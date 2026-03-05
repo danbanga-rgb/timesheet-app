@@ -557,13 +557,7 @@ const TimesheetSystem = () => {
       }
     } else {
       if (!userForm.password) { alert('Password is required for new users'); return; }
-      // Create auth user (this will trigger a profile insert via RLS policies or manual insert below)
-      const { error: signUpError } = await supabase.auth.admin
-        ? // If you have service role key this would work — for anon key, guide user:
-          { data: null, error: { message: 'Use Supabase Dashboard to invite users. See guide Phase 2.6.' } }
-        : { data: null, error: { message: 'Use Supabase Dashboard to invite users. See guide Phase 2.6.' } };
-
-      // Practical approach for anon key: show instructions
+      // For anon key: guide user to create via Supabase Dashboard
       alert(
         'To create a new user:\n\n' +
         '1. Go to Supabase Dashboard → Authentication → Users → Invite User\n' +
