@@ -459,6 +459,9 @@ const TimesheetSystem = () => {
       setTimeEntries(existing.entries);
     } else {
       const entries: Record<string, TimeEntry> = {};
+      getWeekDates(weekStart).forEach(date => {
+        const dateKey = formatDate(date);
+        const holiday = user && isHoliday(date, user.country);
         const weekend = isWeekend(date);
         entries[dateKey] = {
           hours: (!holiday && !weekend) ? '8' : '0',
