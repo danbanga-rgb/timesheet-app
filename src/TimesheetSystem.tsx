@@ -3,7 +3,7 @@
 // Phase 3 of the Production Deployment Guide
 // ============================================================
 
-const ConsolidatedTable = ({ report, parseLocalDate }) => {
+const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: string[]; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number }; parseLocalDate: (s: string) => Date }) => {
   const { weekEndings, employeeRows, colTotals, grandTotal } = report;
   return (
     <div>
@@ -20,7 +20,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }) => {
               <th className="border border-green-700 px-3 py-2 text-left">Employee</th>
               <th className="border border-green-700 px-3 py-2 text-left">Country</th>
               <th className="border border-green-700 px-3 py-2 text-left">Project</th>
-              {weekEndings.map(we => (
+              {weekEndings.map((we: string) => (
                 <th key={we} className="border border-green-700 px-3 py-2 text-center whitespace-nowrap">
                   <div className="text-xs opacity-80">W/E</div>
                   <div>{parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
@@ -35,7 +35,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }) => {
                 <td className="border border-gray-300 px-3 py-2 font-semibold">{row.name}</td>
                 <td className="border border-gray-300 px-3 py-2 text-gray-500">{row.country}</td>
                 <td className="border border-gray-300 px-3 py-2 text-indigo-600 text-xs">{row.project}</td>
-                {weekEndings.map(we => {
+                {weekEndings.map((we: string) => {
                   const h = row.hours[we];
                   const st = row.statuses[we];
                   return (
@@ -52,7 +52,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }) => {
             ))}
             <tr className="bg-green-600 text-white font-bold">
               <td className="border border-green-700 px-3 py-2" colSpan={3}>Total</td>
-              {weekEndings.map(we => (
+              {weekEndings.map((we: string) => (
                 <td key={we} className="border border-green-700 px-3 py-2 text-center">{colTotals[we].toFixed(1)}</td>
               ))}
               <td className="border border-green-700 px-3 py-2 text-center bg-green-700">{grandTotal.toFixed(1)}</td>
@@ -64,15 +64,93 @@ const ConsolidatedTable = ({ report, parseLocalDate }) => {
   );
 };
 
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
+// ─── TypeScript interfaces ────────────────────────────────────────────────────
+interface UserProfile {
+  id: string;
+  username: string;
+  name: string;
+  role: 'timesheetuser' | 'manager' | 'accountant' | 'admin';
+  managerId: string | null;
+  email: string;
+  country: string;
+  region: string;
+  projectId: number | null;
+}
+
+interface Project {
+  id: number;
+  name: string;
+  code: string;
+  status: 'active' | 'inactive';
+  description: string;
+}
+
+interface TimeEntry {
+  hours: string;
+  isHoliday?: boolean | { date: string; name: string };
+  holidayName?: string;
+  isWeekend?: boolean;
+}
+
+interface Timesheet {
+  id: number;
+  userId: string;
+  userName: string;
+  projectId: number | null;
+  weekStart: string;
+  entries: Record<string, TimeEntry>;
+  status: 'pending' | 'approved' | 'rejected';
+  submittedAt: string;
+  approvedAt?: string | null;
+}
+
+interface ReminderEmail {
+  id: number;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  reminderType: 'first' | 'second';
+  weekStart: string;
+  sentDate: string;
+  sentTime: string;
+  subject: string;
+  message: string;
+}
+
+interface UserForm {
+  email: string;
+  password: string;
+  name: string;
+  role: string;
+  manager_id: string | null;
+  country: string;
+  region: string;
+  project_id: number | null;
+}
+
+interface ProjectForm {
+  name: string;
+  code: string;
+  status: string;
+  description: string;
+}
+
+const tzMap: Record<string, string> = {
+  'US-California': 'America/Los_Angeles', 'US-New York': 'America/New_York',
+  'US-Texas': 'America/Chicago', 'US-Florida': 'America/New_York',
+  'GB-England': 'Europe/London', 'GB-Scotland': 'Europe/London', 'GB-Wales': 'Europe/London',
+  'CA-Ontario': 'America/Toronto', 'CA-Quebec': 'America/Toronto', 'CA-British Columbia': 'America/Vancouver'
+};
+
 const TimesheetSystem = () => {
-  const [currentUser, setCurrentUser] = useState(null);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [users, setUsers] = useState([]);
-  const [projects, setProjects] = useState([]);
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
 
   const holidays2026 = {
     US: [
@@ -107,33 +185,33 @@ const TimesheetSystem = () => {
     { code: 'CA', name: 'Canada', regions: ['Ontario', 'Quebec', 'British Columbia'] }
   ];
 
-  const [timesheets, setTimesheets] = useState([]);
-  const timesheetsRef = useRef([]);
+  const [timesheets, setTimesheets] = useState<Timesheet[]>([]);
+  const timesheetsRef = useRef<Timesheet[]>([]);
   const [accountantTab, setAccountantTab] = useState('weekly');
   const [consolidatedRange, setConsolidatedRange] = useState({ start: '', end: '' });
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [selectedWeek, setSelectedWeek] = useState(getCurrentWeekStart());
-  const [timeEntries, setTimeEntries] = useState({});
-  const [detectedLocation, setDetectedLocation] = useState(null);
-  const [reminderEmails, setReminderEmails] = useState([]);
+  const [timeEntries, setTimeEntries] = useState<Record<string, TimeEntry>>({});
+  const [detectedLocation, setDetectedLocation] = useState<{ country: string; region: string; timezone: string } | null>(null);
+  const [reminderEmails, setReminderEmails] = useState<ReminderEmail[]>([]);
   const [showReminderLog, setShowReminderLog] = useState(false);
   const [reportWeek, setReportWeek] = useState(getCurrentWeekStart());
   const [adminView, setAdminView] = useState('users');
-  const [editingUser, setEditingUser] = useState(null);
-  const [editingProject, setEditingProject] = useState(null);
+  const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
-  const [userForm, setUserForm] = useState({
+  const [userForm, setUserForm] = useState<UserForm>({
     email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null
   });
-  const [projectForm, setProjectForm] = useState({
+  const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
   });
   const [viewMode, setViewMode] = useState('form');
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
-  const [selectedTimesheetForView, setSelectedTimesheetForView] = useState(null);
+  const [selectedTimesheetForView, setSelectedTimesheetForView] = useState<Timesheet | null>(null);
   const [showTimesheetModal, setShowTimesheetModal] = useState(false);
-  const [selectedTimesheetIds, setSelectedTimesheetIds] = useState([]);
+  const [selectedTimesheetIds, setSelectedTimesheetIds] = useState<number[]>([]);
 
   // ─── On mount: restore session + load data ───────────────────────────────
   useEffect(() => {
@@ -183,7 +261,7 @@ const TimesheetSystem = () => {
         fetchTimesheets();
       })
       .subscribe();
-    return () => supabase.removeChannel(channel);
+    return () => { supabase.removeChannel(channel); };
   }, [currentUser?.id]);
 
   // ─── Data loading helpers ─────────────────────────────────────────────────
@@ -235,31 +313,31 @@ const TimesheetSystem = () => {
   }
 
   // ─── Normalise DB snake_case → camelCase for UI compatibility ─────────────
-  function normaliseProfile(p) {
+  function normaliseProfile(p: Record<string, unknown>): UserProfile {
     return {
-      id: p.id,
-      username: p.username || p.email?.split('@')[0] || '',
-      name: p.name,
-      role: p.role,
-      managerId: p.manager_id,
-      email: p.email,
-      country: p.country || 'US',
-      region: p.region || '',
-      projectId: p.project_id,
+      id: p.id as string,
+      username: (p.username as string) || (p.email as string)?.split('@')[0] || '',
+      name: p.name as string,
+      role: p.role as UserProfile['role'],
+      managerId: (p.manager_id as string) || null,
+      email: p.email as string,
+      country: (p.country as string) || 'US',
+      region: (p.region as string) || '',
+      projectId: (p.project_id as number) || null,
     };
   }
 
-  function normaliseTimesheet(t) {
+  function normaliseTimesheet(t: Record<string, unknown>): Timesheet {
     return {
-      id: t.id,
-      userId: t.user_id,
-      userName: t.user_name,
-      projectId: t.project_id,
-      weekStart: t.week_start,
-      entries: t.entries || {},
-      status: t.status,
-      submittedAt: t.submitted_at,
-      approvedAt: t.approved_at,
+      id: t.id as number,
+      userId: t.user_id as string,
+      userName: t.user_name as string,
+      projectId: (t.project_id as number) || null,
+      weekStart: t.week_start as string,
+      entries: (t.entries as Record<string, TimeEntry>) || {},
+      status: t.status as Timesheet['status'],
+      submittedAt: t.submitted_at as string,
+      approvedAt: (t.approved_at as string) || null,
     };
   }
 
@@ -273,19 +351,19 @@ const TimesheetSystem = () => {
     return weekStart;
   }
 
-  function parseLocalDate(dateStr) {
+  function parseLocalDate(dateStr: string): Date {
     const [y, m, d] = dateStr.split('-').map(Number);
     return new Date(y, m - 1, d);
   }
 
-  function formatDate(date) {
+  function formatDate(date: Date): string {
     const d = new Date(date);
     d.setHours(0, 0, 0, 0);
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   }
 
-  function getWeekDates(startDate) {
-    const dates = [];
+  function getWeekDates(startDate: Date): Date[] {
+    const dates: Date[] = [];
     for (let i = 0; i < 5; i++) {
       const date = new Date(startDate);
       date.setDate(date.getDate() + i);
@@ -305,13 +383,7 @@ const TimesheetSystem = () => {
     setDetectedLocation({ country: detectedCountry, region: detectedRegion, timezone });
   }
 
-  function getUserLocalTime(user) {
-    const tzMap = {
-      'US-California': 'America/Los_Angeles', 'US-New York': 'America/New_York',
-      'US-Texas': 'America/Chicago', 'US-Florida': 'America/New_York',
-      'GB-England': 'Europe/London', 'GB-Scotland': 'Europe/London', 'GB-Wales': 'Europe/London',
-      'CA-Ontario': 'America/Toronto', 'CA-Quebec': 'America/Toronto', 'CA-British Columbia': 'America/Vancouver'
-    };
+  function getUserLocalTime(user: UserProfile): Date {
     const tz = tzMap[user.country + '-' + user.region] || 'America/New_York';
     return new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   }
@@ -336,7 +408,7 @@ const TimesheetSystem = () => {
     });
   }
 
-  function createReminderEmail(user, reminderType, userLocalTime) {
+  function createReminderEmail(user: UserProfile, reminderType: 'first' | 'second', userLocalTime: Date): ReminderEmail {
     const weekStart = getCurrentWeekStart();
     return {
       id: Date.now() + Math.random(), userId: user.id, userName: user.name, userEmail: user.email,
@@ -349,12 +421,12 @@ const TimesheetSystem = () => {
     };
   }
 
-  function isHoliday(date, country) {
+  function isHoliday(date: Date, country: string) {
     const dateStr = formatDate(date);
-    return (holidays2026[country] || []).find(h => h.date === dateStr);
+    return (holidays2026[country as keyof typeof holidays2026] || []).find((h: { date: string; name: string }) => h.date === dateStr);
   }
 
-  function isWeekend(date) { const d = date.getDay(); return d === 0 || d === 6; }
+  function isWeekend(date: Date): boolean { const d = date.getDay(); return d === 0 || d === 6; }
 
   // ─── AUTH ─────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
@@ -377,7 +449,7 @@ const TimesheetSystem = () => {
   };
 
   // ─── TIMESHEET USER OPERATIONS ────────────────────────────────────────────
-  const loadTimesheetForWeek = (userId, weekStart, tsList) => {
+  const loadTimesheetForWeek = (userId: string, weekStart: Date, tsList?: Timesheet[]) => {
     const weekKey = formatDate(weekStart);
     const list = tsList !== undefined ? tsList : timesheetsRef.current;
     const existing = list.find(t => t.userId === userId && t.weekStart === weekKey);
@@ -402,27 +474,27 @@ const TimesheetSystem = () => {
     }
   };
 
-  const handleTimeEntry = (date, hours) => {
+  const handleTimeEntry = (date: string, hours: string) => {
     setTimeEntries(prev => ({ ...prev, [date]: { ...prev[date], hours } }));
   };
 
-  const updateUserProject = async (projectId) => {
+  const updateUserProject = async (projectId: string) => {
     const pid = projectId ? parseInt(projectId) : null;
-    await supabase.from('profiles').update({ project_id: pid }).eq('id', currentUser.id);
-    setCurrentUser({ ...currentUser, projectId: pid });
-    setUsers(users.map(u => u.id === currentUser.id ? { ...u, projectId: pid } : u));
+    await supabase.from('profiles').update({ project_id: pid }).eq('id', currentUser!.id);
+    setCurrentUser({ ...currentUser!, projectId: pid });
+    setUsers(users.map(u => u.id === currentUser!.id ? { ...u, projectId: pid } : u));
   };
 
   const submitTimesheet = async () => {
-    if (!currentUser.projectId) {
+    if (!currentUser!.projectId) {
       alert('Please select a project before submitting your timesheet.');
       return;
     }
     const weekKey = formatDate(selectedWeek);
     const { error } = await supabase.from('timesheets').upsert({
-      user_id: currentUser.id,
-      user_name: currentUser.name,
-      project_id: currentUser.projectId,
+      user_id: currentUser!.id,
+      user_name: currentUser!.name,
+      project_id: currentUser!.projectId,
       week_start: weekKey,
       entries: timeEntries,
       status: 'pending',
@@ -435,15 +507,15 @@ const TimesheetSystem = () => {
   };
 
   // ─── MANAGER / APPROVAL OPERATIONS ───────────────────────────────────────
-  const handleApproval = async (timesheetId, status) => {
+  const handleApproval = async (timesheetId: number, status: string) => {
     const { error } = await supabase.from('timesheets')
       .update({ status, approved_at: new Date().toISOString() })
       .eq('id', timesheetId);
     if (error) { alert('Error updating timesheet: ' + error.message); return; }
-    setTimesheets(prev => prev.map(t => t.id === timesheetId ? { ...t, status, approvedAt: new Date().toISOString() } : t));
+    setTimesheets(prev => prev.map(t => t.id === timesheetId ? { ...t, status: status as Timesheet['status'], approvedAt: new Date().toISOString() } : t));
   };
 
-  const bulkApproveTimesheets = async (status) => {
+  const bulkApproveTimesheets = async (status: string) => {
     if (selectedTimesheetIds.length === 0) { alert('Please select at least one timesheet'); return; }
     const action = status === 'approved' ? 'approve' : 'reject';
     if (!window.confirm(`Are you sure you want to ${action} ${selectedTimesheetIds.length} timesheet(s)?`)) return;
@@ -509,8 +581,8 @@ const TimesheetSystem = () => {
     setEditingUser(null);
   };
 
-  const deleteUser = async (userId) => {
-    if (userId === currentUser.id) { alert('You cannot delete your own account.'); return; }
+  const deleteUser = async (userId: string) => {
+    if (userId === currentUser!.id) { alert('You cannot delete your own account.'); return; }
     if (!window.confirm('Are you sure you want to delete this user?')) return;
     // Delete profile (timesheets cascade automatically per schema)
     const { error } = await supabase.from('profiles').delete().eq('id', userId);
@@ -545,7 +617,7 @@ const TimesheetSystem = () => {
     setEditingProject(null);
   };
 
-  const deleteProject = async (projectId) => {
+  const deleteProject = async (projectId: number) => {
     if (!window.confirm('Are you sure you want to delete this project?')) return;
     const { error } = await supabase.from('projects').delete().eq('id', projectId);
     if (error) { alert('Error deleting project: ' + error.message); return; }
@@ -556,14 +628,14 @@ const TimesheetSystem = () => {
   };
 
   // ─── WEEK NAVIGATION ──────────────────────────────────────────────────────
-  const changeWeek = (direction) => {
+  const changeWeek = (direction: number) => {
     const newWeek = new Date(selectedWeek);
     newWeek.setDate(newWeek.getDate() + (direction * 7));
     setSelectedWeek(newWeek);
-    if (currentUser?.role === 'timesheetuser') loadTimesheetForWeek(currentUser.id, newWeek, timesheetsRef.current);
+    if (currentUser?.role === 'timesheetuser') loadTimesheetForWeek(currentUser!.id, newWeek, timesheetsRef.current);
   };
 
-  const changeReportWeek = (direction) => {
+  const changeReportWeek = (direction: number) => {
     const newWeek = new Date(reportWeek);
     newWeek.setDate(newWeek.getDate() + (direction * 7));
     setReportWeek(newWeek);
@@ -572,7 +644,7 @@ const TimesheetSystem = () => {
   const copyPreviousWeekTimesheet = () => {
     const currentWeekKey = formatDate(selectedWeek);
     const past = timesheetsRef.current
-      .filter(t => t.userId === currentUser.id && t.weekStart < currentWeekKey)
+      .filter(t => t.userId === currentUser!.id && t.weekStart < currentWeekKey)
       .sort((a, b) => b.weekStart.localeCompare(a.weekStart));
     if (past.length === 0) { alert('No previous timesheet found.'); return; }
     const prev = past[0];
@@ -583,7 +655,7 @@ const TimesheetSystem = () => {
       const curKey = formatDate(date);
       const prevKey = formatDate(getWeekDates(prevWeek)[i]);
       const e = prev.entries[prevKey];
-      const holiday = isHoliday(date, currentUser.country);
+      const holiday = isHoliday(date, currentUser!.country);
       const weekend = isWeekend(date);
       const raw = e ? (typeof e === 'object' ? e.hours : e) : '0';
       newEntries[curKey] = {
@@ -626,7 +698,7 @@ const TimesheetSystem = () => {
     triggerDownload(csv, `timesheet_report_${formatDate(reportWeek)}.csv`);
   };
 
-  const exportTimesheetList = (filtered) => {
+  const exportTimesheetList = (filtered: Timesheet[]) => {
     let csv = 'Employee Name,Week Start,Project,Mon,Tue,Wed,Thu,Fri,Total Hours,Status,Submitted Date\n';
     filtered.forEach(ts => {
       const project = projects.find(p => p.id === ts.projectId);
@@ -640,7 +712,7 @@ const TimesheetSystem = () => {
     triggerDownload(csv, `timesheets_export_${Date.now()}.csv`);
   };
 
-  function triggerDownload(csv, filename) {
+  function triggerDownload(csv: string, filename: string) {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -650,7 +722,7 @@ const TimesheetSystem = () => {
   }
 
   // ─── FILTER / MODAL HELPERS ───────────────────────────────────────────────
-  const getFilteredTimesheets = (userId = null) => {
+  const getFilteredTimesheets = (userId: string | null = null) => {
     let filtered = userId ? timesheets.filter(t => t.userId === userId) : timesheets;
     if (dateRange.start && dateRange.end) {
       const start = new Date(dateRange.start), end = new Date(dateRange.end);
@@ -659,15 +731,15 @@ const TimesheetSystem = () => {
     return filtered.sort((a, b) => parseLocalDate(b.weekStart) - parseLocalDate(a.weekStart));
   };
 
-  const openTimesheetModal = (ts) => { setSelectedTimesheetForView(ts); setShowTimesheetModal(true); };
+  const openTimesheetModal = (ts: Timesheet) => { setSelectedTimesheetForView(ts); setShowTimesheetModal(true); };
   const closeTimesheetModal = () => { setSelectedTimesheetForView(null); setShowTimesheetModal(false); };
-  const dismissReminder = (id) => { setReminderEmails(prev => prev.filter(r => r.id !== id)); };
+  const dismissReminder = (id: number) => { setReminderEmails(prev => prev.filter(r => r.id !== id)); };
 
-  const toggleTimesheetSelection = (id) => {
+  const toggleTimesheetSelection = (id: number) => {
     setSelectedTimesheetIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   };
 
-  const toggleSelectAll = (filtered) => {
+  const toggleSelectAll = (filtered: Timesheet[]) => {
     const pendingIds = filtered.filter(t => t.status === 'pending').map(t => t.id);
     setSelectedTimesheetIds(selectedTimesheetIds.length === pendingIds.length && pendingIds.length > 0 ? [] : pendingIds);
   };
@@ -804,7 +876,7 @@ const TimesheetSystem = () => {
   }
 
   // ─── ADMIN VIEW ───────────────────────────────────────────────────────────
-  if (currentUser.role === 'admin') {
+  if (currentUser!.role === 'admin') {
     const managers = users.filter(u => u.role === 'manager');
     return (
       <div className="min-h-screen bg-gray-50 p-6">
@@ -813,7 +885,7 @@ const TimesheetSystem = () => {
             <div className="flex justify-between items-center">
               <div>
                 <h1 className="text-2xl font-bold text-gray-800">Admin Dashboard</h1>
-                <p className="text-gray-600">Welcome, {currentUser.name}</p>
+                <p className="text-gray-600">Welcome, {currentUser!.name}</p>
                 <p className="text-sm text-purple-600 font-medium">Role: Administrator</p>
               </div>
               <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"><LogOut className="w-4 h-4" /> Logout</button>
@@ -1003,9 +1075,9 @@ const TimesheetSystem = () => {
   }
 
   // ─── MANAGER VIEW ─────────────────────────────────────────────────────────
-  if (currentUser.role === 'manager') {
+  if (currentUser!.role === 'manager') {
     const pendingTimesheets = timesheets.filter(t => t.status === 'pending');
-    const managedUsers = users.filter(u => u.managerId === currentUser.id);
+    const managedUsers = users.filter(u => u.managerId === currentUser!.id);
     const filteredTimesheets = getFilteredTimesheets().filter(t => managedUsers.some(u => u.id === t.userId));
 
     return (
@@ -1015,7 +1087,7 @@ const TimesheetSystem = () => {
             <div className="flex justify-between items-center">
               <div>
                 <h1 className="text-2xl font-bold text-gray-800">Manager Dashboard</h1>
-                <p className="text-gray-600">Welcome, {currentUser.name}</p>
+                <p className="text-gray-600">Welcome, {currentUser!.name}</p>
                 <p className="text-sm text-blue-600 font-medium">Role: Manager — {managedUsers.length} team member(s)</p>
               </div>
               <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"><LogOut className="w-4 h-4" /> Logout</button>
@@ -1038,7 +1110,7 @@ const TimesheetSystem = () => {
                 <div className="space-y-4">
                   {pendingTimesheets.filter(t => managedUsers.some(u => u.id === t.userId)).map(timesheet => {
                     const project = projects.find(p => p.id === timesheet.projectId);
-                    const totalHrs = Object.values(timesheet.entries).reduce((s, e) => s + (parseFloat(e?.hours || e || 0)), 0);
+                    const totalHrs = Object.values(timesheet.entries).reduce((s, e) => s + (parseFloat((e as TimeEntry)?.hours || '0')), 0);
                     return (
                       <div key={timesheet.id} className="border border-gray-200 rounded-lg p-4">
                         <div className="flex justify-between items-start mb-3">
@@ -1126,7 +1198,7 @@ const TimesheetSystem = () => {
   }
 
   // ─── ACCOUNTANT VIEW ──────────────────────────────────────────────────────
-  if (currentUser.role === 'accountant') {
+  if (currentUser!.role === 'accountant') {
     const reportData = generateReport();
     const weekDates = getWeekDates(reportWeek);
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
@@ -1138,19 +1210,19 @@ const TimesheetSystem = () => {
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
       const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
       const employeeRows = timesheetUsers.map(user => {
-        const hours = {}, statuses = {};
+        const hours: Record<string, number | null> = {}, statuses: Record<string, string> = {};
         let rowTotal = 0;
         weekEndings.forEach(we => {
           const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
           if (ts) {
-            const h = Object.values(ts.entries).reduce((s, e) => s + parseFloat(e?.hours || 0), 0);
+            const h = Object.values(ts.entries).reduce((s, e) => s + parseFloat((e as TimeEntry)?.hours || '0'), 0);
             hours[we] = h; statuses[we] = ts.status; rowTotal += h;
           } else { hours[we] = null; statuses[we] = 'not submitted'; }
         });
         const project = projects.find(p => p.id === user.projectId);
         return { name: user.name, country: user.country, project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
       });
-      const colTotals = {};
+      const colTotals: Record<string, number> = {};
       weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
       return { weekEndings, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0) };
     };
@@ -1164,7 +1236,7 @@ const TimesheetSystem = () => {
             <div className="flex justify-between items-center">
               <div>
                 <h1 className="text-2xl font-bold text-gray-800">Accountant Dashboard</h1>
-                <p className="text-gray-600">Welcome, {currentUser.name}</p>
+                <p className="text-gray-600">Welcome, {currentUser!.name}</p>
                 <p className="text-sm text-green-600 font-medium">Role: Accountant</p>
               </div>
               <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"><LogOut className="w-4 h-4" /> Logout</button>
@@ -1253,14 +1325,14 @@ const TimesheetSystem = () => {
 
   // ─── TIMESHEET USER VIEW ──────────────────────────────────────────────────
   const weekDates = getWeekDates(selectedWeek);
-  const currentTimesheet = timesheets.find(t => t.userId === currentUser.id && t.weekStart === formatDate(selectedWeek));
+  const currentTimesheet = timesheets.find(t => t.userId === currentUser!.id && t.weekStart === formatDate(selectedWeek));
   const totalHours = Object.values(timeEntries).reduce((s, e) => s + parseFloat(e?.hours || 0), 0);
   const activeProjects = projects.filter(p => p.status === 'active');
-  const currentProject = projects.find(p => p.id === currentUser.projectId);
-  const userReminders = reminderEmails.filter(r => r.userId === currentUser.id);
+  const currentProject = projects.find(p => p.id === currentUser!.projectId);
+  const userReminders = reminderEmails.filter(r => r.userId === currentUser!.id);
   const currentWeekKey = formatDate(selectedWeek);
-  const hasPreviousWeekTimesheet = timesheetsRef.current.some(t => t.userId === currentUser.id && t.weekStart < currentWeekKey);
-  const filteredUserTimesheets = getFilteredTimesheets(currentUser.id);
+  const hasPreviousWeekTimesheet = timesheetsRef.current.some(t => t.userId === currentUser!.id && t.weekStart < currentWeekKey);
+  const filteredUserTimesheets = getFilteredTimesheets(currentUser!.id);
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -1269,10 +1341,10 @@ const TimesheetSystem = () => {
           <div className="flex justify-between items-center">
             <div className="flex-1">
               <h1 className="text-2xl font-bold text-gray-800">My Timesheet</h1>
-              <p className="text-gray-600">Welcome, {currentUser.name}</p>
+              <p className="text-gray-600">Welcome, {currentUser!.name}</p>
               <div className="flex items-center gap-2 mt-2 text-sm text-indigo-600">
                 <MapPin className="w-4 h-4" />
-                <span>{countries.find(c => c.code === currentUser.country)?.name}{currentUser.region ? ' – ' + currentUser.region : ''}</span>
+                <span>{countries.find(c => c.code === currentUser!.country)?.name}{currentUser!.region ? ' – ' + currentUser!.region : ''}</span>
               </div>
             </div>
             <div className="flex items-center gap-4">
@@ -1283,7 +1355,7 @@ const TimesheetSystem = () => {
               )}
               <div className="text-right">
                 <label className="block text-sm font-medium text-gray-700 mb-2">Current Project</label>
-                <select value={currentUser.projectId || ''} onChange={e => updateUserProject(e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 bg-white min-w-[200px]">
+                <select value={currentUser!.projectId || ''} onChange={e => updateUserProject(e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 bg-white min-w-[200px]">
                   <option value="">Select Project</option>
                   {activeProjects.map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
                 </select>
