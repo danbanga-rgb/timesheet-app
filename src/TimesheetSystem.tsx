@@ -265,7 +265,7 @@ const TimesheetSystem = () => {
   }, [currentUser?.id]);
 
   // ─── Data loading helpers ─────────────────────────────────────────────────
-  async function loadProfileAndData(userId) {
+  async function loadProfileAndData(userId: string) {
     setLoading(true);
     try {
       const { data: profile, error } = await supabase
@@ -458,10 +458,7 @@ const TimesheetSystem = () => {
     if (existing) {
       setTimeEntries(existing.entries);
     } else {
-      const entries = {};
-      getWeekDates(weekStart).forEach(date => {
-        const dateKey = formatDate(date);
-        const holiday = user && isHoliday(date, user.country);
+      const entries: Record<string, TimeEntry> = {};
         const weekend = isWeekend(date);
         entries[dateKey] = {
           hours: (!holiday && !weekend) ? '8' : '0',
@@ -530,9 +527,9 @@ const TimesheetSystem = () => {
   };
 
   // ─── ADMIN: USER MANAGEMENT ───────────────────────────────────────────────
-  const openUserModal = (user = null) => {
+  const openUserModal = (user?: UserProfile) => {
     if (user) {
-      setEditingUser(user);
+      setEditingUser(user ?? null);
       setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId });
     } else {
       setEditingUser(null);
@@ -558,7 +555,7 @@ const TimesheetSystem = () => {
     } else {
       if (!userForm.password) { alert('Password is required for new users'); return; }
       // Create auth user (this will trigger a profile insert via RLS policies or manual insert below)
-      const { data: signUpData, error: signUpError } = await supabase.auth.admin
+      const { error: signUpError } = await supabase.auth.admin
         ? // If you have service role key this would work — for anon key, guide user:
           { data: null, error: { message: 'Use Supabase Dashboard to invite users. See guide Phase 2.6.' } }
         : { data: null, error: { message: 'Use Supabase Dashboard to invite users. See guide Phase 2.6.' } };
@@ -592,9 +589,9 @@ const TimesheetSystem = () => {
   };
 
   // ─── ADMIN: PROJECT MANAGEMENT ────────────────────────────────────────────
-  const openProjectModal = (project = null) => {
+  const openProjectModal = (project?: Project) => {
     if (project) {
-      setEditingProject(project);
+      setEditingProject(project ?? null);
       setProjectForm({ name: project.name, code: project.code, status: project.status, description: project.description || '' });
     } else {
       setEditingProject(null);
@@ -650,7 +647,7 @@ const TimesheetSystem = () => {
     const prev = past[0];
     const [py, pm, pd] = prev.weekStart.split('-').map(Number);
     const prevWeek = new Date(py, pm - 1, pd);
-    const newEntries = {};
+    const newEntries: Record<string, TimeEntry> = {};
     getWeekDates(selectedWeek).forEach((date, i) => {
       const curKey = formatDate(date);
       const prevKey = formatDate(getWeekDates(prevWeek)[i]);
@@ -677,7 +674,7 @@ const TimesheetSystem = () => {
       const timesheet = weekTimesheets.find(t => t.userId === user.id);
       const entries = timesheet ? timesheet.entries : {};
       const project = timesheet ? projects.find(p => p.id === timesheet.projectId) : null;
-      const dailyHours = getWeekDates(reportWeek).map(date => parseFloat(entries[formatDate(date)]?.hours || 0));
+      const dailyHours = getWeekDates(reportWeek).map(date => parseFloat(entries[formatDate(date)]?.hours || '0'));
       return { name: user.name, country: user.country, project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
     });
   };
@@ -703,7 +700,7 @@ const TimesheetSystem = () => {
     filtered.forEach(ts => {
       const project = projects.find(p => p.id === ts.projectId);
       const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
-      const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || 0));
+      const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
       const total = dailyHours.reduce((s, h) => s + h, 0);
       csv += `"${ts.userName}","${parseLocalDate(ts.weekStart).toLocaleDateString()}","${project ? `${project.name} (${project.code})` : 'N/A'}",`;
       dailyHours.forEach(h => { csv += h + ','; });
@@ -728,7 +725,7 @@ const TimesheetSystem = () => {
       const start = new Date(dateRange.start), end = new Date(dateRange.end);
       filtered = filtered.filter(t => { const d = parseLocalDate(t.weekStart); return d >= start && d <= end; });
     }
-    return filtered.sort((a, b) => parseLocalDate(b.weekStart) - parseLocalDate(a.weekStart));
+    return filtered.sort((a, b) => parseLocalDate(b.weekStart).getTime() - parseLocalDate(a.weekStart).getTime());
   };
 
   const openTimesheetModal = (ts: Timesheet) => { setSelectedTimesheetForView(ts); setShowTimesheetModal(true); };
@@ -753,7 +750,7 @@ const TimesheetSystem = () => {
     const dailyData = weekDates.map(date => {
       const dateKey = formatDate(date);
       const entry = selectedTimesheetForView.entries[dateKey];
-      return { date, dateKey, dayName: date.toLocaleDateString('en-US', { weekday: 'long' }), hours: parseFloat(entry?.hours || 0), holiday: entry?.isHoliday, holidayName: entry?.holidayName, weekend: entry?.isWeekend };
+      return { date, dateKey, dayName: date.toLocaleDateString('en-US', { weekday: 'long' }), hours: parseFloat(entry?.hours || '0'), holiday: entry?.isHoliday, holidayName: entry?.holidayName, weekend: entry?.isWeekend };
     });
     const totalHours = dailyData.reduce((s, d) => s + d.hours, 0);
 
@@ -1170,7 +1167,7 @@ const TimesheetSystem = () => {
                     ) : filteredTimesheets.map((ts, idx) => {
                       const project = projects.find(p => p.id === ts.projectId);
                       const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
-                      const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || 0));
+                      const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                       const total = dailyHours.reduce((s, h) => s + h, 0);
                       return (
                         <tr key={ts.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')}>
@@ -1326,7 +1323,7 @@ const TimesheetSystem = () => {
   // ─── TIMESHEET USER VIEW ──────────────────────────────────────────────────
   const weekDates = getWeekDates(selectedWeek);
   const currentTimesheet = timesheets.find(t => t.userId === currentUser!.id && t.weekStart === formatDate(selectedWeek));
-  const totalHours = Object.values(timeEntries).reduce((s, e) => s + parseFloat(e?.hours || 0), 0);
+  const totalHours = Object.values(timeEntries).reduce((s, e) => s + parseFloat(e?.hours || '0'), 0);
   const activeProjects = projects.filter(p => p.status === 'active');
   const currentProject = projects.find(p => p.id === currentUser!.projectId);
   const userReminders = reminderEmails.filter(r => r.userId === currentUser!.id);
@@ -1504,7 +1501,7 @@ const TimesheetSystem = () => {
                 ) : filteredUserTimesheets.map((ts, idx) => {
                   const project = projects.find(p => p.id === ts.projectId);
                   const wDates = getWeekDates(parseLocalDate(ts.weekStart));
-                  const dailyHours = wDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || 0));
+                  const dailyHours = wDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                   const total = dailyHours.reduce((s, h) => s + h, 0);
                   return (
                     <tr key={ts.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')} onClick={() => openTimesheetModal(ts)}>
