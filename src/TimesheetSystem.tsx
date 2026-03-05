@@ -212,6 +212,10 @@ const TimesheetSystem = () => {
   const [selectedTimesheetForView, setSelectedTimesheetForView] = useState<Timesheet | null>(null);
   const [showTimesheetModal, setShowTimesheetModal] = useState(false);
   const [selectedTimesheetIds, setSelectedTimesheetIds] = useState<number[]>([]);
+  const [passwordResetMode, setPasswordResetMode] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
+  const [passwordResetLoading, setPasswordResetLoading] = useState(false);
 
   // ─── On mount: restore session + load data ───────────────────────────────
   useEffect(() => {
@@ -228,10 +232,16 @@ const TimesheetSystem = () => {
 
     // Listen for auth changes (login / logout)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_IN' && session?.user) {
+      if (event === 'PASSWORD_RECOVERY') {
+        // User clicked reset link — show set-new-password form
+        setPasswordResetMode(true);
+        setLoading(false);
+      } else if (event === 'SIGNED_IN' && session?.user) {
+        if (passwordResetMode) return; // don't redirect while resetting password
         await loadProfileAndData(session.user.id);
       } else if (event === 'SIGNED_OUT') {
         setCurrentUser(null);
+        setPasswordResetMode(false);
         setUsers([]);
         setProjects([]);
         setTimesheets([]);
@@ -866,6 +876,75 @@ const TimesheetSystem = () => {
     );
   }
 
+  // ─── PASSWORD RESET SCREEN ────────────────────────────────────────────────
+  if (passwordResetMode) {
+    const handleSetNewPassword = async () => {
+      if (!newPassword || newPassword.length < 6) {
+        alert('Password must be at least 6 characters'); return;
+      }
+      if (newPassword !== newPasswordConfirm) {
+        alert('Passwords do not match'); return;
+      }
+      setPasswordResetLoading(true);
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      setPasswordResetLoading(false);
+      if (error) { alert('Error setting password: ' + error.message); return; }
+      setPasswordResetMode(false);
+      setNewPassword('');
+      setNewPasswordConfirm('');
+      alert('Password updated successfully! You can now log in.');
+      await supabase.auth.signOut();
+    };
+
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg shadow-xl p-8 w-full max-w-md">
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Save className="w-8 h-8 text-indigo-600" />
+            </div>
+            <h1 className="text-2xl font-bold text-gray-800">Set New Password</h1>
+            <p className="text-gray-600 mt-2">Choose a new password for your account</p>
+          </div>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">New Password</label>
+              <input
+                type="password"
+                value={newPassword}
+                onChange={e => setNewPassword(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                placeholder="Min. 6 characters"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Confirm Password</label>
+              <input
+                type="password"
+                value={newPasswordConfirm}
+                onChange={e => setNewPasswordConfirm(e.target.value)}
+                onKeyPress={e => e.key === 'Enter' && handleSetNewPassword()}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                placeholder="Re-enter password"
+              />
+            </div>
+            {newPassword && newPasswordConfirm && newPassword !== newPasswordConfirm && (
+              <p className="text-sm text-red-600">Passwords do not match</p>
+            )}
+            <button
+              onClick={handleSetNewPassword}
+              disabled={passwordResetLoading}
+              className="w-full bg-indigo-600 text-white py-2 rounded-lg hover:bg-indigo-700 font-medium disabled:opacity-50"
+            >
+              {passwordResetLoading ? 'Saving...' : 'Set Password & Log In'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ─── LOGIN SCREEN ─────────────────────────────────────────────────────────
   if (!currentUser) {
     return (
@@ -892,6 +971,17 @@ const TimesheetSystem = () => {
               <input type="password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} onKeyPress={e => e.key === 'Enter' && handleLogin()} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" placeholder="Enter password" />
             </div>
             <button onClick={handleLogin} className="w-full bg-indigo-600 text-white py-2 rounded-lg hover:bg-indigo-700 transition-colors font-medium">Log In</button>
+            <button
+              onClick={async () => {
+                if (!loginForm.email) { alert('Enter your email address first'); return; }
+                const { error } = await supabase.auth.resetPasswordForEmail(loginForm.email, { redirectTo: window.location.origin });
+                if (error) { alert('Error: ' + error.message); return; }
+                alert(`Password reset email sent to ${loginForm.email}`);
+              }}
+              className="w-full text-sm text-indigo-600 hover:text-indigo-800 py-1"
+            >
+              Forgot password?
+            </button>
           </div>
           <div className="mt-6 p-4 bg-blue-50 rounded-lg text-sm text-blue-800">
             <p className="font-semibold mb-1">ℹ️ Login uses your email address</p>
