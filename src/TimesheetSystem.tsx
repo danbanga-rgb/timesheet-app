@@ -547,32 +547,65 @@ const TimesheetSystem = () => {
     }
 
     if (editingUser) {
-      // Update profile
-      const updates = { name: userForm.name, role: userForm.role, manager_id: userForm.manager_id, country: userForm.country, region: userForm.region, project_id: userForm.project_id };
+      // Update existing profile fields
+      const updates = {
+        name: userForm.name,
+        role: userForm.role,
+        manager_id: userForm.manager_id,
+        country: userForm.country,
+        region: userForm.region,
+        project_id: userForm.project_id
+      };
       const { error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id);
       if (error) { alert('Error updating user: ' + error.message); return; }
-      // Update password via admin API if provided — not available from client; show guidance
-      if (userForm.password) {
-        alert('Note: To change a password, use Supabase Dashboard → Authentication → Users → Edit user.');
-      }
-    } else {
-      if (!userForm.password) { alert('Password is required for new users'); return; }
-      // For anon key: guide user to create via Supabase Dashboard
-      alert(
-        'To create a new user:\n\n' +
-        '1. Go to Supabase Dashboard → Authentication → Users → Invite User\n' +
-        '2. Enter their email and send the invite\n' +
-        '3. After they accept, run this SQL in Supabase SQL Editor:\n\n' +
-        `INSERT INTO public.profiles (id, username, name, role, email, country, region)\n` +
-        `VALUES ('<uuid-from-auth.users>', '${userForm.email.split('@')[0]}', '${userForm.name}', '${userForm.role}', '${userForm.email}', '${userForm.country}', '${userForm.region}');`
-      );
+      await fetchUsers();
       setShowUserModal(false);
-      return;
-    }
+      setEditingUser(null);
+    } else {
+      // Create new user via signUp — works with anon key
+      if (!userForm.password) { alert('Password is required for new users'); return; }
+      if (userForm.password.length < 6) { alert('Password must be at least 6 characters'); return; }
 
-    await fetchUsers();
-    setShowUserModal(false);
-    setEditingUser(null);
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+        email: userForm.email,
+        password: userForm.password,
+        options: {
+          data: { name: userForm.name } // stored in auth.users metadata
+        }
+      });
+
+      if (signUpError) { alert('Error creating user: ' + signUpError.message); return; }
+      if (!signUpData.user) { alert('User creation failed — no user returned.'); return; }
+
+      // Insert profile row
+      const { error: profileError } = await supabase.from('profiles').insert({
+        id: signUpData.user.id,
+        username: userForm.email.split('@')[0],
+        name: userForm.name,
+        role: userForm.role,
+        email: userForm.email,
+        country: userForm.country,
+        region: userForm.region,
+        manager_id: userForm.manager_id,
+        project_id: userForm.project_id
+      });
+
+      if (profileError) { alert('User auth created but profile failed: ' + profileError.message); return; }
+
+      alert(`User "${userForm.name}" created successfully! They can now log in with their email and password.`);
+      await fetchUsers();
+      setShowUserModal(false);
+      setEditingUser(null);
+    }
+  };
+
+  const resetUserPassword = async (user: UserProfile) => {
+    if (!window.confirm(`Send a password reset email to ${user.email}?`)) return;
+    const { error } = await supabase.auth.resetPasswordForEmail(user.email, {
+      redirectTo: window.location.origin
+    });
+    if (error) { alert('Error sending reset email: ' + error.message); return; }
+    alert(`Password reset email sent to ${user.email}`);
   };
 
   const deleteUser = async (userId: string) => {
@@ -943,6 +976,7 @@ const TimesheetSystem = () => {
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-2">
                             <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit"><Edit2 className="w-4 h-4" /></button>
+                            <button onClick={() => resetUserPassword(user)} className="p-1 text-amber-600 hover:text-amber-800" title="Reset Password"><Mail className="w-4 h-4" /></button>
                             <button onClick={() => deleteUser(user.id)} className="p-1 text-red-600 hover:text-red-800" title="Delete"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         </td>
@@ -992,8 +1026,24 @@ const TimesheetSystem = () => {
                   </div>
                   <div className="space-y-4">
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label><input type="text" value={userForm.name} onChange={e => setUserForm({...userForm, name: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="John Doe" /></div>
-                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Email *</label><input type="email" value={userForm.email} onChange={e => setUserForm({...userForm, email: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="john@company.com" /></div>
-                    {!editingUser && <div><label className="block text-sm font-medium text-gray-700 mb-1">Password *</label><input type="password" value={userForm.password} onChange={e => setUserForm({...userForm, password: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Enter password" /></div>}
+                    <div><label className="block text-sm font-medium text-gray-700 mb-1">Email *</label><input type="email" value={userForm.email} onChange={e => setUserForm({...userForm, email: e.target.value})} disabled={!!editingUser} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100" placeholder="john@company.com" /></div>
+                    {!editingUser ? (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+                        <input type="password" value={userForm.password} onChange={e => setUserForm({...userForm, password: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Min. 6 characters" />
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                        <p className="text-sm text-amber-800 font-medium mb-2">Password Reset</p>
+                        <p className="text-xs text-amber-700 mb-3">Send a password reset link to the user's email address.</p>
+                        <button
+                          onClick={() => { setShowUserModal(false); resetUserPassword(editingUser!); }}
+                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 text-sm"
+                        >
+                          <Mail className="w-4 h-4" /> Send Password Reset Email
+                        </button>
+                      </div>
+                    )}
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Role *</label>
                       <select value={userForm.role} onChange={e => setUserForm({...userForm, role: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                         <option value="timesheetuser">TimesheetUser</option><option value="manager">Manager</option><option value="accountant">Accountant</option><option value="admin">Admin</option>
