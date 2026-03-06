@@ -331,7 +331,9 @@ const TimesheetSystem = () => {
       .select('*')
       .order('week_start', { ascending: false });
     if (data) {
+      console.log('RAW week_start values from Supabase:', data.map(t => t.week_start));
       const normalised = data.map(normaliseTimesheet);
+      console.log('NORMALISED weekStart values:', normalised.map(t => t.weekStart));
       setTimesheets(normalised);
       timesheetsRef.current = normalised;
     }
@@ -1650,8 +1652,9 @@ const TimesheetSystem = () => {
       const inRange = timesheets.filter(t => {
         const weekMon = parseLocalDate(t.weekStart);
         const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-        // Week overlaps range if Mon <= endD AND Fri >= startD
-        return weekMon <= endD && weekFri >= startD;
+        const included = weekMon <= endD && weekFri >= startD;
+        console.log(`weekStart="${t.weekStart}" weekMon=${weekMon.toDateString()} weekFri=${weekFri.toDateString()} startD=${startD.toDateString()} endD=${endD.toDateString()} included=${included}`);
+        return included;
       });
 
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
