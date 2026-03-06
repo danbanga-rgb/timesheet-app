@@ -80,6 +80,7 @@ interface UserProfile {
   region: string;
   projectId: number | null;
   startDate: string | null;
+  endDate: string | null;
 }
 
 interface Project {
@@ -132,6 +133,7 @@ interface UserForm {
   region: string;
   project_id: number | null;
   start_date: string;
+  end_date: string;
 }
 
 interface ProjectForm {
@@ -204,7 +206,7 @@ const TimesheetSystem = () => {
   const [showUserModal, setShowUserModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0]
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: ''
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -337,6 +339,7 @@ const TimesheetSystem = () => {
       region: (p.region as string) || '',
       projectId: (p.project_id as number) || null,
       startDate: (p.start_date as string) || null,
+      endDate: (p.end_date as string) || null,
     };
   }
 
@@ -401,9 +404,8 @@ const TimesheetSystem = () => {
     return new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   }
 
-  function getMissingWeeksSince(startDate: string, timesheets: Timesheet[], userId: string): string[] {
+  function getMissingWeeksSince(startDate: string, timesheets: Timesheet[], userId: string, endDate?: string | null): string[] {
     const start = parseLocalDate(startDate);
-    // Align to Monday
     const day = start.getDay();
     const diff = day === 0 ? -6 : 1 - day;
     start.setDate(start.getDate() + diff);
@@ -413,10 +415,27 @@ const TimesheetSystem = () => {
     today.setHours(0, 0, 0, 0);
     const thisWeekStart = getCurrentWeekStart();
 
+    // Stop at end date if set, otherwise stop at current week
+    let ceiling = thisWeekStart;
+    if (endDate) {
+      const end = parseLocalDate(endDate);
+      end.setHours(0, 0, 0, 0);
+      // Find the Monday of the week containing the end date
+      const endDay = end.getDay();
+      const endDiff = endDay === 0 ? -6 : 1 - endDay;
+      const endWeekStart = new Date(end);
+      endWeekStart.setDate(end.getDate() + endDiff);
+      endWeekStart.setHours(0, 0, 0, 0);
+      // Use the earlier of endWeekStart+7 (include the week containing end date) or thisWeekStart
+      const endCeiling = new Date(endWeekStart);
+      endCeiling.setDate(endWeekStart.getDate() + 7);
+      if (endCeiling < thisWeekStart) ceiling = endCeiling;
+    }
+
     const missing: string[] = [];
     const cursor = new Date(start);
 
-    while (cursor < thisWeekStart) {
+    while (cursor < ceiling) {
       const weekKey = formatDate(cursor);
       const submitted = timesheets.some(
         t => t.userId === userId && t.weekStart === weekKey && t.status !== 'rejected'
@@ -466,21 +485,25 @@ const TimesheetSystem = () => {
     const allTimesheets = timesheetsRef.current;
 
     timesheetUsers.forEach(user => {
+      // Skip if user's end date has passed
+      if (user.endDate) {
+        const end = parseLocalDate(user.endDate);
+        end.setHours(23, 59, 59, 999);
+        if (new Date() > end) return;
+      }
+
       const userLocalTime = getUserLocalTime(user);
       const dayOfWeek = userLocalTime.getDay();
       const hour = userLocalTime.getHours();
 
-      // Only trigger on Sunday 5 PM or Monday 12 PM local time
       const isTriggerTime = (dayOfWeek === 0 && hour === 17) || (dayOfWeek === 1 && hour === 12);
       if (!isTriggerTime) return;
 
-      const missingWeeks = getMissingWeeksSince(user.startDate!, allTimesheets, user.id);
+      const missingWeeks = getMissingWeeksSince(user.startDate!, allTimesheets, user.id, user.endDate);
       if (missingWeeks.length === 0) return;
 
-      const isUrgent = dayOfWeek === 1; // Monday = urgent
-      const weekList = missingWeeks
-        .map(w => `  • Week of ${parseLocalDate(w).toLocaleDateString()}`)
-        .join('\n');
+      const isUrgent = dayOfWeek === 1;
+      const weekList = missingWeeks.map(w => `  • Week of ${parseLocalDate(w).toLocaleDateString()}`).join('\n');
 
       const subject = isUrgent
         ? `URGENT: ${missingWeeks.length} Timesheet(s) Overdue`
@@ -606,10 +629,10 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '' });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '' });
     } else {
       setEditingUser(null);
-      setUserForm({ email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0] });
+      setUserForm({ email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '' });
     }
     setShowUserModal(true);
   };
@@ -628,6 +651,7 @@ const TimesheetSystem = () => {
         region: userForm.region,
         project_id: userForm.project_id,
         start_date: userForm.start_date || null,
+        end_date: userForm.end_date || null,
       };
       const { error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id);
       if (error) { alert('Error updating user: ' + error.message); return; }
@@ -662,6 +686,7 @@ const TimesheetSystem = () => {
         manager_id: userForm.manager_id,
         project_id: userForm.project_id,
         start_date: userForm.start_date || null,
+        end_date: userForm.end_date || null,
       });
 
       if (profileError) { alert('User auth created but profile failed: ' + profileError.message); return; }
@@ -1112,6 +1137,7 @@ const TimesheetSystem = () => {
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Role</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Location</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Start Date</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">End Date</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Manager</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Actions</th>
                     </tr>
@@ -1128,6 +1154,14 @@ const TimesheetSystem = () => {
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600"><div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{user.country}{user.region ? ', ' + user.region : ''}</div></td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
+                        <td className="px-4 py-3 text-sm text-gray-600">
+                          {user.endDate ? (
+                            <span className={new Date() > parseLocalDate(user.endDate) ? 'text-red-600 font-medium' : 'text-gray-600'}>
+                              {parseLocalDate(user.endDate).toLocaleDateString()}
+                              {new Date() > parseLocalDate(user.endDate) && <span className="ml-1 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full">Inactive</span>}
+                            </span>
+                          ) : <span className="text-gray-400 italic">No end date</span>}
+                        </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.managerId ? users.find(u => u.id === user.managerId)?.name : '-'}</td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-2">
@@ -1187,6 +1221,11 @@ const TimesheetSystem = () => {
                       <label className="block text-sm font-medium text-gray-700 mb-1">Start Date <span className="text-gray-400 font-normal">(used for timesheet reminders)</span></label>
                       <input type="date" value={userForm.start_date} onChange={e => setUserForm({...userForm, start_date: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
                       <p className="text-xs text-gray-500 mt-1">Reminders will flag any missing timesheets from this date onward</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">End Date <span className="text-gray-400 font-normal">(optional)</span></label>
+                      <input type="date" value={userForm.end_date} onChange={e => setUserForm({...userForm, end_date: e.target.value})} min={userForm.start_date || undefined} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+                      <p className="text-xs text-gray-500 mt-1">No timesheets or reminders after this date. Login access remains.</p>
                     </div>
                     {!editingUser ? (
                       <div>
@@ -1538,6 +1577,7 @@ const TimesheetSystem = () => {
   const currentWeekKey = formatDate(selectedWeek);
   const hasPreviousWeekTimesheet = timesheetsRef.current.some(t => t.userId === currentUser!.id && t.weekStart < currentWeekKey);
   const filteredUserTimesheets = getFilteredTimesheets(currentUser!.id);
+  const isUserInactive = !!(currentUser!.endDate && new Date() > parseLocalDate(currentUser!.endDate));
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -1598,6 +1638,17 @@ const TimesheetSystem = () => {
         )}
 
         <div className="bg-white rounded-lg shadow-md p-6">
+          {isUserInactive && (
+            <div className="mb-6 p-4 bg-orange-50 border-2 border-orange-300 rounded-lg flex items-center gap-3">
+              <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center flex-shrink-0">
+                <X className="w-4 h-4 text-orange-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-orange-800">Account Inactive</p>
+                <p className="text-sm text-orange-700">Your end date was {parseLocalDate(currentUser!.endDate!).toLocaleDateString()}. You can view past timesheets but cannot submit new ones.</p>
+              </div>
+            </div>
+          )}
           <div className="flex justify-between items-center mb-6">
             <button onClick={() => changeWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Previous Week</button>
             <div className="text-center">
@@ -1630,7 +1681,7 @@ const TimesheetSystem = () => {
             {weekDates.map(date => {
               const dateKey = formatDate(date);
               const entry = timeEntries[dateKey] || { hours: '' };
-              const isDisabled = currentTimesheet?.status === 'approved';
+              const isDisabled = isUserInactive || currentTimesheet?.status === 'approved';
               return (
                 <div key={dateKey} className={'p-4 rounded-lg ' + (entry.isHoliday ? 'bg-red-50 border-2 border-red-200' : entry.isWeekend ? 'bg-gray-100' : 'bg-blue-50')}>
                   <div className="flex items-center justify-between">
@@ -1664,14 +1715,18 @@ const TimesheetSystem = () => {
             </div>
           </div>
 
-          {!currentTimesheet || currentTimesheet.status !== 'approved' ? (
+          {isUserInactive ? (
+            <div className="mt-6 p-4 bg-orange-50 border-2 border-orange-200 rounded-lg text-center">
+              <p className="text-orange-800 font-medium">Timesheet submission is disabled after your end date.</p>
+            </div>
+          ) : !currentTimesheet || currentTimesheet.status !== 'approved' ? (
             <div>
               <button onClick={submitTimesheet} className="w-full mt-6 bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2">
                 <CheckCircle className="w-5 h-5" /> Submit for Approval
               </button>
               {(() => {
                 const missing = currentUser!.startDate
-                  ? getMissingWeeksSince(currentUser!.startDate, timesheets, currentUser!.id)
+                  ? getMissingWeeksSince(currentUser!.startDate, timesheets, currentUser!.id, currentUser!.endDate)
                   : [];
                 return missing.length > 0 ? (
                   <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
