@@ -1644,17 +1644,18 @@ const TimesheetSystem = () => {
       if (!appliedRange.start || !appliedRange.end) return null;
       const startD = parseLocalDate(appliedRange.start), endD = parseLocalDate(appliedRange.end);
 
-      // Find all timesheets whose week overlaps the range (week Mon–Fri)
+      // Include any week that has at least one working day (Mon–Fri) within the range
       const inRange = timesheets.filter(t => {
         const weekMon = parseLocalDate(t.weekStart);
         const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-        return weekFri >= startD && weekMon <= endD;
+        // Week overlaps range if Mon <= endD AND Fri >= startD
+        return weekMon <= endD && weekFri >= startD;
       });
 
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
       const partialWeeks = new Set<string>();
 
-      // Determine which weeks are partial (straddle the range boundary)
+      // A week is partial if its Mon or Fri falls outside the range
       weekEndings.forEach(we => {
         const weekMon = parseLocalDate(we);
         const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
@@ -1668,7 +1669,7 @@ const TimesheetSystem = () => {
         weekEndings.forEach(we => {
           const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
           if (ts) {
-            // Sum only days within the applied range
+            // Sum only the days that fall within the applied range
             let h = 0;
             Object.entries(ts.entries).forEach(([dateKey, entry]) => {
               const d = parseLocalDate(dateKey);
