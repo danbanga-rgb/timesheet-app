@@ -79,6 +79,7 @@ interface UserProfile {
   country: string;
   region: string;
   projectId: number | null;
+  startDate: string | null;
 }
 
 interface Project {
@@ -130,6 +131,7 @@ interface UserForm {
   country: string;
   region: string;
   project_id: number | null;
+  start_date: string;
 }
 
 interface ProjectForm {
@@ -202,7 +204,7 @@ const TimesheetSystem = () => {
   const [showUserModal, setShowUserModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0]
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -334,6 +336,7 @@ const TimesheetSystem = () => {
       country: (p.country as string) || 'US',
       region: (p.region as string) || '',
       projectId: (p.project_id as number) || null,
+      startDate: (p.start_date as string) || null,
     };
   }
 
@@ -398,37 +401,87 @@ const TimesheetSystem = () => {
     return new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   }
 
+  function getMissingWeeksSince(startDate: string, timesheets: Timesheet[], userId: string): string[] {
+    const start = parseLocalDate(startDate);
+    // Align to Monday
+    const day = start.getDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    start.setDate(start.getDate() + diff);
+    start.setHours(0, 0, 0, 0);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const thisWeekStart = getCurrentWeekStart();
+
+    const missing: string[] = [];
+    const cursor = new Date(start);
+
+    while (cursor < thisWeekStart) {
+      const weekKey = formatDate(cursor);
+      const submitted = timesheets.some(
+        t => t.userId === userId && t.weekStart === weekKey && t.status !== 'rejected'
+      );
+      if (!submitted) missing.push(weekKey);
+      cursor.setDate(cursor.getDate() + 7);
+    }
+
+    return missing;
+  }
+
+  async function sendReminderEmail(user: UserProfile, subject: string, body: string) {
+    // Uses Supabase Edge Function or falls back to logging
+    // To enable real emails, deploy a Supabase Edge Function called "send-reminder"
+    // For now we store reminders in state so they show in-app
+    const userLocalTime = getUserLocalTime(user);
+    const reminder: ReminderEmail = {
+      id: Date.now() + Math.random(),
+      userId: user.id,
+      userName: user.name,
+      userEmail: user.email,
+      reminderType: subject.includes('URGENT') ? 'second' : 'first',
+      weekStart: formatDate(getCurrentWeekStart()),
+      sentDate: formatDate(userLocalTime),
+      sentTime: userLocalTime.toLocaleString(),
+      subject,
+      message: body,
+    };
+    setReminderEmails(prev => {
+      const alreadySent = prev.some(r => r.userId === user.id && r.sentDate === formatDate(userLocalTime));
+      return alreadySent ? prev : [...prev, reminder];
+    });
+  }
+
   function checkAndSendReminders() {
-    const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
-    const weekKey = formatDate(getCurrentWeekStart());
+    const timesheetUsers = users.filter(u => u.role === 'timesheetuser' && u.startDate);
+    const allTimesheets = timesheetsRef.current;
+
     timesheetUsers.forEach(user => {
       const userLocalTime = getUserLocalTime(user);
       const dayOfWeek = userLocalTime.getDay();
       const hour = userLocalTime.getHours();
-      const hasSubmitted = timesheetsRef.current.some(t => t.userId === user.id && t.weekStart === weekKey && t.status !== 'rejected');
-      if (hasSubmitted) return;
-      const today = formatDate(userLocalTime);
-      setReminderEmails(prev => {
-        const alreadySent = prev.some(r => r.userId === user.id && r.sentDate === today);
-        if (alreadySent) return prev;
-        if (dayOfWeek === 0 && hour === 17) return [...prev, createReminderEmail(user, 'first', userLocalTime)];
-        if (dayOfWeek === 1 && hour === 12) return [...prev, createReminderEmail(user, 'second', userLocalTime)];
-        return prev;
-      });
-    });
-  }
 
-  function createReminderEmail(user: UserProfile, reminderType: 'first' | 'second', userLocalTime: Date): ReminderEmail {
-    const weekStart = getCurrentWeekStart();
-    return {
-      id: Date.now() + Math.random(), userId: user.id, userName: user.name, userEmail: user.email,
-      reminderType, weekStart: formatDate(weekStart), sentDate: formatDate(userLocalTime),
-      sentTime: userLocalTime.toLocaleString(),
-      subject: reminderType === 'first' ? 'Reminder: Submit Your Timesheet' : 'URGENT: Timesheet Submission Overdue',
-      message: reminderType === 'first'
-        ? `Hi ${user.name}, this is a friendly reminder to submit your timesheet for the week of ${weekStart.toLocaleDateString()}. Please submit by end of day Monday.`
-        : `Hi ${user.name}, your timesheet for the week of ${weekStart.toLocaleDateString()} is still pending. Please submit it as soon as possible.`
-    };
+      // Only trigger on Sunday 5 PM or Monday 12 PM local time
+      const isTriggerTime = (dayOfWeek === 0 && hour === 17) || (dayOfWeek === 1 && hour === 12);
+      if (!isTriggerTime) return;
+
+      const missingWeeks = getMissingWeeksSince(user.startDate!, allTimesheets, user.id);
+      if (missingWeeks.length === 0) return;
+
+      const isUrgent = dayOfWeek === 1; // Monday = urgent
+      const weekList = missingWeeks
+        .map(w => `  • Week of ${parseLocalDate(w).toLocaleDateString()}`)
+        .join('\n');
+
+      const subject = isUrgent
+        ? `URGENT: ${missingWeeks.length} Timesheet(s) Overdue`
+        : `Reminder: ${missingWeeks.length} Timesheet(s) Need Submission`;
+
+      const body = isUrgent
+        ? `Hi ${user.name},\n\nYou have ${missingWeeks.length} timesheet(s) that have not been submitted:\n\n${weekList}\n\nPlease log in and submit them as soon as possible.`
+        : `Hi ${user.name},\n\nThis is a reminder that the following timesheet(s) are missing:\n\n${weekList}\n\nPlease submit them by end of day Monday.`;
+
+      sendReminderEmail(user, subject, body);
+    });
   }
 
   function isHoliday(date: Date, country: string) {
@@ -543,10 +596,10 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '' });
     } else {
       setEditingUser(null);
-      setUserForm({ email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null });
+      setUserForm({ email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0] });
     }
     setShowUserModal(true);
   };
@@ -557,14 +610,14 @@ const TimesheetSystem = () => {
     }
 
     if (editingUser) {
-      // Update existing profile fields
       const updates = {
         name: userForm.name,
         role: userForm.role,
         manager_id: userForm.manager_id,
         country: userForm.country,
         region: userForm.region,
-        project_id: userForm.project_id
+        project_id: userForm.project_id,
+        start_date: userForm.start_date || null,
       };
       const { error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id);
       if (error) { alert('Error updating user: ' + error.message); return; }
@@ -597,7 +650,8 @@ const TimesheetSystem = () => {
         country: userForm.country,
         region: userForm.region,
         manager_id: userForm.manager_id,
-        project_id: userForm.project_id
+        project_id: userForm.project_id,
+        start_date: userForm.start_date || null,
       });
 
       if (profileError) { alert('User auth created but profile failed: ' + profileError.message); return; }
@@ -1010,7 +1064,7 @@ const TimesheetSystem = () => {
           </div>
 
           <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
-            <p className="text-yellow-800"><strong>Admin Features:</strong> Manage users and projects. To create new users, use Supabase → Authentication → Invite User, then insert their profile via SQL Editor.</p>
+            <p className="text-yellow-800"><strong>Admin Features:</strong> Create users directly in the app. Set each user's <strong>Start Date</strong> to enable automatic missing-timesheet reminders from that date onward.</p>
           </div>
 
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
@@ -1047,6 +1101,7 @@ const TimesheetSystem = () => {
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Email</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Role</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Location</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Start Date</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Manager</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Actions</th>
                     </tr>
@@ -1062,6 +1117,7 @@ const TimesheetSystem = () => {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600"><div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{user.country}{user.region ? ', ' + user.region : ''}</div></td>
+                        <td className="px-4 py-3 text-sm text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.managerId ? users.find(u => u.id === user.managerId)?.name : '-'}</td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-2">
@@ -1117,6 +1173,11 @@ const TimesheetSystem = () => {
                   <div className="space-y-4">
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label><input type="text" value={userForm.name} onChange={e => setUserForm({...userForm, name: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="John Doe" /></div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Email *</label><input type="email" value={userForm.email} onChange={e => setUserForm({...userForm, email: e.target.value})} disabled={!!editingUser} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100" placeholder="john@company.com" /></div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Start Date <span className="text-gray-400 font-normal">(used for timesheet reminders)</span></label>
+                      <input type="date" value={userForm.start_date} onChange={e => setUserForm({...userForm, start_date: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+                      <p className="text-xs text-gray-500 mt-1">Reminders will flag any missing timesheets from this date onward</p>
+                    </div>
                     {!editingUser ? (
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
@@ -1598,11 +1659,31 @@ const TimesheetSystem = () => {
               <button onClick={submitTimesheet} className="w-full mt-6 bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2">
                 <CheckCircle className="w-5 h-5" /> Submit for Approval
               </button>
+              {(() => {
+                const missing = currentUser!.startDate
+                  ? getMissingWeeksSince(currentUser!.startDate, timesheets, currentUser!.id)
+                  : [];
+                return missing.length > 0 ? (
+                  <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                    <p className="text-sm font-semibold text-red-800 mb-2">⚠️ {missing.length} Missing Timesheet{missing.length > 1 ? 's' : ''}</p>
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {missing.map(w => (
+                        <button key={w} onClick={() => { const d = parseLocalDate(w); setSelectedWeek(d); loadTimesheetForWeek(currentUser!.id, d); }} className="block w-full text-left text-xs text-red-700 hover:text-red-900 hover:underline">
+                          → Week of {parseLocalDate(w).toLocaleDateString()}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-red-600 mt-2">Click a week to navigate to it and submit.</p>
+                  </div>
+                ) : (
+                  <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="text-sm text-green-800">✓ All timesheets submitted since your start date.</p>
+                  </div>
+                );
+              })()}
               <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <p className="text-sm text-blue-800"><strong>Reminder Schedule:</strong> Automated email reminders are sent if you haven't submitted by Sunday 5 PM and Monday 12 PM (your local time).</p>
+                <p className="text-sm text-blue-800"><strong>Reminder Schedule:</strong> Automated reminders are sent Sunday at 5 PM and Monday at 12 PM (your local time) for any missing timesheets.</p>
               </div>
-              <button onClick={() => { const t = getUserLocalTime(currentUser); setReminderEmails(prev => [...prev, createReminderEmail(currentUser, 'first', t)]); alert('Demo: First reminder triggered!'); }} className="w-full mt-3 bg-amber-100 text-amber-800 py-2 rounded-lg hover:bg-amber-200 text-sm border border-amber-300">🔔 Demo: Trigger First Reminder</button>
-              <button onClick={() => { const t = getUserLocalTime(currentUser); setReminderEmails(prev => [...prev, createReminderEmail(currentUser, 'second', t)]); alert('Demo: Second reminder triggered!'); }} className="w-full mt-2 bg-red-100 text-red-800 py-2 rounded-lg hover:bg-red-200 text-sm border border-red-300">⚠️ Demo: Trigger Second Reminder</button>
             </div>
           ) : (
             <div className="mt-6 p-4 bg-green-50 border-2 border-green-200 rounded-lg text-center">
