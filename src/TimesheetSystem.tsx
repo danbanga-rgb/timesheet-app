@@ -27,10 +27,12 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
               <th className="border border-green-700 px-3 py-2 text-left">Project</th>
               {weekEndings.map((we: string) => {
                 const isPartial = partialWeeks.has(we);
+                const weekSat = parseLocalDate(we);
+                const weekFri = new Date(weekSat); weekFri.setDate(weekSat.getDate() + 6);
                 return (
                   <th key={we} className={`border border-green-700 px-3 py-2 text-center whitespace-nowrap ${isPartial ? 'bg-amber-600' : ''}`}>
                     <div className="text-xs opacity-80">{isPartial ? 'Partial' : 'W/E'}</div>
-                    <div>{parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                    <div>{weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
                   </th>
                 );
               })}
@@ -331,9 +333,7 @@ const TimesheetSystem = () => {
       .select('*')
       .order('week_start', { ascending: false });
     if (data) {
-      console.log('RAW week_start values from Supabase:', data.map(t => t.week_start));
       const normalised = data.map(normaliseTimesheet);
-      console.log('NORMALISED weekStart values:', normalised.map(t => t.weekStart));
       setTimesheets(normalised);
       timesheetsRef.current = normalised;
     }
@@ -373,9 +373,10 @@ const TimesheetSystem = () => {
   // ─── Pure utility functions ───────────────────────────────────────────────
   function getCurrentWeekStart() {
     const today = new Date();
-    const day = today.getDay();
-    const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-    const weekStart = new Date(today.getFullYear(), today.getMonth(), diff);
+    const day = today.getDay(); // 0=Sun,1=Mon,...,6=Sat
+    // Week starts Saturday: go back to most recent Saturday
+    const diff = day === 6 ? 0 : -(day + 1);
+    const weekStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() + diff);
     weekStart.setHours(0, 0, 0, 0);
     return weekStart;
   }
@@ -394,8 +395,9 @@ const TimesheetSystem = () => {
   }
 
   function getWeekDates(startDate: Date): Date[] {
+    // startDate is Saturday; working days are Mon(+2) through Fri(+6)
     const dates: Date[] = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 2; i <= 6; i++) {
       const date = new Date(startDate);
       date.setDate(date.getDate() + i);
       date.setHours(0, 0, 0, 0);
@@ -421,13 +423,12 @@ const TimesheetSystem = () => {
 
   function getMissingWeeksSince(startDate: string, timesheets: Timesheet[], userId: string, endDate?: string | null): string[] {
     const start = parseLocalDate(startDate);
+    // Align to most recent Saturday on or before start date
     const day = start.getDay();
-    const diff = day === 0 ? -6 : 1 - day;
+    const diff = day === 6 ? 0 : -(day + 1);
     start.setDate(start.getDate() + diff);
     start.setHours(0, 0, 0, 0);
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
     const thisWeekStart = getCurrentWeekStart();
 
     // Stop at end date if set, otherwise stop at current week
@@ -435,13 +436,13 @@ const TimesheetSystem = () => {
     if (endDate) {
       const end = parseLocalDate(endDate);
       end.setHours(0, 0, 0, 0);
-      // Find the Monday of the week containing the end date
+      // Find the Saturday of the week containing the end date
       const endDay = end.getDay();
-      const endDiff = endDay === 0 ? -6 : 1 - endDay;
+      const endDiff = endDay === 6 ? 0 : -(endDay + 1);
       const endWeekStart = new Date(end);
       endWeekStart.setDate(end.getDate() + endDiff);
       endWeekStart.setHours(0, 0, 0, 0);
-      // Use the earlier of endWeekStart+7 (include the week containing end date) or thisWeekStart
+      // Include the week containing end date
       const endCeiling = new Date(endWeekStart);
       endCeiling.setDate(endWeekStart.getDate() + 7);
       if (endCeiling < thisWeekStart) ceiling = endCeiling;
@@ -511,14 +512,14 @@ const TimesheetSystem = () => {
       const dayOfWeek = userLocalTime.getDay();
       const hour = userLocalTime.getHours();
 
-      const isTriggerTime = (dayOfWeek === 0 && hour === 17) || (dayOfWeek === 1 && hour === 12);
+      const isTriggerTime = (dayOfWeek === 4 && hour === 17) || (dayOfWeek === 5 && hour === 12);
       if (!isTriggerTime) return;
 
       const missingWeeks = getMissingWeeksSince(user.startDate!, allTimesheets, user.id, user.endDate);
       if (missingWeeks.length === 0) return;
 
-      const isUrgent = dayOfWeek === 1;
-      const weekList = missingWeeks.map(w => `  • Week of ${parseLocalDate(w).toLocaleDateString()}`).join('\n');
+      const isUrgent = dayOfWeek === 5;
+      const weekList = missingWeeks.map(w => `  • Week ending ${new Date(new Date(parseLocalDate(w)).setDate(parseLocalDate(w).getDate() + 6)).toLocaleDateString()}`).join('\n');
 
       const subject = isUrgent
         ? `URGENT: ${missingWeeks.length} Timesheet(s) Overdue`
@@ -526,7 +527,7 @@ const TimesheetSystem = () => {
 
       const body = isUrgent
         ? `Hi ${user.name},\n\nYou have ${missingWeeks.length} timesheet(s) that have not been submitted:\n\n${weekList}\n\nPlease log in and submit them as soon as possible.`
-        : `Hi ${user.name},\n\nThis is a reminder that the following timesheet(s) are missing:\n\n${weekList}\n\nPlease submit them by end of day Monday.`;
+        : `Hi ${user.name},\n\nThis is a reminder that the following timesheet(s) are missing:\n\n${weekList}\n\nPlease submit them by end of day Friday.`;
 
       sendReminderEmail(user, subject, body);
     });
@@ -1648,23 +1649,21 @@ const TimesheetSystem = () => {
       if (!appliedRange.start || !appliedRange.end) return null;
       const startD = parseLocalDate(appliedRange.start), endD = parseLocalDate(appliedRange.end);
 
-      // Include any week that has at least one working day (Mon–Fri) within the range
+      // Include any week (Sat–Fri) that overlaps the range
       const inRange = timesheets.filter(t => {
-        const weekMon = parseLocalDate(t.weekStart);
-        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-        const included = weekMon <= endD && weekFri >= startD;
-        console.log(`weekStart="${t.weekStart}" weekMon=${weekMon.toDateString()} weekFri=${weekFri.toDateString()} startD=${startD.toDateString()} endD=${endD.toDateString()} included=${included}`);
-        return included;
+        const weekSat = parseLocalDate(t.weekStart);
+        const weekFri = new Date(weekSat); weekFri.setDate(weekSat.getDate() + 6);
+        return weekSat <= endD && weekFri >= startD;
       });
 
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
       const partialWeeks = new Set<string>();
 
-      // A week is partial if its Mon or Fri falls outside the range
+      // A week is partial if its Saturday or Friday falls outside the range
       weekEndings.forEach(we => {
-        const weekMon = parseLocalDate(we);
-        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-        if (weekMon < startD || weekFri > endD) partialWeeks.add(we);
+        const weekSat = parseLocalDate(we);
+        const weekFri = new Date(weekSat); weekFri.setDate(weekSat.getDate() + 6);
+        if (weekSat < startD || weekFri > endD) partialWeeks.add(we);
       });
 
       const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
@@ -1790,9 +1789,10 @@ const TimesheetSystem = () => {
               const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
               let csv = 'Employee,Country,Project';
               weekEndings.forEach(we => {
+                const weekFri = new Date(parseLocalDate(we)); weekFri.setDate(parseLocalDate(we).getDate() + 6);
                 const label = partialWeeks.has(we)
-                  ? `Partial W/E ${parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
-                  : `W/E ${parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+                  ? `Partial W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+                  : `W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
                 csv += `,"${label}","Status"`;
               });
               csv += ',Total Hours\n';
@@ -2091,7 +2091,7 @@ const TimesheetSystem = () => {
                 );
               })()}
               <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <p className="text-sm text-blue-800"><strong>Reminder Schedule:</strong> Automated reminders are sent Sunday at 5 PM and Monday at 12 PM (your local time) for any missing timesheets.</p>
+                <p className="text-sm text-blue-800"><strong>Reminder Schedule:</strong> Automated reminders are sent Thursday at 5 PM and Friday at 12 PM (your local time) for any missing timesheets.</p>
               </div>
             </div>
           ) : (
