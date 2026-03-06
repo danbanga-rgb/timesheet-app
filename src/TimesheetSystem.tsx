@@ -1750,7 +1750,6 @@ const TimesheetSystem = () => {
               const startOffset = (8 - firstDay.getDay()) % 7;
               const startD = new Date(firstDay); startD.setDate(firstDay.getDate() + (firstDay.getDay() === 1 ? 0 : startOffset === 0 ? 0 : startOffset));
               // Nearest Friday <= lastDay
-              const endOffset = (lastDay.getDay() + 2) % 7; // days to subtract to get to Friday
               const endD = new Date(lastDay); endD.setDate(lastDay.getDate() - (lastDay.getDay() === 5 ? 0 : (lastDay.getDay() + 2) % 7));
               monthOptions.push({ label, value: monthVal, start: formatDate(startD), end: formatDate(endD) });
             }
