@@ -360,7 +360,7 @@ const TimesheetSystem = () => {
       userId: t.user_id as string,
       userName: t.user_name as string,
       projectId: (t.project_id as number) || null,
-      weekStart: t.week_start as string,
+      weekStart: (t.week_start as string).split('T')[0],
       entries: (t.entries as Record<string, TimeEntry>) || {},
       status: t.status as Timesheet['status'],
       submittedAt: t.submitted_at as string,
@@ -379,7 +379,9 @@ const TimesheetSystem = () => {
   }
 
   function parseLocalDate(dateStr: string): Date {
-    const [y, m, d] = dateStr.split('-').map(Number);
+    // Handle full ISO strings like '2026-02-23T00:00:00.000Z' by taking just the date part
+    const clean = dateStr.split('T')[0];
+    const [y, m, d] = clean.split('-').map(Number);
     return new Date(y, m - 1, d);
   }
 
