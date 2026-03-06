@@ -429,26 +429,36 @@ const TimesheetSystem = () => {
   }
 
   async function sendReminderEmail(user: UserProfile, subject: string, body: string) {
-    // Uses Supabase Edge Function or falls back to logging
-    // To enable real emails, deploy a Supabase Edge Function called "send-reminder"
-    // For now we store reminders in state so they show in-app
     const userLocalTime = getUserLocalTime(user);
-    const reminder: ReminderEmail = {
-      id: Date.now() + Math.random(),
-      userId: user.id,
-      userName: user.name,
-      userEmail: user.email,
-      reminderType: subject.includes('URGENT') ? 'second' : 'first',
-      weekStart: formatDate(getCurrentWeekStart()),
-      sentDate: formatDate(userLocalTime),
-      sentTime: userLocalTime.toLocaleString(),
-      subject,
-      message: body,
-    };
+    const today = formatDate(userLocalTime);
+
+    // Avoid duplicate in-app reminders
     setReminderEmails(prev => {
-      const alreadySent = prev.some(r => r.userId === user.id && r.sentDate === formatDate(userLocalTime));
-      return alreadySent ? prev : [...prev, reminder];
+      const alreadySent = prev.some(r => r.userId === user.id && r.sentDate === today);
+      if (alreadySent) return prev;
+      return [...prev, {
+        id: Date.now() + Math.random(),
+        userId: user.id,
+        userName: user.name,
+        userEmail: user.email,
+        reminderType: subject.includes('URGENT') ? 'second' : 'first',
+        weekStart: formatDate(getCurrentWeekStart()),
+        sentDate: today,
+        sentTime: userLocalTime.toLocaleString(),
+        subject,
+        message: body,
+      }];
     });
+
+    // Send real email via Supabase Edge Function
+    try {
+      const { error } = await supabase.functions.invoke('send-reminder', {
+        body: { to: user.email, subject, body, userName: user.name },
+      });
+      if (error) console.warn('Email send failed for', user.email, error);
+    } catch (err) {
+      console.warn('Edge function not available — in-app reminder only:', err);
+    }
   }
 
   function checkAndSendReminders() {
