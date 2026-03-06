@@ -3,8 +3,8 @@
 // Phase 3 of the Production Deployment Guide
 // ============================================================
 
-const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: string[]; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number }; parseLocalDate: (s: string) => Date }) => {
-  const { weekEndings, employeeRows, colTotals, grandTotal } = report;
+const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: string[]; partialWeeks: Set<string>; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number }; parseLocalDate: (s: string) => Date }) => {
+  const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal } = report;
   return (
     <div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -13,6 +13,11 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
         <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600">Employees</div><div className="text-2xl font-bold text-purple-600">{employeeRows.length}</div></div>
         <div className="bg-amber-50 p-4 rounded-lg"><div className="text-sm text-gray-600">Avg Hrs/Employee</div><div className="text-2xl font-bold text-amber-600">{employeeRows.length > 0 ? (grandTotal / employeeRows.length).toFixed(1) : 0}h</div></div>
       </div>
+      {partialWeeks.size > 0 && (
+        <div className="flex items-center gap-2 mb-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span className="font-semibold">Partial</span> weeks include only the working days that fall within the selected date range.
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="border-collapse text-sm w-full">
           <thead>
@@ -20,12 +25,15 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
               <th className="border border-green-700 px-3 py-2 text-left">Employee</th>
               <th className="border border-green-700 px-3 py-2 text-left">Country</th>
               <th className="border border-green-700 px-3 py-2 text-left">Project</th>
-              {weekEndings.map((we: string) => (
-                <th key={we} className="border border-green-700 px-3 py-2 text-center whitespace-nowrap">
-                  <div className="text-xs opacity-80">W/E</div>
-                  <div>{parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
-                </th>
-              ))}
+              {weekEndings.map((we: string) => {
+                const isPartial = partialWeeks.has(we);
+                return (
+                  <th key={we} className={`border border-green-700 px-3 py-2 text-center whitespace-nowrap ${isPartial ? 'bg-amber-600' : ''}`}>
+                    <div className="text-xs opacity-80">{isPartial ? 'Partial' : 'W/E'}</div>
+                    <div>{parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                  </th>
+                );
+              })}
               <th className="border border-green-700 px-3 py-2 text-center bg-green-700">Total</th>
             </tr>
           </thead>
@@ -38,8 +46,9 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
                 {weekEndings.map((we: string) => {
                   const h = row.hours[we];
                   const st = row.statuses[we];
+                  const isPartial = partialWeeks.has(we);
                   return (
-                    <td key={we} className="border border-gray-300 px-3 py-2 text-center">
+                    <td key={we} className={`border border-gray-300 px-3 py-2 text-center ${isPartial ? 'bg-amber-50' : ''}`}>
                       {h !== null ? <span className={h > 0 ? 'font-semibold text-gray-800' : 'text-gray-400'}>{h.toFixed(1)}</span> : <span className="text-gray-300">-</span>}
                       {h !== null && st !== 'approved' && st !== 'not submitted' && (
                         <div className={'text-xs ' + (st === 'rejected' ? 'text-red-500' : 'text-amber-500')}>{st === 'pending' ? 'pend' : 'rej'}</div>
@@ -53,7 +62,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
             <tr className="bg-green-600 text-white font-bold">
               <td className="border border-green-700 px-3 py-2" colSpan={3}>Total</td>
               {weekEndings.map((we: string) => (
-                <td key={we} className="border border-green-700 px-3 py-2 text-center">{colTotals[we].toFixed(1)}</td>
+                <td key={we} className={`border border-green-700 px-3 py-2 text-center ${partialWeeks.has(we) ? 'bg-amber-600' : ''}`}>{colTotals[we].toFixed(1)}</td>
               ))}
               <td className="border border-green-700 px-3 py-2 text-center bg-green-700">{grandTotal.toFixed(1)}</td>
             </tr>
@@ -1634,8 +1643,24 @@ const TimesheetSystem = () => {
     const generateConsolidatedReport = () => {
       if (!appliedRange.start || !appliedRange.end) return null;
       const startD = parseLocalDate(appliedRange.start), endD = parseLocalDate(appliedRange.end);
-      const inRange = timesheets.filter(t => { const d = parseLocalDate(t.weekStart); return d >= startD && d <= endD; });
+
+      // Find all timesheets whose week overlaps the range (week Mon–Fri)
+      const inRange = timesheets.filter(t => {
+        const weekMon = parseLocalDate(t.weekStart);
+        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+        return weekFri >= startD && weekMon <= endD;
+      });
+
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
+      const partialWeeks = new Set<string>();
+
+      // Determine which weeks are partial (straddle the range boundary)
+      weekEndings.forEach(we => {
+        const weekMon = parseLocalDate(we);
+        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+        if (weekMon < startD || weekFri > endD) partialWeeks.add(we);
+      });
+
       const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
       const employeeRows = timesheetUsers.map(user => {
         const hours: Record<string, number | null> = {}, statuses: Record<string, string> = {};
@@ -1643,16 +1668,22 @@ const TimesheetSystem = () => {
         weekEndings.forEach(we => {
           const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
           if (ts) {
-            const h = Object.values(ts.entries).reduce((s, e) => s + parseFloat((e as TimeEntry)?.hours || '0'), 0);
+            // Sum only days within the applied range
+            let h = 0;
+            Object.entries(ts.entries).forEach(([dateKey, entry]) => {
+              const d = parseLocalDate(dateKey);
+              if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
+            });
             hours[we] = h; statuses[we] = ts.status; rowTotal += h;
           } else { hours[we] = null; statuses[we] = 'not submitted'; }
         });
         const project = projects.find(p => p.id === user.projectId);
         return { name: user.name, country: user.country, project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
       });
+
       const colTotals: Record<string, number> = {};
       weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
-      return { weekEndings, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0) };
+      return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0) };
     };
 
     const consolidatedReport = generateConsolidatedReport();
@@ -1743,22 +1774,21 @@ const TimesheetSystem = () => {
               const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
               const label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
               const monthVal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-              // Start = first monday on or after 1st of month; End = last friday on or before last day
               const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
               const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-              // Nearest Monday >= firstDay
-              const startOffset = (8 - firstDay.getDay()) % 7;
-              const startD = new Date(firstDay); startD.setDate(firstDay.getDate() + (firstDay.getDay() === 1 ? 0 : startOffset === 0 ? 0 : startOffset));
-              // Nearest Friday <= lastDay
-              const endD = new Date(lastDay); endD.setDate(lastDay.getDate() - (lastDay.getDay() === 5 ? 0 : (lastDay.getDay() + 2) % 7));
-              monthOptions.push({ label, value: monthVal, start: formatDate(startD), end: formatDate(endD) });
+              monthOptions.push({ label, value: monthVal, start: formatDate(firstDay), end: formatDate(lastDay) });
             }
 
             const downloadConsolidatedCSV = () => {
               if (!consolidatedReport) return;
-              const { weekEndings, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
+              const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
               let csv = 'Employee,Country,Project';
-              weekEndings.forEach(we => { csv += `,"W/E ${parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })},Status"`; });
+              weekEndings.forEach(we => {
+                const label = partialWeeks.has(we)
+                  ? `Partial W/E ${parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+                  : `W/E ${parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+                csv += `,"${label}","Status"`;
+              });
               csv += ',Total Hours\n';
               employeeRows.forEach(row => {
                 csv += `"${row.name}","${row.country}","${row.project}"`;
@@ -1769,11 +1799,11 @@ const TimesheetSystem = () => {
                 });
                 csv += `,"${row.rowTotal.toFixed(1)}"\n`;
               });
-              csv += `"TOTAL","",""`; 
+              csv += `"TOTAL","",""`;
               weekEndings.forEach(we => { csv += `,"${colTotals[we].toFixed(1)}",""` });
               csv += `,"${gt.toFixed(1)}"\n`;
-              const rangeLabel = appliedRange.start && appliedRange.end 
-                ? `${appliedRange.start}_to_${appliedRange.end}` 
+              const rangeLabel = appliedRange.start && appliedRange.end
+                ? `${appliedRange.start}_to_${appliedRange.end}`
                 : 'consolidated';
               triggerDownload(csv, `consolidated_report_${rangeLabel}.csv`);
             };
