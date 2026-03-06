@@ -1119,6 +1119,9 @@ const TimesheetSystem = () => {
               <button onClick={() => setAdminView('projects')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'projects' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
                 <Settings className="w-5 h-5" /> Project Management
               </button>
+              <button onClick={() => setAdminView('allocations')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'allocations' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
+                <FileText className="w-5 h-5" /> Project Allocations
+              </button>
             </div>
           </div>
 
@@ -1205,6 +1208,182 @@ const TimesheetSystem = () => {
             </div>
           )}
 
+          {adminView === 'allocations' && (() => {
+            const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
+            const allProjects = projects;
+
+            const exportAllocations = () => {
+              let csv = 'Project,Project Code,Status,Employee Name,Email,Country,Region,Start Date,End Date,Active\n';
+              allProjects.forEach(project => {
+                const allocated = timesheetUsers.filter(u => u.projectId === project.id);
+                if (allocated.length === 0) {
+                  csv += `"${project.name}","${project.code}","${project.status}","(no users)","","","","","",""\n`;
+                } else {
+                  allocated.forEach(user => {
+                    const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
+                    csv += `"${project.name}","${project.code}","${project.status}","${user.name}","${user.email}","${user.country}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
+                  });
+                }
+              });
+              // Unallocated users
+              const unallocated = timesheetUsers.filter(u => !u.projectId);
+              unallocated.forEach(user => {
+                const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
+                csv += `"(No Project)","","","${user.name}","${user.email}","${user.country}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
+              });
+              const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = 'project_allocations_' + new Date().toISOString().split('T')[0] + '.csv';
+              link.style.display = 'none';
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+              URL.revokeObjectURL(url);
+            };
+
+            return (
+              <div className="bg-white rounded-lg shadow-md p-6">
+                <div className="flex justify-between items-center mb-6">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-800">Project Allocations</h2>
+                    <p className="text-sm text-gray-500 mt-1">All timesheet users grouped by assigned project</p>
+                  </div>
+                  <button onClick={exportAllocations} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                    <Download className="w-4 h-4" /> Export CSV
+                  </button>
+                </div>
+
+                {allProjects.map(project => {
+                  const allocated = timesheetUsers.filter(u => u.projectId === project.id);
+                  return (
+                    <div key={project.id} className="mb-6 border border-gray-200 rounded-lg overflow-hidden">
+                      <div className={`flex items-center justify-between px-5 py-3 ${project.status === 'active' ? 'bg-indigo-600' : 'bg-gray-400'} text-white`}>
+                        <div>
+                          <span className="font-semibold text-lg">{project.name}</span>
+                          <span className="ml-3 text-indigo-200 text-sm font-mono">{project.code}</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm text-indigo-100">{allocated.length} user{allocated.length !== 1 ? 's' : ''}</span>
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${project.status === 'active' ? 'bg-indigo-100 text-indigo-800' : 'bg-gray-200 text-gray-700'}`}>
+                            {project.status.charAt(0).toUpperCase() + project.status.slice(1)}
+                          </span>
+                        </div>
+                      </div>
+                      {allocated.length === 0 ? (
+                        <p className="px-5 py-4 text-sm text-gray-400 italic">No users allocated to this project</p>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
+                            <tr>
+                              <th className="px-4 py-2 text-left">Name</th>
+                              <th className="px-4 py-2 text-left">Email</th>
+                              <th className="px-4 py-2 text-left">Location</th>
+                              <th className="px-4 py-2 text-left">Start Date</th>
+                              <th className="px-4 py-2 text-left">End Date</th>
+                              <th className="px-4 py-2 text-left">Status</th>
+                              <th className="px-4 py-2 text-center">Edit</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {allocated.map(user => {
+                              const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
+                              return (
+                                <tr key={user.id} className={isInactive ? 'bg-red-50' : 'bg-white hover:bg-gray-50'}>
+                                  <td className="px-4 py-3 font-medium text-gray-800">{user.name}</td>
+                                  <td className="px-4 py-3 text-gray-600">{user.email}</td>
+                                  <td className="px-4 py-3 text-gray-600">
+                                    <div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{user.country}{user.region ? ', ' + user.region : ''}</div>
+                                  </td>
+                                  <td className="px-4 py-3 text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
+                                  <td className="px-4 py-3">
+                                    {user.endDate ? (
+                                      <span className={isInactive ? 'text-red-600 font-medium' : 'text-gray-600'}>
+                                        {parseLocalDate(user.endDate).toLocaleDateString()}
+                                        {isInactive && <span className="ml-1 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full">Past</span>}
+                                      </span>
+                                    ) : <span className="text-gray-400 italic">No end date</span>}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${isInactive ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
+                                      {isInactive ? 'Inactive' : 'Active'}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3 text-center">
+                                    <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit user"><Edit2 className="w-4 h-4" /></button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Unallocated users */}
+                {(() => {
+                  const unallocated = timesheetUsers.filter(u => !u.projectId);
+                  if (unallocated.length === 0) return null;
+                  return (
+                    <div className="border border-orange-200 rounded-lg overflow-hidden">
+                      <div className="flex items-center justify-between px-5 py-3 bg-orange-500 text-white">
+                        <span className="font-semibold text-lg">Unallocated Users</span>
+                        <span className="text-sm text-orange-100">{unallocated.length} user{unallocated.length !== 1 ? 's' : ''} — no project assigned</span>
+                      </div>
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
+                          <tr>
+                            <th className="px-4 py-2 text-left">Name</th>
+                            <th className="px-4 py-2 text-left">Email</th>
+                            <th className="px-4 py-2 text-left">Location</th>
+                            <th className="px-4 py-2 text-left">Start Date</th>
+                            <th className="px-4 py-2 text-left">End Date</th>
+                            <th className="px-4 py-2 text-left">Status</th>
+                            <th className="px-4 py-2 text-center">Edit</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {unallocated.map(user => {
+                            const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
+                            return (
+                              <tr key={user.id} className={isInactive ? 'bg-red-50' : 'bg-white hover:bg-gray-50'}>
+                                <td className="px-4 py-3 font-medium text-gray-800">{user.name}</td>
+                                <td className="px-4 py-3 text-gray-600">{user.email}</td>
+                                <td className="px-4 py-3 text-gray-600">
+                                  <div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{user.country}{user.region ? ', ' + user.region : ''}</div>
+                                </td>
+                                <td className="px-4 py-3 text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
+                                <td className="px-4 py-3">
+                                  {user.endDate ? (
+                                    <span className={isInactive ? 'text-red-600 font-medium' : 'text-gray-600'}>
+                                      {parseLocalDate(user.endDate).toLocaleDateString()}
+                                      {isInactive && <span className="ml-1 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full">Past</span>}
+                                    </span>
+                                  ) : <span className="text-gray-400 italic">No end date</span>}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${isInactive ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
+                                    {isInactive ? 'Inactive' : 'Active'}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 text-center">
+                                  <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit user"><Edit2 className="w-4 h-4" /></button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
+              </div>
+            );
+          })()}
+
           {/* User Modal */}
           {showUserModal && (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -1217,16 +1396,6 @@ const TimesheetSystem = () => {
                   <div className="space-y-4">
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label><input type="text" value={userForm.name} onChange={e => setUserForm({...userForm, name: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="John Doe" /></div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Email *</label><input type="email" value={userForm.email} onChange={e => setUserForm({...userForm, email: e.target.value})} disabled={!!editingUser} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100" placeholder="john@company.com" /></div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Start Date <span className="text-gray-400 font-normal">(used for timesheet reminders)</span></label>
-                      <input type="date" value={userForm.start_date} onChange={e => setUserForm({...userForm, start_date: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
-                      <p className="text-xs text-gray-500 mt-1">Reminders will flag any missing timesheets from this date onward</p>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">End Date <span className="text-gray-400 font-normal">(optional)</span></label>
-                      <input type="date" value={userForm.end_date} onChange={e => setUserForm({...userForm, end_date: e.target.value})} min={userForm.start_date || undefined} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
-                      <p className="text-xs text-gray-500 mt-1">No timesheets or reminders after this date. Login access remains.</p>
-                    </div>
                     {!editingUser ? (
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
@@ -1273,6 +1442,19 @@ const TimesheetSystem = () => {
                             <option value="">Select Project</option>
                             {projects.filter(p => p.status === 'active').map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
                           </select>
+                        </div>
+                        <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg space-y-3">
+                          <p className="text-sm font-semibold text-indigo-800">Employment Dates</p>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date <span className="text-gray-400 font-normal">(used for timesheet reminders)</span></label>
+                            <input type="date" value={userForm.start_date} onChange={e => setUserForm({...userForm, start_date: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 bg-white" />
+                            <p className="text-xs text-gray-500 mt-1">Reminders will flag missing timesheets from this date onward</p>
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">End Date <span className="text-gray-400 font-normal">(optional — leave blank if still active)</span></label>
+                            <input type="date" value={userForm.end_date} onChange={e => setUserForm({...userForm, end_date: e.target.value})} min={userForm.start_date || undefined} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 bg-white" />
+                            <p className="text-xs text-gray-500 mt-1">No timesheets or reminders after this date. Login access remains.</p>
+                          </div>
                         </div>
                       </>
                     )}
