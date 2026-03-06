@@ -193,6 +193,8 @@ const TimesheetSystem = () => {
   const timesheetsRef = useRef<Timesheet[]>([]);
   const [accountantTab, setAccountantTab] = useState('weekly');
   const [consolidatedRange, setConsolidatedRange] = useState({ start: '', end: '' });
+  const [appliedRange, setAppliedRange] = useState({ start: '', end: '' });
+  const [consolidatedMonthPreset, setConsolidatedMonthPreset] = useState('');
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [selectedWeek, setSelectedWeek] = useState(getCurrentWeekStart());
   const [timeEntries, setTimeEntries] = useState<Record<string, TimeEntry>>({});
@@ -1630,8 +1632,8 @@ const TimesheetSystem = () => {
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
 
     const generateConsolidatedReport = () => {
-      if (!consolidatedRange.start || !consolidatedRange.end) return null;
-      const startD = parseLocalDate(consolidatedRange.start), endD = parseLocalDate(consolidatedRange.end);
+      if (!appliedRange.start || !appliedRange.end) return null;
+      const startD = parseLocalDate(appliedRange.start), endD = parseLocalDate(appliedRange.end);
       const inRange = timesheets.filter(t => { const d = parseLocalDate(t.weekStart); return d >= startD && d <= endD; });
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
       const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
@@ -1733,16 +1735,141 @@ const TimesheetSystem = () => {
             </div>
           )}
 
-          {accountantTab === 'consolidated' && (
-            <div className="bg-white rounded-lg shadow-md p-6">
-              <h2 className="text-xl font-bold text-gray-800 mb-4">Consolidated Report (Multi-Week)</h2>
-              <div className="flex gap-4 items-end mb-6">
-                <div><label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label><input type="date" value={consolidatedRange.start} onChange={e => setConsolidatedRange({...consolidatedRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg" /></div>
-                <div><label className="block text-sm font-medium text-gray-700 mb-1">End Date</label><input type="date" value={consolidatedRange.end} onChange={e => setConsolidatedRange({...consolidatedRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg" /></div>
+          {accountantTab === 'consolidated' && (() => {
+            // Build month preset options: last 12 months
+            const monthOptions: { label: string; value: string; start: string; end: string }[] = [];
+            const now = new Date();
+            for (let i = 0; i < 12; i++) {
+              const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+              const label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+              const monthVal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+              // Start = first monday on or after 1st of month; End = last friday on or before last day
+              const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
+              const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+              // Nearest Monday >= firstDay
+              const startOffset = (8 - firstDay.getDay()) % 7;
+              const startD = new Date(firstDay); startD.setDate(firstDay.getDate() + (firstDay.getDay() === 1 ? 0 : startOffset === 0 ? 0 : startOffset));
+              // Nearest Friday <= lastDay
+              const endOffset = (lastDay.getDay() + 2) % 7; // days to subtract to get to Friday
+              const endD = new Date(lastDay); endD.setDate(lastDay.getDate() - (lastDay.getDay() === 5 ? 0 : (lastDay.getDay() + 2) % 7));
+              monthOptions.push({ label, value: monthVal, start: formatDate(startD), end: formatDate(endD) });
+            }
+
+            const downloadConsolidatedCSV = () => {
+              if (!consolidatedReport) return;
+              const { weekEndings, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
+              let csv = 'Employee,Country,Project';
+              weekEndings.forEach(we => { csv += `,"W/E ${parseLocalDate(we).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })},Status"`; });
+              csv += ',Total Hours\n';
+              employeeRows.forEach(row => {
+                csv += `"${row.name}","${row.country}","${row.project}"`;
+                weekEndings.forEach(we => {
+                  const h = row.hours[we];
+                  const st = row.statuses[we];
+                  csv += `,"${h !== null ? h.toFixed(1) : '-'}","${st}"`;
+                });
+                csv += `,"${row.rowTotal.toFixed(1)}"\n`;
+              });
+              csv += `"TOTAL","",""`; 
+              weekEndings.forEach(we => { csv += `,"${colTotals[we].toFixed(1)}",""` });
+              csv += `,"${gt.toFixed(1)}"\n`;
+              const rangeLabel = appliedRange.start && appliedRange.end 
+                ? `${appliedRange.start}_to_${appliedRange.end}` 
+                : 'consolidated';
+              triggerDownload(csv, `consolidated_report_${rangeLabel}.csv`);
+            };
+
+            return (
+              <div className="bg-white rounded-lg shadow-md p-6">
+                <div className="flex justify-between items-center mb-5">
+                  <h2 className="text-xl font-bold text-gray-800">Consolidated Report</h2>
+                  {consolidatedReport && (
+                    <button onClick={downloadConsolidatedCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                      <Download className="w-4 h-4" /> Export CSV
+                    </button>
+                  )}
+                </div>
+
+                {/* Controls */}
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
+                  {/* Month presets */}
+                  <div className="mb-4">
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Quick Select — Month</label>
+                    <div className="flex flex-wrap gap-2">
+                      {monthOptions.slice(0, 6).map(opt => (
+                        <button
+                          key={opt.value}
+                          onClick={() => {
+                            setConsolidatedMonthPreset(opt.value);
+                            setConsolidatedRange({ start: opt.start, end: opt.end });
+                          }}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                            consolidatedMonthPreset === opt.value
+                              ? 'bg-indigo-600 text-white border-indigo-600'
+                              : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Custom date range + Apply */}
+                  <div className="flex flex-wrap gap-3 items-end pt-3 border-t border-gray-200">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Start Date</label>
+                      <input
+                        type="date"
+                        value={consolidatedRange.start}
+                        onChange={e => { setConsolidatedRange({...consolidatedRange, start: e.target.value}); setConsolidatedMonthPreset(''); }}
+                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">End Date</label>
+                      <input
+                        type="date"
+                        value={consolidatedRange.end}
+                        onChange={e => { setConsolidatedRange({...consolidatedRange, end: e.target.value}); setConsolidatedMonthPreset(''); }}
+                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <button
+                      onClick={() => setAppliedRange({ ...consolidatedRange })}
+                      disabled={!consolidatedRange.start || !consolidatedRange.end}
+                      className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium"
+                    >
+                      <CheckCircle className="w-4 h-4" /> Apply
+                    </button>
+                    {appliedRange.start && (
+                      <button
+                        onClick={() => { setAppliedRange({ start: '', end: '' }); setConsolidatedRange({ start: '', end: '' }); setConsolidatedMonthPreset(''); }}
+                        className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 underline"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {appliedRange.start && appliedRange.end && (
+                      <span className="text-sm text-green-700 font-medium bg-green-50 px-3 py-2 rounded-lg border border-green-200">
+                        Showing: {parseLocalDate(appliedRange.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} – {parseLocalDate(appliedRange.end).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {consolidatedReport
+                  ? <ConsolidatedTable report={consolidatedReport} parseLocalDate={parseLocalDate} />
+                  : (
+                    <div className="text-center py-12 text-gray-400">
+                      <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                      <p className="text-base">Select a month or custom date range, then click <strong className="text-gray-500">Apply</strong>.</p>
+                    </div>
+                  )
+                }
               </div>
-              {consolidatedReport ? <ConsolidatedTable report={consolidatedReport} parseLocalDate={parseLocalDate} /> : <p className="text-gray-500 text-center py-8">Select a date range to generate the consolidated report.</p>}
-            </div>
-          )}
+            );
+          })()}
         </div>
         <style>{`@media print { body * { visibility: hidden; } .bg-white.rounded-lg.shadow-md.p-6, .bg-white.rounded-lg.shadow-md.p-6 * { visibility: visible; } .bg-white.rounded-lg.shadow-md.p-6 { position: absolute; left: 0; top: 0; width: 100%; } button { display: none !important; } }`}</style>
       </div>
