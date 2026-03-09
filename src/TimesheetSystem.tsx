@@ -165,7 +165,8 @@ interface Invoice {
   reviewedBy: string | null;
   notes: string;
   paymentProfile: PaymentProfile | null;
-  payOnDate: string | null;          // scheduled pay on date set by accountant
+  payOnDate: string | null;          // scheduled/expected payment date set by accountant
+  paidDate: string | null;           // actual date payment was made
 }
 
 interface ReminderEmail {
@@ -291,7 +292,9 @@ const TimesheetSystem = () => {
   const [accountantInvoiceFilter, setAccountantInvoiceFilter] = useState('all');
   const [invoiceDateRange, setInvoiceDateRange] = useState({ start: '', end: '' });
   const [invoicePayDateRange, setInvoicePayDateRange] = useState({ start: '', end: '' });
-  const [pendingPayOnDate, setPendingPayOnDate] = useState('');   // date input in "Mark Paid" flow
+  const [invoicePaidDateRange, setInvoicePaidDateRange] = useState({ start: '', end: '' });
+  const [pendingPayOnDate, setPendingPayOnDate] = useState('');   // expected pay on date (set on approve or anytime)
+  const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<PaymentProfile | null>(null);
   const emptyProfileForm = (): Omit<PaymentProfile, 'id' | 'userId'> => ({
@@ -892,6 +895,7 @@ const TimesheetSystem = () => {
       notes: (r.notes as string) || '',
       paymentProfile: r.payment_profile ? (r.payment_profile as PaymentProfile) : null,
       payOnDate: (r.pay_on_date as string) || null,
+      paidDate: (r.paid_date as string) || null,
     };
   }
 
@@ -982,18 +986,20 @@ const TimesheetSystem = () => {
     await fetchInvoices();
   };
 
-  const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string) => {
+  const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string) => {
     const update: Record<string, unknown> = {
       status,
       reviewed_at: new Date().toISOString(),
       reviewed_by: currentUser!.name,
     };
-    if (status === 'paid' && payOnDate) update.pay_on_date = payOnDate;
+    if (payOnDate !== undefined) update.pay_on_date = payOnDate || null;
+    if (status === 'paid' && paidDate) update.paid_date = paidDate;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error updating invoice: ' + error.message); return; }
     await fetchInvoices();
     setShowInvoiceModal(false);
     setPendingPayOnDate('');
+    setPendingPaidDate('');
   };
 
   const savePaymentProfile = async () => {
@@ -1045,7 +1051,7 @@ const TimesheetSystem = () => {
   const exportInvoicesCSV = (list: Invoice[]) => {
     const headers = [
       'Invoice No','Employee','Project','Period Start','Period End',
-      'Total Hours','Rate','Total Amount','Currency','Status','Submitted','Pay On Date',
+      'Total Hours','Rate','Total Amount','Currency','Status','Submitted','Pay On Date','Paid Date',
       'Company Name','Company Address','Country',
       'Bank Name','Bank Address','Bank Branch',
       'Account Number','IBAN','SWIFT/BIC','Payment Email'
@@ -1067,6 +1073,7 @@ const TimesheetSystem = () => {
         `"${inv.status}"`,
         `"${inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}"`,
         `"${inv.payOnDate ? new Date(inv.payOnDate).toLocaleDateString() : ''}"`,
+        `"${inv.paidDate ? new Date(inv.paidDate).toLocaleDateString() : ''}"`,
         `"${pp?.companyName || ''}"`,
         `"${pp?.companyAddress || ''}"`,
         `"${pp?.country || ''}"`,
@@ -2239,6 +2246,9 @@ const TimesheetSystem = () => {
             if (invoicePayDateRange.start && invoicePayDateRange.end) {
               filtered = filtered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
             }
+            if (invoicePaidDateRange.start && invoicePaidDateRange.end) {
+              filtered = filtered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
+            }
             filtered = [...filtered].sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
 
             const totalPaid = invoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
@@ -2281,6 +2291,13 @@ const TimesheetSystem = () => {
                         <input type="date" value={invoicePayDateRange.end} onChange={e => setInvoicePayDateRange({...invoicePayDateRange, end: e.target.value})} className="px-2 py-1.5 border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-400" />
                         {(invoicePayDateRange.start || invoicePayDateRange.end) && <button onClick={() => setInvoicePayDateRange({start:'',end:''})} className="text-xs text-blue-400 hover:text-blue-600 underline">Clear</button>}
                       </div>
+                      <div className="flex gap-2 items-center">
+                        <span className="text-xs font-medium text-green-700 w-20 text-right">Paid Date:</span>
+                        <input type="date" value={invoicePaidDateRange.start} onChange={e => setInvoicePaidDateRange({...invoicePaidDateRange, start: e.target.value})} className="px-2 py-1.5 border border-green-200 rounded-lg text-sm focus:ring-2 focus:ring-green-400" />
+                        <span className="text-gray-400 text-sm">to</span>
+                        <input type="date" value={invoicePaidDateRange.end} onChange={e => setInvoicePaidDateRange({...invoicePaidDateRange, end: e.target.value})} className="px-2 py-1.5 border border-green-200 rounded-lg text-sm focus:ring-2 focus:ring-green-400" />
+                        {(invoicePaidDateRange.start || invoicePaidDateRange.end) && <button onClick={() => setInvoicePaidDateRange({start:'',end:''})} className="text-xs text-green-500 hover:text-green-700 underline">Clear</button>}
+                      </div>
                       <div className="flex justify-end">
                         <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                       </div>
@@ -2303,6 +2320,7 @@ const TimesheetSystem = () => {
                             <th className="border border-indigo-700 px-4 py-3 text-center">Rate</th>
                             <th className="border border-indigo-700 px-4 py-3 text-right">Amount</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Pay On Date</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Paid Date</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Actions</th>
                           </tr>
@@ -2325,6 +2343,11 @@ const TimesheetSystem = () => {
                                     ? <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">{new Date(inv.payOnDate).toLocaleDateString()}</span>
                                     : <span className="text-gray-300 text-xs">—</span>}
                                 </td>
+                                <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
+                                  {inv.paidDate
+                                    ? <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs font-medium">{new Date(inv.paidDate).toLocaleDateString()}</span>
+                                    : <span className="text-gray-300 text-xs">—</span>}
+                                </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
                                 <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
                                   <div className="flex items-center justify-center gap-1">
@@ -2335,7 +2358,7 @@ const TimesheetSystem = () => {
                                       </>
                                     )}
                                     {inv.status === 'approved' && (
-                                      <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
+                                      <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
                                     )}
                                     {(inv.status === 'paid' || inv.status === 'rejected') && <span className="text-gray-400 text-xs">—</span>}
                                   </div>
@@ -2350,7 +2373,7 @@ const TimesheetSystem = () => {
                             <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + i.totalHours, 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
-                            <td className="border border-gray-200 px-4 py-3" colSpan={3}></td>
+                            <td className="border border-gray-200 px-4 py-3" colSpan={4}></td>
                           </tr>
                         </tfoot>
                       </table>
@@ -2389,6 +2412,9 @@ const TimesheetSystem = () => {
                       <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Submitted</div><div className="font-medium">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : '—'}</div></div>
                       {inv.payOnDate && (
                         <div className="bg-blue-50 rounded-lg p-3 border border-blue-200"><div className="text-blue-500 mb-0.5">Pay On Date</div><div className="font-medium text-blue-800">{new Date(inv.payOnDate).toLocaleDateString()}</div></div>
+                      )}
+                      {inv.paidDate && (
+                        <div className="bg-green-50 rounded-lg p-3 border border-green-200"><div className="text-green-600 mb-0.5">Paid Date</div><div className="font-medium text-green-800">{new Date(inv.paidDate).toLocaleDateString()}</div></div>
                       )}
                     </div>
                     <table className="w-full text-sm border-collapse mb-5">
@@ -2432,41 +2458,70 @@ const TimesheetSystem = () => {
                     {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
                     {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
                     {inv.status === 'submitted' && (
-                      <div className="mt-5 flex gap-3">
-                        <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
-                        <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
-                      </div>
-                    )}
-                    {inv.status === 'approved' && (
-                      <div className="mt-5 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                        <p className="text-sm font-semibold text-blue-800 mb-3 flex items-center gap-2"><DollarSign className="w-4 h-4" /> Mark as Paid</p>
-                        <div className="flex gap-3 items-end">
-                          <div className="flex-1">
-                            <label className="block text-xs font-medium text-blue-700 mb-1">Pay On Date *</label>
-                            <input
-                              type="date"
-                              value={pendingPayOnDate}
-                              onChange={e => setPendingPayOnDate(e.target.value)}
-                              className="w-full px-3 py-2 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm bg-white"
-                              defaultValue={new Date().toISOString().split('T')[0]}
-                            />
-                          </div>
-                          <button
-                            onClick={() => {
-                              if (!pendingPayOnDate) { alert('Please select a pay on date.'); return; }
-                              handleInvoiceAction(inv.id, 'paid', pendingPayOnDate);
-                            }}
-                            className="flex items-center gap-2 px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium whitespace-nowrap"
-                          >
-                            <DollarSign className="w-4 h-4" /> Confirm Payment
-                          </button>
+                      <div className="mt-5 space-y-3">
+                        <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                          <label className="block text-xs font-medium text-gray-600 mb-1">Pay On Date (optional — schedule expected payment)</label>
+                          <input
+                            type="date"
+                            value={pendingPayOnDate}
+                            onChange={e => setPendingPayOnDate(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm bg-white"
+                          />
+                        </div>
+                        <div className="flex gap-3">
+                          <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined)} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
+                          <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
                         </div>
                       </div>
                     )}
-                    {inv.status === 'paid' && inv.payOnDate && (
-                      <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800 flex items-center gap-2">
-                        <DollarSign className="w-4 h-4" />
-                        <span>Pay on date: <strong>{new Date(inv.payOnDate).toLocaleDateString()}</strong></span>
+                    {inv.status === 'approved' && (
+                      <div className="mt-5 p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
+                        <p className="text-sm font-semibold text-blue-800 flex items-center gap-2"><DollarSign className="w-4 h-4" /> Mark as Paid</p>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium text-blue-700 mb-1">Pay On Date (expected)</label>
+                            <input
+                              type="date"
+                              value={pendingPayOnDate || inv.payOnDate || ''}
+                              onChange={e => setPendingPayOnDate(e.target.value)}
+                              className="w-full px-3 py-2 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-400 text-sm bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-green-700 mb-1">Paid Date (actual) *</label>
+                            <input
+                              type="date"
+                              value={pendingPaidDate}
+                              onChange={e => setPendingPaidDate(e.target.value)}
+                              className="w-full px-3 py-2 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-400 text-sm bg-white"
+                            />
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (!pendingPaidDate) { alert('Please enter the actual Paid Date.'); return; }
+                            handleInvoiceAction(inv.id, 'paid', pendingPayOnDate || inv.payOnDate || undefined, pendingPaidDate);
+                          }}
+                          className="w-full flex items-center justify-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+                        >
+                          <DollarSign className="w-4 h-4" /> Confirm Payment
+                        </button>
+                      </div>
+                    )}
+                    {inv.status === 'paid' && (inv.payOnDate || inv.paidDate) && (
+                      <div className="mt-4 grid grid-cols-2 gap-3">
+                        {inv.payOnDate && (
+                          <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800 flex items-center gap-2">
+                            <Calendar className="w-4 h-4 flex-shrink-0" />
+                            <div><div className="text-xs text-blue-500">Pay On Date</div><strong>{new Date(inv.payOnDate).toLocaleDateString()}</strong></div>
+                          </div>
+                        )}
+                        {inv.paidDate && (
+                          <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800 flex items-center gap-2">
+                            <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                            <div><div className="text-xs text-green-600">Paid Date</div><strong>{new Date(inv.paidDate).toLocaleDateString()}</strong></div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -3046,7 +3101,8 @@ const TimesheetSystem = () => {
                               {project && <p className="text-sm text-indigo-600">{project.name} ({project.code})</p>}
                               <p className="text-sm text-gray-500 mt-1">{inv.lines.length} week{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours.toFixed(1)} hrs · {sym2}{inv.rate}/hr</p>
                               {inv.paymentProfile && <p className="text-xs text-gray-400 mt-0.5">💳 {inv.paymentProfile.profileName} — {inv.paymentProfile.bankName}</p>}
-                              {inv.payOnDate && <p className="text-xs text-blue-600 mt-0.5 font-medium">💰 Pay on date: {new Date(inv.payOnDate).toLocaleDateString()}</p>}
+                              {inv.payOnDate && <p className="text-xs text-blue-600 mt-0.5 font-medium">📅 Pay on date: {new Date(inv.payOnDate).toLocaleDateString()}</p>}
+                              {inv.paidDate && <p className="text-xs text-green-600 mt-0.5 font-medium">✅ Paid: {new Date(inv.paidDate).toLocaleDateString()}</p>}
                             </div>
                             <div className="text-right ml-3 flex flex-col items-end gap-2">
                               <div className="text-2xl font-bold text-indigo-600">{sym2}{inv.totalAmount.toFixed(2)}</div>
@@ -3166,6 +3222,9 @@ const TimesheetSystem = () => {
                     <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Submitted</div><div className="font-medium">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : '—'}</div></div>
                     {inv.payOnDate && (
                       <div className="bg-blue-50 rounded-lg p-3 border border-blue-200"><div className="text-blue-500 mb-0.5">Pay On Date</div><div className="font-medium text-blue-800">{new Date(inv.payOnDate).toLocaleDateString()}</div></div>
+                    )}
+                    {inv.paidDate && (
+                      <div className="bg-green-50 rounded-lg p-3 border border-green-200"><div className="text-green-600 mb-0.5">Paid Date</div><div className="font-medium text-green-800">{new Date(inv.paidDate).toLocaleDateString()}</div></div>
                     )}
                   </div>
                   <table className="w-full text-sm border-collapse mb-5">
