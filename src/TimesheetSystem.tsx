@@ -509,13 +509,13 @@ const TimesheetSystem = () => {
       const dayOfWeek = userLocalTime.getDay();
       const hour = userLocalTime.getHours();
 
-      const isTriggerTime = (dayOfWeek === 4 && hour === 17) || (dayOfWeek === 5 && hour === 12);
+      const isTriggerTime = (dayOfWeek === 5 && hour === 17) || (dayOfWeek === 1 && hour === 11);
       if (!isTriggerTime) return;
 
       const missingWeeks = getMissingWeeksSince(user.startDate!, allTimesheets, user.id, user.endDate);
       if (missingWeeks.length === 0) return;
 
-      const isUrgent = dayOfWeek === 5;
+      const isUrgent = dayOfWeek === 1;
       const weekList = missingWeeks.map(w => {
         const fri = new Date(parseLocalDate(w)); fri.setDate(parseLocalDate(w).getDate() + 4);
         return `  • Week ending ${fri.toLocaleDateString()}`;
@@ -2092,7 +2092,7 @@ const TimesheetSystem = () => {
                 );
               })()}
               <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <p className="text-sm text-blue-800"><strong>Reminder Schedule:</strong> Automated reminders are sent Thursday at 5 PM and Friday at 12 PM (your local time) for any missing timesheets.</p>
+                <p className="text-sm text-blue-800"><strong>Reminder Schedule:</strong> Automated reminders are sent Friday at 5 PM and Monday at 11 AM (your local time) for any missing timesheets.</p>
               </div>
             </div>
           ) : (
