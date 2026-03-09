@@ -27,8 +27,8 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
               <th className="border border-green-700 px-3 py-2 text-left">Project</th>
               {weekEndings.map((we: string) => {
                 const isPartial = partialWeeks.has(we);
-                const weekSat = parseLocalDate(we);
-                const weekFri = new Date(weekSat); weekFri.setDate(weekSat.getDate() + 6);
+                const weekMon = parseLocalDate(we);
+                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
                 return (
                   <th key={we} className={`border border-green-700 px-3 py-2 text-center whitespace-nowrap ${isPartial ? 'bg-amber-600' : ''}`}>
                     <div className="text-xs opacity-80">{isPartial ? 'Partial' : 'W/E'}</div>
@@ -373,10 +373,10 @@ const TimesheetSystem = () => {
   // ─── Pure utility functions ───────────────────────────────────────────────
   function getCurrentWeekStart() {
     const today = new Date();
-    const day = today.getDay(); // 0=Sun,1=Mon,...,6=Sat
-    // Week starts Saturday: go back to most recent Saturday
-    const diff = day === 6 ? 0 : -(day + 1);
-    const weekStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() + diff);
+    const day = today.getDay();
+    // Week identified by its Monday; display will show W/E Friday
+    const diff = today.getDate() - day + (day === 0 ? -6 : 1);
+    const weekStart = new Date(today.getFullYear(), today.getMonth(), diff);
     weekStart.setHours(0, 0, 0, 0);
     return weekStart;
   }
@@ -395,9 +395,9 @@ const TimesheetSystem = () => {
   }
 
   function getWeekDates(startDate: Date): Date[] {
-    // startDate is Saturday; working days are Mon(+2) through Fri(+6)
+    // startDate is Monday; returns Mon–Fri working days
     const dates: Date[] = [];
-    for (let i = 2; i <= 6; i++) {
+    for (let i = 0; i < 5; i++) {
       const date = new Date(startDate);
       date.setDate(date.getDate() + i);
       date.setHours(0, 0, 0, 0);
@@ -423,26 +423,23 @@ const TimesheetSystem = () => {
 
   function getMissingWeeksSince(startDate: string, timesheets: Timesheet[], userId: string, endDate?: string | null): string[] {
     const start = parseLocalDate(startDate);
-    // Align to most recent Saturday on or before start date
+    // Align to Monday of the week containing start date
     const day = start.getDay();
-    const diff = day === 6 ? 0 : -(day + 1);
+    const diff = day === 0 ? -6 : 1 - day;
     start.setDate(start.getDate() + diff);
     start.setHours(0, 0, 0, 0);
 
     const thisWeekStart = getCurrentWeekStart();
 
-    // Stop at end date if set, otherwise stop at current week
     let ceiling = thisWeekStart;
     if (endDate) {
       const end = parseLocalDate(endDate);
       end.setHours(0, 0, 0, 0);
-      // Find the Saturday of the week containing the end date
       const endDay = end.getDay();
-      const endDiff = endDay === 6 ? 0 : -(endDay + 1);
+      const endDiff = endDay === 0 ? -6 : 1 - endDay;
       const endWeekStart = new Date(end);
       endWeekStart.setDate(end.getDate() + endDiff);
       endWeekStart.setHours(0, 0, 0, 0);
-      // Include the week containing end date
       const endCeiling = new Date(endWeekStart);
       endCeiling.setDate(endWeekStart.getDate() + 7);
       if (endCeiling < thisWeekStart) ceiling = endCeiling;
@@ -519,7 +516,10 @@ const TimesheetSystem = () => {
       if (missingWeeks.length === 0) return;
 
       const isUrgent = dayOfWeek === 5;
-      const weekList = missingWeeks.map(w => `  • Week ending ${new Date(new Date(parseLocalDate(w)).setDate(parseLocalDate(w).getDate() + 6)).toLocaleDateString()}`).join('\n');
+      const weekList = missingWeeks.map(w => {
+        const fri = new Date(parseLocalDate(w)); fri.setDate(parseLocalDate(w).getDate() + 4);
+        return `  • Week ending ${fri.toLocaleDateString()}`;
+      }).join('\n');
 
       const subject = isUrgent
         ? `URGENT: ${missingWeeks.length} Timesheet(s) Overdue`
@@ -1649,21 +1649,21 @@ const TimesheetSystem = () => {
       if (!appliedRange.start || !appliedRange.end) return null;
       const startD = parseLocalDate(appliedRange.start), endD = parseLocalDate(appliedRange.end);
 
-      // Include any week (Sat–Fri) that overlaps the range
+      // Include any week (Mon–Fri) that overlaps the range
       const inRange = timesheets.filter(t => {
-        const weekSat = parseLocalDate(t.weekStart);
-        const weekFri = new Date(weekSat); weekFri.setDate(weekSat.getDate() + 6);
-        return weekSat <= endD && weekFri >= startD;
+        const weekMon = parseLocalDate(t.weekStart);
+        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+        return weekMon <= endD && weekFri >= startD;
       });
 
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
       const partialWeeks = new Set<string>();
 
-      // A week is partial if its Saturday or Friday falls outside the range
+      // A week is partial if its Monday or Friday falls outside the range
       weekEndings.forEach(we => {
-        const weekSat = parseLocalDate(we);
-        const weekFri = new Date(weekSat); weekFri.setDate(weekSat.getDate() + 6);
-        if (weekSat < startD || weekFri > endD) partialWeeks.add(we);
+        const weekMon = parseLocalDate(we);
+        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+        if (weekMon < startD || weekFri > endD) partialWeeks.add(we);
       });
 
       const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
@@ -1789,7 +1789,8 @@ const TimesheetSystem = () => {
               const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
               let csv = 'Employee,Country,Project';
               weekEndings.forEach(we => {
-                const weekFri = new Date(parseLocalDate(we)); weekFri.setDate(parseLocalDate(we).getDate() + 6);
+                const weekMon = parseLocalDate(we);
+                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
                 const label = partialWeeks.has(we)
                   ? `Partial W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
                   : `W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
