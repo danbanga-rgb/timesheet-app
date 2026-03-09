@@ -876,7 +876,6 @@ const TimesheetSystem = () => {
 
     const totalHours = lines.reduce((s, l) => s + l.hours, 0);
     const totalAmount = lines.reduce((s, l) => s + l.amount, 0);
-    const project = projects.find(p => p.id === currentUser!.projectId);
 
     const payload = {
       user_id: currentUser!.id,
@@ -2080,7 +2079,6 @@ const TimesheetSystem = () => {
 
             const totalPaid = invoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
             const totalApproved = invoices.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
-            const totalPending = invoices.filter(i => i.status === 'submitted').reduce((s, i) => s + i.totalAmount, 0);
 
             return (
               <div>
@@ -2821,16 +2819,6 @@ const TimesheetSystem = () => {
                   </table>
                   {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
                   {inv.reviewedBy && <p className="text-sm text-gray-500">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
-                  {/* Accountant actions inside modal */}
-                  {currentUser!.role === 'accountant' && inv.status === 'submitted' && (
-                    <div className="mt-5 flex gap-3">
-                      <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
-                      <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
-                    </div>
-                  )}
-                  {currentUser!.role === 'accountant' && inv.status === 'approved' && (
-                    <button onClick={() => handleInvoiceAction(inv.id, 'paid')} className="mt-5 w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"><DollarSign className="w-5 h-5" /> Mark as Paid</button>
-                  )}
                 </div>
               </div>
             </div>
