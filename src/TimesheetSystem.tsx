@@ -76,7 +76,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
 };
 
 import { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -119,6 +119,33 @@ interface Timesheet {
   status: 'pending' | 'approved' | 'rejected';
   submittedAt: string;
   approvedAt?: string | null;
+}
+
+interface InvoiceLine {
+  weekStart: string;    // Monday key
+  weekEndingFri: string; // display only
+  hours: number;
+  rate: number;
+  amount: number;
+}
+
+interface Invoice {
+  id: number;
+  userId: string;
+  userName: string;
+  projectId: number | null;
+  periodStart: string;   // YYYY-MM-DD
+  periodEnd: string;     // YYYY-MM-DD
+  lines: InvoiceLine[];
+  totalHours: number;
+  rate: number;          // $ per hour
+  totalAmount: number;
+  currency: string;
+  status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'paid';
+  submittedAt: string | null;
+  reviewedAt: string | null;
+  reviewedBy: string | null;
+  notes: string;
 }
 
 interface ReminderEmail {
@@ -229,6 +256,17 @@ const TimesheetSystem = () => {
   const [selectedTimesheetForView, setSelectedTimesheetForView] = useState<Timesheet | null>(null);
   const [showTimesheetModal, setShowTimesheetModal] = useState(false);
   const [selectedTimesheetIds, setSelectedTimesheetIds] = useState<number[]>([]);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [userTab, setUserTab] = useState<'timesheet' | 'invoices'>('timesheet');
+  const [invoiceView, setInvoiceView] = useState<'list' | 'create'>('list');
+  const [invoiceMonth, setInvoiceMonth] = useState({ start: '', end: '', label: '' });
+  const [invoiceRate, setInvoiceRate] = useState('');
+  const [invoiceCurrency, setInvoiceCurrency] = useState('USD');
+  const [invoiceNotes, setInvoiceNotes] = useState('');
+  const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  const [accountantInvoiceFilter, setAccountantInvoiceFilter] = useState('all');
+  const [invoiceDateRange, setInvoiceDateRange] = useState({ start: '', end: '' });
   const [passwordResetMode, setPasswordResetMode] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
@@ -307,7 +345,7 @@ const TimesheetSystem = () => {
       const normalisedProfile = normaliseProfile(profile);
       setCurrentUser(normalisedProfile);
 
-      await Promise.all([fetchUsers(), fetchProjects(), fetchTimesheets()]);
+      await Promise.all([fetchUsers(), fetchProjects(), fetchTimesheets(), fetchInvoices()]);
 
       if (normalisedProfile.role === 'timesheetuser') {
         loadTimesheetForWeek(normalisedProfile.id, getCurrentWeekStart(), timesheetsRef.current);
@@ -767,6 +805,122 @@ const TimesheetSystem = () => {
     await supabase.from('profiles').update({ project_id: null }).eq('project_id', projectId);
     await fetchProjects();
     await fetchUsers();
+  };
+
+  // ─── INVOICE OPERATIONS ──────────────────────────────────────────────────
+  async function fetchInvoices() {
+    const { data } = await supabase.from('invoices').select('*').order('submitted_at', { ascending: false });
+    if (data) setInvoices(data.map(normaliseInvoice));
+  }
+
+  function normaliseInvoice(r: Record<string, unknown>): Invoice {
+    return {
+      id: r.id as number,
+      userId: r.user_id as string,
+      userName: r.user_name as string,
+      projectId: (r.project_id as number) || null,
+      periodStart: (r.period_start as string)?.split('T')[0],
+      periodEnd: (r.period_end as string)?.split('T')[0],
+      lines: (r.lines as InvoiceLine[]) || [],
+      totalHours: r.total_hours as number,
+      rate: r.rate as number,
+      totalAmount: r.total_amount as number,
+      currency: (r.currency as string) || 'USD',
+      status: r.status as Invoice['status'],
+      submittedAt: (r.submitted_at as string) || null,
+      reviewedAt: (r.reviewed_at as string) || null,
+      reviewedBy: (r.reviewed_by as string) || null,
+      notes: (r.notes as string) || '',
+    };
+  }
+
+  // Build invoice line items from approved timesheets in a date range
+  function buildInvoiceLines(userId: string, periodStart: string, periodEnd: string, rate: number): InvoiceLine[] {
+    const startD = parseLocalDate(periodStart), endD = parseLocalDate(periodEnd);
+    const userTimesheets = timesheets.filter(t => {
+      if (t.userId !== userId || t.status !== 'approved') return false;
+      const weekMon = parseLocalDate(t.weekStart);
+      const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+      return weekMon <= endD && weekFri >= startD;
+    });
+
+    return userTimesheets
+      .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
+      .map(ts => {
+        const weekMon = parseLocalDate(ts.weekStart);
+        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+        // Only count hours for days within the period
+        let hours = 0;
+        Object.entries(ts.entries).forEach(([dateKey, entry]) => {
+          const d = parseLocalDate(dateKey);
+          if (d >= startD && d <= endD) hours += parseFloat((entry as TimeEntry)?.hours || '0');
+        });
+        return {
+          weekStart: ts.weekStart,
+          weekEndingFri: formatDate(weekFri),
+          hours: parseFloat(hours.toFixed(2)),
+          rate,
+          amount: parseFloat((hours * rate).toFixed(2)),
+        };
+      })
+      .filter(l => l.hours > 0);
+  }
+
+  const submitInvoice = async () => {
+    const rate = parseFloat(invoiceRate);
+    if (!invoiceMonth.start || !invoiceMonth.end) { alert('Please select a period.'); return; }
+    if (!rate || rate <= 0) { alert('Please enter a valid hourly rate.'); return; }
+
+    const lines = buildInvoiceLines(currentUser!.id, invoiceMonth.start, invoiceMonth.end, rate);
+    if (lines.length === 0) { alert('No approved timesheets found in this period. Make sure your timesheets are approved before invoicing.'); return; }
+
+    const totalHours = lines.reduce((s, l) => s + l.hours, 0);
+    const totalAmount = lines.reduce((s, l) => s + l.amount, 0);
+    const project = projects.find(p => p.id === currentUser!.projectId);
+
+    const payload = {
+      user_id: currentUser!.id,
+      user_name: currentUser!.name,
+      project_id: currentUser!.projectId,
+      period_start: invoiceMonth.start,
+      period_end: invoiceMonth.end,
+      lines,
+      total_hours: totalHours,
+      rate,
+      total_amount: totalAmount,
+      currency: invoiceCurrency,
+      status: 'submitted',
+      submitted_at: new Date().toISOString(),
+      notes: invoiceNotes,
+    };
+
+    const { error } = await supabase.from('invoices').insert(payload);
+    if (error) { alert('Error submitting invoice: ' + error.message); return; }
+    await fetchInvoices();
+    setInvoiceView('list');
+    setInvoiceRate('');
+    setInvoiceNotes('');
+    alert('Invoice submitted successfully!');
+  };
+
+  const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid') => {
+    const { error } = await supabase.from('invoices').update({
+      status,
+      reviewed_at: new Date().toISOString(),
+      reviewed_by: currentUser!.name,
+    }).eq('id', invoiceId);
+    if (error) { alert('Error updating invoice: ' + error.message); return; }
+    await fetchInvoices();
+    setShowInvoiceModal(false);
+  };
+
+  const exportInvoicesCSV = (list: Invoice[]) => {
+    let csv = 'Invoice ID,Employee,Project,Period Start,Period End,Total Hours,Rate,Total Amount,Currency,Status,Submitted\n';
+    list.forEach(inv => {
+      const project = projects.find(p => p.id === inv.projectId);
+      csv += `${inv.id},"${inv.userName}","${project?.name || 'N/A'}","${inv.periodStart}","${inv.periodEnd}",${inv.totalHours.toFixed(2)},${inv.rate},${inv.totalAmount.toFixed(2)},"${inv.currency}","${inv.status}","${inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}"\n`;
+    });
+    triggerDownload(csv, `invoices_export_${Date.now()}.csv`);
   };
 
   // ─── WEEK NAVIGATION ──────────────────────────────────────────────────────
@@ -1711,6 +1865,12 @@ const TimesheetSystem = () => {
             <div className="flex border-b">
               <button onClick={() => setAccountantTab('weekly')} className={'flex-1 px-6 py-4 font-medium ' + (accountantTab === 'weekly' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>Weekly Report</button>
               <button onClick={() => setAccountantTab('consolidated')} className={'flex-1 px-6 py-4 font-medium ' + (accountantTab === 'consolidated' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>Consolidated Report</button>
+              <button onClick={() => setAccountantTab('invoices')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (accountantTab === 'invoices' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
+                <Receipt className="w-4 h-4" /> Invoices
+                {invoices.filter(i => i.status === 'submitted').length > 0 && (
+                  <span className="ml-1 px-2 py-0.5 bg-yellow-100 text-yellow-800 rounded-full text-xs font-bold">{invoices.filter(i => i.status === 'submitted').length}</span>
+                )}
+              </button>
             </div>
           </div>
 
@@ -1906,6 +2066,190 @@ const TimesheetSystem = () => {
               </div>
             );
           })()}
+
+          {accountantTab === 'invoices' && (() => {
+            const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
+            const currencySymbols: Record<string, string> = { USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' };
+
+            let filtered = invoices;
+            if (accountantInvoiceFilter !== 'all') filtered = filtered.filter(i => i.status === accountantInvoiceFilter);
+            if (invoiceDateRange.start && invoiceDateRange.end) {
+              filtered = filtered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
+            }
+            filtered = [...filtered].sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
+
+            const totalPaid = invoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
+            const totalApproved = invoices.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
+            const totalPending = invoices.filter(i => i.status === 'submitted').reduce((s, i) => s + i.totalAmount, 0);
+
+            return (
+              <div>
+                {/* Stats */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Pending Review</div><div className="text-2xl font-bold text-yellow-600">{invoices.filter(i => i.status === 'submitted').length}</div><div className="text-xs text-gray-400 mt-1">awaiting action</div></div>
+                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Approved</div><div className="text-2xl font-bold text-green-600">{invoices.filter(i => i.status === 'approved').length}</div><div className="text-xs text-gray-400 mt-1">${totalApproved.toFixed(2)} to pay</div></div>
+                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Paid</div><div className="text-2xl font-bold text-blue-600">{invoices.filter(i => i.status === 'paid').length}</div><div className="text-xs text-gray-400 mt-1">${totalPaid.toFixed(2)} total</div></div>
+                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Total Invoices</div><div className="text-2xl font-bold text-indigo-600">{invoices.length}</div><div className="text-xs text-gray-400 mt-1">all time</div></div>
+                </div>
+
+                <div className="bg-white rounded-lg shadow-md p-6">
+                  {/* Filters */}
+                  <div className="flex flex-wrap items-center justify-between gap-4 mb-5">
+                    <div className="flex flex-wrap gap-2">
+                      {['all','submitted','approved','paid','rejected'].map(s => (
+                        <button key={s} onClick={() => setAccountantInvoiceFilter(s)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${accountantInvoiceFilter === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                          {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+                          {s !== 'all' && <span className="ml-1.5 text-xs">({invoices.filter(i => i.status === s).length})</span>}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <input type="date" value={invoiceDateRange.start} onChange={e => setInvoiceDateRange({...invoiceDateRange, start: e.target.value})} className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
+                      <span className="text-gray-400 text-sm">to</span>
+                      <input type="date" value={invoiceDateRange.end} onChange={e => setInvoiceDateRange({...invoiceDateRange, end: e.target.value})} className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
+                      {(invoiceDateRange.start || invoiceDateRange.end) && <button onClick={() => setInvoiceDateRange({start:'',end:''})} className="text-xs text-gray-400 hover:text-gray-600 underline">Clear</button>}
+                      <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
+                    </div>
+                  </div>
+
+                  {/* Table */}
+                  {filtered.length === 0 ? (
+                    <div className="text-center py-12 text-gray-400"><Receipt className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No invoices match the current filter</p></div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse text-sm">
+                        <thead className="bg-indigo-600 text-white">
+                          <tr>
+                            <th className="border border-indigo-700 px-4 py-3 text-left">Employee</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-left">Period</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Hours</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Rate</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-right">Amount</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filtered.map((inv, idx) => {
+                            const project = projects.find(p => p.id === inv.projectId);
+                            const sym = currencySymbols[inv.currency] || '$';
+                            return (
+                              <tr key={inv.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')} onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                                <td className="border border-gray-200 px-4 py-3 font-medium text-gray-800">{inv.userName}</td>
+                                <td className="border border-gray-200 px-4 py-3 whitespace-nowrap">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
+                                <td className="border border-gray-200 px-4 py-3 text-indigo-600 text-xs">{project?.name || '—'}</td>
+                                <td className="border border-gray-200 px-4 py-3 text-center">{inv.totalHours.toFixed(2)}</td>
+                                <td className="border border-gray-200 px-4 py-3 text-center text-gray-500">{sym}{inv.rate.toFixed(2)}</td>
+                                <td className="border border-gray-200 px-4 py-3 text-right font-bold text-gray-800">{sym}{inv.totalAmount.toFixed(2)}</td>
+                                <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
+                                <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
+                                  <div className="flex items-center justify-center gap-1">
+                                    {inv.status === 'submitted' && (
+                                      <>
+                                        <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">Approve</button>
+                                        <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Reject</button>
+                                      </>
+                                    )}
+                                    {inv.status === 'approved' && (
+                                      <button onClick={() => handleInvoiceAction(inv.id, 'paid')} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
+                                    )}
+                                    {(inv.status === 'paid' || inv.status === 'rejected') && <span className="text-gray-400 text-xs">—</span>}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                        <tfoot className="bg-gray-100 font-semibold">
+                          <tr>
+                            <td className="border border-gray-200 px-4 py-3 text-gray-700" colSpan={3}>Filtered Total ({filtered.length} invoices)</td>
+                            <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + i.totalHours, 0).toFixed(2)}</td>
+                            <td className="border border-gray-200 px-4 py-3"></td>
+                            <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
+                            <td className="border border-gray-200 px-4 py-3" colSpan={2}></td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Invoice Detail Modal (shared, also used in accountant view) */}
+          {showInvoiceModal && selectedInvoice && (() => {
+            const inv = selectedInvoice;
+            const project = projects.find(p => p.id === inv.projectId);
+            const sym = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' } as Record<string, string>)[inv.currency] || '$';
+            const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
+            return (
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
+                <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                  <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-start z-10">
+                    <div>
+                      <h2 className="text-xl font-bold text-gray-800">Invoice #{inv.id}</h2>
+                      <p className="text-gray-600 text-sm">{inv.userName} · {parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
+                    </div>
+                    <button onClick={() => setShowInvoiceModal(false)} className="text-gray-500 hover:text-gray-700 p-1"><X className="w-5 h-5" /></button>
+                  </div>
+                  <div className="p-6">
+                    <div className="flex items-center gap-3 mb-5">
+                      <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
+                      {project && <span className="text-sm text-indigo-600 font-medium">{project.name} ({project.code})</span>}
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 mb-5 text-sm">
+                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Period</div><div className="font-medium">{parseLocalDate(inv.periodStart).toLocaleDateString()} – {parseLocalDate(inv.periodEnd).toLocaleDateString()}</div></div>
+                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Rate</div><div className="font-medium">{sym}{inv.rate.toFixed(2)} / hour ({inv.currency})</div></div>
+                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours.toFixed(2)}</div></div>
+                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Submitted</div><div className="font-medium">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : '—'}</div></div>
+                    </div>
+                    <table className="w-full text-sm border-collapse mb-5">
+                      <thead className="bg-indigo-600 text-white">
+                        <tr>
+                          <th className="px-4 py-2 text-left border border-indigo-700">Week Ending</th>
+                          <th className="px-4 py-2 text-center border border-indigo-700">Hours</th>
+                          <th className="px-4 py-2 text-center border border-indigo-700">Rate</th>
+                          <th className="px-4 py-2 text-right border border-indigo-700">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {inv.lines.map((line, i) => (
+                          <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                            <td className="px-4 py-2 border border-gray-200">W/E {parseLocalDate(line.weekEndingFri).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+                            <td className="px-4 py-2 border border-gray-200 text-center">{line.hours.toFixed(2)}</td>
+                            <td className="px-4 py-2 border border-gray-200 text-center text-gray-500">{sym}{line.rate.toFixed(2)}</td>
+                            <td className="px-4 py-2 border border-gray-200 text-right font-medium">{sym}{line.amount.toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="bg-indigo-600 text-white font-bold">
+                        <tr>
+                          <td className="px-4 py-3 border border-indigo-700">Total</td>
+                          <td className="px-4 py-3 border border-indigo-700 text-center">{inv.totalHours.toFixed(2)} hrs</td>
+                          <td className="px-4 py-3 border border-indigo-700"></td>
+                          <td className="px-4 py-3 border border-indigo-700 text-right text-lg">{sym}{inv.totalAmount.toFixed(2)}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                    {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
+                    {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
+                    {inv.status === 'submitted' && (
+                      <div className="mt-5 flex gap-3">
+                        <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
+                        <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
+                      </div>
+                    )}
+                    {inv.status === 'approved' && (
+                      <button onClick={() => handleInvoiceAction(inv.id, 'paid')} className="mt-5 w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"><DollarSign className="w-5 h-5" /> Mark as Paid</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
         <style>{`@media print { body * { visibility: hidden; } .bg-white.rounded-lg.shadow-md.p-6, .bg-white.rounded-lg.shadow-md.p-6 * { visibility: visible; } .bg-white.rounded-lg.shadow-md.p-6 { position: absolute; left: 0; top: 0; width: 100%; } button { display: none !important; } }`}</style>
       </div>
@@ -1982,7 +2326,23 @@ const TimesheetSystem = () => {
           </div>
         )}
 
-        <div className="bg-white rounded-lg shadow-md p-6">
+        {/* Tab Navigation */}
+        <div className="bg-white rounded-lg shadow-md mb-6">
+          <div className="flex border-b">
+            <button onClick={() => setUserTab('timesheet')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (userTab === 'timesheet' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
+              <Clock className="w-5 h-5" /> My Timesheets
+            </button>
+            <button onClick={() => setUserTab('invoices')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (userTab === 'invoices' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
+              <Receipt className="w-5 h-5" /> My Invoices
+              {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length > 0 && (
+                <span className="ml-1 px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-xs font-bold">{invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length}</span>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {userTab === 'timesheet' && (<div>
+          <div className="bg-white rounded-lg shadow-md p-6">
           {isUserInactive && (
             <div className="mb-6 p-4 bg-orange-50 border-2 border-orange-300 rounded-lg flex items-center gap-3">
               <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center flex-shrink-0">
@@ -2189,6 +2549,293 @@ const TimesheetSystem = () => {
             </table>
           </div>
         </div>
+        </div>)}
+
+        {userTab === 'invoices' && (() => {
+          const userInvoices = invoices.filter(i => i.userId === currentUser!.id).sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
+          const approvedTimesheets = timesheets.filter(t => t.userId === currentUser!.id && t.status === 'approved');
+          const now = new Date();
+          const monthOptions = Array.from({ length: 6 }, (_, i) => {
+            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const start = formatDate(new Date(d.getFullYear(), d.getMonth(), 1));
+            const end = formatDate(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+            return { label: d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), value: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`, start, end };
+          });
+
+          const previewLines = invoiceMonth.start && invoiceMonth.end && parseFloat(invoiceRate) > 0
+            ? buildInvoiceLines(currentUser!.id, invoiceMonth.start, invoiceMonth.end, parseFloat(invoiceRate))
+            : [];
+          const previewTotal = previewLines.reduce((s, l) => s + l.amount, 0);
+          const previewHours = previewLines.reduce((s, l) => s + l.hours, 0);
+
+          const currencies = ['USD', 'GBP', 'EUR', 'CAD', 'AUD'];
+          const currencySymbols: Record<string, string> = { USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' };
+          const sym = currencySymbols[invoiceCurrency] || '$';
+
+          const statusColors: Record<string, string> = {
+            draft: 'bg-gray-100 text-gray-700',
+            submitted: 'bg-yellow-100 text-yellow-800',
+            approved: 'bg-green-100 text-green-800',
+            rejected: 'bg-red-100 text-red-800',
+            paid: 'bg-blue-100 text-blue-800',
+          };
+
+          return (
+            <div>
+              {/* Header */}
+              <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><Receipt className="w-6 h-6 text-indigo-600" /> My Invoices</h2>
+                    <p className="text-sm text-gray-500 mt-1">Generate invoices from your approved timesheets</p>
+                  </div>
+                  <button
+                    onClick={() => setInvoiceView(invoiceView === 'list' ? 'create' : 'list')}
+                    className={'flex items-center gap-2 px-4 py-2 rounded-lg font-medium ' + (invoiceView === 'create' ? 'bg-gray-200 text-gray-700' : 'bg-indigo-600 text-white hover:bg-indigo-700')}
+                  >
+                    {invoiceView === 'create' ? (<><X className="w-4 h-4" /> Cancel</>) : (<><Plus className="w-4 h-4" /> Create Invoice</>)}
+                  </button>
+                </div>
+              </div>
+
+              {/* Create Invoice Form */}
+              {invoiceView === 'create' && (
+                <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                  <h3 className="text-lg font-bold text-gray-800 mb-5 flex items-center gap-2"><DollarSign className="w-5 h-5 text-indigo-600" /> New Invoice</h3>
+
+                  {approvedTimesheets.length === 0 && (
+                    <div className="mb-5 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                      <p className="text-amber-800 text-sm font-medium">⚠️ No approved timesheets found. Your timesheets must be approved by your manager before you can invoice them.</p>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                    {/* Period Selection */}
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">Billing Period *</label>
+                      <div className="flex flex-wrap gap-2 mb-3">
+                        {monthOptions.map(opt => {
+                          const hasApproved = approvedTimesheets.some(t => {
+                            const weekFri = new Date(parseLocalDate(t.weekStart)); weekFri.setDate(weekFri.getDate() + 4);
+                            return parseLocalDate(t.weekStart) <= parseLocalDate(opt.end) && weekFri >= parseLocalDate(opt.start);
+                          });
+                          return (
+                            <button
+                              key={opt.value}
+                              onClick={() => setInvoiceMonth({ start: opt.start, end: opt.end, label: opt.label })}
+                              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors relative ${
+                                invoiceMonth.start === opt.start ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
+                              }`}
+                            >
+                              {opt.label}
+                              {hasApproved && <span className="ml-1.5 w-1.5 h-1.5 bg-green-400 rounded-full inline-block" title="Has approved timesheets" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {invoiceMonth.label && <p className="text-sm text-green-700 font-medium">✓ Period: {invoiceMonth.label}</p>}
+                    </div>
+
+                    {/* Rate */}
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Hourly Rate *</label>
+                        <div className="flex gap-2">
+                          <select value={invoiceCurrency} onChange={e => setInvoiceCurrency(e.target.value)} className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                            {currencies.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <div className="relative flex-1">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-medium">{sym}</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={invoiceRate}
+                              onChange={e => setInvoiceRate(e.target.value)}
+                              className="w-full pl-7 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                              placeholder="0.00 per hour"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Notes (optional)</label>
+                        <textarea value={invoiceNotes} onChange={e => setInvoiceNotes(e.target.value)} rows={2} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="Add any notes for the accountant..." />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Preview */}
+                  {previewLines.length > 0 && (
+                    <div className="border border-indigo-200 rounded-lg overflow-hidden mb-5">
+                      <div className="bg-indigo-600 text-white px-5 py-3 flex justify-between items-center">
+                        <span className="font-semibold">Invoice Preview — {invoiceMonth.label}</span>
+                        <span className="text-sm opacity-80">Only approved timesheets are included</span>
+                      </div>
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-4 py-2 text-left font-semibold text-gray-700">Week Ending</th>
+                            <th className="px-4 py-2 text-center font-semibold text-gray-700">Hours</th>
+                            <th className="px-4 py-2 text-center font-semibold text-gray-700">Rate</th>
+                            <th className="px-4 py-2 text-right font-semibold text-gray-700">Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {previewLines.map((line, i) => (
+                            <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                              <td className="px-4 py-2 text-gray-700">W/E {parseLocalDate(line.weekEndingFri).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+                              <td className="px-4 py-2 text-center font-medium">{line.hours.toFixed(2)}</td>
+                              <td className="px-4 py-2 text-center text-gray-500">{sym}{line.rate.toFixed(2)}/hr</td>
+                              <td className="px-4 py-2 text-right font-semibold text-gray-800">{sym}{line.amount.toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-indigo-50 font-bold">
+                          <tr>
+                            <td className="px-4 py-3 text-gray-800">Total</td>
+                            <td className="px-4 py-3 text-center text-indigo-700">{previewHours.toFixed(2)} hrs</td>
+                            <td className="px-4 py-3"></td>
+                            <td className="px-4 py-3 text-right text-indigo-700 text-lg">{sym}{previewTotal.toFixed(2)}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+
+                  {previewLines.length === 0 && invoiceMonth.start && (
+                    <div className="mb-5 p-4 bg-gray-50 border border-gray-200 rounded-lg text-center text-gray-500 text-sm">
+                      {parseFloat(invoiceRate) > 0 ? 'No approved timesheets found in this period.' : 'Enter an hourly rate to see a preview.'}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={submitInvoice}
+                    disabled={previewLines.length === 0}
+                    className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Receipt className="w-5 h-5" /> Submit Invoice for Review
+                  </button>
+                </div>
+              )}
+
+              {/* Invoice List */}
+              <div className="bg-white rounded-lg shadow-md p-6">
+                <div className="flex justify-between items-center mb-5">
+                  <h3 className="text-lg font-bold text-gray-800">Invoice History</h3>
+                  {userInvoices.length > 0 && (
+                    <button onClick={() => exportInvoicesCSV(userInvoices)} className="flex items-center gap-2 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
+                  )}
+                </div>
+                {userInvoices.length === 0 ? (
+                  <div className="text-center py-12 text-gray-400">
+                    <Receipt className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                    <p className="font-medium">No invoices yet</p>
+                    <p className="text-sm mt-1">Create your first invoice from approved timesheets</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {userInvoices.map(inv => {
+                      const project = projects.find(p => p.id === inv.projectId);
+                      const sym2 = currencySymbols[inv.currency] || '$';
+                      return (
+                        <div key={inv.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow cursor-pointer" onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="font-semibold text-gray-800">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</span>
+                                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
+                              </div>
+                              {project && <p className="text-sm text-indigo-600">{project.name} ({project.code})</p>}
+                              <p className="text-sm text-gray-500 mt-1">{inv.lines.length} week{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours.toFixed(1)} hrs · {sym2}{inv.rate}/hr</p>
+                            </div>
+                            <div className="text-right">
+                              <div className="text-2xl font-bold text-indigo-600">{sym2}{inv.totalAmount.toFixed(2)}</div>
+                              <div className="text-xs text-gray-400 mt-1">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}</div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Invoice Detail Modal */}
+        {showInvoiceModal && selectedInvoice && (() => {
+          const inv = selectedInvoice;
+          const project = projects.find(p => p.id === inv.projectId);
+          const sym = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' })[inv.currency] || '$';
+          const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
+          return (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
+              <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-start z-10">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-800">Invoice #{inv.id}</h2>
+                    <p className="text-gray-600 text-sm">{inv.userName} · {parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
+                  </div>
+                  <button onClick={() => setShowInvoiceModal(false)} className="text-gray-500 hover:text-gray-700 p-1"><X className="w-5 h-5" /></button>
+                </div>
+                <div className="p-6">
+                  <div className="flex items-center gap-3 mb-5">
+                    <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
+                    {project && <span className="text-sm text-indigo-600 font-medium">{project.name} ({project.code})</span>}
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 mb-5 text-sm">
+                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Period</div><div className="font-medium">{parseLocalDate(inv.periodStart).toLocaleDateString()} – {parseLocalDate(inv.periodEnd).toLocaleDateString()}</div></div>
+                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Rate</div><div className="font-medium">{sym}{inv.rate.toFixed(2)} / hour ({inv.currency})</div></div>
+                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours.toFixed(2)}</div></div>
+                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Submitted</div><div className="font-medium">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : '—'}</div></div>
+                  </div>
+                  <table className="w-full text-sm border-collapse mb-5">
+                    <thead className="bg-indigo-600 text-white">
+                      <tr>
+                        <th className="px-4 py-2 text-left border border-indigo-700">Week Ending</th>
+                        <th className="px-4 py-2 text-center border border-indigo-700">Hours</th>
+                        <th className="px-4 py-2 text-center border border-indigo-700">Rate</th>
+                        <th className="px-4 py-2 text-right border border-indigo-700">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {inv.lines.map((line, i) => (
+                        <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                          <td className="px-4 py-2 border border-gray-200">W/E {parseLocalDate(line.weekEndingFri).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+                          <td className="px-4 py-2 border border-gray-200 text-center">{line.hours.toFixed(2)}</td>
+                          <td className="px-4 py-2 border border-gray-200 text-center text-gray-500">{sym}{line.rate.toFixed(2)}</td>
+                          <td className="px-4 py-2 border border-gray-200 text-right font-medium">{sym}{line.amount.toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-indigo-600 text-white font-bold">
+                      <tr>
+                        <td className="px-4 py-3 border border-indigo-700">Total</td>
+                        <td className="px-4 py-3 border border-indigo-700 text-center">{inv.totalHours.toFixed(2)} hrs</td>
+                        <td className="px-4 py-3 border border-indigo-700"></td>
+                        <td className="px-4 py-3 border border-indigo-700 text-right text-lg">{sym}{inv.totalAmount.toFixed(2)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                  {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
+                  {inv.reviewedBy && <p className="text-sm text-gray-500">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
+                  {/* Accountant actions inside modal */}
+                  {currentUser!.role === 'accountant' && inv.status === 'submitted' && (
+                    <div className="mt-5 flex gap-3">
+                      <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
+                      <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
+                    </div>
+                  )}
+                  {currentUser!.role === 'accountant' && inv.status === 'approved' && (
+                    <button onClick={() => handleInvoiceAction(inv.id, 'paid')} className="mt-5 w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"><DollarSign className="w-5 h-5" /> Mark as Paid</button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {showTimesheetModal && <TimesheetDetailModal />}
       </div>
