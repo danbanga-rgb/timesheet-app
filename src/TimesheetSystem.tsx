@@ -2103,20 +2103,61 @@ const TimesheetSystem = () => {
         </div>
 
         <div className="bg-white rounded-lg shadow-md p-6 mt-6">
-          <div className="flex justify-between items-center mb-6">
+          <div className="flex justify-between items-center mb-5">
             <h2 className="text-xl font-bold text-gray-800">Timesheet History</h2>
             <button onClick={() => exportTimesheetList(filteredUserTimesheets)} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"><Download className="w-4 h-4" /> Export CSV</button>
           </div>
-          <div className="mb-4 flex gap-4 items-end">
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label><input type="date" value={dateRange.start} onChange={e => setDateRange({...dateRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg" /></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">End Date</label><input type="date" value={dateRange.end} onChange={e => setDateRange({...dateRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg" /></div>
-            <button onClick={() => setDateRange({start: '', end: ''})} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Clear Filter</button>
+
+          {/* Filters */}
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-5">
+            {/* Month quick-select */}
+            <div className="mb-4">
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Quick Select — Month</label>
+              <div className="flex flex-wrap gap-2">
+                {(() => {
+                  const now = new Date();
+                  return Array.from({ length: 6 }, (_, i) => {
+                    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                    const label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+                    const monthVal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                    const start = new Date(d.getFullYear(), d.getMonth(), 1);
+                    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+                    const isActive = dateRange.start === formatDate(start) && dateRange.end === formatDate(end);
+                    return (
+                      <button
+                        key={monthVal}
+                        onClick={() => setDateRange({ start: formatDate(start), end: formatDate(end) })}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+
+            {/* Custom date range */}
+            <div className="flex flex-wrap gap-3 items-end pt-3 border-t border-gray-200">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Start Date</label>
+                <input type="date" value={dateRange.start} onChange={e => setDateRange({...dateRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">End Date</label>
+                <input type="date" value={dateRange.end} onChange={e => setDateRange({...dateRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
+              </div>
+              {(dateRange.start || dateRange.end) && (
+                <button onClick={() => setDateRange({start: '', end: ''})} className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 underline">Clear</button>
+              )}
+            </div>
           </div>
+
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
               <thead className="bg-indigo-600 text-white">
                 <tr>
-                  <th className="border border-indigo-700 px-4 py-3 text-left">Week Start</th>
+                  <th className="border border-indigo-700 px-4 py-3 text-left">W/E Date</th>
                   <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
                   {['Mon','Tue','Wed','Thu','Fri'].map(d => <th key={d} className="border border-indigo-700 px-4 py-3 text-center">{d}</th>)}
                   <th className="border border-indigo-700 px-4 py-3 text-center">Total</th>
@@ -2129,11 +2170,12 @@ const TimesheetSystem = () => {
                 ) : filteredUserTimesheets.map((ts, idx) => {
                   const project = projects.find(p => p.id === ts.projectId);
                   const wDates = getWeekDates(parseLocalDate(ts.weekStart));
+                  const weekFri = wDates[4]; // Friday is last working day
                   const dailyHours = wDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                   const total = dailyHours.reduce((s, h) => s + h, 0);
                   return (
                     <tr key={ts.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')} onClick={() => openTimesheetModal(ts)}>
-                      <td className="border border-gray-300 px-4 py-2 text-indigo-600 font-medium">{parseLocalDate(ts.weekStart).toLocaleDateString()}</td>
+                      <td className="border border-gray-300 px-4 py-2 text-indigo-600 font-medium whitespace-nowrap">{weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
                       <td className="border border-gray-300 px-4 py-2 text-sm text-indigo-600">{project ? `${project.name} (${project.code})` : 'N/A'}</td>
                       {dailyHours.map((h, i) => <td key={i} className="border border-gray-300 px-4 py-2 text-center">{h > 0 ? h.toFixed(1) : '-'}</td>)}
                       <td className="border border-gray-300 px-4 py-2 text-center font-bold text-indigo-600">{total.toFixed(1)}</td>
