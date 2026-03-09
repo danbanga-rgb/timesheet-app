@@ -121,9 +121,26 @@ interface Timesheet {
   approvedAt?: string | null;
 }
 
+interface PaymentProfile {
+  id: number;
+  userId: string;
+  profileName: string;       // user-facing label e.g. "My UK Account"
+  companyName: string;
+  companyAddress: string;
+  country: string;
+  bankName: string;
+  bankAddress: string;
+  bankBranch: string;
+  accountNumber: string;
+  iban: string;
+  swift: string;
+  paymentEmail: string;
+  isDefault: boolean;
+}
+
 interface InvoiceLine {
-  weekStart: string;    // Monday key
-  weekEndingFri: string; // display only
+  weekStart: string;
+  weekEndingFri: string;
   hours: number;
   rate: number;
   amount: number;
@@ -131,14 +148,15 @@ interface InvoiceLine {
 
 interface Invoice {
   id: number;
+  invoiceNumber: string;     // user-editable alphanumeric
   userId: string;
   userName: string;
   projectId: number | null;
-  periodStart: string;   // YYYY-MM-DD
-  periodEnd: string;     // YYYY-MM-DD
+  periodStart: string;
+  periodEnd: string;
   lines: InvoiceLine[];
   totalHours: number;
-  rate: number;          // $ per hour
+  rate: number;
   totalAmount: number;
   currency: string;
   status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'paid';
@@ -146,6 +164,7 @@ interface Invoice {
   reviewedAt: string | null;
   reviewedBy: string | null;
   notes: string;
+  paymentProfile: PaymentProfile | null;
 }
 
 interface ReminderEmail {
@@ -257,16 +276,26 @@ const TimesheetSystem = () => {
   const [showTimesheetModal, setShowTimesheetModal] = useState(false);
   const [selectedTimesheetIds, setSelectedTimesheetIds] = useState<number[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [userTab, setUserTab] = useState<'timesheet' | 'invoices'>('timesheet');
+  const [paymentProfiles, setPaymentProfiles] = useState<PaymentProfile[]>([]);
+  const [userTab, setUserTab] = useState<'timesheet' | 'invoices' | 'payment'>('timesheet');
   const [invoiceView, setInvoiceView] = useState<'list' | 'create'>('list');
   const [invoiceMonth, setInvoiceMonth] = useState({ start: '', end: '', label: '' });
   const [invoiceRate, setInvoiceRate] = useState('');
   const [invoiceCurrency, setInvoiceCurrency] = useState('USD');
   const [invoiceNotes, setInvoiceNotes] = useState('');
+  const [invoiceNumber, setInvoiceNumber] = useState('');
+  const [selectedPaymentProfileId, setSelectedPaymentProfileId] = useState<number | null>(null);
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
   const [accountantInvoiceFilter, setAccountantInvoiceFilter] = useState('all');
   const [invoiceDateRange, setInvoiceDateRange] = useState({ start: '', end: '' });
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<PaymentProfile | null>(null);
+  const emptyProfileForm = (): Omit<PaymentProfile, 'id' | 'userId'> => ({
+    profileName: '', companyName: '', companyAddress: '', country: '', bankName: '',
+    bankAddress: '', bankBranch: '', accountNumber: '', iban: '', swift: '', paymentEmail: '', isDefault: false,
+  });
+  const [profileForm, setProfileForm] = useState(emptyProfileForm());
   const [passwordResetMode, setPasswordResetMode] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
@@ -300,6 +329,8 @@ const TimesheetSystem = () => {
         setUsers([]);
         setProjects([]);
         setTimesheets([]);
+        setInvoices([]);
+        setPaymentProfiles([]);
         setLoading(false);
       }
     });
@@ -345,7 +376,7 @@ const TimesheetSystem = () => {
       const normalisedProfile = normaliseProfile(profile);
       setCurrentUser(normalisedProfile);
 
-      await Promise.all([fetchUsers(), fetchProjects(), fetchTimesheets(), fetchInvoices()]);
+      await Promise.all([fetchUsers(), fetchProjects(), fetchTimesheets(), fetchInvoices(), fetchPaymentProfiles()]);
 
       if (normalisedProfile.role === 'timesheetuser') {
         loadTimesheetForWeek(normalisedProfile.id, getCurrentWeekStart(), timesheetsRef.current);
@@ -807,15 +838,40 @@ const TimesheetSystem = () => {
     await fetchUsers();
   };
 
-  // ─── INVOICE OPERATIONS ──────────────────────────────────────────────────
+  // ─── INVOICE & PAYMENT PROFILE OPERATIONS ────────────────────────────────
   async function fetchInvoices() {
     const { data } = await supabase.from('invoices').select('*').order('submitted_at', { ascending: false });
     if (data) setInvoices(data.map(normaliseInvoice));
   }
 
+  async function fetchPaymentProfiles() {
+    const { data } = await supabase.from('payment_profiles').select('*').order('is_default', { ascending: false });
+    if (data) setPaymentProfiles(data.map(normalisePaymentProfile));
+  }
+
+  function normalisePaymentProfile(r: Record<string, unknown>): PaymentProfile {
+    return {
+      id: r.id as number,
+      userId: r.user_id as string,
+      profileName: (r.profile_name as string) || '',
+      companyName: (r.company_name as string) || '',
+      companyAddress: (r.company_address as string) || '',
+      country: (r.country as string) || '',
+      bankName: (r.bank_name as string) || '',
+      bankAddress: (r.bank_address as string) || '',
+      bankBranch: (r.bank_branch as string) || '',
+      accountNumber: (r.account_number as string) || '',
+      iban: (r.iban as string) || '',
+      swift: (r.swift as string) || '',
+      paymentEmail: (r.payment_email as string) || '',
+      isDefault: !!(r.is_default as boolean),
+    };
+  }
+
   function normaliseInvoice(r: Record<string, unknown>): Invoice {
     return {
       id: r.id as number,
+      invoiceNumber: (r.invoice_number as string) || String(r.id),
       userId: r.user_id as string,
       userName: r.user_name as string,
       projectId: (r.project_id as number) || null,
@@ -831,10 +887,18 @@ const TimesheetSystem = () => {
       reviewedAt: (r.reviewed_at as string) || null,
       reviewedBy: (r.reviewed_by as string) || null,
       notes: (r.notes as string) || '',
+      paymentProfile: r.payment_profile ? (r.payment_profile as PaymentProfile) : null,
     };
   }
 
-  // Build invoice line items from approved timesheets in a date range
+  // Generate default invoice number: INV-USERID_PREFIX-YYYYMM-NNN
+  function generateInvoiceNumber(userId: string, periodStart: string): string {
+    const prefix = userId.slice(0, 4).toUpperCase();
+    const period = periodStart.replace(/-/g, '').slice(0, 6);
+    const existing = invoices.filter(i => i.invoiceNumber.includes(`${prefix}-${period}`)).length + 1;
+    return `INV-${prefix}-${period}-${String(existing).padStart(3, '0')}`;
+  }
+
   function buildInvoiceLines(userId: string, periodStart: string, periodEnd: string, rate: number): InvoiceLine[] {
     const startD = parseLocalDate(periodStart), endD = parseLocalDate(periodEnd);
     const userTimesheets = timesheets.filter(t => {
@@ -843,25 +907,17 @@ const TimesheetSystem = () => {
       const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
       return weekMon <= endD && weekFri >= startD;
     });
-
     return userTimesheets
       .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
       .map(ts => {
         const weekMon = parseLocalDate(ts.weekStart);
         const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-        // Only count hours for days within the period
         let hours = 0;
         Object.entries(ts.entries).forEach(([dateKey, entry]) => {
           const d = parseLocalDate(dateKey);
           if (d >= startD && d <= endD) hours += parseFloat((entry as TimeEntry)?.hours || '0');
         });
-        return {
-          weekStart: ts.weekStart,
-          weekEndingFri: formatDate(weekFri),
-          hours: parseFloat(hours.toFixed(2)),
-          rate,
-          amount: parseFloat((hours * rate).toFixed(2)),
-        };
+        return { weekStart: ts.weekStart, weekEndingFri: formatDate(weekFri), hours: parseFloat(hours.toFixed(2)), rate, amount: parseFloat((hours * rate).toFixed(2)) };
       })
       .filter(l => l.hours > 0);
   }
@@ -870,14 +926,24 @@ const TimesheetSystem = () => {
     const rate = parseFloat(invoiceRate);
     if (!invoiceMonth.start || !invoiceMonth.end) { alert('Please select a period.'); return; }
     if (!rate || rate <= 0) { alert('Please enter a valid hourly rate.'); return; }
+    if (!invoiceNumber.trim()) { alert('Please enter an invoice number.'); return; }
+
+    // Validate invoice number uniqueness (exclude rejected)
+    const invNumTrimmed = invoiceNumber.trim().toUpperCase();
+    const duplicate = invoices.find(i => i.invoiceNumber.toUpperCase() === invNumTrimmed && i.status !== 'rejected');
+    if (duplicate) { alert(`Invoice number "${invNumTrimmed}" is already used by invoice #${duplicate.id}. Please use a unique number.`); return; }
 
     const lines = buildInvoiceLines(currentUser!.id, invoiceMonth.start, invoiceMonth.end, rate);
-    if (lines.length === 0) { alert('No approved timesheets found in this period. Make sure your timesheets are approved before invoicing.'); return; }
+    if (lines.length === 0) { alert('No approved timesheets found in this period.'); return; }
 
     const totalHours = lines.reduce((s, l) => s + l.hours, 0);
     const totalAmount = lines.reduce((s, l) => s + l.amount, 0);
 
+    // Attach selected payment profile snapshot
+    const profile = paymentProfiles.find(p => p.id === selectedPaymentProfileId) || null;
+
     const payload = {
+      invoice_number: invNumTrimmed,
       user_id: currentUser!.id,
       user_name: currentUser!.name,
       project_id: currentUser!.projectId,
@@ -891,6 +957,7 @@ const TimesheetSystem = () => {
       status: 'submitted',
       submitted_at: new Date().toISOString(),
       notes: invoiceNotes,
+      payment_profile: profile,
     };
 
     const { error } = await supabase.from('invoices').insert(payload);
@@ -899,7 +966,16 @@ const TimesheetSystem = () => {
     setInvoiceView('list');
     setInvoiceRate('');
     setInvoiceNotes('');
+    setInvoiceNumber('');
+    setSelectedPaymentProfileId(null);
     alert('Invoice submitted successfully!');
+  };
+
+  const deleteInvoice = async (invoiceId: number) => {
+    if (!window.confirm('Delete this rejected invoice? This cannot be undone.')) return;
+    const { error } = await supabase.from('invoices').delete().eq('id', invoiceId);
+    if (error) { alert('Error deleting invoice: ' + error.message); return; }
+    await fetchInvoices();
   };
 
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid') => {
@@ -913,11 +989,57 @@ const TimesheetSystem = () => {
     setShowInvoiceModal(false);
   };
 
+  const savePaymentProfile = async () => {
+    if (!profileForm.profileName || !profileForm.companyName || !profileForm.bankName || !profileForm.accountNumber) {
+      alert('Please fill in Profile Name, Company Name, Bank Name and Account Number.'); return;
+    }
+    const payload = {
+      user_id: currentUser!.id,
+      profile_name: profileForm.profileName,
+      company_name: profileForm.companyName,
+      company_address: profileForm.companyAddress,
+      country: profileForm.country,
+      bank_name: profileForm.bankName,
+      bank_address: profileForm.bankAddress,
+      bank_branch: profileForm.bankBranch,
+      account_number: profileForm.accountNumber,
+      iban: profileForm.iban,
+      swift: profileForm.swift,
+      payment_email: profileForm.paymentEmail,
+      is_default: profileForm.isDefault,
+    };
+    if (editingProfile) {
+      const { error } = await supabase.from('payment_profiles').update(payload).eq('id', editingProfile.id);
+      if (error) { alert('Error updating profile: ' + error.message); return; }
+    } else {
+      const { error } = await supabase.from('payment_profiles').insert(payload);
+      if (error) { alert('Error saving profile: ' + error.message); return; }
+    }
+    // If marked default, unset others
+    if (profileForm.isDefault && editingProfile) {
+      await supabase.from('payment_profiles').update({ is_default: false }).eq('user_id', currentUser!.id).neq('id', editingProfile.id);
+    } else if (profileForm.isDefault) {
+      const { data: last } = await supabase.from('payment_profiles').select('id').eq('user_id', currentUser!.id).order('id', { ascending: false }).limit(1);
+      if (last && last[0]) await supabase.from('payment_profiles').update({ is_default: false }).eq('user_id', currentUser!.id).neq('id', last[0].id);
+    }
+    await fetchPaymentProfiles();
+    setShowProfileModal(false);
+    setEditingProfile(null);
+    setProfileForm(emptyProfileForm());
+  };
+
+  const deletePaymentProfile = async (profileId: number) => {
+    if (!window.confirm('Delete this payment profile?')) return;
+    const { error } = await supabase.from('payment_profiles').delete().eq('id', profileId);
+    if (error) { alert('Error: ' + error.message); return; }
+    await fetchPaymentProfiles();
+  };
+
   const exportInvoicesCSV = (list: Invoice[]) => {
-    let csv = 'Invoice ID,Employee,Project,Period Start,Period End,Total Hours,Rate,Total Amount,Currency,Status,Submitted\n';
+    let csv = 'Invoice No,Employee,Project,Period Start,Period End,Total Hours,Rate,Total Amount,Currency,Status,Submitted\n';
     list.forEach(inv => {
       const project = projects.find(p => p.id === inv.projectId);
-      csv += `${inv.id},"${inv.userName}","${project?.name || 'N/A'}","${inv.periodStart}","${inv.periodEnd}",${inv.totalHours.toFixed(2)},${inv.rate},${inv.totalAmount.toFixed(2)},"${inv.currency}","${inv.status}","${inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}"\n`;
+      csv += `"${inv.invoiceNumber}","${inv.userName}","${project?.name || 'N/A'}","${inv.periodStart}","${inv.periodEnd}",${inv.totalHours.toFixed(2)},${inv.rate},${inv.totalAmount.toFixed(2)},"${inv.currency}","${inv.status}","${inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}"\n`;
     });
     triggerDownload(csv, `invoices_export_${Date.now()}.csv`);
   };
@@ -2119,6 +2241,7 @@ const TimesheetSystem = () => {
                       <table className="w-full border-collapse text-sm">
                         <thead className="bg-indigo-600 text-white">
                           <tr>
+                            <th className="border border-indigo-700 px-4 py-3 text-left">Invoice No</th>
                             <th className="border border-indigo-700 px-4 py-3 text-left">Employee</th>
                             <th className="border border-indigo-700 px-4 py-3 text-left">Period</th>
                             <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
@@ -2135,6 +2258,7 @@ const TimesheetSystem = () => {
                             const sym = currencySymbols[inv.currency] || '$';
                             return (
                               <tr key={inv.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')} onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                                <td className="border border-gray-200 px-4 py-3 font-mono text-xs text-gray-700">{inv.invoiceNumber}</td>
                                 <td className="border border-gray-200 px-4 py-3 font-medium text-gray-800">{inv.userName}</td>
                                 <td className="border border-gray-200 px-4 py-3 whitespace-nowrap">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
                                 <td className="border border-gray-200 px-4 py-3 text-indigo-600 text-xs">{project?.name || '—'}</td>
@@ -2162,7 +2286,7 @@ const TimesheetSystem = () => {
                         </tbody>
                         <tfoot className="bg-gray-100 font-semibold">
                           <tr>
-                            <td className="border border-gray-200 px-4 py-3 text-gray-700" colSpan={3}>Filtered Total ({filtered.length} invoices)</td>
+                            <td className="border border-gray-200 px-4 py-3 text-gray-700" colSpan={4}>Filtered Total ({filtered.length} invoices)</td>
                             <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + i.totalHours, 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
@@ -2188,7 +2312,7 @@ const TimesheetSystem = () => {
                 <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                   <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-start z-10">
                     <div>
-                      <h2 className="text-xl font-bold text-gray-800">Invoice #{inv.id}</h2>
+                      <h2 className="text-xl font-bold text-gray-800 font-mono">{inv.invoiceNumber}</h2>
                       <p className="text-gray-600 text-sm">{inv.userName} · {parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
                     </div>
                     <button onClick={() => setShowInvoiceModal(false)} className="text-gray-500 hover:text-gray-700 p-1"><X className="w-5 h-5" /></button>
@@ -2232,6 +2356,16 @@ const TimesheetSystem = () => {
                         </tr>
                       </tfoot>
                     </table>
+                    {inv.paymentProfile && (
+                      <div className="mb-5 border border-green-200 rounded-lg overflow-hidden">
+                        <div className="bg-green-50 px-4 py-2 border-b border-green-200"><span className="font-semibold text-green-800 text-sm">💳 Payment Details — {inv.paymentProfile.profileName}</span></div>
+                        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+                          {[['Company Name', inv.paymentProfile.companyName],['Company Address', inv.paymentProfile.companyAddress],['Country', inv.paymentProfile.country],['Bank Name', inv.paymentProfile.bankName],['Bank Address', inv.paymentProfile.bankAddress],['Bank Branch', inv.paymentProfile.bankBranch],['Account Number', inv.paymentProfile.accountNumber],['IBAN', inv.paymentProfile.iban],['SWIFT / BIC', inv.paymentProfile.swift],['Payment Email', inv.paymentProfile.paymentEmail]].filter(([,v]) => v).map(([label, value]) => (
+                            <div key={label as string}><span className="text-gray-500">{label}: </span><span className="font-medium text-gray-800 font-mono">{value}</span></div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
                     {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
                     {inv.status === 'submitted' && (
@@ -2334,6 +2468,12 @@ const TimesheetSystem = () => {
               <Receipt className="w-5 h-5" /> My Invoices
               {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length > 0 && (
                 <span className="ml-1 px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-xs font-bold">{invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length}</span>
+              )}
+            </button>
+            <button onClick={() => setUserTab('payment')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (userTab === 'payment' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
+              <DollarSign className="w-5 h-5" /> Payment Profiles
+              {paymentProfiles.filter(p => p.userId === currentUser!.id).length > 0 && (
+                <span className="ml-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs font-bold">{paymentProfiles.filter(p => p.userId === currentUser!.id).length}</span>
               )}
             </button>
           </div>
@@ -2552,6 +2692,7 @@ const TimesheetSystem = () => {
         {userTab === 'invoices' && (() => {
           const userInvoices = invoices.filter(i => i.userId === currentUser!.id).sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
           const approvedTimesheets = timesheets.filter(t => t.userId === currentUser!.id && t.status === 'approved');
+          const userProfiles = paymentProfiles.filter(p => p.userId === currentUser!.id);
           const now = new Date();
           const monthOptions = Array.from({ length: 6 }, (_, i) => {
             const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
@@ -2578,6 +2719,11 @@ const TimesheetSystem = () => {
             paid: 'bg-blue-100 text-blue-800',
           };
 
+          // Auto-generate invoice number when period selected
+          const suggestedInvNum = invoiceMonth.start
+            ? generateInvoiceNumber(currentUser!.id, invoiceMonth.start)
+            : '';
+
           return (
             <div>
               {/* Header */}
@@ -2588,7 +2734,10 @@ const TimesheetSystem = () => {
                     <p className="text-sm text-gray-500 mt-1">Generate invoices from your approved timesheets</p>
                   </div>
                   <button
-                    onClick={() => setInvoiceView(invoiceView === 'list' ? 'create' : 'list')}
+                    onClick={() => {
+                      setInvoiceView(invoiceView === 'list' ? 'create' : 'list');
+                      if (invoiceView === 'list') setInvoiceNumber('');
+                    }}
                     className={'flex items-center gap-2 px-4 py-2 rounded-lg font-medium ' + (invoiceView === 'create' ? 'bg-gray-200 text-gray-700' : 'bg-indigo-600 text-white hover:bg-indigo-700')}
                   >
                     {invoiceView === 'create' ? (<><X className="w-4 h-4" /> Cancel</>) : (<><Plus className="w-4 h-4" /> Create Invoice</>)}
@@ -2607,6 +2756,30 @@ const TimesheetSystem = () => {
                     </div>
                   )}
 
+                  {/* Invoice Number */}
+                  <div className="mb-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Invoice Number * <span className="text-xs font-normal text-gray-500">(alphanumeric, must be unique across active invoices)</span></label>
+                    <div className="flex gap-3 items-center">
+                      <input
+                        type="text"
+                        value={invoiceNumber}
+                        onChange={e => setInvoiceNumber(e.target.value.toUpperCase().replace(/[^A-Z0-9\-_]/g, ''))}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                        placeholder="e.g. INV-2026-001"
+                        maxLength={40}
+                      />
+                      {suggestedInvNum && !invoiceNumber && (
+                        <button
+                          onClick={() => setInvoiceNumber(suggestedInvNum)}
+                          className="px-3 py-2 text-sm bg-white border border-indigo-300 text-indigo-600 rounded-lg hover:bg-indigo-50 whitespace-nowrap"
+                        >
+                          Use suggested: {suggestedInvNum}
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">Letters, numbers, hyphens and underscores only. Rejected invoice numbers can be reused.</p>
+                  </div>
+
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                     {/* Period Selection */}
                     <div>
@@ -2620,7 +2793,7 @@ const TimesheetSystem = () => {
                           return (
                             <button
                               key={opt.value}
-                              onClick={() => setInvoiceMonth({ start: opt.start, end: opt.end, label: opt.label })}
+                              onClick={() => { setInvoiceMonth({ start: opt.start, end: opt.end, label: opt.label }); if (!invoiceNumber) setInvoiceNumber(''); }}
                               className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors relative ${
                                 invoiceMonth.start === opt.start ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
                               }`}
@@ -2644,15 +2817,7 @@ const TimesheetSystem = () => {
                           </select>
                           <div className="relative flex-1">
                             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-medium">{sym}</span>
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={invoiceRate}
-                              onChange={e => setInvoiceRate(e.target.value)}
-                              className="w-full pl-7 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                              placeholder="0.00 per hour"
-                            />
+                            <input type="number" min="0" step="0.01" value={invoiceRate} onChange={e => setInvoiceRate(e.target.value)} className="w-full pl-7 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="0.00 per hour" />
                           </div>
                         </div>
                       </div>
@@ -2661,6 +2826,47 @@ const TimesheetSystem = () => {
                         <textarea value={invoiceNotes} onChange={e => setInvoiceNotes(e.target.value)} rows={2} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="Add any notes for the accountant..." />
                       </div>
                     </div>
+                  </div>
+
+                  {/* Payment Profile Picker */}
+                  <div className="mb-6 border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex justify-between items-center">
+                      <span className="font-semibold text-gray-700 text-sm">Payment Profile (optional)</span>
+                      <button
+                        onClick={() => { setEditingProfile(null); setProfileForm(emptyProfileForm()); setShowProfileModal(true); }}
+                        className="flex items-center gap-1 px-3 py-1 text-xs bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                      >
+                        <Plus className="w-3 h-3" /> New Profile
+                      </button>
+                    </div>
+                    {userProfiles.length === 0 ? (
+                      <div className="p-4 text-center text-gray-400 text-sm">
+                        No payment profiles yet. <button onClick={() => { setEditingProfile(null); setProfileForm(emptyProfileForm()); setShowProfileModal(true); }} className="text-indigo-600 underline hover:text-indigo-800">Create one</button> to include bank details on your invoice.
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-gray-100">
+                        <label className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 cursor-pointer">
+                          <input type="radio" name="payProfile" checked={selectedPaymentProfileId === null} onChange={() => setSelectedPaymentProfileId(null)} className="accent-indigo-600" />
+                          <span className="text-sm text-gray-500 italic">None (no payment details on invoice)</span>
+                        </label>
+                        {userProfiles.map(p => (
+                          <label key={p.id} className="flex items-center gap-3 px-4 py-3 hover:bg-indigo-50 cursor-pointer">
+                            <input type="radio" name="payProfile" checked={selectedPaymentProfileId === p.id} onChange={() => setSelectedPaymentProfileId(p.id)} className="accent-indigo-600" />
+                            <div className="flex-1 min-w-0">
+                              <div className="font-medium text-gray-800 text-sm flex items-center gap-2">
+                                {p.profileName}
+                                {p.isDefault && <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 text-xs rounded font-normal">Default</span>}
+                              </div>
+                              <div className="text-xs text-gray-500 truncate">{p.companyName} · {p.bankName}{p.accountNumber ? ' · Acct: ' + p.accountNumber : ''}</div>
+                            </div>
+                            <button
+                              onClick={e => { e.preventDefault(); setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault }); setShowProfileModal(true); }}
+                              className="p-1 text-gray-400 hover:text-indigo-600"
+                            ><Edit2 className="w-3.5 h-3.5" /></button>
+                          </label>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Preview */}
@@ -2709,7 +2915,7 @@ const TimesheetSystem = () => {
 
                   <button
                     onClick={submitInvoice}
-                    disabled={previewLines.length === 0}
+                    disabled={previewLines.length === 0 || !invoiceNumber.trim()}
                     className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Receipt className="w-5 h-5" /> Submit Invoice for Review
@@ -2737,19 +2943,29 @@ const TimesheetSystem = () => {
                       const project = projects.find(p => p.id === inv.projectId);
                       const sym2 = currencySymbols[inv.currency] || '$';
                       return (
-                        <div key={inv.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow cursor-pointer" onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                        <div key={inv.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
                           <div className="flex justify-between items-start">
-                            <div>
-                              <div className="flex items-center gap-2 mb-1">
+                            <div className="flex-1 cursor-pointer" onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                <span className="font-mono text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded">{inv.invoiceNumber}</span>
                                 <span className="font-semibold text-gray-800">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</span>
                                 <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
                               </div>
                               {project && <p className="text-sm text-indigo-600">{project.name} ({project.code})</p>}
                               <p className="text-sm text-gray-500 mt-1">{inv.lines.length} week{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours.toFixed(1)} hrs · {sym2}{inv.rate}/hr</p>
+                              {inv.paymentProfile && <p className="text-xs text-gray-400 mt-0.5">💳 {inv.paymentProfile.profileName} — {inv.paymentProfile.bankName}</p>}
                             </div>
-                            <div className="text-right">
+                            <div className="text-right ml-3 flex flex-col items-end gap-2">
                               <div className="text-2xl font-bold text-indigo-600">{sym2}{inv.totalAmount.toFixed(2)}</div>
-                              <div className="text-xs text-gray-400 mt-1">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}</div>
+                              <div className="text-xs text-gray-400">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}</div>
+                              {inv.status === 'rejected' && (
+                                <button
+                                  onClick={() => deleteInvoice(inv.id)}
+                                  className="flex items-center gap-1 px-2 py-1 text-xs bg-red-50 text-red-600 border border-red-200 rounded hover:bg-red-100"
+                                >
+                                  <Trash2 className="w-3 h-3" /> Delete
+                                </button>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -2762,8 +2978,75 @@ const TimesheetSystem = () => {
           );
         })()}
 
-        {/* Invoice Detail Modal */}
-        {showInvoiceModal && selectedInvoice && (() => {
+        {/* Payment Profiles Tab */}
+        {userTab === 'payment' && (() => {
+          const userProfiles = paymentProfiles.filter(p => p.userId === currentUser!.id);
+          return (
+            <div>
+              <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                <div className="flex justify-between items-center mb-2">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><DollarSign className="w-6 h-6 text-indigo-600" /> Payment Profiles</h2>
+                    <p className="text-sm text-gray-500 mt-1">Bank and company details attached to your invoices</p>
+                  </div>
+                  <button
+                    onClick={() => { setEditingProfile(null); setProfileForm(emptyProfileForm()); setShowProfileModal(true); }}
+                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"
+                  >
+                    <Plus className="w-4 h-4" /> Add Profile
+                  </button>
+                </div>
+              </div>
+
+              {userProfiles.length === 0 ? (
+                <div className="bg-white rounded-lg shadow-md p-12 text-center text-gray-400">
+                  <DollarSign className="w-12 h-12 mx-auto mb-3 opacity-20" />
+                  <p className="font-medium text-gray-600">No payment profiles yet</p>
+                  <p className="text-sm mt-1 mb-5">Add your bank details so they appear on your invoices</p>
+                  <button onClick={() => { setEditingProfile(null); setProfileForm(emptyProfileForm()); setShowProfileModal(true); }} className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium">Add First Profile</button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {userProfiles.map(p => (
+                    <div key={p.id} className="bg-white rounded-lg shadow-md p-5">
+                      <div className="flex justify-between items-start mb-4">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-bold text-gray-800 text-lg">{p.profileName}</h3>
+                            {p.isDefault && <span className="px-2 py-0.5 bg-indigo-100 text-indigo-700 text-xs rounded-full font-medium">Default</span>}
+                          </div>
+                          <p className="text-sm text-gray-500 mt-0.5">{p.companyName}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault }); setShowProfileModal(true); }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 text-sm"
+                          ><Edit2 className="w-3.5 h-3.5" /> Edit</button>
+                          <button onClick={() => deletePaymentProfile(p.id)} className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 text-sm"><Trash2 className="w-3.5 h-3.5" /> Delete</button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-sm border-t border-gray-100 pt-4">
+                        <div><span className="text-gray-500 w-40 inline-block">Company Name</span><span className="font-medium text-gray-800">{p.companyName || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">Company Address</span><span className="font-medium text-gray-800">{p.companyAddress || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">Country</span><span className="font-medium text-gray-800">{p.country || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">Bank Name</span><span className="font-medium text-gray-800">{p.bankName || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">Bank Address</span><span className="font-medium text-gray-800">{p.bankAddress || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">Bank Branch</span><span className="font-medium text-gray-800">{p.bankBranch || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">Account Number</span><span className="font-medium text-gray-800 font-mono">{p.accountNumber || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">IBAN</span><span className="font-medium text-gray-800 font-mono">{p.iban || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">SWIFT / BIC</span><span className="font-medium text-gray-800 font-mono">{p.swift || '—'}</span></div>
+                        <div><span className="text-gray-500 w-40 inline-block">Payment Email</span><span className="font-medium text-gray-800">{p.paymentEmail || '—'}</span></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Invoice Detail Modal — user view */}
+        {showInvoiceModal && selectedInvoice && userTab === 'invoices' && (() => {
           const inv = selectedInvoice;
           const project = projects.find(p => p.id === inv.projectId);
           const sym = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' })[inv.currency] || '$';
@@ -2773,7 +3056,7 @@ const TimesheetSystem = () => {
               <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                 <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-start z-10">
                   <div>
-                    <h2 className="text-xl font-bold text-gray-800">Invoice #{inv.id}</h2>
+                    <h2 className="text-xl font-bold text-gray-800 font-mono">{inv.invoiceNumber}</h2>
                     <p className="text-gray-600 text-sm">{inv.userName} · {parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
                   </div>
                   <button onClick={() => setShowInvoiceModal(false)} className="text-gray-500 hover:text-gray-700 p-1"><X className="w-5 h-5" /></button>
@@ -2818,7 +3101,17 @@ const TimesheetSystem = () => {
                     </tfoot>
                   </table>
                   {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
-                  {inv.reviewedBy && <p className="text-sm text-gray-500">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
+                  {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
+                  {inv.paymentProfile && (
+                    <div className="mt-4 border border-green-200 rounded-lg overflow-hidden">
+                      <div className="bg-green-50 px-4 py-2 border-b border-green-200"><span className="font-semibold text-green-800 text-sm">💳 Payment Details — {inv.paymentProfile.profileName}</span></div>
+                      <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+                        {[['Company Name', inv.paymentProfile.companyName],['Company Address', inv.paymentProfile.companyAddress],['Country', inv.paymentProfile.country],['Bank Name', inv.paymentProfile.bankName],['Bank Address', inv.paymentProfile.bankAddress],['Bank Branch', inv.paymentProfile.bankBranch],['Account Number', inv.paymentProfile.accountNumber],['IBAN', inv.paymentProfile.iban],['SWIFT / BIC', inv.paymentProfile.swift],['Payment Email', inv.paymentProfile.paymentEmail]].filter(([,v]) => v).map(([label, value]) => (
+                          <div key={label as string}><span className="text-gray-500">{label}: </span><span className="font-medium text-gray-800 font-mono">{value}</span></div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -2826,6 +3119,85 @@ const TimesheetSystem = () => {
         })()}
 
         {showTimesheetModal && <TimesheetDetailModal />}
+
+        {/* Payment Profile Modal */}
+        {showProfileModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setShowProfileModal(false)}>
+            <div className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-center z-10">
+                <h3 className="text-lg font-bold text-gray-800">{editingProfile ? 'Edit Payment Profile' : 'New Payment Profile'}</h3>
+                <button onClick={() => setShowProfileModal(false)} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Profile Label *</label>
+                  <input type="text" value={profileForm.profileName} onChange={e => setProfileForm({...profileForm, profileName: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="e.g. My UK Account, US Corp Account" />
+                  <p className="text-xs text-gray-400 mt-1">A short name to identify this profile</p>
+                </div>
+                <div className="pt-2 border-t border-gray-100">
+                  <p className="text-xs font-semibold text-indigo-600 uppercase tracking-wide mb-3">Company Details (as per bank account)</p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Full Company Name *</label>
+                      <input type="text" value={profileForm.companyName} onChange={e => setProfileForm({...profileForm, companyName: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="As per bank account" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Company Address</label>
+                      <textarea value={profileForm.companyAddress} onChange={e => setProfileForm({...profileForm, companyAddress: e.target.value})} rows={2} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="As per bank account" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Country</label>
+                      <input type="text" value={profileForm.country} onChange={e => setProfileForm({...profileForm, country: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="e.g. United Kingdom" />
+                    </div>
+                  </div>
+                </div>
+                <div className="pt-2 border-t border-gray-100">
+                  <p className="text-xs font-semibold text-indigo-600 uppercase tracking-wide mb-3">Bank Details</p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Bank Name *</label>
+                      <input type="text" value={profileForm.bankName} onChange={e => setProfileForm({...profileForm, bankName: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="e.g. HSBC, Barclays" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Bank Address</label>
+                      <input type="text" value={profileForm.bankAddress} onChange={e => setProfileForm({...profileForm, bankAddress: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="Bank branch address" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Bank Branch</label>
+                      <input type="text" value={profileForm.bankBranch} onChange={e => setProfileForm({...profileForm, bankBranch: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="Branch name or sort code" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Account Number *</label>
+                      <input type="text" value={profileForm.accountNumber} onChange={e => setProfileForm({...profileForm, accountNumber: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm font-mono" placeholder="Bank account number" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">IBAN</label>
+                        <input type="text" value={profileForm.iban} onChange={e => setProfileForm({...profileForm, iban: e.target.value.toUpperCase()})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm font-mono" placeholder="e.g. GB29 NWBK..." />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">SWIFT / BIC</label>
+                        <input type="text" value={profileForm.swift} onChange={e => setProfileForm({...profileForm, swift: e.target.value.toUpperCase()})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm font-mono" placeholder="e.g. NWBKGB2L" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Email Address for Payment Notification</label>
+                      <input type="email" value={profileForm.paymentEmail} onChange={e => setProfileForm({...profileForm, paymentEmail: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="payments@yourcompany.com" />
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 pt-2">
+                  <input type="checkbox" id="isDefault" checked={profileForm.isDefault} onChange={e => setProfileForm({...profileForm, isDefault: e.target.checked})} className="accent-indigo-600 w-4 h-4" />
+                  <label htmlFor="isDefault" className="text-sm text-gray-700 cursor-pointer">Set as default payment profile</label>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button onClick={savePaymentProfile} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"><Save className="w-4 h-4" /> Save Profile</button>
+                  <button onClick={() => setShowProfileModal(false)} className="px-4 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
