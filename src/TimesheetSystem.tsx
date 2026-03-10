@@ -1879,8 +1879,14 @@ const TimesheetSystem = () => {
 
           <div className="bg-white rounded-lg shadow-md mb-6">
             <div className="flex border-b">
-              <button onClick={() => setViewMode('cards')} className={'flex-1 px-6 py-4 font-medium ' + (viewMode === 'cards' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>Pending Approvals ({pendingTimesheets.filter(t => managedUsers.some(u => u.id === t.userId)).length})</button>
-              <button onClick={() => setViewMode('table')} className={'flex-1 px-6 py-4 font-medium ' + (viewMode === 'table' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>All Timesheets (Table View)</button>
+              <button onClick={() => setViewMode('cards')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (viewMode === 'cards' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <CheckCircle className="w-5 h-5 flex-shrink-0" />
+                <span>Pending <span className="hidden sm:inline">Approvals </span>({pendingTimesheets.filter(t => managedUsers.some(u => u.id === t.userId)).length})</span>
+              </button>
+              <button onClick={() => setViewMode('table')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (viewMode === 'table' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <FileText className="w-5 h-5 flex-shrink-0" />
+                <span>All <span className="hidden sm:inline">Timesheets</span></span>
+              </button>
             </div>
           </div>
 
@@ -2050,13 +2056,24 @@ const TimesheetSystem = () => {
 
           <div className="bg-white rounded-lg shadow-md mb-6">
             <div className="flex border-b">
-              <button onClick={() => setAccountantTab('weekly')} className={'flex-1 px-6 py-4 font-medium ' + (accountantTab === 'weekly' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>Weekly Report</button>
-              <button onClick={() => setAccountantTab('consolidated')} className={'flex-1 px-6 py-4 font-medium ' + (accountantTab === 'consolidated' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>Consolidated Report</button>
-              <button onClick={() => setAccountantTab('invoices')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (accountantTab === 'invoices' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
-                <Receipt className="w-4 h-4" /> Invoices
-                {invoices.filter(i => i.status === 'submitted').length > 0 && (
-                  <span className="ml-1 px-2 py-0.5 bg-yellow-100 text-yellow-800 rounded-full text-xs font-bold">{invoices.filter(i => i.status === 'submitted').length}</span>
-                )}
+              <button onClick={() => setAccountantTab('weekly')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'weekly' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <Calendar className="w-5 h-5 flex-shrink-0" />
+                <span>Weekly</span>
+              </button>
+              <button onClick={() => setAccountantTab('consolidated')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'consolidated' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <FileText className="w-5 h-5 flex-shrink-0" />
+                <span>Consolidated</span>
+              </button>
+              <button onClick={() => setAccountantTab('invoices')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors relative ' + (accountantTab === 'invoices' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <span className="relative">
+                  <Receipt className="w-5 h-5 flex-shrink-0" />
+                  {invoices.filter(i => i.status === 'submitted').length > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-yellow-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
+                      {invoices.filter(i => i.status === 'submitted').length}
+                    </span>
+                  )}
+                </span>
+                <span>Invoices</span>
               </button>
             </div>
           </div>
@@ -2623,7 +2640,7 @@ const TimesheetSystem = () => {
   return (
     <div className="min-h-screen bg-gray-50 p-3 sm:p-6">
       <div className="max-w-4xl mx-auto">
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+        <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
           <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
             <div className="flex-1">
               <h1 className="text-2xl font-bold text-gray-800">My Timesheet</h1>
@@ -2653,7 +2670,7 @@ const TimesheetSystem = () => {
         </div>
 
         {showReminderLog && userReminders.length > 0 && (
-          <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-bold text-gray-800">Timesheet Reminders</h2>
               <button onClick={() => setShowReminderLog(false)} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
@@ -2680,27 +2697,51 @@ const TimesheetSystem = () => {
 
         {/* Tab Navigation */}
         <div className="bg-white rounded-lg shadow-md mb-6">
-          <div className="flex border-b">
-            <button onClick={() => setUserTab('timesheet')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (userTab === 'timesheet' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
-              <Clock className="w-5 h-5" /> My Timesheets
+          {/* Tab bar — compact icon+label on mobile, full text on sm+ */}
+          <div className="flex border-b bg-white">
+            <button
+              onClick={() => setUserTab('timesheet')}
+              className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 ' +
+                (userTab === 'timesheet' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}
+            >
+              <Clock className="w-5 h-5 flex-shrink-0" />
+              <span>Timesheets</span>
             </button>
-            <button onClick={() => setUserTab('invoices')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (userTab === 'invoices' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
-              <Receipt className="w-5 h-5" /> My Invoices
-              {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length > 0 && (
-                <span className="ml-1 px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-xs font-bold">{invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length}</span>
-              )}
+            <button
+              onClick={() => setUserTab('invoices')}
+              className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 relative ' +
+                (userTab === 'invoices' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}
+            >
+              <span className="relative">
+                <Receipt className="w-5 h-5 flex-shrink-0" />
+                {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-amber-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
+                    {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length}
+                  </span>
+                )}
+              </span>
+              <span>Invoices</span>
             </button>
-            <button onClick={() => setUserTab('payment')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (userTab === 'payment' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
-              <DollarSign className="w-5 h-5" /> Payment Profiles
-              {paymentProfiles.filter(p => p.userId === currentUser!.id).length > 0 && (
-                <span className="ml-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs font-bold">{paymentProfiles.filter(p => p.userId === currentUser!.id).length}</span>
-              )}
+            <button
+              onClick={() => setUserTab('payment')}
+              className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 relative ' +
+                (userTab === 'payment' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}
+            >
+              <span className="relative">
+                <DollarSign className="w-5 h-5 flex-shrink-0" />
+                {paymentProfiles.filter(p => p.userId === currentUser!.id).length > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-indigo-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
+                    {paymentProfiles.filter(p => p.userId === currentUser!.id).length}
+                  </span>
+                )}
+              </span>
+              <span className="hidden xs:inline sm:inline">Payment </span><span>Profiles</span>
             </button>
           </div>
         </div>
 
         {userTab === 'timesheet' && (<div>
-          <div className="bg-white rounded-lg shadow-md p-6">
+          <div className="bg-white rounded-lg shadow-md p-3 sm:p-6">
           {isUserInactive && (
             <div className="mb-6 p-4 bg-orange-50 border-2 border-orange-300 rounded-lg flex items-center gap-3">
               <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center flex-shrink-0">
@@ -2713,16 +2754,16 @@ const TimesheetSystem = () => {
             </div>
           )}
           <div className="flex justify-between items-center mb-6">
-            <button onClick={() => changeWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Previous Week</button>
+            <button onClick={() => changeWeek(-1)} className="px-3 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm">← <span className="hidden sm:inline">Previous </span>Week</button>
             <div className="text-center">
-              <h2 className="text-lg font-semibold text-gray-800">Week of {selectedWeek.toLocaleDateString()}</h2>
+              <h2 className="text-base sm:text-lg font-semibold text-gray-800">Week of {selectedWeek.toLocaleDateString()}</h2>
               {currentTimesheet && (
                 <span className={'inline-block mt-1 px-3 py-1 rounded-full text-sm font-medium ' + (currentTimesheet.status === 'approved' ? 'bg-green-100 text-green-800' : currentTimesheet.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800')}>
                   {currentTimesheet.status.charAt(0).toUpperCase() + currentTimesheet.status.slice(1)}
                 </span>
               )}
             </div>
-            <button onClick={() => changeWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next Week →</button>
+            <button onClick={() => changeWeek(1)} className="px-3 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm"><span className="hidden sm:inline">Next </span>Week →</button>
           </div>
 
           {hasPreviousWeekTimesheet && (!currentTimesheet || currentTimesheet.status !== 'approved') && (
@@ -2820,10 +2861,10 @@ const TimesheetSystem = () => {
           )}
         </div>
 
-        <div className="bg-white rounded-lg shadow-md p-6 mt-6">
-          <div className="flex justify-between items-center mb-5">
+        <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mt-6">
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-5">
             <h2 className="text-xl font-bold text-gray-800">Timesheet History</h2>
-            <button onClick={() => exportTimesheetList(filteredUserTimesheets)} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"><Download className="w-4 h-4" /> Export CSV</button>
+            <button onClick={() => exportTimesheetList(filteredUserTimesheets)} className="flex items-center justify-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
           </div>
 
           {/* Filters */}
@@ -2947,8 +2988,8 @@ const TimesheetSystem = () => {
           return (
             <div>
               {/* Header */}
-              <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-                <div className="flex justify-between items-center">
+              <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
                   <div>
                     <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><Receipt className="w-6 h-6 text-indigo-600" /> My Invoices</h2>
                     <p className="text-sm text-gray-500 mt-1">Generate invoices from your approved timesheets</p>
@@ -2958,7 +2999,7 @@ const TimesheetSystem = () => {
                       setInvoiceView(invoiceView === 'list' ? 'create' : 'list');
                       if (invoiceView === 'list') setInvoiceNumber('');
                     }}
-                    className={'flex items-center gap-2 px-4 py-2 rounded-lg font-medium ' + (invoiceView === 'create' ? 'bg-gray-200 text-gray-700' : 'bg-indigo-600 text-white hover:bg-indigo-700')}
+                    className={'flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium ' + (invoiceView === 'create' ? 'bg-gray-200 text-gray-700' : 'bg-indigo-600 text-white hover:bg-indigo-700')}
                   >
                     {invoiceView === 'create' ? (<><X className="w-4 h-4" /> Cancel</>) : (<><Plus className="w-4 h-4" /> Create Invoice</>)}
                   </button>
@@ -2967,7 +3008,7 @@ const TimesheetSystem = () => {
 
               {/* Create Invoice Form */}
               {invoiceView === 'create' && (
-                <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
                   <h3 className="text-lg font-bold text-gray-800 mb-5 flex items-center gap-2"><DollarSign className="w-5 h-5 text-indigo-600" /> New Invoice</h3>
 
                   {approvedTimesheets.length === 0 && (
@@ -2977,26 +3018,24 @@ const TimesheetSystem = () => {
                   )}
 
                   {/* Invoice Number */}
-                  <div className="mb-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Invoice Number * <span className="text-xs font-normal text-gray-500">(alphanumeric, must be unique across active invoices)</span></label>
-                    <div className="flex gap-3 items-center">
-                      <input
-                        type="text"
-                        value={invoiceNumber}
-                        onChange={e => setInvoiceNumber(e.target.value.toUpperCase().replace(/[^A-Z0-9\-_]/g, ''))}
-                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
-                        placeholder="e.g. INV-2026-001"
-                        maxLength={40}
-                      />
-                      {suggestedInvNum && !invoiceNumber && (
-                        <button
-                          onClick={() => setInvoiceNumber(suggestedInvNum)}
-                          className="px-3 py-2 text-sm bg-white border border-indigo-300 text-indigo-600 rounded-lg hover:bg-indigo-50 whitespace-nowrap"
-                        >
-                          Use suggested: {suggestedInvNum}
-                        </button>
-                      )}
-                    </div>
+                  <div className="mb-6 p-3 sm:p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Invoice Number *</label>
+                    <input
+                      type="text"
+                      value={invoiceNumber}
+                      onChange={e => setInvoiceNumber(e.target.value.toUpperCase().replace(/[^A-Z0-9\-_]/g, ''))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                      placeholder="e.g. INV-2026-001"
+                      maxLength={40}
+                    />
+                    {suggestedInvNum && !invoiceNumber && (
+                      <button
+                        onClick={() => setInvoiceNumber(suggestedInvNum)}
+                        className="mt-2 w-full px-3 py-2 text-sm bg-white border border-indigo-300 text-indigo-600 rounded-lg hover:bg-indigo-50 text-left truncate"
+                      >
+                        Use suggested: <span className="font-mono">{suggestedInvNum}</span>
+                      </button>
+                    )}
                     <p className="text-xs text-gray-500 mt-1">Letters, numbers, hyphens and underscores only. Rejected invoice numbers can be reused.</p>
                   </div>
 
@@ -3144,8 +3183,8 @@ const TimesheetSystem = () => {
               )}
 
               {/* Invoice List */}
-              <div className="bg-white rounded-lg shadow-md p-6">
-                <div className="flex justify-between items-center mb-5">
+              <div className="bg-white rounded-lg shadow-md p-3 sm:p-6">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-5">
                   <h3 className="text-lg font-bold text-gray-800">Invoice History</h3>
                   {userInvoices.length > 0 && (
                     <button onClick={() => exportInvoicesCSV(userInvoices)} className="flex items-center gap-2 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
@@ -3205,15 +3244,15 @@ const TimesheetSystem = () => {
           const userProfiles = paymentProfiles.filter(p => p.userId === currentUser!.id);
           return (
             <div>
-              <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-                <div className="flex justify-between items-center mb-2">
+              <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-2">
                   <div>
                     <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><DollarSign className="w-6 h-6 text-indigo-600" /> Payment Profiles</h2>
                     <p className="text-sm text-gray-500 mt-1">Bank and company details attached to your invoices</p>
                   </div>
                   <button
                     onClick={() => { setEditingProfile(null); setProfileForm(emptyProfileForm()); setShowProfileModal(true); }}
-                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"
+                    className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"
                   >
                     <Plus className="w-4 h-4" /> Add Profile
                   </button>
