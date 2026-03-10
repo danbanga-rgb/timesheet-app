@@ -206,7 +206,12 @@ const tzMap: Record<string, string> = {
   'US-California': 'America/Los_Angeles', 'US-New York': 'America/New_York',
   'US-Texas': 'America/Chicago', 'US-Florida': 'America/New_York',
   'GB-England': 'Europe/London', 'GB-Scotland': 'Europe/London', 'GB-Wales': 'Europe/London',
-  'CA-Ontario': 'America/Toronto', 'CA-Quebec': 'America/Toronto', 'CA-British Columbia': 'America/Vancouver'
+  'CA-Ontario': 'America/Toronto', 'CA-Quebec': 'America/Toronto', 'CA-British Columbia': 'America/Vancouver',
+  'HR-': 'Europe/Zagreb', 'RS-': 'Europe/Belgrade', 'BA-': 'Europe/Sarajevo',
+  'SI-': 'Europe/Ljubljana', 'MK-': 'Europe/Skopje',
+  'HR-Croatia': 'Europe/Zagreb', 'RS-Serbia': 'Europe/Belgrade',
+  'BA-Bosnia and Herzegovina': 'Europe/Sarajevo', 'SI-Slovenia': 'Europe/Ljubljana',
+  'MK-North Macedonia': 'Europe/Skopje',
 };
 
 const TimesheetSystem = () => {
@@ -239,13 +244,87 @@ const TimesheetSystem = () => {
       { date: '2026-07-01', name: 'Canada Day' },
       { date: '2026-09-07', name: 'Labour Day' },
       { date: '2026-12-25', name: 'Christmas Day' }
+    ],
+    HR: [
+      { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
+      { date: '2026-01-06', name: 'Sveta tri kralja (Epiphany)' },
+      { date: '2026-04-05', name: 'Uskrs (Easter Sunday)' },
+      { date: '2026-04-06', name: 'Uskrsni ponedjeljak (Easter Monday)' },
+      { date: '2026-05-01', name: 'Međunarodni praznik rada (Labour Day)' },
+      { date: '2026-05-30', name: 'Dan državnosti (National Day)' },
+      { date: '2026-06-04', name: 'Tijelovo (Corpus Christi)' },
+      { date: '2026-06-22', name: 'Dan antifašističke borbe (Anti-Fascist Struggle Day)' },
+      { date: '2026-08-05', name: 'Dan domovinske zahvalnosti (Victory & Thanksgiving Day)' },
+      { date: '2026-08-15', name: 'Velika Gospa (Assumption of Mary)' },
+      { date: '2026-10-08', name: 'Dan neovisnosti (Independence Day)' },
+      { date: '2026-11-01', name: 'Svi sveti (All Saints\' Day)' },
+      { date: '2026-12-25', name: 'Božić (Christmas Day)' },
+      { date: '2026-12-26', name: 'Sveti Stjepan (St. Stephen\'s Day)' }
+    ],
+    RS: [
+      { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
+      { date: '2026-01-02', name: "Nova godina (New Year's Day 2)" },
+      { date: '2026-01-07', name: 'Božić (Orthodox Christmas)' },
+      { date: '2026-02-15', name: 'Dan državnosti (Statehood Day)' },
+      { date: '2026-02-16', name: 'Dan državnosti (Statehood Day 2)' },
+      { date: '2026-04-10', name: 'Veliki petak (Orthodox Good Friday)' },
+      { date: '2026-04-12', name: 'Vaskrs (Orthodox Easter Sunday)' },
+      { date: '2026-04-13', name: 'Vaskrsni ponedeljak (Orthodox Easter Monday)' },
+      { date: '2026-05-01', name: 'Praznik rada (Labour Day)' },
+      { date: '2026-05-02', name: 'Praznik rada (Labour Day 2)' },
+      { date: '2026-11-11', name: 'Dan primirja (Armistice Day)' }
+    ],
+    BA: [
+      { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
+      { date: '2026-01-07', name: 'Božić (Orthodox Christmas)' },
+      { date: '2026-04-06', name: 'Dan neovisnosti (Independence Day)' },
+      { date: '2026-04-12', name: 'Vaskrs (Orthodox Easter Sunday)' },
+      { date: '2026-04-13', name: 'Uskrsni ponedjeljak (Easter Monday)' },
+      { date: '2026-05-01', name: 'Međunarodni dan rada (Labour Day)' },
+      { date: '2026-11-25', name: 'Dan državnosti (Statehood Day)' },
+      { date: '2026-12-25', name: 'Božić (Christmas Day)' }
+    ],
+    SI: [
+      { date: '2026-01-01', name: "Novo leto (New Year's Day)" },
+      { date: '2026-01-02', name: "Novo leto (New Year's Day 2)" },
+      { date: '2026-02-08', name: 'Prešernov dan (Prešeren Day)' },
+      { date: '2026-04-05', name: 'Velika noč (Easter Sunday)' },
+      { date: '2026-04-06', name: 'Velikonočni ponedeljek (Easter Monday)' },
+      { date: '2026-04-27', name: 'Dan upora proti okupatorju (Resistance Day)' },
+      { date: '2026-05-01', name: 'Praznik dela (Labour Day)' },
+      { date: '2026-05-02', name: 'Praznik dela (Labour Day 2)' },
+      { date: '2026-06-25', name: 'Dan državnosti (Statehood Day)' },
+      { date: '2026-08-15', name: 'Marijino vnebovzetje (Assumption of Mary)' },
+      { date: '2026-10-31', name: 'Dan reformacije (Reformation Day)' },
+      { date: '2026-11-01', name: 'Dan spomina na mrtve (All Saints\' Day)' },
+      { date: '2026-12-25', name: 'Božič (Christmas Day)' },
+      { date: '2026-12-26', name: 'Dan samostojnosti in enotnosti (Independence Day)' }
+    ],
+    MK: [
+      { date: '2026-01-01', name: "Нова Година (New Year's Day)" },
+      { date: '2026-01-07', name: 'Божиќ (Orthodox Christmas)' },
+      { date: '2026-04-12', name: 'Велигден (Orthodox Easter Sunday)' },
+      { date: '2026-04-13', name: 'Велигден (Orthodox Easter Monday)' },
+      { date: '2026-05-01', name: 'Ден на трудот (Labour Day)' },
+      { date: '2026-05-24', name: 'Св. Кирил и Методиј (Sts. Cyril & Methodius)' },
+      { date: '2026-08-02', name: 'Илинден (Ilinden - National Day)' },
+      { date: '2026-09-08', name: 'Ден на независноста (Independence Day)' },
+      { date: '2026-10-11', name: 'Ден на народното востание (National Uprising Day)' },
+      { date: '2026-10-23', name: 'Ден на македонската револуционерна борба (Revolution Day)' },
+      { date: '2026-12-08', name: 'Св. Климент Охридски (St. Clement of Ohrid)' },
+      { date: '2026-12-25', name: 'Божиќ (Christmas Day)' }
     ]
   };
 
   const countries = [
     { code: 'US', name: 'United States', regions: ['California', 'New York', 'Texas', 'Florida'] },
     { code: 'GB', name: 'United Kingdom', regions: ['England', 'Scotland', 'Wales'] },
-    { code: 'CA', name: 'Canada', regions: ['Ontario', 'Quebec', 'British Columbia'] }
+    { code: 'CA', name: 'Canada', regions: ['Ontario', 'Quebec', 'British Columbia'] },
+    { code: 'HR', name: 'Croatia', regions: ['Croatia'] },
+    { code: 'RS', name: 'Serbia', regions: ['Serbia'] },
+    { code: 'BA', name: 'Bosnia and Herzegovina', regions: ['Bosnia and Herzegovina'] },
+    { code: 'SI', name: 'Slovenia', regions: ['Slovenia'] },
+    { code: 'MK', name: 'North Macedonia', regions: ['North Macedonia'] },
   ];
 
   const [timesheets, setTimesheets] = useState<Timesheet[]>([]);
@@ -488,11 +567,18 @@ const TimesheetSystem = () => {
     else if (timezone.includes('America/New_York')) { detectedCountry = 'US'; detectedRegion = 'New York'; }
     else if (timezone.includes('Europe/London')) { detectedCountry = 'GB'; detectedRegion = 'England'; }
     else if (timezone.includes('America/Toronto')) { detectedCountry = 'CA'; detectedRegion = 'Ontario'; }
+    else if (timezone.includes('Europe/Zagreb')) { detectedCountry = 'HR'; detectedRegion = 'Croatia'; }
+    else if (timezone.includes('Europe/Belgrade')) { detectedCountry = 'RS'; detectedRegion = 'Serbia'; }
+    else if (timezone.includes('Europe/Sarajevo')) { detectedCountry = 'BA'; detectedRegion = 'Bosnia and Herzegovina'; }
+    else if (timezone.includes('Europe/Ljubljana')) { detectedCountry = 'SI'; detectedRegion = 'Slovenia'; }
+    else if (timezone.includes('Europe/Skopje')) { detectedCountry = 'MK'; detectedRegion = 'North Macedonia'; }
     setDetectedLocation({ country: detectedCountry, region: detectedRegion, timezone });
   }
 
   function getUserLocalTime(user: UserProfile): Date {
-    const tz = tzMap[user.country + '-' + user.region] || 'America/New_York';
+    const tz = tzMap[user.country + '-' + user.region]
+      || tzMap[user.country + '-']
+      || 'America/New_York';
     return new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   }
 
@@ -1776,16 +1862,22 @@ const TimesheetSystem = () => {
                       </select>
                     </div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>
-                      <select value={userForm.country} onChange={e => setUserForm({...userForm, country: e.target.value, region: ''})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                      <select value={userForm.country} onChange={e => {
+                        const c = countries.find(x => x.code === e.target.value);
+                        const autoRegion = c && c.regions.length === 1 ? c.regions[0] : '';
+                        setUserForm({...userForm, country: e.target.value, region: autoRegion});
+                      }} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                         {countries.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
                       </select>
                     </div>
+                    {(countries.find(c => c.code === userForm.country)?.regions.length ?? 0) > 1 && (
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Region</label>
                       <select value={userForm.region} onChange={e => setUserForm({...userForm, region: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                         <option value="">Select Region</option>
                         {countries.find(c => c.code === userForm.country)?.regions.map(r => <option key={r} value={r}>{r}</option>)}
                       </select>
                     </div>
+                    )}
                     {userForm.role === 'timesheetuser' && (
                       <>
                         <div><label className="block text-sm font-medium text-gray-700 mb-1">Manager</label>
