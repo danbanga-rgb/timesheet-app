@@ -1002,6 +1002,26 @@ const TimesheetSystem = () => {
     setPendingPaidDate('');
   };
 
+  // Save approval status and/or pay on date without closing modal
+  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string }) => {
+    const update: Record<string, unknown> = {};
+    if (fields.status !== undefined) {
+      update.status = fields.status;
+      update.reviewed_at = new Date().toISOString();
+      update.reviewed_by = currentUser!.name;
+    }
+    if (fields.payOnDate !== undefined) update.pay_on_date = fields.payOnDate || null;
+    const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
+    if (error) { alert('Error saving changes: ' + error.message); return; }
+    await fetchInvoices();
+    // Refresh selectedInvoice so the modal reflects the save
+    setSelectedInvoice(prev => prev ? {
+      ...prev,
+      ...(fields.status ? { status: fields.status, reviewedBy: currentUser!.name, reviewedAt: new Date().toISOString() } : {}),
+      ...(fields.payOnDate !== undefined ? { payOnDate: fields.payOnDate || null } : {}),
+    } : prev);
+  };
+
   const savePaymentProfile = async () => {
     if (!profileForm.profileName || !profileForm.companyName || !profileForm.bankName || !profileForm.accountNumber) {
       alert('Please fill in Profile Name, Company Name, Bank Name and Account Number.'); return;
@@ -2457,6 +2477,8 @@ const TimesheetSystem = () => {
                     )}
                     {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
                     {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
+
+                    {/* ── Submitted: approve/reject with optional Pay On Date ── */}
                     {inv.status === 'submitted' && (
                       <div className="mt-5 space-y-3">
                         <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
@@ -2474,40 +2496,85 @@ const TimesheetSystem = () => {
                         </div>
                       </div>
                     )}
-                    {inv.status === 'approved' && (
-                      <div className="mt-5 p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
-                        <p className="text-sm font-semibold text-blue-800 flex items-center gap-2"><DollarSign className="w-4 h-4" /> Mark as Paid</p>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-xs font-medium text-blue-700 mb-1">Pay On Date (expected)</label>
-                            <input
-                              type="date"
-                              value={pendingPayOnDate || inv.payOnDate || ''}
-                              onChange={e => setPendingPayOnDate(e.target.value)}
-                              className="w-full px-3 py-2 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-400 text-sm bg-white"
-                            />
+
+                    {/* ── Approved: edit approval details + separate mark-paid panel ── */}
+                    {inv.status === 'approved' && (() => {
+                      const editPayOn = pendingPayOnDate !== '' ? pendingPayOnDate : (inv.payOnDate || '');
+                      return (
+                        <div className="mt-5 space-y-4">
+                          {/* Edit panel */}
+                          <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
+                            <p className="text-sm font-semibold text-amber-800 flex items-center gap-2"><Edit2 className="w-4 h-4" /> Edit Approval Details</p>
+                            <div>
+                              <label className="block text-xs font-medium text-amber-700 mb-1">Pay On Date (expected)</label>
+                              <input
+                                type="date"
+                                value={editPayOn}
+                                onChange={e => setPendingPayOnDate(e.target.value)}
+                                className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-400 text-sm bg-white"
+                              />
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={async () => {
+                                  await saveInvoiceEdits(inv.id, { payOnDate: editPayOn });
+                                  setPendingPayOnDate('');
+                                  alert('Pay On Date saved.');
+                                }}
+                                className="flex-1 flex items-center justify-center gap-2 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 font-medium text-sm"
+                              >
+                                <Save className="w-4 h-4" /> Save Changes
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  if (!window.confirm('Change this invoice back to Rejected?')) return;
+                                  await saveInvoiceEdits(inv.id, { status: 'rejected' });
+                                }}
+                                className="flex items-center justify-center gap-2 px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 font-medium text-sm border border-red-200"
+                              >
+                                <XCircle className="w-4 h-4" /> Reject
+                              </button>
+                            </div>
                           </div>
-                          <div>
-                            <label className="block text-xs font-medium text-green-700 mb-1">Paid Date (actual) *</label>
-                            <input
-                              type="date"
-                              value={pendingPaidDate}
-                              onChange={e => setPendingPaidDate(e.target.value)}
-                              className="w-full px-3 py-2 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-400 text-sm bg-white"
-                            />
+
+                          {/* Mark as Paid panel */}
+                          <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
+                            <p className="text-sm font-semibold text-blue-800 flex items-center gap-2"><DollarSign className="w-4 h-4" /> Mark as Paid</p>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-xs font-medium text-blue-600 mb-1">Pay On Date (confirm)</label>
+                                <input
+                                  type="date"
+                                  value={editPayOn}
+                                  onChange={e => setPendingPayOnDate(e.target.value)}
+                                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-400 text-sm bg-white"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-green-700 mb-1">Paid Date (actual) *</label>
+                                <input
+                                  type="date"
+                                  value={pendingPaidDate}
+                                  onChange={e => setPendingPaidDate(e.target.value)}
+                                  className="w-full px-3 py-2 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-400 text-sm bg-white"
+                                />
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => {
+                                if (!pendingPaidDate) { alert('Please enter the actual Paid Date.'); return; }
+                                handleInvoiceAction(inv.id, 'paid', editPayOn || undefined, pendingPaidDate);
+                              }}
+                              className="w-full flex items-center justify-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+                            >
+                              <DollarSign className="w-4 h-4" /> Confirm Payment
+                            </button>
                           </div>
                         </div>
-                        <button
-                          onClick={() => {
-                            if (!pendingPaidDate) { alert('Please enter the actual Paid Date.'); return; }
-                            handleInvoiceAction(inv.id, 'paid', pendingPayOnDate || inv.payOnDate || undefined, pendingPaidDate);
-                          }}
-                          className="w-full flex items-center justify-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
-                        >
-                          <DollarSign className="w-4 h-4" /> Confirm Payment
-                        </button>
-                      </div>
-                    )}
+                      );
+                    })()}
+
+                    {/* ── Paid: summary only ── */}
                     {inv.status === 'paid' && (inv.payOnDate || inv.paidDate) && (
                       <div className="mt-4 grid grid-cols-2 gap-3">
                         {inv.payOnDate && (
