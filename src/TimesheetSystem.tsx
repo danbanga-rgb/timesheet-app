@@ -18,7 +18,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
           <span className="font-semibold">Partial</span> weeks include only the working days that fall within the selected date range.
         </div>
       )}
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
         <table className="border-collapse text-sm w-full">
           <thead>
             <tr className="bg-green-600 text-white">
@@ -1241,8 +1241,8 @@ const TimesheetSystem = () => {
     const totalHours = dailyData.reduce((s, d) => s + d.hours, 0);
 
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={closeTimesheetModal}>
-        <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={closeTimesheetModal}>
+        <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-3xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
           <div className="sticky top-0 bg-white border-b p-6 z-10">
             <div className="flex justify-between items-start">
               <div>
@@ -1442,10 +1442,10 @@ const TimesheetSystem = () => {
   if (currentUser!.role === 'admin') {
     const managers = users.filter(u => u.role === 'manager');
     return (
-      <div className="min-h-screen bg-gray-50 p-6">
+      <div className="min-h-screen bg-gray-50 p-3 sm:p-6">
         <div className="max-w-7xl mx-auto">
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
               <div>
                 <h1 className="text-2xl font-bold text-gray-800">Admin Dashboard</h1>
                 <p className="text-gray-600">Welcome, {currentUser!.name}</p>
@@ -1484,11 +1484,11 @@ const TimesheetSystem = () => {
 
           {adminView === 'users' && (
             <div className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex justify-between items-center mb-6">
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800">Users ({users.length})</h2>
                 <button onClick={() => openUserModal()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"><Plus className="w-4 h-4" /> Add User</button>
               </div>
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
@@ -1540,7 +1540,7 @@ const TimesheetSystem = () => {
 
           {adminView === 'projects' && (
             <div className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex justify-between items-center mb-6">
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800">Projects ({projects.length})</h2>
                 <button onClick={() => openProjectModal()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"><Plus className="w-4 h-4" /> Add Project</button>
               </div>
@@ -1743,8 +1743,8 @@ const TimesheetSystem = () => {
 
           {/* User Modal */}
           {showUserModal && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-              <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
+              <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto">
                 <div className="p-6">
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-xl font-bold text-gray-800">{editingUser ? 'Edit User' : 'Add New User'}</h3>
@@ -1827,8 +1827,8 @@ const TimesheetSystem = () => {
 
           {/* Project Modal */}
           {showProjectModal && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-              <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
+              <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-md">
                 <div className="p-6">
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-xl font-bold text-gray-800">{editingProject ? 'Edit Project' : 'Add New Project'}</h3>
@@ -1864,10 +1864,10 @@ const TimesheetSystem = () => {
     const filteredTimesheets = getFilteredTimesheets().filter(t => managedUsers.some(u => u.id === t.userId));
 
     return (
-      <div className="min-h-screen bg-gray-50 p-6">
+      <div className="min-h-screen bg-gray-50 p-3 sm:p-6">
         <div className="max-w-7xl mx-auto">
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
               <div>
                 <h1 className="text-2xl font-bold text-gray-800">Manager Dashboard</h1>
                 <p className="text-gray-600">Welcome, {currentUser!.name}</p>
@@ -1917,24 +1917,24 @@ const TimesheetSystem = () => {
             </div>
           ) : (
             <div className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex justify-between items-center mb-6">
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800">All Team Timesheets</h2>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   {selectedTimesheetIds.length > 0 && (
                     <>
-                      <button onClick={() => bulkApproveTimesheets('approved')} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"><CheckCircle className="w-4 h-4" /> Approve Selected ({selectedTimesheetIds.length})</button>
-                      <button onClick={() => bulkApproveTimesheets('rejected')} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"><XCircle className="w-4 h-4" /> Reject Selected ({selectedTimesheetIds.length})</button>
+                      <button onClick={() => bulkApproveTimesheets('approved')} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><CheckCircle className="w-4 h-4" /> Approve ({selectedTimesheetIds.length})</button>
+                      <button onClick={() => bulkApproveTimesheets('rejected')} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm"><XCircle className="w-4 h-4" /> Reject ({selectedTimesheetIds.length})</button>
                     </>
                   )}
-                  <button onClick={() => exportTimesheetList(filteredTimesheets)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"><Download className="w-4 h-4" /> Export CSV</button>
+                  <button onClick={() => exportTimesheetList(filteredTimesheets)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                 </div>
               </div>
-              <div className="mb-4 flex gap-4 items-end">
+              <div className="mb-4 flex flex-wrap gap-3 items-end">
                 <div><label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label><input type="date" value={dateRange.start} onChange={e => setDateRange({...dateRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg" /></div>
                 <div><label className="block text-sm font-medium text-gray-700 mb-1">End Date</label><input type="date" value={dateRange.end} onChange={e => setDateRange({...dateRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg" /></div>
                 <button onClick={() => setDateRange({start: '', end: ''})} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Clear</button>
               </div>
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
                 <table className="w-full border-collapse">
                   <thead className="bg-indigo-600 text-white">
                     <tr>
@@ -2035,10 +2035,10 @@ const TimesheetSystem = () => {
     const consolidatedReport = generateConsolidatedReport();
 
     return (
-      <div className="min-h-screen bg-gray-50 p-6">
+      <div className="min-h-screen bg-gray-50 p-3 sm:p-6">
         <div className="max-w-7xl mx-auto">
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
               <div>
                 <h1 className="text-2xl font-bold text-gray-800">Accountant Dashboard</h1>
                 <p className="text-gray-600">Welcome, {currentUser!.name}</p>
@@ -2062,23 +2062,23 @@ const TimesheetSystem = () => {
           </div>
 
           {accountantTab === 'weekly' && (
-            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-              <div className="flex justify-between items-center mb-6">
+            <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><FileText className="w-6 h-6" /> Weekly Timesheet Report</h2>
                 <div className="flex gap-2">
-                  <button onClick={downloadCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"><Download className="w-4 h-4" /> Download CSV</button>
-                  <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"><Printer className="w-4 h-4" /> Print</button>
+                  <button onClick={downloadCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> CSV</button>
+                  <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><Printer className="w-4 h-4" /> Print</button>
                 </div>
               </div>
               <div className="flex justify-between items-center mb-6 p-4 bg-gray-50 rounded-lg">
-                <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Previous Week</button>
+                <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Prev</button>
                 <div className="text-center">
                   <h3 className="text-lg font-semibold text-gray-800">Week of {reportWeek.toLocaleDateString()}</h3>
                   <p className="text-sm text-gray-600">{weekDates[0].toLocaleDateString()} – {weekDates[4].toLocaleDateString()}</p>
                 </div>
-                <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next Week →</button>
+                <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next →</button>
               </div>
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
                 <table className="w-full border-collapse">
                   <thead>
                     <tr className="bg-indigo-600 text-white">
@@ -2286,7 +2286,7 @@ const TimesheetSystem = () => {
 
                 <div className="bg-white rounded-lg shadow-md p-6">
                   {/* Filters */}
-                  <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
+                  <div className="flex flex-col gap-3 mb-5">
                     <div className="flex flex-wrap gap-2">
                       {['all','submitted','approved','paid','rejected'].map(s => (
                         <button key={s} onClick={() => setAccountantInvoiceFilter(s)}
@@ -2296,31 +2296,37 @@ const TimesheetSystem = () => {
                         </button>
                       ))}
                     </div>
-                    <div className="flex flex-col gap-2">
-                      <div className="flex gap-2 items-center">
-                        <span className="text-xs font-medium text-gray-500 w-20 text-right">Period:</span>
-                        <input type="date" value={invoiceDateRange.start} onChange={e => setInvoiceDateRange({...invoiceDateRange, start: e.target.value})} className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
-                        <span className="text-gray-400 text-sm">to</span>
-                        <input type="date" value={invoiceDateRange.end} onChange={e => setInvoiceDateRange({...invoiceDateRange, end: e.target.value})} className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
-                        {(invoiceDateRange.start || invoiceDateRange.end) && <button onClick={() => setInvoiceDateRange({start:'',end:''})} className="text-xs text-gray-400 hover:text-gray-600 underline">Clear</button>}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <div>
+                        <span className="block text-xs font-medium text-gray-500 mb-1">Period</span>
+                        <div className="flex gap-1 items-center">
+                          <input type="date" value={invoiceDateRange.start} onChange={e => setInvoiceDateRange({...invoiceDateRange, start: e.target.value})} className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
+                          <span className="text-gray-400 text-xs">–</span>
+                          <input type="date" value={invoiceDateRange.end} onChange={e => setInvoiceDateRange({...invoiceDateRange, end: e.target.value})} className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
+                          {(invoiceDateRange.start || invoiceDateRange.end) && <button onClick={() => setInvoiceDateRange({start:'',end:''})} className="text-xs text-gray-400 hover:text-gray-600 underline ml-1">✕</button>}
+                        </div>
                       </div>
-                      <div className="flex gap-2 items-center">
-                        <span className="text-xs font-medium text-blue-600 w-20 text-right">Pay On Date:</span>
-                        <input type="date" value={invoicePayDateRange.start} onChange={e => setInvoicePayDateRange({...invoicePayDateRange, start: e.target.value})} className="px-2 py-1.5 border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-400" />
-                        <span className="text-gray-400 text-sm">to</span>
-                        <input type="date" value={invoicePayDateRange.end} onChange={e => setInvoicePayDateRange({...invoicePayDateRange, end: e.target.value})} className="px-2 py-1.5 border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-400" />
-                        {(invoicePayDateRange.start || invoicePayDateRange.end) && <button onClick={() => setInvoicePayDateRange({start:'',end:''})} className="text-xs text-blue-400 hover:text-blue-600 underline">Clear</button>}
+                      <div>
+                        <span className="block text-xs font-medium text-blue-600 mb-1">Pay On Date</span>
+                        <div className="flex gap-1 items-center">
+                          <input type="date" value={invoicePayDateRange.start} onChange={e => setInvoicePayDateRange({...invoicePayDateRange, start: e.target.value})} className="flex-1 min-w-0 px-2 py-1.5 border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-400" />
+                          <span className="text-gray-400 text-xs">–</span>
+                          <input type="date" value={invoicePayDateRange.end} onChange={e => setInvoicePayDateRange({...invoicePayDateRange, end: e.target.value})} className="flex-1 min-w-0 px-2 py-1.5 border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-400" />
+                          {(invoicePayDateRange.start || invoicePayDateRange.end) && <button onClick={() => setInvoicePayDateRange({start:'',end:''})} className="text-xs text-blue-400 hover:text-blue-600 underline ml-1">✕</button>}
+                        </div>
                       </div>
-                      <div className="flex gap-2 items-center">
-                        <span className="text-xs font-medium text-green-700 w-20 text-right">Paid Date:</span>
-                        <input type="date" value={invoicePaidDateRange.start} onChange={e => setInvoicePaidDateRange({...invoicePaidDateRange, start: e.target.value})} className="px-2 py-1.5 border border-green-200 rounded-lg text-sm focus:ring-2 focus:ring-green-400" />
-                        <span className="text-gray-400 text-sm">to</span>
-                        <input type="date" value={invoicePaidDateRange.end} onChange={e => setInvoicePaidDateRange({...invoicePaidDateRange, end: e.target.value})} className="px-2 py-1.5 border border-green-200 rounded-lg text-sm focus:ring-2 focus:ring-green-400" />
-                        {(invoicePaidDateRange.start || invoicePaidDateRange.end) && <button onClick={() => setInvoicePaidDateRange({start:'',end:''})} className="text-xs text-green-500 hover:text-green-700 underline">Clear</button>}
+                      <div>
+                        <span className="block text-xs font-medium text-green-700 mb-1">Paid Date</span>
+                        <div className="flex gap-1 items-center">
+                          <input type="date" value={invoicePaidDateRange.start} onChange={e => setInvoicePaidDateRange({...invoicePaidDateRange, start: e.target.value})} className="flex-1 min-w-0 px-2 py-1.5 border border-green-200 rounded-lg text-sm focus:ring-2 focus:ring-green-400" />
+                          <span className="text-gray-400 text-xs">–</span>
+                          <input type="date" value={invoicePaidDateRange.end} onChange={e => setInvoicePaidDateRange({...invoicePaidDateRange, end: e.target.value})} className="flex-1 min-w-0 px-2 py-1.5 border border-green-200 rounded-lg text-sm focus:ring-2 focus:ring-green-400" />
+                          {(invoicePaidDateRange.start || invoicePaidDateRange.end) && <button onClick={() => setInvoicePaidDateRange({start:'',end:''})} className="text-xs text-green-500 hover:text-green-700 underline ml-1">✕</button>}
+                        </div>
                       </div>
-                      <div className="flex justify-end">
-                        <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
-                      </div>
+                    </div>
+                    <div className="flex justify-end">
+                      <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                     </div>
                   </div>
 
@@ -2328,7 +2334,7 @@ const TimesheetSystem = () => {
                   {filtered.length === 0 ? (
                     <div className="text-center py-12 text-gray-400"><Receipt className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No invoices match the current filter</p></div>
                   ) : (
-                    <div className="overflow-x-auto">
+                    <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
                       <table className="w-full border-collapse text-sm">
                         <thead className="bg-indigo-600 text-white">
                           <tr>
@@ -2411,8 +2417,8 @@ const TimesheetSystem = () => {
             const sym = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' } as Record<string, string>)[inv.currency] || '$';
             const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
             return (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
-                <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
+                <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                   <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-start z-10">
                     <div>
                       <h2 className="text-xl font-bold text-gray-800 font-mono">{inv.invoiceNumber}</h2>
@@ -2615,10 +2621,10 @@ const TimesheetSystem = () => {
   const isUserInactive = !!(currentUser!.endDate && new Date() > parseLocalDate(currentUser!.endDate));
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
+    <div className="min-h-screen bg-gray-50 p-3 sm:p-6">
       <div className="max-w-4xl mx-auto">
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <div className="flex justify-between items-center">
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
             <div className="flex-1">
               <h1 className="text-2xl font-bold text-gray-800">My Timesheet</h1>
               <p className="text-gray-600">Welcome, {currentUser!.name}</p>
@@ -2627,21 +2633,21 @@ const TimesheetSystem = () => {
                 <span>{countries.find(c => c.code === currentUser!.country)?.name}{currentUser!.region ? ' – ' + currentUser!.region : ''}</span>
               </div>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
               {userReminders.length > 0 && (
-                <button onClick={() => setShowReminderLog(!showReminderLog)} className="relative flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 rounded-lg hover:bg-amber-200 border border-amber-300">
+                <button onClick={() => setShowReminderLog(!showReminderLog)} className="flex items-center justify-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 rounded-lg hover:bg-amber-200 border border-amber-300">
                   <Mail className="w-4 h-4" /> Reminders ({userReminders.length})
                 </button>
               )}
-              <div className="text-right">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Current Project</label>
-                <select value={currentUser!.projectId || ''} onChange={e => updateUserProject(e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 bg-white min-w-[200px]">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Current Project</label>
+                <select value={currentUser!.projectId || ''} onChange={e => updateUserProject(e.target.value)} className="w-full sm:w-auto px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 bg-white sm:min-w-[200px]">
                   <option value="">Select Project</option>
                   {activeProjects.map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
                 </select>
                 {currentProject && <p className="text-xs text-gray-500 mt-1">All hours logged to this project</p>}
               </div>
-              <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"><LogOut className="w-4 h-4" /> Logout</button>
+              <button onClick={handleLogout} className="flex items-center justify-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"><LogOut className="w-4 h-4" /> Logout</button>
             </div>
           </div>
         </div>
@@ -2865,7 +2871,7 @@ const TimesheetSystem = () => {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
             <table className="w-full border-collapse">
               <thead className="bg-indigo-600 text-white">
                 <tr>
@@ -3268,8 +3274,8 @@ const TimesheetSystem = () => {
           const sym = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' })[inv.currency] || '$';
           const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
           return (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
-              <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
+              <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                 <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-start z-10">
                   <div>
                     <h2 className="text-xl font-bold text-gray-800 font-mono">{inv.invoiceNumber}</h2>
@@ -3344,8 +3350,8 @@ const TimesheetSystem = () => {
 
         {/* Payment Profile Modal */}
         {showProfileModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setShowProfileModal(false)}>
-            <div className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => setShowProfileModal(false)}>
+            <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
               <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-center z-10">
                 <h3 className="text-lg font-bold text-gray-800">{editingProfile ? 'Edit Payment Profile' : 'New Payment Profile'}</h3>
                 <button onClick={() => setShowProfileModal(false)} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
