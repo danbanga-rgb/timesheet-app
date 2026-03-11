@@ -76,7 +76,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
 };
 
 import { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -167,6 +167,7 @@ interface Invoice {
   paymentProfile: PaymentProfile | null;
   payOnDate: string | null;          // scheduled/expected payment date set by accountant
   paidDate: string | null;           // actual date payment was made
+  attachmentPath: string | null;     // Supabase Storage path for PDF attachment
 }
 
 interface ReminderEmail {
@@ -374,6 +375,14 @@ const TimesheetSystem = () => {
   const [invoicePaidDateRange, setInvoicePaidDateRange] = useState({ start: '', end: '' });
   const [pendingPayOnDate, setPendingPayOnDate] = useState('');   // expected pay on date (set on approve or anytime)
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
+  // PDF attachment
+  const [invoiceAttachmentFile, setInvoiceAttachmentFile] = useState<File | null>(null);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
+  // Manager consolidated view
+  const [managerConsolidatedRange, setManagerConsolidatedRange] = useState({ start: '', end: '' });
+  const [managerAppliedRange, setManagerAppliedRange] = useState({ start: '', end: '' });
+  const [managerMonthPreset, setManagerMonthPreset] = useState('');
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<PaymentProfile | null>(null);
   const emptyProfileForm = (): Omit<PaymentProfile, 'id' | 'userId'> => ({
@@ -982,6 +991,7 @@ const TimesheetSystem = () => {
       paymentProfile: r.payment_profile ? (r.payment_profile as PaymentProfile) : null,
       payOnDate: (r.pay_on_date as string) || null,
       paidDate: (r.paid_date as string) || null,
+      attachmentPath: (r.attachment_path as string) || null,
     };
   }
 
@@ -1054,14 +1064,26 @@ const TimesheetSystem = () => {
       payment_profile: profile,
     };
 
-    const { error } = await supabase.from('invoices').insert(payload);
+    const { data: insertData, error } = await supabase.from('invoices').insert(payload).select('id').single();
     if (error) { alert('Error submitting invoice: ' + error.message); return; }
+
+    // Upload attachment if one was selected
+    if (invoiceAttachmentFile && insertData?.id) {
+      setAttachmentUploading(true);
+      const path = await uploadInvoiceAttachment(insertData.id, invoiceAttachmentFile);
+      if (path) {
+        await supabase.from('invoices').update({ attachment_path: path }).eq('id', insertData.id);
+      }
+      setAttachmentUploading(false);
+    }
+
     await fetchInvoices();
     setInvoiceView('list');
     setInvoiceRate('');
     setInvoiceNotes('');
     setInvoiceNumber('');
     setSelectedPaymentProfileId(null);
+    setInvoiceAttachmentFile(null);
     alert('Invoice submitted successfully!');
   };
 
@@ -1152,6 +1174,49 @@ const TimesheetSystem = () => {
     const { error } = await supabase.from('payment_profiles').delete().eq('id', profileId);
     if (error) { alert('Error: ' + error.message); return; }
     await fetchPaymentProfiles();
+  };
+
+  // ─── PDF Attachment helpers ───────────────────────────────────────────────
+  const uploadInvoiceAttachment = async (invoiceId: number, file: File): Promise<string | null> => {
+    const ext = file.name.split('.').pop() || 'pdf';
+    const path = `invoices/${currentUser!.id}/${invoiceId}_${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from('invoice-attachments').upload(path, file, { upsert: true, contentType: file.type });
+    if (error) { alert('Upload failed: ' + error.message); return null; }
+    return path;
+  };
+
+  const getAttachmentSignedUrl = async (path: string): Promise<string | null> => {
+    const { data, error } = await supabase.storage.from('invoice-attachments').createSignedUrl(path, 3600);
+    if (error || !data) return null;
+    return data.signedUrl;
+  };
+
+  const openAttachment = async (inv: Invoice) => {
+    if (!inv.attachmentPath) return;
+    // Use cached URL if fresh enough, otherwise fetch a new one
+    if (attachmentSignedUrls[inv.id]) {
+      window.open(attachmentSignedUrls[inv.id], '_blank');
+      return;
+    }
+    const url = await getAttachmentSignedUrl(inv.attachmentPath);
+    if (!url) { alert('Could not open attachment.'); return; }
+    setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: url }));
+    window.open(url, '_blank');
+  };
+
+  const handleAttachmentUploadForExisting = async (inv: Invoice, file: File) => {
+    setAttachmentUploading(true);
+    const path = await uploadInvoiceAttachment(inv.id, file);
+    if (path) {
+      const { error } = await supabase.from('invoices').update({ attachment_path: path }).eq('id', inv.id);
+      if (error) { alert('Could not save attachment reference: ' + error.message); }
+      else {
+        await fetchInvoices();
+        // Bust cached URL so next open re-fetches
+        setAttachmentSignedUrls(prev => { const n = { ...prev }; delete n[inv.id]; return n; });
+      }
+    }
+    setAttachmentUploading(false);
   };
 
   const exportInvoicesCSV = (list: Invoice[]) => {
@@ -1979,6 +2044,10 @@ const TimesheetSystem = () => {
                 <FileText className="w-5 h-5 flex-shrink-0" />
                 <span>All <span className="hidden sm:inline">Timesheets</span></span>
               </button>
+              <button onClick={() => setViewMode('consolidated')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (viewMode === 'consolidated' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <BarChart2 className="w-5 h-5 flex-shrink-0" />
+                <span>Consolidated</span>
+              </button>
             </div>
           </div>
 
@@ -2073,6 +2142,170 @@ const TimesheetSystem = () => {
             </div>
           )}
           {showTimesheetModal && <TimesheetDetailModal />}
+
+          {/* Manager Consolidated View */}
+          {viewMode === 'consolidated' && (() => {
+            // Build month options: last 12 months
+            const mgMonthOptions: { label: string; value: string; start: string; end: string }[] = [];
+            const now = new Date();
+            for (let i = 0; i < 12; i++) {
+              const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+              const label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+              const monthVal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+              const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
+              const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+              mgMonthOptions.push({ label, value: monthVal, start: formatDate(firstDay), end: formatDate(lastDay) });
+            }
+
+            // Build report — same logic as accountant but scoped to managed users only
+            const generateMgrReport = () => {
+              if (!managerAppliedRange.start || !managerAppliedRange.end) return null;
+              const startD = parseLocalDate(managerAppliedRange.start);
+              const endD = parseLocalDate(managerAppliedRange.end);
+              const teamTimesheets = timesheets.filter(t => managedUsers.some(u => u.id === t.userId));
+              const inRange = teamTimesheets.filter(t => {
+                const weekMon = parseLocalDate(t.weekStart);
+                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+                return weekMon <= endD && weekFri >= startD;
+              });
+              const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort() as string[];
+              const partialWeeks = new Set<string>();
+              weekEndings.forEach(we => {
+                const weekMon = parseLocalDate(we);
+                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+                if (weekMon < startD || weekFri > endD) partialWeeks.add(we);
+              });
+              const employeeRows = managedUsers.map(user => {
+                const hours: Record<string, number | null> = {};
+                const statuses: Record<string, string> = {};
+                let rowTotal = 0;
+                weekEndings.forEach(we => {
+                  const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
+                  if (ts) {
+                    let h = 0;
+                    Object.entries(ts.entries).forEach(([dateKey, entry]) => {
+                      const d = parseLocalDate(dateKey);
+                      if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
+                    });
+                    hours[we] = h; statuses[we] = ts.status; rowTotal += h;
+                  } else { hours[we] = null; statuses[we] = 'not submitted'; }
+                });
+                const project = projects.find(p => p.id === user.projectId);
+                return { name: user.name, country: user.country, project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
+              });
+              const colTotals: Record<string, number> = {};
+              weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
+              return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0) };
+            };
+
+            const mgrReport = generateMgrReport();
+
+            const downloadMgrCSV = () => {
+              if (!mgrReport) return;
+              const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = mgrReport;
+              let csv = 'Employee,Country,Project';
+              weekEndings.forEach(we => {
+                const weekMon = parseLocalDate(we);
+                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+                const label = partialWeeks.has(we)
+                  ? `Partial W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+                  : `W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+                csv += `,"${label}","Status"`;
+              });
+              csv += ',Total Hours\n';
+              employeeRows.forEach(row => {
+                csv += `"${row.name}","${row.country}","${row.project}"`;
+                weekEndings.forEach(we => { csv += `,"${row.hours[we] !== null ? row.hours[we]!.toFixed(1) : '-'}","${row.statuses[we]}"`; });
+                csv += `,"${row.rowTotal.toFixed(1)}"\n`;
+              });
+              csv += '"TOTAL","",""';
+              weekEndings.forEach(we => { csv += `,"${colTotals[we as string].toFixed(1)}",""`; });
+              csv += `,"${gt.toFixed(1)}"\n`;
+              triggerDownload(csv, `team_consolidated_${managerAppliedRange.start}_to_${managerAppliedRange.end}.csv`);
+            };
+
+            return (
+              <div className="bg-white rounded-lg shadow-md p-4 sm:p-6">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-5">
+                  <h2 className="text-xl font-bold text-gray-800">Team Consolidated Report</h2>
+                  {mgrReport && (
+                    <button onClick={downloadMgrCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm">
+                      <Download className="w-4 h-4" /> Export CSV
+                    </button>
+                  )}
+                </div>
+
+                {/* Controls */}
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
+                  <div className="mb-4">
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Quick Select — Month</label>
+                    <div className="flex flex-wrap gap-2">
+                      {mgMonthOptions.slice(0, 6).map(opt => (
+                        <button
+                          key={opt.value}
+                          onClick={() => {
+                            setManagerMonthPreset(opt.value);
+                            setManagerConsolidatedRange({ start: opt.start, end: opt.end });
+                            setManagerAppliedRange({ start: opt.start, end: opt.end });
+                          }}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                            managerMonthPreset === opt.value
+                              ? 'bg-indigo-600 text-white border-indigo-600'
+                              : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-3 items-end pt-3 border-t border-gray-200">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Start Date</label>
+                      <input type="date" value={managerConsolidatedRange.start}
+                        onChange={e => { setManagerConsolidatedRange(r => ({...r, start: e.target.value})); setManagerMonthPreset(''); }}
+                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">End Date</label>
+                      <input type="date" value={managerConsolidatedRange.end}
+                        onChange={e => { setManagerConsolidatedRange(r => ({...r, end: e.target.value})); setManagerMonthPreset(''); }}
+                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
+                    </div>
+                    <button
+                      onClick={() => setManagerAppliedRange({ ...managerConsolidatedRange })}
+                      disabled={!managerConsolidatedRange.start || !managerConsolidatedRange.end}
+                      className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium"
+                    >
+                      <CheckCircle className="w-4 h-4" /> Apply
+                    </button>
+                    {managerAppliedRange.start && (
+                      <button
+                        onClick={() => { setManagerAppliedRange({ start: '', end: '' }); setManagerConsolidatedRange({ start: '', end: '' }); setManagerMonthPreset(''); }}
+                        className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 underline"
+                      >Clear</button>
+                    )}
+                    {managerAppliedRange.start && managerAppliedRange.end && (
+                      <span className="text-sm text-green-700 font-medium bg-green-50 px-3 py-2 rounded-lg border border-green-200">
+                        Showing: {parseLocalDate(managerAppliedRange.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} – {parseLocalDate(managerAppliedRange.end).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {mgrReport
+                  ? <ConsolidatedTable report={mgrReport} parseLocalDate={parseLocalDate} />
+                  : (
+                    <div className="text-center py-12 text-gray-400">
+                      <BarChart2 className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                      <p className="text-base">Select a month or custom date range, then click <strong className="text-gray-500">Apply</strong>.</p>
+                      <p className="text-sm mt-1">Shows consolidated hours for your {managedUsers.length} team member(s).</p>
+                    </div>
+                  )
+                }
+              </div>
+            );
+          })()}
         </div>
       </div>
     );
@@ -2457,6 +2690,7 @@ const TimesheetSystem = () => {
                             <th className="border border-indigo-700 px-4 py-3 text-center">Pay On Date</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Paid Date</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">PDF</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Actions</th>
                           </tr>
                         </thead>
@@ -2484,6 +2718,15 @@ const TimesheetSystem = () => {
                                     : <span className="text-gray-300 text-xs">—</span>}
                                 </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
+                                <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
+                                  {inv.attachmentPath ? (
+                                    <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs font-medium">
+                                      <Paperclip className="w-3 h-3" /> PDF
+                                    </button>
+                                  ) : (
+                                    <span className="text-gray-300 text-xs">—</span>
+                                  )}
+                                </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
                                   <div className="flex items-center justify-center gap-1">
                                     {inv.status === 'submitted' && (
@@ -2593,7 +2836,28 @@ const TimesheetSystem = () => {
                     {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
                     {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
 
-                    {/* ── Submitted: approve/reject with optional Pay On Date ── */}
+                    {/* PDF Attachment — accountant view (read-only open) */}
+                    <div className="mb-5 border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
+                        <Paperclip className="w-4 h-4 text-gray-500" />
+                        <span className="font-semibold text-gray-700 text-sm">Attachment</span>
+                      </div>
+                      <div className="p-4">
+                        {inv.attachmentPath ? (
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <FileText className="w-5 h-5 text-indigo-500 flex-shrink-0" />
+                              <span className="text-sm text-gray-700 truncate">{inv.attachmentPath.split('/').pop()}</span>
+                            </div>
+                            <button onClick={() => openAttachment(inv)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 font-medium flex-shrink-0">
+                              <ExternalLink className="w-3.5 h-3.5" /> Open PDF
+                            </button>
+                          </div>
+                        ) : (
+                          <p className="text-sm text-gray-400 text-center py-2">No attachment provided</p>
+                        )}
+                      </div>
+                    </div>
                     {inv.status === 'submitted' && (
                       <div className="mt-5 space-y-3">
                         <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
@@ -3264,12 +3528,39 @@ const TimesheetSystem = () => {
                     </div>
                   )}
 
+                  {/* PDF Attachment */}
+                  <div className="mb-5 border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex items-center gap-2">
+                      <Paperclip className="w-4 h-4 text-gray-500" />
+                      <span className="font-semibold text-gray-700 text-sm">Attach PDF (optional)</span>
+                    </div>
+                    <div className="p-4">
+                      {invoiceAttachmentFile ? (
+                        <div className="flex items-center justify-between p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <FileText className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                            <span className="text-sm font-medium text-indigo-800 truncate">{invoiceAttachmentFile.name}</span>
+                            <span className="text-xs text-indigo-500 flex-shrink-0">({(invoiceAttachmentFile.size / 1024).toFixed(0)} KB)</span>
+                          </div>
+                          <button onClick={() => setInvoiceAttachmentFile(null)} className="ml-2 text-gray-400 hover:text-red-500 flex-shrink-0"><X className="w-4 h-4" /></button>
+                        </div>
+                      ) : (
+                        <label className="flex flex-col items-center justify-center gap-2 p-6 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition-colors">
+                          <UploadCloud className="w-8 h-8 text-gray-400" />
+                          <span className="text-sm text-gray-600">Click to attach a PDF</span>
+                          <span className="text-xs text-gray-400">Supporting document, timesheet printout, etc.</span>
+                          <input type="file" accept="application/pdf" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) setInvoiceAttachmentFile(f); }} />
+                        </label>
+                      )}
+                    </div>
+                  </div>
+
                   <button
                     onClick={submitInvoice}
-                    disabled={previewLines.length === 0 || !invoiceNumber.trim()}
+                    disabled={previewLines.length === 0 || !invoiceNumber.trim() || attachmentUploading}
                     className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    <Receipt className="w-5 h-5" /> Submit Invoice for Review
+                    {attachmentUploading ? <><span className="animate-spin">⏳</span> Uploading…</> : <><Receipt className="w-5 h-5" /> Submit Invoice for Review</>}
                   </button>
                 </div>
               )}
@@ -3307,10 +3598,31 @@ const TimesheetSystem = () => {
                               {inv.paymentProfile && <p className="text-xs text-gray-400 mt-0.5">💳 {inv.paymentProfile.profileName} — {inv.paymentProfile.bankName}</p>}
                               {inv.payOnDate && <p className="text-xs text-blue-600 mt-0.5 font-medium">📅 Pay on date: {new Date(inv.payOnDate).toLocaleDateString()}</p>}
                               {inv.paidDate && <p className="text-xs text-green-600 mt-0.5 font-medium">✅ Paid: {new Date(inv.paidDate).toLocaleDateString()}</p>}
+                              {/* PDF attachment badge */}
+                              {inv.attachmentPath && (
+                                <button
+                                  onClick={e => { e.stopPropagation(); openAttachment(inv); }}
+                                  className="inline-flex items-center gap-1 mt-1 text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                                >
+                                  <Paperclip className="w-3 h-3" /> View attachment <ExternalLink className="w-3 h-3" />
+                                </button>
+                              )}
                             </div>
                             <div className="text-right ml-3 flex flex-col items-end gap-2">
                               <div className="text-2xl font-bold text-indigo-600">{sym2}{inv.totalAmount.toFixed(2)}</div>
                               <div className="text-xs text-gray-400">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}</div>
+                              {/* Upload / replace attachment */}
+                              {inv.status !== 'paid' && (
+                                <label className="flex items-center gap-1 px-2 py-1 text-xs bg-indigo-50 text-indigo-600 border border-indigo-200 rounded cursor-pointer hover:bg-indigo-100">
+                                  <Paperclip className="w-3 h-3" />
+                                  {inv.attachmentPath ? 'Replace PDF' : 'Attach PDF'}
+                                  <input type="file" accept="application/pdf" className="hidden" onChange={async e => {
+                                    const f = e.target.files?.[0];
+                                    if (f) await handleAttachmentUploadForExisting(inv, f);
+                                    e.target.value = '';
+                                  }} />
+                                </label>
+                              )}
                               {inv.status === 'rejected' && (
                                 <button
                                   onClick={() => deleteInvoice(inv.id)}
@@ -3461,6 +3773,44 @@ const TimesheetSystem = () => {
                   </table>
                   {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
                   {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
+                  {/* PDF Attachment panel — user modal */}
+                  <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
+                      <Paperclip className="w-4 h-4 text-gray-500" />
+                      <span className="font-semibold text-gray-700 text-sm">Attachment</span>
+                    </div>
+                    <div className="p-4">
+                      {inv.attachmentPath ? (
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <FileText className="w-5 h-5 text-indigo-500 flex-shrink-0" />
+                            <span className="text-sm text-gray-700 truncate">{inv.attachmentPath.split('/').pop()}</span>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <button onClick={() => openAttachment(inv)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 font-medium">
+                              <ExternalLink className="w-3.5 h-3.5" /> Open PDF
+                            </button>
+                            {inv.status !== 'paid' && (
+                              <label className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200 cursor-pointer font-medium border border-gray-200">
+                                <UploadCloud className="w-3.5 h-3.5" /> Replace
+                                <input type="file" accept="application/pdf" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { await handleAttachmentUploadForExisting(inv, f); setShowInvoiceModal(false); } e.target.value = ''; }} />
+                              </label>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        inv.status !== 'paid' ? (
+                          <label className="flex flex-col items-center justify-center gap-2 p-5 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition-colors">
+                            <UploadCloud className="w-7 h-7 text-gray-400" />
+                            <span className="text-sm text-gray-600">Click to attach a PDF to this invoice</span>
+                            <input type="file" accept="application/pdf" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { await handleAttachmentUploadForExisting(inv, f); setShowInvoiceModal(false); } e.target.value = ''; }} />
+                          </label>
+                        ) : (
+                          <p className="text-sm text-gray-400 text-center py-3">No attachment</p>
+                        )
+                      )}
+                    </div>
+                  </div>
                   {inv.paymentProfile && (
                     <div className="mt-4 border border-green-200 rounded-lg overflow-hidden">
                       <div className="bg-green-50 px-4 py-2 border-b border-green-200"><span className="font-semibold text-green-800 text-sm">💳 Payment Details — {inv.paymentProfile.profileName}</span></div>
