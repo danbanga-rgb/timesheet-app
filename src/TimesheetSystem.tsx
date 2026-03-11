@@ -2082,7 +2082,7 @@ const TimesheetSystem = () => {
                 </div>
               )}
             </div>
-          ) : (
+          ) : viewMode === 'table' ? (
             <div className="bg-white rounded-lg shadow-md p-6">
               <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800">All Team Timesheets</h2>
@@ -2140,7 +2140,7 @@ const TimesheetSystem = () => {
                 </table>
               </div>
             </div>
-          )}
+          ) : null}
           {showTimesheetModal && <TimesheetDetailModal />}
 
           {/* Manager Consolidated View */}
