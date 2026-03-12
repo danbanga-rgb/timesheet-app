@@ -346,7 +346,6 @@ const TimesheetSystem = () => {
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
   const [showGeneratedPassword, setShowGeneratedPassword] = useState(false);
-  const [welcomeEmailSending, setWelcomeEmailSending] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
     email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: ''
@@ -884,7 +883,6 @@ const TimesheetSystem = () => {
       setEditingUser(null);
 
       // Send welcome email with credentials
-      setWelcomeEmailSending(true);
       try {
         const { error: emailError } = await supabase.functions.invoke('send-reminder', {
           body: {
@@ -901,8 +899,6 @@ const TimesheetSystem = () => {
         }
       } catch {
         alert(`User "${userForm.name}" created! Welcome email failed — share credentials manually:\n\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
-      } finally {
-        setWelcomeEmailSending(false);
       }
     }
   };
