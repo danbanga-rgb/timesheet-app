@@ -864,7 +864,7 @@ const TimesheetSystem = () => {
       // Insert profile row
       const { error: profileError } = await supabase.from('profiles').insert({
         id: signUpData.user.id,
-        username: userForm.email.split('@')[0],
+        username: userForm.email,
         name: userForm.name,
         role: userForm.role,
         email: userForm.email,
