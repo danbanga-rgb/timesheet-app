@@ -760,13 +760,6 @@ const TimesheetSystem = () => {
     setTimeEntries(prev => ({ ...prev, [date]: { ...prev[date], hours } }));
   };
 
-  const updateUserProject = async (projectId: string) => {
-    const pid = projectId ? parseInt(projectId) : null;
-    await supabase.from('profiles').update({ project_id: pid }).eq('id', currentUser!.id);
-    setCurrentUser({ ...currentUser!, projectId: pid });
-    setUsers(users.map(u => u.id === currentUser!.id ? { ...u, projectId: pid } : u));
-  };
-
   const submitTimesheet = async () => {
     if (!currentUser!.projectId) {
       alert('Please select a project before submitting your timesheet.');
