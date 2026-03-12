@@ -2985,7 +2985,6 @@ const TimesheetSystem = () => {
   const weekDates = getWeekDates(selectedWeek);
   const currentTimesheet = timesheets.find(t => t.userId === currentUser!.id && t.weekStart === formatDate(selectedWeek));
   const totalHours = Object.values(timeEntries).reduce((s, e) => s + parseFloat(e?.hours || '0'), 0);
-  const activeProjects = projects.filter(p => p.status === 'active');
   const currentProject = projects.find(p => p.id === currentUser!.projectId);
   const userReminders = reminderEmails.filter(r => r.userId === currentUser!.id);
   const currentWeekKey = formatDate(selectedWeek);
@@ -3014,11 +3013,15 @@ const TimesheetSystem = () => {
               )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Current Project</label>
-                <select value={currentUser!.projectId || ''} onChange={e => updateUserProject(e.target.value)} className="w-full sm:w-auto px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 bg-white sm:min-w-[200px]">
-                  <option value="">Select Project</option>
-                  {activeProjects.map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
-                </select>
-                {currentProject && <p className="text-xs text-gray-500 mt-1">All hours logged to this project</p>}
+                {currentProject ? (
+                  <div className="px-4 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-sm font-medium text-indigo-800 sm:min-w-[200px]">
+                    {currentProject.name} <span className="text-indigo-500 font-mono text-xs">({currentProject.code})</span>
+                  </div>
+                ) : (
+                  <div className="px-4 py-2 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700 sm:min-w-[200px]">
+                    No project assigned — contact your manager
+                  </div>
+                )}
               </div>
               <button onClick={handleLogout} className="flex items-center justify-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"><LogOut className="w-4 h-4" /> Logout</button>
             </div>
