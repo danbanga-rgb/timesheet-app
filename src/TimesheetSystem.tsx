@@ -76,7 +76,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
 };
 
 import { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2 } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -345,6 +345,8 @@ const TimesheetSystem = () => {
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
+  const [showGeneratedPassword, setShowGeneratedPassword] = useState(false);
+  const [welcomeEmailSending, setWelcomeEmailSending] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
     email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: ''
@@ -805,14 +807,21 @@ const TimesheetSystem = () => {
   };
 
   // ─── ADMIN: USER MANAGEMENT ───────────────────────────────────────────────
+  const generatePassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+    return Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  };
+
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
       setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '' });
     } else {
       setEditingUser(null);
-      setUserForm({ email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '' });
+      const autoPassword = generatePassword();
+      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '' });
     }
+    setShowGeneratedPassword(true);
     setShowUserModal(true);
   };
 
@@ -870,10 +879,31 @@ const TimesheetSystem = () => {
 
       if (profileError) { alert('User auth created but profile failed: ' + profileError.message); return; }
 
-      alert(`User "${userForm.name}" created successfully! They can now log in with their email and password.`);
       await fetchUsers();
       setShowUserModal(false);
       setEditingUser(null);
+
+      // Send welcome email with credentials
+      setWelcomeEmailSending(true);
+      try {
+        const { error: emailError } = await supabase.functions.invoke('send-reminder', {
+          body: {
+            action: 'welcome',
+            toEmail: userForm.email,
+            toName: userForm.name,
+            password: userForm.password,
+          }
+        });
+        if (emailError) {
+          alert(`User "${userForm.name}" created! Welcome email failed to send — please share credentials manually:\n\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
+        } else {
+          alert(`User "${userForm.name}" created! Welcome email with login credentials sent to ${userForm.email}.`);
+        }
+      } catch {
+        alert(`User "${userForm.name}" created! Welcome email failed — share credentials manually:\n\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
+      } finally {
+        setWelcomeEmailSending(false);
+      }
     }
   };
 
@@ -1438,13 +1468,15 @@ const TimesheetSystem = () => {
                 <div className="text-right"><div className="text-sm opacity-90">Standard Week</div><div className="text-2xl font-semibold mt-1">40h</div>{totalHours !== 40 && <div className="text-sm mt-1">{totalHours > 40 ? '+' : ''}{(totalHours - 40).toFixed(1)}h</div>}</div>
               </div>
             </div>
-            {currentUser?.role === 'manager' && selectedTimesheetForView.status === 'pending' && (
+            {currentUser?.role === 'manager' && selectedTimesheetForView.status !== 'rejected' && (
               <div className="mt-6 flex gap-3">
-                <button onClick={async () => { await handleApproval(selectedTimesheetForView.id, 'approved'); closeTimesheetModal(); alert('Timesheet approved!'); }} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium">
-                  <CheckCircle className="w-5 h-5" /> Approve Timesheet
-                </button>
-                <button onClick={async () => { await handleApproval(selectedTimesheetForView.id, 'rejected'); closeTimesheetModal(); alert('Timesheet rejected!'); }} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium">
-                  <XCircle className="w-5 h-5" /> Reject Timesheet
+                {selectedTimesheetForView.status === 'pending' && (
+                  <button onClick={async () => { await handleApproval(selectedTimesheetForView.id, 'approved'); closeTimesheetModal(); alert('Timesheet approved!'); }} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium">
+                    <CheckCircle className="w-5 h-5" /> Approve Timesheet
+                  </button>
+                )}
+                <button onClick={async () => { if (!window.confirm('Reject this timesheet? The employee will need to resubmit.')) return; await handleApproval(selectedTimesheetForView.id, 'rejected'); closeTimesheetModal(); alert('Timesheet rejected.'); }} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium">
+                  <XCircle className="w-5 h-5" /> {selectedTimesheetForView.status === 'approved' ? 'Revoke & Reject' : 'Reject Timesheet'}
                 </button>
               </div>
             )}
@@ -1899,8 +1931,34 @@ const TimesheetSystem = () => {
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Email *</label><input type="email" value={userForm.email} onChange={e => setUserForm({...userForm, email: e.target.value})} disabled={!!editingUser} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100" placeholder="john@company.com" /></div>
                     {!editingUser ? (
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
-                        <input type="password" value={userForm.password} onChange={e => setUserForm({...userForm, password: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Min. 6 characters" />
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Generated Password</label>
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <input
+                              type={showGeneratedPassword ? 'text' : 'password'}
+                              value={userForm.password}
+                              onChange={e => setUserForm({...userForm, password: e.target.value})}
+                              className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm bg-indigo-50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowGeneratedPassword(!showGeneratedPassword)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                              title={showGeneratedPassword ? 'Hide' : 'Show'}
+                            >
+                              {showGeneratedPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setUserForm({...userForm, password: generatePassword()})}
+                            className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm whitespace-nowrap"
+                            title="Generate new password"
+                          >
+                            ↻ New
+                          </button>
+                        </div>
+                        <p className="text-xs text-indigo-600 mt-1">✉ This password will be emailed to the user automatically on save.</p>
                       </div>
                     ) : (
                       <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
