@@ -807,8 +807,19 @@ const TimesheetSystem = () => {
 
   // ─── ADMIN: USER MANAGEMENT ───────────────────────────────────────────────
   const generatePassword = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
-    return Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const lower = 'abcdefghjkmnpqrstuvwxyz';
+    const digits = '23456789';
+    const symbols = '!@#$%^&*';
+    const all = upper + lower + digits + symbols;
+    const required = [
+      upper[Math.floor(Math.random() * upper.length)],
+      lower[Math.floor(Math.random() * lower.length)],
+      digits[Math.floor(Math.random() * digits.length)],
+      symbols[Math.floor(Math.random() * symbols.length)],
+    ];
+    const rest = Array.from({ length: 8 }, () => all[Math.floor(Math.random() * all.length)]);
+    return [...required, ...rest].sort(() => Math.random() - 0.5).join('');
   };
 
   const openUserModal = (user?: UserProfile) => {
