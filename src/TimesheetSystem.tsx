@@ -915,16 +915,20 @@ const TimesheetSystem = () => {
 
       // Send welcome email with credentials
       try {
-        const { error: emailError } = await supabase.functions.invoke('send-reminder', {
-          body: {
-            action: 'welcome',
-            toEmail: createdEmail,
-            toName: createdName,
-            password: createdPassword,
-          }
+        const { data: { session } } = await supabase.auth.getSession();
+        const fnUrl = `${(supabase as any).supabaseUrl}/functions/v1/send-reminder`;
+        const fnRes = await fetch(fnUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session?.access_token || (supabase as any).supabaseKey}`,
+            'apikey': (supabase as any).supabaseKey,
+          },
+          body: JSON.stringify({ action: 'welcome', toEmail: createdEmail, toName: createdName, password: createdPassword }),
         });
-        if (emailError) {
-          alert(`User "${createdName}" created! Welcome email failed:\n${emailError.message}\n\nShare manually:\nEmail: ${createdEmail}\nPassword: ${createdPassword}`);
+        const fnData = await fnRes.json();
+        if (!fnRes.ok) {
+          alert(`User "${createdName}" created! Welcome email failed:\n${JSON.stringify(fnData)}\n\nShare manually:\nEmail: ${createdEmail}\nPassword: ${createdPassword}`);
         } else {
           alert(`User "${createdName}" created! Welcome email sent to ${createdEmail}.`);
         }
