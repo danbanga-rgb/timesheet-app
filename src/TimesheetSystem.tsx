@@ -904,6 +904,11 @@ const TimesheetSystem = () => {
         return;
       }
 
+      // Capture credentials before closing modal (state resets on close)
+      const createdEmail = userForm.email;
+      const createdName = userForm.name;
+      const createdPassword = userForm.password;
+
       await fetchUsers();
       setShowUserModal(false);
       setEditingUser(null);
@@ -913,19 +918,19 @@ const TimesheetSystem = () => {
         const { error: emailError } = await supabase.functions.invoke('send-reminder', {
           body: {
             action: 'welcome',
-            toEmail: userForm.email,
-            toName: userForm.name,
-            password: userForm.password,
+            toEmail: createdEmail,
+            toName: createdName,
+            password: createdPassword,
           }
         });
         if (emailError) {
-          alert(`User "${userForm.name}" created! Welcome email failed:\n${emailError.message}\n\nShare manually:\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
+          alert(`User "${createdName}" created! Welcome email failed:\n${emailError.message}\n\nShare manually:\nEmail: ${createdEmail}\nPassword: ${createdPassword}`);
         } else {
-          alert(`User "${userForm.name}" created! Welcome email sent to ${userForm.email}.`);
+          alert(`User "${createdName}" created! Welcome email sent to ${createdEmail}.`);
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : JSON.stringify(err);
-        alert(`User "${userForm.name}" created! Welcome email failed:\n${msg}\n\nShare manually:\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
+        alert(`User "${createdName}" created! Welcome email failed:\n${msg}\n\nShare manually:\nEmail: ${createdEmail}\nPassword: ${createdPassword}`);
       }
     }
   };
