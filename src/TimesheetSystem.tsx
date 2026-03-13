@@ -861,11 +861,23 @@ const TimesheetSystem = () => {
       if (!userForm.password) { alert('Password is required for new users'); return; }
       if (userForm.password.length < 6) { alert('Password must be at least 6 characters'); return; }
 
+      // Pre-check: does a profile with this email already exist?
+      const { data: existingProfile } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('email', userForm.email)
+        .maybeSingle();
+
+      if (existingProfile) {
+        alert(`A user with email "${userForm.email}" already exists. Please use a different email.`);
+        return;
+      }
+
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email: userForm.email,
         password: userForm.password,
         options: {
-          data: { name: userForm.name } // stored in auth.users metadata
+          data: { name: userForm.name }
         }
       });
 
@@ -887,7 +899,10 @@ const TimesheetSystem = () => {
         end_date: userForm.end_date || null,
       });
 
-      if (profileError) { alert('User auth created but profile failed: ' + profileError.message); return; }
+      if (profileError) {
+        alert(`Profile creation failed: ${profileError.message}\n\nPlease go to Supabase → Authentication → Users, delete the entry for ${userForm.email}, then try again.`);
+        return;
+      }
 
       await fetchUsers();
       setShowUserModal(false);
@@ -904,12 +919,13 @@ const TimesheetSystem = () => {
           }
         });
         if (emailError) {
-          alert(`User "${userForm.name}" created! Welcome email failed to send — please share credentials manually:\n\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
+          alert(`User "${userForm.name}" created! Welcome email failed:\n${emailError.message}\n\nShare manually:\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
         } else {
-          alert(`User "${userForm.name}" created! Welcome email with login credentials sent to ${userForm.email}.`);
+          alert(`User "${userForm.name}" created! Welcome email sent to ${userForm.email}.`);
         }
-      } catch {
-        alert(`User "${userForm.name}" created! Welcome email failed — share credentials manually:\n\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : JSON.stringify(err);
+        alert(`User "${userForm.name}" created! Welcome email failed:\n${msg}\n\nShare manually:\nEmail: ${userForm.email}\nPassword: ${userForm.password}`);
       }
     }
   };
