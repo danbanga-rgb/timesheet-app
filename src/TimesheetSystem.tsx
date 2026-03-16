@@ -92,6 +92,7 @@ interface UserProfile {
   projectId: number | null;
   startDate: string | null;
   endDate: string | null;
+  phone: string | null;
 }
 
 interface Project {
@@ -194,6 +195,7 @@ interface UserForm {
   project_id: number | null;
   start_date: string;
   end_date: string;
+  phone: string;
 }
 
 interface ProjectForm {
@@ -378,6 +380,7 @@ const TimesheetSystem = () => {
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   // PDF attachment
   const [invoiceAttachmentFile, setInvoiceAttachmentFile] = useState<File | null>(null);
+  const [invoicePhoneConfirm, setInvoicePhoneConfirm] = useState('');
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   // Manager consolidated view
@@ -517,6 +520,7 @@ const TimesheetSystem = () => {
       projectId: (p.project_id as number) || null,
       startDate: (p.start_date as string) || null,
       endDate: (p.end_date as string) || null,
+      phone: (p.phone as string) || null,
     };
   }
 
@@ -825,7 +829,7 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '' });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '' });
     } else {
       setEditingUser(null);
       const autoPassword = generatePassword();
@@ -850,6 +854,7 @@ const TimesheetSystem = () => {
         project_id: userForm.project_id,
         start_date: userForm.start_date || null,
         end_date: userForm.end_date || null,
+        phone: userForm.phone || null,
       };
       const { error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id);
       if (error) { alert('Error updating user: ' + error.message); return; }
@@ -897,6 +902,7 @@ const TimesheetSystem = () => {
         project_id: userForm.project_id,
         start_date: userForm.start_date || null,
         end_date: userForm.end_date || null,
+        phone: userForm.phone || null,
       });
 
       if (profileError) {
@@ -1092,6 +1098,8 @@ const TimesheetSystem = () => {
     const duplicate = invoices.find(i => i.invoiceNumber.toUpperCase() === invNumTrimmed && i.status !== 'rejected');
     if (duplicate) { alert(`Invoice number "${invNumTrimmed}" is already used by invoice #${duplicate.id}. Please use a unique number.`); return; }
 
+    if (!invoicePhoneConfirm.trim()) { alert('Please confirm your contact phone number.'); return; }
+
     const lines = buildInvoiceLines(currentUser!.id, invoiceMonth.start, invoiceMonth.end, rate);
     if (lines.length === 0) { alert('No approved timesheets found in this period.'); return; }
 
@@ -1132,11 +1140,19 @@ const TimesheetSystem = () => {
       setAttachmentUploading(false);
     }
 
+    // Save phone back to profile if changed
+    const trimmedPhone = invoicePhoneConfirm.trim();
+    if (trimmedPhone && trimmedPhone !== currentUser!.phone) {
+      await supabase.from('profiles').update({ phone: trimmedPhone }).eq('id', currentUser!.id);
+      setCurrentUser({ ...currentUser!, phone: trimmedPhone });
+    }
+
     await fetchInvoices();
     setInvoiceView('list');
     setInvoiceRate('');
     setInvoiceNotes('');
     setInvoiceNumber('');
+    setInvoicePhoneConfirm('');
     setSelectedPaymentProfileId(null);
     setInvoiceAttachmentFile(null);
     alert('Invoice submitted successfully!');
@@ -1186,8 +1202,8 @@ const TimesheetSystem = () => {
   };
 
   const savePaymentProfile = async () => {
-    if (!profileForm.profileName || !profileForm.companyName || !profileForm.bankName || !profileForm.accountNumber) {
-      alert('Please fill in Profile Name, Company Name, Bank Name and Account Number.'); return;
+    if (!profileForm.profileName || !profileForm.companyName || !profileForm.bankName || !profileForm.accountNumber || !profileForm.swift) {
+      alert('Please fill in all required fields: Profile Label, Company Name, Bank Name, Account Number and SWIFT/BIC.'); return;
     }
     const payload = {
       user_id: currentUser!.id,
@@ -1702,6 +1718,7 @@ const TimesheetSystem = () => {
                     <tr>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Name</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Email</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Phone</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Role</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Location</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Start Date</th>
@@ -1715,6 +1732,7 @@ const TimesheetSystem = () => {
                       <tr key={user.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3 text-sm text-gray-800">{user.name}</td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.email}</td>
+                        <td className="px-4 py-3 text-sm text-gray-600">{user.phone || <span className="text-gray-400 italic">—</span>}</td>
                         <td className="px-4 py-3 text-sm">
                           <span className={'px-2 py-1 rounded-full text-xs font-medium ' + (user.role === 'admin' ? 'bg-purple-100 text-purple-800' : user.role === 'manager' ? 'bg-blue-100 text-blue-800' : user.role === 'accountant' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800')}>
                             {user.role === 'timesheetuser' ? 'TimesheetUser' : user.role.charAt(0).toUpperCase() + user.role.slice(1)}
@@ -1961,6 +1979,11 @@ const TimesheetSystem = () => {
                   <div className="space-y-4">
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label><input type="text" value={userForm.name} onChange={e => setUserForm({...userForm, name: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="John Doe" /></div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Email *</label><input type="email" value={userForm.email} onChange={e => setUserForm({...userForm, email: e.target.value})} disabled={!!editingUser} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100" placeholder="john@company.com" /></div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Phone (international format)</label>
+                      <input type="tel" value={userForm.phone} onChange={e => setUserForm({...userForm, phone: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="+44 7700 900123" />
+                      <p className="text-xs text-gray-400 mt-1">Include country code, e.g. +1 555 123 4567</p>
+                    </div>
                     {!editingUser ? (
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Generated Password</label>
@@ -3439,7 +3462,7 @@ const TimesheetSystem = () => {
                   <button
                     onClick={() => {
                       setInvoiceView(invoiceView === 'list' ? 'create' : 'list');
-                      if (invoiceView === 'list') setInvoiceNumber('');
+                      if (invoiceView === 'list') { setInvoiceNumber(''); setInvoicePhoneConfirm(currentUser?.phone || ''); }
                     }}
                     className={'flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium ' + (invoiceView === 'create' ? 'bg-gray-200 text-gray-700' : 'bg-indigo-600 text-white hover:bg-indigo-700')}
                   >
@@ -3641,9 +3664,24 @@ const TimesheetSystem = () => {
                     </div>
                   </div>
 
+                  {/* Phone confirmation */}
+                  <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">
+                      Contact Phone Number *
+                    </label>
+                    <input
+                      type="tel"
+                      value={invoicePhoneConfirm}
+                      onChange={e => setInvoicePhoneConfirm(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm"
+                      placeholder={currentUser?.phone || '+1 555 123 4567'}
+                    />
+                    <p className="text-xs text-gray-400 mt-1">Please confirm your number in case we need to contact you about this invoice. Updates your profile if changed.</p>
+                  </div>
+
                   <button
                     onClick={submitInvoice}
-                    disabled={previewLines.length === 0 || !invoiceNumber.trim() || attachmentUploading}
+                    disabled={previewLines.length === 0 || !invoiceNumber.trim() || attachmentUploading || !invoicePhoneConfirm.trim()}
                     className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {attachmentUploading ? <><span className="animate-spin">⏳</span> Uploading…</> : <><Receipt className="w-5 h-5" /> Submit Invoice for Review</>}
@@ -3971,7 +4009,7 @@ const TimesheetSystem = () => {
                         <input type="text" value={profileForm.iban} onChange={e => setProfileForm({...profileForm, iban: e.target.value.toUpperCase()})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm font-mono" placeholder="e.g. GB29 NWBK..." />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">SWIFT / BIC</label>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">SWIFT / BIC *</label>
                         <input type="text" value={profileForm.swift} onChange={e => setProfileForm({...profileForm, swift: e.target.value.toUpperCase()})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm font-mono" placeholder="e.g. NWBKGB2L" />
                       </div>
                     </div>
