@@ -381,6 +381,13 @@ const TimesheetSystem = () => {
   // PDF attachment
   const [invoiceAttachmentFile, setInvoiceAttachmentFile] = useState<File | null>(null);
   const [invoicePhoneConfirm, setInvoicePhoneConfirm] = useState('');
+  const [profileNewPassword, setProfileNewPassword] = useState('');
+  const [profileConfirmPassword, setProfileConfirmPassword] = useState('');
+  const [profileShowNewPw, setProfileShowNewPw] = useState(false);
+  const [profileShowConfirmPw, setProfileShowConfirmPw] = useState(false);
+  const [profilePwLoading, setProfilePwLoading] = useState(false);
+  const [profilePhone, setProfilePhone] = useState('');
+  const [profilePhoneSaving, setProfilePhoneSaving] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   // Manager consolidated view
@@ -3962,130 +3969,117 @@ const TimesheetSystem = () => {
         {showTimesheetModal && <TimesheetDetailModal />}
 
         {/* Profile Tab */}
-        {userTab === 'profile' && (() => {
-          const [currentPassword, setCurrentPassword] = React.useState('');
-          const [newPassword, setNewPassword] = React.useState('');
-          const [confirmPassword, setConfirmPassword] = React.useState('');
-          const [showCurrentPw, setShowCurrentPw] = React.useState(false);
-          const [showNewPw, setShowNewPw] = React.useState(false);
-          const [pwLoading, setPwLoading] = React.useState(false);
-          const [phoneValue, setPhoneValue] = React.useState(currentUser!.phone || '');
-          const [phoneSaving, setPhoneSaving] = React.useState(false);
-
-          const handleChangePassword = async () => {
-            if (!newPassword) { alert('Please enter a new password.'); return; }
-            if (newPassword.length < 8) { alert('Password must be at least 8 characters.'); return; }
-            if (newPassword !== confirmPassword) { alert('Passwords do not match.'); return; }
-            setPwLoading(true);
-            const { error } = await supabase.auth.updateUser({ password: newPassword });
-            setPwLoading(false);
-            if (error) { alert('Error updating password: ' + error.message); return; }
-            setCurrentPassword(''); setNewPassword(''); setConfirmPassword('');
-            alert('Password updated successfully!');
-          };
-
-          const handleSavePhone = async () => {
-            setPhoneSaving(true);
-            const { error } = await supabase.from('profiles').update({ phone: phoneValue.trim() || null }).eq('id', currentUser!.id);
-            setPhoneSaving(false);
-            if (error) { alert('Error saving phone: ' + error.message); return; }
-            setCurrentUser({ ...currentUser!, phone: phoneValue.trim() || null });
-            alert('Phone number saved!');
-          };
-
-          return (
-            <div className="space-y-6">
-              {/* Contact Info */}
-              <div className="bg-white rounded-lg shadow-md p-6">
-                <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                  <MapPin className="w-5 h-5 text-indigo-600" /> Contact Information
-                </h3>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-                    <input type="text" value={currentUser!.name} disabled className="w-full px-3 py-2 border border-gray-200 rounded-lg bg-gray-50 text-gray-500" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                    <input type="email" value={currentUser!.email} disabled className="w-full px-3 py-2 border border-gray-200 rounded-lg bg-gray-50 text-gray-500" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Phone (international format)</label>
-                    <div className="flex gap-2">
-                      <input
-                        type="tel"
-                        value={phoneValue}
-                        onChange={e => setPhoneValue(e.target.value)}
-                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                        placeholder="+44 7700 900123"
-                      />
-                      <button
-                        onClick={handleSavePhone}
-                        disabled={phoneSaving}
-                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 font-medium text-sm"
-                      >
-                        {phoneSaving ? 'Saving…' : 'Save'}
-                      </button>
-                    </div>
-                    <p className="text-xs text-gray-400 mt-1">Include country code, e.g. +1 555 123 4567</p>
-                  </div>
+        {userTab === 'profile' && (
+          <div className="space-y-6">
+            {/* Contact Info */}
+            <div className="bg-white rounded-lg shadow-md p-6">
+              <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <MapPin className="w-5 h-5 text-indigo-600" /> Contact Information
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                  <input type="text" value={currentUser!.name} disabled className="w-full px-3 py-2 border border-gray-200 rounded-lg bg-gray-50 text-gray-500" />
                 </div>
-              </div>
-
-              {/* Change Password */}
-              <div className="bg-white rounded-lg shadow-md p-6">
-                <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                  <Settings className="w-5 h-5 text-indigo-600" /> Change Password
-                </h3>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
-                    <div className="relative">
-                      <input
-                        type={showNewPw ? 'text' : 'password'}
-                        value={newPassword}
-                        onChange={e => setNewPassword(e.target.value)}
-                        className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                        placeholder="Min. 8 characters"
-                      />
-                      <button type="button" onClick={() => setShowNewPw(!showNewPw)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                        {showNewPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input type="email" value={currentUser!.email} disabled className="w-full px-3 py-2 border border-gray-200 rounded-lg bg-gray-50 text-gray-500" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone (international format)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="tel"
+                      value={profilePhone || currentUser!.phone || ''}
+                      onChange={e => setProfilePhone(e.target.value)}
+                      onFocus={() => { if (!profilePhone) setProfilePhone(currentUser!.phone || ''); }}
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                      placeholder="+44 7700 900123"
+                    />
+                    <button
+                      onClick={async () => {
+                        setProfilePhoneSaving(true);
+                        const val = profilePhone.trim() || null;
+                        const { error } = await supabase.from('profiles').update({ phone: val }).eq('id', currentUser!.id);
+                        setProfilePhoneSaving(false);
+                        if (error) { alert('Error saving phone: ' + error.message); return; }
+                        setCurrentUser({ ...currentUser!, phone: val });
+                        alert('Phone number saved!');
+                      }}
+                      disabled={profilePhoneSaving}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 font-medium text-sm"
+                    >
+                      {profilePhoneSaving ? 'Saving…' : 'Save'}
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
-                    <div className="relative">
-                      <input
-                        type={showCurrentPw ? 'text' : 'password'}
-                        value={confirmPassword}
-                        onChange={e => setConfirmPassword(e.target.value)}
-                        className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                        placeholder="Re-enter new password"
-                      />
-                      <button type="button" onClick={() => setShowCurrentPw(!showCurrentPw)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                        {showCurrentPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                    {confirmPassword && newPassword !== confirmPassword && (
-                      <p className="text-xs text-red-500 mt-1">Passwords do not match</p>
-                    )}
-                    {confirmPassword && newPassword === confirmPassword && (
-                      <p className="text-xs text-green-600 mt-1">✓ Passwords match</p>
-                    )}
-                  </div>
-                  <button
-                    onClick={handleChangePassword}
-                    disabled={pwLoading || !newPassword || newPassword !== confirmPassword}
-                    className="w-full py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 font-medium"
-                  >
-                    {pwLoading ? 'Updating…' : 'Update Password'}
-                  </button>
+                  <p className="text-xs text-gray-400 mt-1">Include country code, e.g. +1 555 123 4567</p>
                 </div>
               </div>
             </div>
-          );
-        })()}
+
+            {/* Change Password */}
+            <div className="bg-white rounded-lg shadow-md p-6">
+              <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <Settings className="w-5 h-5 text-indigo-600" /> Change Password
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+                  <div className="relative">
+                    <input
+                      type={profileShowNewPw ? 'text' : 'password'}
+                      value={profileNewPassword}
+                      onChange={e => setProfileNewPassword(e.target.value)}
+                      className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                      placeholder="Min. 8 characters"
+                    />
+                    <button type="button" onClick={() => setProfileShowNewPw(!profileShowNewPw)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      {profileShowNewPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
+                  <div className="relative">
+                    <input
+                      type={profileShowConfirmPw ? 'text' : 'password'}
+                      value={profileConfirmPassword}
+                      onChange={e => setProfileConfirmPassword(e.target.value)}
+                      className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                      placeholder="Re-enter new password"
+                    />
+                    <button type="button" onClick={() => setProfileShowConfirmPw(!profileShowConfirmPw)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      {profileShowConfirmPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  {profileConfirmPassword && profileNewPassword !== profileConfirmPassword && (
+                    <p className="text-xs text-red-500 mt-1">Passwords do not match</p>
+                  )}
+                  {profileConfirmPassword && profileNewPassword === profileConfirmPassword && (
+                    <p className="text-xs text-green-600 mt-1">✓ Passwords match</p>
+                  )}
+                </div>
+                <button
+                  onClick={async () => {
+                    if (!profileNewPassword) { alert('Please enter a new password.'); return; }
+                    if (profileNewPassword.length < 8) { alert('Password must be at least 8 characters.'); return; }
+                    if (profileNewPassword !== profileConfirmPassword) { alert('Passwords do not match.'); return; }
+                    setProfilePwLoading(true);
+                    const { error } = await supabase.auth.updateUser({ password: profileNewPassword });
+                    setProfilePwLoading(false);
+                    if (error) { alert('Error updating password: ' + error.message); return; }
+                    setProfileNewPassword(''); setProfileConfirmPassword('');
+                    alert('Password updated successfully!');
+                  }}
+                  disabled={profilePwLoading || !profileNewPassword || profileNewPassword !== profileConfirmPassword}
+                  className="w-full py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 font-medium"
+                >
+                  {profilePwLoading ? 'Updating…' : 'Update Password'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Payment Profile Modal */}
         {showProfileModal && (
