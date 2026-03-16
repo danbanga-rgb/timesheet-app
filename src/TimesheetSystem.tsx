@@ -350,7 +350,7 @@ const TimesheetSystem = () => {
   const [showGeneratedPassword, setShowGeneratedPassword] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: ''
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: ''
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -833,7 +833,7 @@ const TimesheetSystem = () => {
     } else {
       setEditingUser(null);
       const autoPassword = generatePassword();
-      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '' });
+      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '' });
     }
     setShowGeneratedPassword(true);
     setShowUserModal(true);
