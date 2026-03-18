@@ -43,7 +43,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
             {employeeRows.map((row, ri) => (
               <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                 <td className="border border-gray-300 px-3 py-2 font-semibold">{row.name}</td>
-                <td className="border border-gray-300 px-3 py-2 text-gray-500">{countryName(row.country)}</td>
+                <td className="border border-gray-300 px-3 py-2 text-gray-500">{row.country}</td>
                 <td className="border border-gray-300 px-3 py-2 text-indigo-600 text-xs">{row.project}</td>
                 {weekEndings.map((we: string) => {
                   const h = row.hours[we];
