@@ -217,6 +217,39 @@ const tzMap: Record<string, string> = {
   'MK-North Macedonia': 'Europe/Skopje',
 };
 
+
+// World countries for payment profile (excludes sanctioned countries)
+const WORLD_COUNTRIES = [
+  "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda",
+  "Argentina","Armenia","Australia","Austria","Azerbaijan","Bahamas","Bahrain",
+  "Bangladesh","Barbados","Belgium","Belize","Benin","Bhutan","Bolivia",
+  "Bosnia and Herzegovina","Botswana","Brazil","Brunei","Bulgaria","Burkina Faso",
+  "Burundi","Cabo Verde","Cambodia","Cameroon","Canada","Central African Republic",
+  "Chad","Chile","China","Colombia","Comoros","Congo (Brazzaville)",
+  "Congo (Kinshasa)","Costa Rica","Croatia","Cyprus","Czech Republic","Denmark",
+  "Djibouti","Dominica","Dominican Republic","Ecuador","Egypt","El Salvador",
+  "Equatorial Guinea","Eritrea","Estonia","Eswatini","Ethiopia","Fiji","Finland",
+  "France","Gabon","Gambia","Georgia","Germany","Ghana","Greece","Grenada",
+  "Guatemala","Guinea","Guinea-Bissau","Guyana","Haiti","Honduras","Hungary",
+  "Iceland","India","Indonesia","Iraq","Ireland","Israel","Italy","Jamaica",
+  "Japan","Jordan","Kazakhstan","Kenya","Kiribati","Kosovo","Kuwait","Kyrgyzstan",
+  "Laos","Latvia","Lebanon","Lesotho","Liberia","Liechtenstein","Lithuania",
+  "Luxembourg","Madagascar","Malawi","Malaysia","Maldives","Mali","Malta",
+  "Marshall Islands","Mauritania","Mauritius","Mexico","Micronesia","Moldova",
+  "Monaco","Mongolia","Montenegro","Morocco","Mozambique","Namibia","Nauru",
+  "Nepal","Netherlands","New Zealand","Nicaragua","Niger","Nigeria","North Macedonia",
+  "Norway","Oman","Pakistan","Palau","Palestine","Panama","Papua New Guinea",
+  "Paraguay","Peru","Philippines","Poland","Portugal","Qatar","Romania","Rwanda",
+  "Saint Kitts and Nevis","Saint Lucia","Saint Vincent and the Grenadines","Samoa",
+  "San Marino","Sao Tome and Principe","Saudi Arabia","Senegal","Serbia",
+  "Seychelles","Sierra Leone","Singapore","Slovakia","Slovenia","Solomon Islands",
+  "South Africa","South Korea","Spain","Sri Lanka","Suriname","Sweden","Switzerland",
+  "Taiwan","Tajikistan","Tanzania","Thailand","Timor-Leste","Togo","Tonga",
+  "Trinidad and Tobago","Tunisia","Turkey","Turkmenistan","Tuvalu","Uganda",
+  "Ukraine","United Arab Emirates","United Kingdom","United States","Uruguay",
+  "Uzbekistan","Vanuatu","Vatican City","Vietnam","Zambia"
+].sort();
+
 const TimesheetSystem = () => {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -331,6 +364,10 @@ const TimesheetSystem = () => {
   ];
 
   const countryName = (code: string) => countries.find(c => c.code === code)?.name || code;
+  const paymentMethod = (inv: Invoice) => {
+    const country = inv.paymentProfile?.country || '';
+    return (country === 'United States' || country === 'US') ? 'Intuit' : 'Convera';
+  };
 
   const [timesheets, setTimesheets] = useState<Timesheet[]>([]);
   const timesheetsRef = useRef<Timesheet[]>([]);
@@ -1302,7 +1339,7 @@ const TimesheetSystem = () => {
   const exportInvoicesCSV = (list: Invoice[]) => {
     const headers = [
       'Invoice No','Employee','Project','Period Start','Period End',
-      'Total Hours','Rate','Total Amount','Currency','Status','Submitted','Pay On Date','Paid Date',
+      'Total Hours','Rate','Total Amount','Currency','Status','Submitted','Pay On Date','Paid Date','Payment Method',
       'Company Name','Company Address','Country',
       'Bank Name','Bank Address','Bank Branch',
       'Account Number','IBAN','SWIFT/BIC','Payment Email'
@@ -1325,6 +1362,7 @@ const TimesheetSystem = () => {
         `"${inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}"`,
         `"${inv.payOnDate ? new Date(inv.payOnDate).toLocaleDateString() : ''}"`,
         `"${inv.paidDate ? new Date(inv.paidDate).toLocaleDateString() : ''}"`,
+        `"${inv.paymentProfile ? paymentMethod(inv) : ''}"`,
         `"${pp?.companyName || ''}"`,
         `"${pp?.companyAddress || ''}"`,
         `"${pp?.country || ''}"`,
@@ -2803,6 +2841,7 @@ const TimesheetSystem = () => {
                             <th className="border border-indigo-700 px-4 py-3 text-center">Rate</th>
                             <th className="border border-indigo-700 px-4 py-3 text-right">Amount</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Pay On Date</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Payment Method</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Paid Date</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">PDF</th>
@@ -2825,6 +2864,11 @@ const TimesheetSystem = () => {
                                 <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
                                   {inv.payOnDate
                                     ? <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">{new Date(inv.payOnDate).toLocaleDateString()}</span>
+                                    : <span className="text-gray-300 text-xs">—</span>}
+                                </td>
+                                <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
+                                  {inv.paymentProfile
+                                    ? <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethod(inv) === 'Intuit' ? 'bg-green-50 text-green-700' : 'bg-purple-50 text-purple-700'}`}>{paymentMethod(inv)}</span>
                                     : <span className="text-gray-300 text-xs">—</span>}
                                 </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
@@ -2908,6 +2952,12 @@ const TimesheetSystem = () => {
                       )}
                       {inv.paidDate && (
                         <div className="bg-green-50 rounded-lg p-3 border border-green-200"><div className="text-green-600 mb-0.5">Paid Date</div><div className="font-medium text-green-800">{new Date(inv.paidDate).toLocaleDateString()}</div></div>
+                      )}
+                      {inv.paymentProfile && (
+                        <div className={`rounded-lg p-3 border col-span-2 ${paymentMethod(inv) === 'Intuit' ? 'bg-green-50 border-green-200' : 'bg-purple-50 border-purple-200'}`}>
+                          <div className={`mb-0.5 text-xs ${paymentMethod(inv) === 'Intuit' ? 'text-green-600' : 'text-purple-600'}`}>Payment Method</div>
+                          <div className={`font-bold text-lg ${paymentMethod(inv) === 'Intuit' ? 'text-green-800' : 'text-purple-800'}`}>{paymentMethod(inv)}</div>
+                        </div>
                       )}
                     </div>
                     <table className="w-full text-sm border-collapse mb-5">
@@ -3737,7 +3787,12 @@ const TimesheetSystem = () => {
                               {project && <p className="text-sm text-indigo-600">{project.name} ({project.code})</p>}
                               <p className="text-sm text-gray-500 mt-1">{inv.lines.length} week{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours.toFixed(1)} hrs · {sym2}{inv.rate}/hr</p>
                               {inv.paymentProfile && <p className="text-xs text-gray-400 mt-0.5">💳 {inv.paymentProfile.profileName} — {inv.paymentProfile.bankName}</p>}
-                              {inv.payOnDate && <p className="text-xs text-blue-600 mt-0.5 font-medium">📅 Pay on date: {new Date(inv.payOnDate).toLocaleDateString()}</p>}
+                              {inv.status === 'approved' && (
+                                inv.payOnDate
+                                  ? <p className="text-xs font-semibold mt-1 text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1 inline-block">📅 Expected payment: {new Date(inv.payOnDate).toLocaleDateString()}</p>
+                                  : <p className="text-xs text-amber-600 mt-0.5">📅 Payment date not yet scheduled</p>
+                              )}
+                              {inv.status !== 'approved' && inv.payOnDate && <p className="text-xs text-blue-600 mt-0.5 font-medium">📅 Pay on date: {new Date(inv.payOnDate).toLocaleDateString()}</p>}
                               {inv.paidDate && <p className="text-xs text-green-600 mt-0.5 font-medium">✅ Paid: {new Date(inv.paidDate).toLocaleDateString()}</p>}
                               {/* PDF attachment badge */}
                               {inv.attachmentPath && (
@@ -4110,7 +4165,16 @@ const TimesheetSystem = () => {
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">Country</label>
-                      <input type="text" value={profileForm.country} onChange={e => setProfileForm({...profileForm, country: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="e.g. United Kingdom" />
+                      <select
+                        value={profileForm.country}
+                        onChange={e => setProfileForm({...profileForm, country: e.target.value})}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm bg-white"
+                      >
+                        <option value="">Select country…</option>
+                        {WORLD_COUNTRIES.map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
                 </div>
