@@ -169,6 +169,7 @@ interface Invoice {
   payOnDate: string | null;          // scheduled/expected payment date set by accountant
   paidDate: string | null;           // actual date payment was made
   attachmentPath: string | null;     // Supabase Storage path for PDF attachment
+  paymentMethodOverride: string | null; // accountant-editable: 'Intuit' or 'Convera'
 }
 
 interface ReminderEmail {
@@ -365,6 +366,7 @@ const TimesheetSystem = () => {
 
   const countryName = (code: string) => countries.find(c => c.code === code)?.name || code;
   const paymentMethod = (inv: Invoice) => {
+    if (inv.paymentMethodOverride) return inv.paymentMethodOverride;
     const country = inv.paymentProfile?.country || '';
     return (country === 'United States' || country === 'US') ? 'Intuit' : 'Convera';
   };
@@ -416,6 +418,7 @@ const TimesheetSystem = () => {
   const [invoicePayDateRange, setInvoicePayDateRange] = useState({ start: '', end: '' });
   const [invoicePaidDateRange, setInvoicePaidDateRange] = useState({ start: '', end: '' });
   const [pendingPayOnDate, setPendingPayOnDate] = useState('');   // expected pay on date (set on approve or anytime)
+  const [pendingPaymentMethod, setPendingPaymentMethod] = useState(''); // accountant-editable payment method
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   // PDF attachment
   const [invoiceAttachmentFile, setInvoiceAttachmentFile] = useState<File | null>(null);
@@ -1099,6 +1102,7 @@ const TimesheetSystem = () => {
       payOnDate: (r.pay_on_date as string) || null,
       paidDate: (r.paid_date as string) || null,
       attachmentPath: (r.attachment_path as string) || null,
+      paymentMethodOverride: (r.payment_method as string) || null,
     };
   }
 
@@ -1211,7 +1215,7 @@ const TimesheetSystem = () => {
     await fetchInvoices();
   };
 
-  const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string) => {
+  const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string) => {
     const update: Record<string, unknown> = {
       status,
       reviewed_at: new Date().toISOString(),
@@ -1219,16 +1223,18 @@ const TimesheetSystem = () => {
     };
     if (payOnDate !== undefined) update.pay_on_date = payOnDate || null;
     if (status === 'paid' && paidDate) update.paid_date = paidDate;
+    if (pmOverride !== undefined) update.payment_method = pmOverride || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error updating invoice: ' + error.message); return; }
     await fetchInvoices();
     setShowInvoiceModal(false);
     setPendingPayOnDate('');
     setPendingPaidDate('');
+    setPendingPaymentMethod('');
   };
 
   // Save approval status and/or pay on date without closing modal
-  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string }) => {
+  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string }) => {
     const update: Record<string, unknown> = {};
     if (fields.status !== undefined) {
       update.status = fields.status;
@@ -1236,14 +1242,15 @@ const TimesheetSystem = () => {
       update.reviewed_by = currentUser!.name;
     }
     if (fields.payOnDate !== undefined) update.pay_on_date = fields.payOnDate || null;
+    if (fields.paymentMethod !== undefined) update.payment_method = fields.paymentMethod || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error saving changes: ' + error.message); return; }
     await fetchInvoices();
-    // Refresh selectedInvoice so the modal reflects the save
     setSelectedInvoice(prev => prev ? {
       ...prev,
       ...(fields.status ? { status: fields.status, reviewedBy: currentUser!.name, reviewedAt: new Date().toISOString() } : {}),
       ...(fields.payOnDate !== undefined ? { payOnDate: fields.payOnDate || null } : {}),
+      ...(fields.paymentMethod !== undefined ? { paymentMethodOverride: fields.paymentMethod || null } : {}),
     } : prev);
   };
 
@@ -3025,17 +3032,30 @@ const TimesheetSystem = () => {
                     </div>
                     {inv.status === 'submitted' && (
                       <div className="mt-5 space-y-3">
-                        <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-                          <label className="block text-xs font-medium text-gray-600 mb-1">Pay On Date (optional — schedule expected payment)</label>
-                          <input
-                            type="date"
-                            value={pendingPayOnDate}
-                            onChange={e => setPendingPayOnDate(e.target.value)}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm bg-white"
-                          />
+                        <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Pay On Date (optional)</label>
+                            <input
+                              type="date"
+                              value={pendingPayOnDate}
+                              onChange={e => setPendingPayOnDate(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Payment Method</label>
+                            <select
+                              value={pendingPaymentMethod !== '' ? pendingPaymentMethod : paymentMethod(inv)}
+                              onChange={e => setPendingPaymentMethod(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm bg-white"
+                            >
+                              <option value="Intuit">Intuit</option>
+                              <option value="Convera">Convera</option>
+                            </select>
+                          </div>
                         </div>
                         <div className="flex gap-3">
-                          <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined)} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
+                          <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined, undefined, pendingPaymentMethod || paymentMethod(inv))} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
                           <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
                         </div>
                       </div>
@@ -3058,12 +3078,24 @@ const TimesheetSystem = () => {
                                 className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-400 text-sm bg-white"
                               />
                             </div>
+                            <div>
+                              <label className="block text-xs font-medium text-amber-700 mb-1">Payment Method</label>
+                              <select
+                                value={pendingPaymentMethod !== '' ? pendingPaymentMethod : paymentMethod(inv)}
+                                onChange={e => setPendingPaymentMethod(e.target.value)}
+                                className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-400 text-sm bg-white"
+                              >
+                                <option value="Intuit">Intuit</option>
+                                <option value="Convera">Convera</option>
+                              </select>
+                            </div>
                             <div className="flex gap-2">
                               <button
                                 onClick={async () => {
-                                  await saveInvoiceEdits(inv.id, { payOnDate: editPayOn });
+                                  await saveInvoiceEdits(inv.id, { payOnDate: editPayOn, paymentMethod: pendingPaymentMethod || paymentMethod(inv) });
                                   setPendingPayOnDate('');
-                                  alert('Pay On Date saved.');
+                                  setPendingPaymentMethod('');
+                                  alert('Changes saved.');
                                 }}
                                 className="flex-1 flex items-center justify-center gap-2 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 font-medium text-sm"
                               >
