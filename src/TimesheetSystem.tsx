@@ -43,7 +43,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
             {employeeRows.map((row, ri) => (
               <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                 <td className="border border-gray-300 px-3 py-2 font-semibold">{row.name}</td>
-                <td className="border border-gray-300 px-3 py-2 text-gray-500">{row.country}</td>
+                <td className="border border-gray-300 px-3 py-2 text-gray-500">{countryName(row.country)}</td>
                 <td className="border border-gray-300 px-3 py-2 text-indigo-600 text-xs">{row.project}</td>
                 {weekEndings.map((we: string) => {
                   const h = row.hours[we];
@@ -329,6 +329,8 @@ const TimesheetSystem = () => {
     { code: 'SI', name: 'Slovenia', regions: ['Slovenia'] },
     { code: 'MK', name: 'North Macedonia', regions: ['North Macedonia'] },
   ];
+
+  const countryName = (code: string) => countries.find(c => c.code === code)?.name || code;
 
   const [timesheets, setTimesheets] = useState<Timesheet[]>([]);
   const timesheetsRef = useRef<Timesheet[]>([]);
@@ -1390,7 +1392,7 @@ const TimesheetSystem = () => {
       const entries = timesheet ? timesheet.entries : {};
       const project = timesheet ? projects.find(p => p.id === timesheet.projectId) : null;
       const dailyHours = getWeekDates(reportWeek).map(date => parseFloat(entries[formatDate(date)]?.hours || '0'));
-      return { name: user.name, country: user.country, project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
+      return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
     });
   };
 
@@ -1745,7 +1747,7 @@ const TimesheetSystem = () => {
                             {user.role === 'timesheetuser' ? 'TimesheetUser' : user.role.charAt(0).toUpperCase() + user.role.slice(1)}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-600"><div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{user.country}{user.region ? ', ' + user.region : ''}</div></td>
+                        <td className="px-4 py-3 text-sm text-gray-600"><div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{countryName(user.country)}{user.region ? ', ' + user.region : ''}</div></td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
                         <td className="px-4 py-3 text-sm text-gray-600">
                           {user.endDate ? (
@@ -1811,7 +1813,7 @@ const TimesheetSystem = () => {
                 } else {
                   allocated.forEach(user => {
                     const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
-                    csv += `"${project.name}","${project.code}","${project.status}","${user.name}","${user.email}","${user.country}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
+                    csv += `"${project.name}","${project.code}","${project.status}","${user.name}","${user.email}","${countryName(user.country)}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
                   });
                 }
               });
@@ -1819,7 +1821,7 @@ const TimesheetSystem = () => {
               const unallocated = timesheetUsers.filter(u => !u.projectId);
               unallocated.forEach(user => {
                 const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
-                csv += `"(No Project)","","","${user.name}","${user.email}","${user.country}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
+                csv += `"(No Project)","","","${user.name}","${user.email}","${countryName(user.country)}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
               });
               const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
               const url = URL.createObjectURL(blob);
@@ -1884,7 +1886,7 @@ const TimesheetSystem = () => {
                                   <td className="px-4 py-3 font-medium text-gray-800">{user.name}</td>
                                   <td className="px-4 py-3 text-gray-600">{user.email}</td>
                                   <td className="px-4 py-3 text-gray-600">
-                                    <div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{user.country}{user.region ? ', ' + user.region : ''}</div>
+                                    <div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{countryName(user.country)}{user.region ? ', ' + user.region : ''}</div>
                                   </td>
                                   <td className="px-4 py-3 text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
                                   <td className="px-4 py-3">
@@ -1943,7 +1945,7 @@ const TimesheetSystem = () => {
                                 <td className="px-4 py-3 font-medium text-gray-800">{user.name}</td>
                                 <td className="px-4 py-3 text-gray-600">{user.email}</td>
                                 <td className="px-4 py-3 text-gray-600">
-                                  <div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{user.country}{user.region ? ', ' + user.region : ''}</div>
+                                  <div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{countryName(user.country)}{user.region ? ', ' + user.region : ''}</div>
                                 </td>
                                 <td className="px-4 py-3 text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
                                 <td className="px-4 py-3">
@@ -2304,7 +2306,7 @@ const TimesheetSystem = () => {
                   } else { hours[we] = null; statuses[we] = 'not submitted'; }
                 });
                 const project = projects.find(p => p.id === user.projectId);
-                return { name: user.name, country: user.country, project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
+                return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
               });
               const colTotals: Record<string, number> = {};
               weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
@@ -2327,7 +2329,7 @@ const TimesheetSystem = () => {
               });
               csv += ',Total Hours\n';
               employeeRows.forEach(row => {
-                csv += `"${row.name}","${row.country}","${row.project}"`;
+                csv += `"${row.name}","${countryName(row.country)}","${row.project}"`;
                 weekEndings.forEach(we => { csv += `,"${row.hours[we] !== null ? row.hours[we]!.toFixed(1) : '-'}","${row.statuses[we]}"`; });
                 csv += `,"${row.rowTotal.toFixed(1)}"\n`;
               });
@@ -2468,7 +2470,7 @@ const TimesheetSystem = () => {
           } else { hours[we] = null; statuses[we] = 'not submitted'; }
         });
         const project = projects.find(p => p.id === user.projectId);
-        return { name: user.name, country: user.country, project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
+        return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
       });
 
       const colTotals: Record<string, number> = {};
@@ -2549,7 +2551,7 @@ const TimesheetSystem = () => {
                     {reportData.map((row, idx) => (
                       <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                         <td className="border border-gray-300 px-4 py-3 font-medium">{row.name}</td>
-                        <td className="border border-gray-300 px-4 py-3 text-gray-600"><div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{row.country}</div></td>
+                        <td className="border border-gray-300 px-4 py-3 text-gray-600"><div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{countryName(row.country)}</div></td>
                         <td className="border border-gray-300 px-4 py-3 text-sm text-indigo-600">{row.project}</td>
                         {row.dailyHours.map((h, i) => <td key={i} className="border border-gray-300 px-4 py-3 text-center"><span className={h > 0 ? 'font-semibold' : 'text-gray-400'}>{h > 0 ? h.toFixed(1) : '-'}</span></td>)}
                         <td className="border border-gray-300 px-4 py-3 text-center font-bold text-indigo-600">{row.total.toFixed(1)}</td>
@@ -2600,7 +2602,7 @@ const TimesheetSystem = () => {
               });
               csv += ',Total Hours\n';
               employeeRows.forEach(row => {
-                csv += `"${row.name}","${row.country}","${row.project}"`;
+                csv += `"${row.name}","${countryName(row.country)}","${row.project}"`;
                 weekEndings.forEach(we => {
                   const h = row.hours[we];
                   const st = row.statuses[we];
