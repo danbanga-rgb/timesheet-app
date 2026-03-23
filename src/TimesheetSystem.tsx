@@ -430,6 +430,8 @@ const TimesheetSystem = () => {
   const [profilePwLoading, setProfilePwLoading] = useState(false);
   const [profilePhone, setProfilePhone] = useState('');
   const [profilePhoneSaving, setProfilePhoneSaving] = useState(false);
+  const [tsOnlyRange, setTsOnlyRange] = useState({ start: '', end: '' });
+  const [tsOnlyApplied, setTsOnlyApplied] = useState({ start: '', end: '' });
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   // Manager consolidated view
@@ -1778,6 +1780,7 @@ const TimesheetSystem = () => {
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Start Date</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">End Date</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Manager</th>
+                      <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Invoices</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Actions</th>
                     </tr>
                   </thead>
@@ -1803,6 +1806,7 @@ const TimesheetSystem = () => {
                           ) : <span className="text-gray-400 italic">No end date</span>}
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.managerId ? users.find(u => u.id === user.managerId)?.name : '-'}</td>
+                        <td className="px-4 py-3 text-center">{user.role === 'timesheetuser' ? (<span className={`px-2 py-1 rounded-full text-xs font-medium ${user.invoiceEnabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{user.invoiceEnabled ? 'Yes' : 'No'}</span>) : <span className="text-gray-300">—</span>}</td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-2">
                             <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit"><Edit2 className="w-4 h-4" /></button>
@@ -2116,6 +2120,19 @@ const TimesheetSystem = () => {
                             <option value="">Select Project</option>
                             {projects.filter(p => p.status === 'active').map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
                           </select>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-800">Invoice Module</p>
+                            <p className="text-xs text-gray-500 mt-0.5">Can this user create and submit invoices?</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setUserForm({...userForm, invoice_enabled: !userForm.invoice_enabled})}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
+                          >
+                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${userForm.invoice_enabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                          </button>
                         </div>
                         <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg space-y-3">
                           <p className="text-sm font-semibold text-indigo-800">Employment Dates</p>
@@ -2560,6 +2577,10 @@ const TimesheetSystem = () => {
                 </span>
                 <span>Invoices</span>
               </button>
+              <button onClick={() => setAccountantTab('timesheet-only')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'timesheet-only' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <Users className="w-5 h-5 flex-shrink-0" />
+                <span className="hidden sm:inline">Timesheet </span><span>Only</span>
+              </button>
             </div>
           </div>
 
@@ -2928,6 +2949,153 @@ const TimesheetSystem = () => {
             );
           })()}
 
+          {/* Timesheet Only Tab */}
+          {accountantTab === 'timesheet-only' && (() => {
+            const tsOnlyUsers = users.filter(u => u.role === 'timesheetuser' && !u.invoiceEnabled);
+            const filteredTs = (() => {
+              let list = timesheets.filter(t => tsOnlyUsers.some(u => u.id === t.userId));
+              if (tsOnlyApplied.start && tsOnlyApplied.end) {
+                list = list.filter(t => t.weekStart >= tsOnlyApplied.start && t.weekStart <= tsOnlyApplied.end);
+              }
+              return list.sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+            })();
+
+            const exportTsOnlyCSV = () => {
+              let csv = 'Employee,Country,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Total Hours,Status,Submitted
+';
+              filteredTs.forEach(ts => {
+                const user = users.find(u => u.id === ts.userId);
+                const project = projects.find(p => p.id === ts.projectId);
+                const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
+                const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
+                const total = dailyHours.reduce((s, h) => s + h, 0);
+                const fri = weekDates[4];
+                csv += `"${ts.userName}","${user ? countryName(user.country) : ''}","${ts.weekStart}","${formatDate(fri)}","${project ? project.name + ' (' + project.code + ')' : 'N/A'}",`;
+                dailyHours.forEach(h => { csv += h + ','; });
+                csv += `${total.toFixed(1)},"${ts.status}","${ts.submittedAt ? new Date(ts.submittedAt).toLocaleDateString() : ''}"
+`;
+              });
+              triggerDownload(csv, `timesheet_only_users_${Date.now()}.csv`);
+            };
+
+            return (
+              <div className="space-y-6">
+                <div className="bg-white rounded-lg shadow-md p-4 sm:p-6">
+                  <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-4 mb-6">
+                    <div>
+                      <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                        <Users className="w-6 h-6 text-indigo-600" /> Timesheet-Only Users
+                      </h2>
+                      <p className="text-sm text-gray-500 mt-1">{tsOnlyUsers.length} user{tsOnlyUsers.length !== 1 ? 's' : ''} without invoice module</p>
+                    </div>
+                    <button
+                      onClick={exportTsOnlyCSV}
+                      className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium"
+                    >
+                      <Download className="w-4 h-4" /> Export CSV
+                    </button>
+                  </div>
+
+                  {/* User summary cards */}
+                  {tsOnlyUsers.length === 0 ? (
+                    <div className="text-center py-8 text-gray-400">
+                      <Users className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                      <p>No users without invoice module.</p>
+                      <p className="text-sm mt-1">Go to Admin → Users to set Invoice Module to No for a user.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+                      {tsOnlyUsers.map(u => {
+                        const userTs = timesheets.filter(t => t.userId === u.id);
+                        const pending = userTs.filter(t => t.status === 'pending').length;
+                        const approved = userTs.filter(t => t.status === 'approved').length;
+                        return (
+                          <div key={u.id} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                            <div className="font-semibold text-gray-800 text-sm">{u.name}</div>
+                            <div className="text-xs text-gray-500 mt-0.5">{countryName(u.country)}{u.region ? ', ' + u.region : ''}</div>
+                            <div className="flex gap-2 mt-2">
+                              {pending > 0 && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full">{pending} pending</span>}
+                              {approved > 0 && <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">{approved} approved</span>}
+                              {userTs.length === 0 && <span className="text-xs text-gray-400">No timesheets</span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Date range filter */}
+                  <div className="flex flex-wrap gap-3 items-end mb-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Week Start From</label>
+                      <input type="date" value={tsOnlyRange.start} onChange={e => setTsOnlyRange({...tsOnlyRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Week Start To</label>
+                      <input type="date" value={tsOnlyRange.end} onChange={e => setTsOnlyRange({...tsOnlyRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
+                    </div>
+                    <button onClick={() => setTsOnlyApplied(tsOnlyRange)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm">Apply</button>
+                    <button onClick={() => { setTsOnlyRange({ start: '', end: '' }); setTsOnlyApplied({ start: '', end: '' }); }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm">Clear</button>
+                  </div>
+
+                  {/* Timesheets table */}
+                  {tsOnlyUsers.length > 0 && (
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse text-sm">
+                        <thead className="bg-indigo-600 text-white">
+                          <tr>
+                            <th className="border border-indigo-700 px-3 py-2 text-left">Employee</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-left">Country</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-left">Week Ending</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-left">Project</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-center">Mon</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-center">Tue</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-center">Wed</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-center">Thu</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-center">Fri</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-center">Total</th>
+                            <th className="border border-indigo-700 px-3 py-2 text-center">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredTs.length === 0 ? (
+                            <tr><td colSpan={11} className="text-center py-6 text-gray-400">No timesheets found for selected range</td></tr>
+                          ) : (
+                            filteredTs.map((ts, idx) => {
+                              const user = users.find(u => u.id === ts.userId);
+                              const project = projects.find(p => p.id === ts.projectId);
+                              const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
+                              const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
+                              const total = dailyHours.reduce((s, h) => s + h, 0);
+                              const fri = weekDates[4];
+                              return (
+                                <tr key={ts.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                  <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
+                                  <td className="border border-gray-200 px-3 py-2 text-gray-500 text-xs">{user ? countryName(user.country) : ''}</td>
+                                  <td className="border border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+                                  <td className="border border-gray-200 px-3 py-2 text-indigo-600 text-xs">{project ? `${project.name} (${project.code})` : '—'}</td>
+                                  {dailyHours.map((h, i) => (
+                                    <td key={i} className="border border-gray-200 px-3 py-2 text-center">{h > 0 ? h.toFixed(1) : <span className="text-gray-300">—</span>}</td>
+                                  ))}
+                                  <td className="border border-gray-200 px-3 py-2 text-center font-bold text-indigo-600">{total.toFixed(1)}</td>
+                                  <td className="border border-gray-200 px-3 py-2 text-center">
+                                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                      {ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Invoice Detail Modal (shared, also used in accountant view) */}
           {showInvoiceModal && selectedInvoice && (() => {
             const inv = selectedInvoice;
@@ -3263,36 +3431,40 @@ const TimesheetSystem = () => {
               <Clock className="w-5 h-5 flex-shrink-0" />
               <span>Timesheets</span>
             </button>
-            <button
-              onClick={() => setUserTab('invoices')}
-              className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 relative ' +
-                (userTab === 'invoices' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}
-            >
-              <span className="relative">
-                <Receipt className="w-5 h-5 flex-shrink-0" />
-                {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length > 0 && (
-                  <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-amber-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
-                    {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length}
-                  </span>
-                )}
-              </span>
-              <span>Invoices</span>
-            </button>
-            <button
-              onClick={() => setUserTab('payment')}
-              className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 relative ' +
-                (userTab === 'payment' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}
-            >
-              <span className="relative">
-                <DollarSign className="w-5 h-5 flex-shrink-0" />
-                {paymentProfiles.filter(p => p.userId === currentUser!.id).length > 0 && (
-                  <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-indigo-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
-                    {paymentProfiles.filter(p => p.userId === currentUser!.id).length}
-                  </span>
-                )}
-              </span>
-              <span className="hidden xs:inline sm:inline">Payment </span><span>Profiles</span>
-            </button>
+            {currentUser!.invoiceEnabled && (
+              <button
+                onClick={() => setUserTab('invoices')}
+                className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 relative ' +
+                  (userTab === 'invoices' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}
+              >
+                <span className="relative">
+                  <Receipt className="w-5 h-5 flex-shrink-0" />
+                  {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-amber-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
+                      {invoices.filter(i => i.userId === currentUser!.id && i.status === 'submitted').length}
+                    </span>
+                  )}
+                </span>
+                <span>Invoices</span>
+              </button>
+            )}
+            {currentUser!.invoiceEnabled && (
+              <button
+                onClick={() => setUserTab('payment')}
+                className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 relative ' +
+                  (userTab === 'payment' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}
+              >
+                <span className="relative">
+                  <DollarSign className="w-5 h-5 flex-shrink-0" />
+                  {paymentProfiles.filter(p => p.userId === currentUser!.id).length > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-indigo-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
+                      {paymentProfiles.filter(p => p.userId === currentUser!.id).length}
+                    </span>
+                  )}
+                </span>
+                <span className="hidden xs:inline sm:inline">Payment </span><span>Profiles</span>
+              </button>
+            )}
             <button
               onClick={() => setUserTab('profile')}
               className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm transition-colors border-b-2 ' +
