@@ -93,6 +93,8 @@ interface UserProfile {
   startDate: string | null;
   endDate: string | null;
   phone: string | null;
+  emailApprovalsEnabled: boolean;
+  invoiceEnabled: boolean;
 }
 
 interface Project {
@@ -197,6 +199,8 @@ interface UserForm {
   start_date: string;
   end_date: string;
   phone: string;
+  email_approvals_enabled: boolean;
+  invoice_enabled: boolean;
 }
 
 interface ProjectForm {
@@ -391,7 +395,7 @@ const TimesheetSystem = () => {
   const [showGeneratedPassword, setShowGeneratedPassword] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: ''
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -572,6 +576,8 @@ const TimesheetSystem = () => {
       startDate: (p.start_date as string) || null,
       endDate: (p.end_date as string) || null,
       phone: (p.phone as string) || null,
+      emailApprovalsEnabled: !!(p.email_approvals_enabled as boolean),
+      invoiceEnabled: p.invoice_enabled === undefined ? true : !!(p.invoice_enabled as boolean),
     };
   }
 
@@ -880,11 +886,11 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '' });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false });
     } else {
       setEditingUser(null);
       const autoPassword = generatePassword();
-      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '' });
+      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true });
     }
     setShowGeneratedPassword(true);
     setShowUserModal(true);
@@ -906,6 +912,8 @@ const TimesheetSystem = () => {
         start_date: userForm.start_date || null,
         end_date: userForm.end_date || null,
         phone: userForm.phone || null,
+        email_approvals_enabled: userForm.email_approvals_enabled,
+        invoice_enabled: userForm.invoice_enabled,
       };
       const { error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id);
       if (error) { alert('Error updating user: ' + error.message); return; }
@@ -954,6 +962,8 @@ const TimesheetSystem = () => {
         start_date: userForm.start_date || null,
         end_date: userForm.end_date || null,
         phone: userForm.phone || null,
+        email_approvals_enabled: userForm.email_approvals_enabled,
+        invoice_enabled: userForm.invoice_enabled,
       });
 
       if (profileError) {
