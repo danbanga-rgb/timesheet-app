@@ -2961,8 +2961,7 @@ const TimesheetSystem = () => {
             })();
 
             const exportTsOnlyCSV = () => {
-              let csv = 'Employee,Country,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Total Hours,Status,Submitted
-';
+              let csv = 'Employee,Country,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Total Hours,Status,Submitted\n';
               filteredTs.forEach(ts => {
                 const user = users.find(u => u.id === ts.userId);
                 const project = projects.find(p => p.id === ts.projectId);
