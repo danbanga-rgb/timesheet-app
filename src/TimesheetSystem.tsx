@@ -2592,6 +2592,10 @@ const TimesheetSystem = () => {
                 <FileText className="w-5 h-5 flex-shrink-0" />
                 <span>Consolidated</span>
               </button>
+              <button onClick={() => setAccountantTab('timesheet-only')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'timesheet-only' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <Users className="w-5 h-5 flex-shrink-0" />
+                <span className="hidden sm:inline">Timesheet </span><span>Only</span>
+              </button>
               <button onClick={() => setAccountantTab('invoices')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors relative ' + (accountantTab === 'invoices' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
                 <span className="relative">
                   <Receipt className="w-5 h-5 flex-shrink-0" />
@@ -2602,10 +2606,6 @@ const TimesheetSystem = () => {
                   )}
                 </span>
                 <span>Invoices</span>
-              </button>
-              <button onClick={() => setAccountantTab('timesheet-only')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'timesheet-only' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
-                <Users className="w-5 h-5 flex-shrink-0" />
-                <span className="hidden sm:inline">Timesheet </span><span>Only</span>
               </button>
             </div>
           </div>
@@ -3049,19 +3049,68 @@ const TimesheetSystem = () => {
                     </div>
                   )}
 
-                  {/* Date range filter */}
-                  <div className="flex flex-wrap gap-3 items-end mb-4">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Week Start From</label>
-                      <input type="date" value={tsOnlyRange.start} onChange={e => setTsOnlyRange({...tsOnlyRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Week Start To</label>
-                      <input type="date" value={tsOnlyRange.end} onChange={e => setTsOnlyRange({...tsOnlyRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
-                    </div>
-                    <button onClick={() => setTsOnlyApplied(tsOnlyRange)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm">Apply</button>
-                    <button onClick={() => { setTsOnlyRange({ start: '', end: '' }); setTsOnlyApplied({ start: '', end: '' }); }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm">Clear</button>
-                  </div>
+                  {/* Quick select presets */}
+                  {(() => {
+                    const now = new Date();
+                    // Month presets — last 6 months
+                    const monthOpts = Array.from({ length: 6 }, (_, i) => {
+                      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                      const start = formatDate(new Date(d.getFullYear(), d.getMonth(), 1));
+                      const end   = formatDate(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+                      return { label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }), start, end };
+                    });
+                    // Bi-weekly — last 2 completed weeks
+                    const todayMon = (() => { const d = new Date(); d.setHours(0,0,0,0); const day = d.getDay(); d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day)); return d; })();
+                    const biWeekEnd = new Date(todayMon); biWeekEnd.setDate(biWeekEnd.getDate() - 1); // last Friday of prev week
+                    const biWeekStart = new Date(todayMon); biWeekStart.setDate(biWeekStart.getDate() - 14); // 2 weeks back Monday
+                    const biWeekLabel = `${biWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${biWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+                    const isActive = (s: string, e: string) => tsOnlyApplied.start === s && tsOnlyApplied.end === e;
+                    return (
+                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4 space-y-4">
+                        {/* Bi-weekly */}
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Bi-Weekly</label>
+                          <button
+                            onClick={() => { const s = formatDate(biWeekStart); const e = formatDate(biWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(biWeekStart), formatDate(biWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
+                          >
+                            Last 2 Weeks ({biWeekLabel})
+                          </button>
+                        </div>
+                        {/* Month presets */}
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Month</label>
+                          <div className="flex flex-wrap gap-2">
+                            {monthOpts.map(opt => (
+                              <button
+                                key={opt.start}
+                                onClick={() => { setTsOnlyRange({ start: opt.start, end: opt.end }); setTsOnlyApplied({ start: opt.start, end: opt.end }); }}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(opt.start, opt.end) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {/* Custom date range */}
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Custom Range</label>
+                          <div className="flex flex-wrap gap-3 items-end">
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">From</label>
+                              <input type="date" value={tsOnlyRange.start} onChange={e => setTsOnlyRange({...tsOnlyRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">To</label>
+                              <input type="date" value={tsOnlyRange.end} onChange={e => setTsOnlyRange({...tsOnlyRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
+                            </div>
+                            <button onClick={() => setTsOnlyApplied(tsOnlyRange)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium">Apply</button>
+                            <button onClick={() => { setTsOnlyRange({ start: '', end: '' }); setTsOnlyApplied({ start: '', end: '' }); }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm">Clear All</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Timesheets table */}
                   {tsOnlyUsers.length > 0 && (
