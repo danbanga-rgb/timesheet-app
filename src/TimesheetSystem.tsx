@@ -2100,6 +2100,22 @@ const TimesheetSystem = () => {
                         <option value="timesheetuser">TimesheetUser</option><option value="manager">Manager</option><option value="accountant">Accountant</option><option value="admin">Admin</option>
                       </select>
                     </div>
+                    {(userForm.role === 'timesheetuser' || (editingUser && editingUser.role === 'timesheetuser')) && (
+                      <div className="flex items-center justify-between p-4 bg-indigo-50 border-2 border-indigo-200 rounded-lg">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-800">Invoice Module</p>
+                          <p className="text-xs text-gray-500 mt-0.5">Allow this user to create and submit invoices</p>
+                          <p className="text-xs font-semibold mt-1 text-indigo-700">{userForm.invoice_enabled ? '✓ Enabled' : '✗ Disabled'}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setUserForm({...userForm, invoice_enabled: !userForm.invoice_enabled})}
+                          className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
+                        >
+                          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${userForm.invoice_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
+                        </button>
+                      </div>
+                    )}
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>
                       <select value={userForm.country} onChange={e => {
                         const c = countries.find(x => x.code === e.target.value);
@@ -2130,20 +2146,6 @@ const TimesheetSystem = () => {
                             <option value="">Select Project</option>
                             {projects.filter(p => p.status === 'active').map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
                           </select>
-                        </div>
-                        <div className="flex items-center justify-between p-4 bg-gray-50 border-2 border-gray-200 rounded-lg">
-                          <div>
-                            <p className="text-sm font-semibold text-gray-800">Invoice Module</p>
-                            <p className="text-xs text-gray-500 mt-0.5">Can this user create and submit invoices?</p>
-                            <p className="text-xs font-medium mt-1 text-indigo-600">{userForm.invoice_enabled ? 'Currently: Enabled' : 'Currently: Disabled'}</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setUserForm({...userForm, invoice_enabled: !userForm.invoice_enabled})}
-                            className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
-                          >
-                            <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${userForm.invoice_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
-                          </button>
                         </div>
                         <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg space-y-3">
                           <p className="text-sm font-semibold text-indigo-800">Employment Dates</p>
