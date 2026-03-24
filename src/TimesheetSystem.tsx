@@ -1816,7 +1816,22 @@ const TimesheetSystem = () => {
                           ) : <span className="text-gray-400 italic">No end date</span>}
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.managerId ? users.find(u => u.id === user.managerId)?.name : '-'}</td>
-                        <td className="px-4 py-3 text-center">{user.role === 'timesheetuser' ? (<span className={`px-2 py-1 rounded-full text-xs font-medium ${user.invoiceEnabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{user.invoiceEnabled ? 'Yes' : 'No'}</span>) : <span className="text-gray-300">—</span>}</td>
+                        <td className="px-4 py-3 text-center">
+                          {user.role === 'timesheetuser' ? (
+                            <button
+                              onClick={async () => {
+                                const next = !user.invoiceEnabled;
+                                const { error } = await supabase.from('profiles').update({ invoice_enabled: next }).eq('id', user.id);
+                                if (error) { alert('Error: ' + error.message); return; }
+                                await fetchUsers();
+                              }}
+                              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${user.invoiceEnabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
+                              title={user.invoiceEnabled ? 'Click to disable invoices' : 'Click to enable invoices'}
+                            >
+                              <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${user.invoiceEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                            </button>
+                          ) : <span className="text-gray-300">—</span>}
+                        </td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-2">
                             <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit"><Edit2 className="w-4 h-4" /></button>
@@ -2100,22 +2115,20 @@ const TimesheetSystem = () => {
                         <option value="timesheetuser">TimesheetUser</option><option value="manager">Manager</option><option value="accountant">Accountant</option><option value="admin">Admin</option>
                       </select>
                     </div>
-                    {(userForm.role === 'timesheetuser' || (editingUser && editingUser.role === 'timesheetuser')) && (
-                      <div className="flex items-center justify-between p-4 bg-indigo-50 border-2 border-indigo-200 rounded-lg">
-                        <div>
-                          <p className="text-sm font-semibold text-gray-800">Invoice Module</p>
-                          <p className="text-xs text-gray-500 mt-0.5">Allow this user to create and submit invoices</p>
-                          <p className="text-xs font-semibold mt-1 text-indigo-700">{userForm.invoice_enabled ? '✓ Enabled' : '✗ Disabled'}</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setUserForm({...userForm, invoice_enabled: !userForm.invoice_enabled})}
-                          className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
-                        >
-                          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${userForm.invoice_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
-                        </button>
+                    <div className="flex items-center justify-between p-4 bg-indigo-50 border-2 border-indigo-200 rounded-lg">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-800">Invoice Module</p>
+                        <p className="text-xs text-gray-500 mt-0.5">Allow this user to create and submit invoices</p>
+                        <p className="text-xs font-semibold mt-1 text-indigo-700">{userForm.invoice_enabled ? '✓ Enabled' : '✗ Disabled'}</p>
                       </div>
-                    )}
+                      <button
+                        type="button"
+                        onClick={() => setUserForm({...userForm, invoice_enabled: !userForm.invoice_enabled})}
+                        className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
+                      >
+                        <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${userForm.invoice_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
+                      </button>
+                    </div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>
                       <select value={userForm.country} onChange={e => {
                         const c = countries.find(x => x.code === e.target.value);
