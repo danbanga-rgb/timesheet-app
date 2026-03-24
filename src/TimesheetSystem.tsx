@@ -2131,17 +2131,18 @@ const TimesheetSystem = () => {
                             {projects.filter(p => p.status === 'active').map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
                           </select>
                         </div>
-                        <div className="flex items-center justify-between p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                        <div className="flex items-center justify-between p-4 bg-gray-50 border-2 border-gray-200 rounded-lg">
                           <div>
                             <p className="text-sm font-semibold text-gray-800">Invoice Module</p>
                             <p className="text-xs text-gray-500 mt-0.5">Can this user create and submit invoices?</p>
+                            <p className="text-xs font-medium mt-1 text-indigo-600">{userForm.invoice_enabled ? 'Currently: Enabled' : 'Currently: Disabled'}</p>
                           </div>
                           <button
                             type="button"
                             onClick={() => setUserForm({...userForm, invoice_enabled: !userForm.invoice_enabled})}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
+                            className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
                           >
-                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${userForm.invoice_enabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                            <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${userForm.invoice_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
                           </button>
                         </div>
                         <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg space-y-3">
