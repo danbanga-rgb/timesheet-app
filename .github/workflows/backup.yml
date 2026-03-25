@@ -32,7 +32,7 @@ jobs:
           grep "^CREATE TABLE" backup_${DATE}.sql | head -20
 
       - name: Upload as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: db-backup-${{ github.run_number }}-${{ github.run_attempt }}
           path: backup_*.sql
