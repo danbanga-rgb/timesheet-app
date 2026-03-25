@@ -916,6 +916,10 @@ const TimesheetSystem = () => {
     if (!userForm.name || !userForm.email || !userForm.country) {
       alert('Please fill in all required fields'); return;
     }
+    const emailRegex = /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/;
+    if (!emailRegex.test(userForm.email.trim())) {
+      alert(`"${userForm.email}" doesn't look like a valid email address. Please check for typos (e.g. .om instead of .com).`); return;
+    }
 
     if (editingUser) {
       const updates = {
