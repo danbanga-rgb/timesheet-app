@@ -19,11 +19,15 @@ jobs:
             --no-owner \
             --no-acl \
             --schema=public \
+            --no-password \
             -f backup_${DATE}.sql
+          echo "Backup size: $(wc -c < backup_${DATE}.sql) bytes"
+          echo "Tables backed up:"
+          grep "^CREATE TABLE" backup_${DATE}.sql | head -20
 
       - name: Upload as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: db-backup-${{ github.run_number }}
+          name: db-backup-${{ github.run_number }}-${{ github.run_attempt }}
           path: backup_*.sql
           retention-days: 30
