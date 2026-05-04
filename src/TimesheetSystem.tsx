@@ -2137,18 +2137,26 @@ const TimesheetSystem = () => {
                 <div>
                   {/* Summary strip */}
                   <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
-                    {[
-                      { label: 'Emails analysed', value: emailTestResults.summary.total, color: 'blue' },
-                      { label: '✅ Parseable', value: emailTestResults.summary.success, color: 'green' },
-                      { label: '⚠️ Partial', value: emailTestResults.summary.partial, color: 'amber' },
-                      { label: '❌ Failed', value: emailTestResults.summary.failed, color: 'red' },
-                      { label: '🗑️ Would Delete', value: emailTestResults.summary.wouldDelete ?? 0, color: 'gray' },
-                    ].map(({ label, value, color }) => (
-                      <div key={label} className={`bg-${color}-50 border border-${color}-200 p-3 rounded-lg text-center`}>
-                        <div className={`text-2xl font-bold text-${color}-600`}>{value}</div>
-                        <div className="text-xs text-gray-600 mt-1">{label}</div>
-                      </div>
-                    ))}
+                    <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-blue-600">{emailTestResults.summary.total}</div>
+                      <div className="text-xs text-gray-600 mt-1">Emails analysed</div>
+                    </div>
+                    <div className="bg-green-50 border border-green-200 p-3 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-green-600">{emailTestResults.summary.success}</div>
+                      <div className="text-xs text-gray-600 mt-1">✅ Parseable</div>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-amber-600">{emailTestResults.summary.partial}</div>
+                      <div className="text-xs text-gray-600 mt-1">⚠️ Partial</div>
+                    </div>
+                    <div className="bg-red-50 border border-red-200 p-3 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-red-600">{emailTestResults.summary.failed}</div>
+                      <div className="text-xs text-gray-600 mt-1">❌ Failed</div>
+                    </div>
+                    <div className="bg-gray-100 border border-gray-300 p-3 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-gray-600">{emailTestResults.summary.wouldDelete ?? 0}</div>
+                      <div className="text-xs text-gray-600 mt-1">🗑️ Would Delete</div>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6 text-sm">
