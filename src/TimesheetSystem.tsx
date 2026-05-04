@@ -2136,12 +2136,13 @@ const TimesheetSystem = () => {
               {emailTestResults && (
                 <div>
                   {/* Summary strip */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
                     {[
                       { label: 'Emails analysed', value: emailTestResults.summary.total, color: 'blue' },
                       { label: '✅ Parseable', value: emailTestResults.summary.success, color: 'green' },
                       { label: '⚠️ Partial', value: emailTestResults.summary.partial, color: 'amber' },
                       { label: '❌ Failed', value: emailTestResults.summary.failed, color: 'red' },
+                      { label: '🗑️ Would Delete', value: emailTestResults.summary.wouldDelete ?? 0, color: 'gray' },
                     ].map(({ label, value, color }) => (
                       <div key={label} className={`bg-${color}-50 border border-${color}-200 p-3 rounded-lg text-center`}>
                         <div className={`text-2xl font-bold text-${color}-600`}>{value}</div>
@@ -2164,6 +2165,7 @@ const TimesheetSystem = () => {
                   <div className="space-y-4">
                     {emailTestResults.emails.map((email: any, idx: number) => (
                       <div key={idx} className={`border-2 rounded-lg p-4 ${
+                        email.wouldDelete ? 'border-gray-200 bg-gray-50 opacity-60' :
                         email.parseStatus === 'success' ? 'border-green-200 bg-green-50' :
                         email.parseStatus === 'partial' ? 'border-amber-200 bg-amber-50' :
                         'border-red-200 bg-red-50'
@@ -2174,11 +2176,12 @@ const TimesheetSystem = () => {
                             <div className="text-xs text-gray-500 mt-0.5">{new Date(email.receivedAt).toLocaleString()}</div>
                           </div>
                           <span className={`px-2 py-1 rounded-full text-xs font-medium shrink-0 ${
+                            email.wouldDelete ? 'bg-gray-200 text-gray-600' :
                             email.parseStatus === 'success' ? 'bg-green-200 text-green-800' :
                             email.parseStatus === 'partial' ? 'bg-amber-200 text-amber-800' :
                             'bg-red-200 text-red-800'
                           }`}>
-                            {email.parseStatus === 'success' ? '✅ Success' : email.parseStatus === 'partial' ? '⚠️ Partial' : '❌ Failed'}
+                            {email.wouldDelete ? '🗑️ Would Delete' : email.parseStatus === 'success' ? '✅ Success' : email.parseStatus === 'partial' ? '⚠️ Partial' : '❌ Failed'}
                           </span>
                         </div>
 
