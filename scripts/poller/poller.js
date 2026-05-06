@@ -750,8 +750,9 @@ function fetchEmails() {
 
           console.log(`Found ${uids.length} unseen email(s)`);
           const messages = [];
-          // markSeen: false — we'll mark/delete selectively after parsing
-          const fetch = imap.fetch(uids, { bodies: '', markSeen: false });
+          // markSeen: true — mark all as seen on fetch (reliable)
+          // DMARC emails will be deleted in a separate pass after processing
+          const fetch = imap.fetch(uids, { bodies: '', markSeen: true });
 
           fetch.on('message', (msg, seq) => {
             const chunks = [];
@@ -764,11 +765,43 @@ function fetchEmails() {
           });
 
           fetch.once('error', reject);
-          fetch.once('end', () => { resolve({ imap, messages }); });
+          fetch.once('end', () => { imap.end(); resolve({ imap: null, messages }); });
         });
       });
     });
 
+    imap.connect();
+  });
+}
+
+// ─── Delete DMARC emails via fresh connection ────────────────────────────────
+
+function deleteDmarcEmails(uids) {
+  return new Promise((resolve, reject) => {
+    const imap = new Imap({
+      user:       CONFIG.imapUser,
+      password:   CONFIG.imapPass,
+      host:       CONFIG.imapHost,
+      port:       CONFIG.imapPort,
+      tls:        true,
+      tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 15000,
+      authTimeout: 10000,
+    });
+    imap.once('error', reject);
+    imap.once('ready', () => {
+      imap.openBox('INBOX', false, (err) => {
+        if (err) return reject(err);
+        imap.addFlags(uids, '\\Deleted', (err) => {
+          if (err) { imap.end(); return reject(err); }
+          imap.expunge((err) => {
+            imap.end();
+            if (err) return reject(err);
+            resolve();
+          });
+        });
+      });
+    });
     imap.connect();
   });
 }
