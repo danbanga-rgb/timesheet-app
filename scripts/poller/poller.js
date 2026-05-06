@@ -223,6 +223,17 @@ function expandTwoDigitYear(str) {
   );
 }
 
+// Convert European dot format: 26.4.2026. → 4/26/2026
+function normaliseDate(str) {
+  if (!str) return str;
+  // Match DD.MM.YYYY. or D.M.YYYY. (trailing dot optional)
+  const euroMatch = str.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\.?$/);
+  if (euroMatch) {
+    return `${euroMatch[2]}/${euroMatch[1]}/${euroMatch[3]}`;
+  }
+  return str;
+}
+
 function weekFromFilename(name) {
   const m = name.match(/(\d{1,2})(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
   if (m) {
@@ -253,7 +264,7 @@ function detectWeek(subject, body, xlsxNames) {
       const m = pat.exec(text);
       if (m) {
         try {
-          const raw = expandTwoDigitYear(m[1]);
+          const raw = expandTwoDigitYear(normaliseDate(m[1]));
           for (const ds of [`${raw} ${new Date().getFullYear()}`, raw]) {
             const d = new Date(ds);
             if (!isNaN(d.getTime())) return { week: getMondayOf(d), by: src };
@@ -325,8 +336,9 @@ function parseXlsx(buffer, filename) {
         // Week Ending Date fallback — requires 4-digit year to avoid version numbers
         if (!weekStartDate && rowText.includes('week ending date')) {
           for (const cell of cells) {
-            if (!cell.includes('/') || cell.split('/').length < 3) continue;
-            const d = new Date(cell);
+            const normalised = normaliseDate(cell);
+            if (!normalised.includes('/') || normalised.split('/').length < 3) continue;
+            const d = new Date(normalised);
             if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) {
               const end = new Date(d);
               end.setDate(end.getDate() - 6);
@@ -425,9 +437,10 @@ async function parsePdf(buffer, filename) {
 
       // Week start from date header
       if (!weekStartDate && lower.includes('client billable hours')) {
-        const dateMatch = lines[i].match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+        // Match both US format (4/20/26) and European dot format (26.4.2026.)
+        const dateMatch = lines[i].match(/(\d{1,2}[\.\/]\d{1,2}[\.\/]\d{2,4}\.?)/);
         if (dateMatch) {
-          const raw = expandTwoDigitYear(dateMatch[1]);
+          const raw = expandTwoDigitYear(normaliseDate(dateMatch[1]));
           const d = new Date(raw);
           if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) {
             weekStartDate = getMondayOf(d);
@@ -596,11 +609,17 @@ async function processEmail(parsed, messageId, results) {
   const bodyText  = parsed.text || (parsed.html || '').replace(/<[^>]+>/g, ' ');
 
   const attachments = (parsed.attachments || []).map(a => ({
-    name:   a.filename || 'unnamed',
+    name:   a.filename || a.contentType?.split('/')[1] || 'unnamed',
     buffer: a.content,
-    isXlsx: !!(a.contentType?.includes('spreadsheet') || (a.filename||'').match(/\.(xlsx|xls)$/i)),
-    isPdf:  !!(a.contentType?.includes('pdf') || (a.filename||'').match(/\.pdf$/i)),
-    isEml:  !!(a.contentType?.includes('message/rfc822') || (a.filename||'').match(/\.eml$/i)),
+    // Detect by contentType OR filename — covers inline attachments too
+    isXlsx: !!(a.contentType?.includes('spreadsheet') || a.contentType?.includes('excel') ||
+               (a.filename||'').match(/\.(xlsx|xls)$/i)),
+    isPdf:  !!(a.contentType?.includes('pdf') ||
+               (a.filename||'').match(/\.pdf$/i) ||
+               // Some clients send PDFs with generic octet-stream content type
+               (a.contentType?.includes('octet-stream') && (a.filename||'').match(/\.pdf$/i))),
+    isEml:  !!(a.contentType?.includes('message/rfc822') || a.contentType?.includes('message/rfc') ||
+               (a.filename||'').match(/\.eml$/i)),
   }));
 
   const emlAtts = attachments.filter(a => a.isEml);
