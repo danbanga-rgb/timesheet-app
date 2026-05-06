@@ -659,13 +659,43 @@ async function processEmail(parsed, messageId, results) {
         const innerEmail = (innerAddr?.address || '').toLowerCase();
         const innerName  = innerAddr?.name || null;
         const innerBody  = inner.text || '';
-        const innerAtts  = (inner.attachments || []).map(a => ({
-          name:   a.filename || 'unnamed',
-          buffer: a.content,
-          isXlsx: !!(a.contentType?.includes('spreadsheet') || (a.filename||'').match(/\.(xlsx|xls)$/i)),
-          isPdf:  !!(a.contentType?.includes('pdf') || (a.filename||'').match(/\.pdf$/i)),
-          isEml:  false,
-        }));
+        // Log all inner attachments for debugging
+        if (inner.attachments?.length > 0) {
+          inner.attachments.forEach(a => {
+            if (a.size > 1000) { // Only log substantial attachments
+              console.log(`     📎 Inner att: "${a.filename || 'unnamed'}" | type: ${a.contentType} | disp: ${a.contentDisposition} | size: ${a.size}`);
+            }
+          });
+        }
+
+        const innerAtts = (inner.attachments || []).map(a => {
+          const fname = a.filename || a.name || '';
+          const ctype = a.contentType || '';
+          // Also check related/alternative content parts that may contain PDFs
+          const isXlsx = !!(ctype.includes('spreadsheet') || ctype.includes('excel') ||
+                            fname.match(/\.(xlsx|xls)$/i));
+          const isPdf  = !!(ctype.includes('pdf') ||
+                            fname.match(/\.pdf$/i) ||
+                            (ctype.includes('octet-stream') && fname.match(/\.pdf$/i)));
+          return { name: fname || ctype.split('/')[1] || 'unnamed', buffer: a.content, isXlsx, isPdf, isEml: false };
+        });
+
+        // Also check related parts (some email clients embed PDFs in related/alternative parts)
+        const relatedParts = inner.attachments?.filter(a =>
+          !a.filename && (a.contentType?.includes('pdf') || a.contentType?.includes('octet-stream'))
+          && a.size > 1000
+        ) || [];
+        relatedParts.forEach(part => {
+          if (!innerAtts.find(a => a.buffer === part.content)) {
+            innerAtts.push({
+              name: `embedded_${part.contentType?.split('/')[1] || 'file'}.pdf`,
+              buffer: part.content,
+              isXlsx: false,
+              isPdf: true,
+              isEml: false,
+            });
+          }
+        });
 
         // Contractor = inner From: (unless internal/blocked, then extract from body)
         let contractor = null;
