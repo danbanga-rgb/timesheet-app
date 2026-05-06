@@ -9,7 +9,7 @@
   "dependencies": {
     "imap": "^0.8.19",
     "mailparser": "^3.7.1",
-    "pdf-parse": "^1.1.1",
+    "pdf-parse": "1.1.1",
     "xlsx": "^0.18.5"
   }
 }

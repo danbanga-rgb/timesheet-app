@@ -399,17 +399,11 @@ function parseXlsx(buffer, filename) {
 
 async function parsePdf(buffer, filename) {
   try {
-    const pdfPkg = require('pdf-parse');
-    const PDFParse = pdfPkg.PDFParse || (pdfPkg.default && pdfPkg.default.PDFParse);
-    if (!PDFParse) {
-      console.warn(`PDF parsing unavailable for ${filename}`);
-      return [];
-    }
+    // pdf-parse v1.1.1 — simple pdfParse(buffer) => Promise<{text, numpages}>
+    const pdfParse = require('pdf-parse');
     const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-    const parser = new PDFParse({ data: buf, verbosity: 0 });
-    await parser.load();
-    const textResult = await parser.getText();
-    const text = textResult?.text || '';
+    const data = await pdfParse(buf);
+    const text = data.text || '';
     if (!text || text.length < 10) return [];
 
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
