@@ -598,13 +598,27 @@ const TimesheetSystem = () => {
   }
 
   function normaliseTimesheet(t: Record<string, unknown>): Timesheet {
+    // Entries from imported timesheets are flat { date: number }
+    // Native timesheets use { date: { hours: string } }
+    // Normalise both to { date: { hours: string } }
+    const rawEntries = (t.entries as Record<string, unknown>) || {};
+    const normalisedEntries: Record<string, TimeEntry> = {};
+    Object.entries(rawEntries).forEach(([date, val]) => {
+      if (typeof val === 'number') {
+        normalisedEntries[date] = { hours: String(val) };
+      } else if (typeof val === 'object' && val !== null && 'hours' in val) {
+        normalisedEntries[date] = val as TimeEntry;
+      } else {
+        normalisedEntries[date] = { hours: String(val ?? 0) };
+      }
+    });
     return {
       id: t.id as number,
       userId: t.user_id as string,
       userName: t.user_name as string,
       projectId: (t.project_id as number) || null,
       weekStart: (t.week_start as string).split('T')[0],
-      entries: (t.entries as Record<string, TimeEntry>) || {},
+      entries: normalisedEntries,
       status: t.status as Timesheet['status'],
       submittedAt: t.submitted_at as string,
       approvedAt: (t.approved_at as string) || null,
