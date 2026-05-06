@@ -1,0 +1,41 @@
+name: Timesheet Email Poller
+
+on:
+  schedule:
+    # Run at 30 minutes past every hour (matches send-reminder cron)
+    - cron: '30 * * * *'
+  # Allow manual trigger from GitHub Actions UI for testing
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: scripts/poller/package.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: scripts/poller
+
+      - name: Run poller
+        working-directory: scripts/poller
+        env:
+          IMAP_USER:              timesheets@mysynergie.net
+          IMAP_PASS:              ${{ secrets.IMAP_PASS }}
+          IMAP_HOST:              imap.ionos.com
+          IMAP_PORT:              "993"
+          INTERNAL_FORWARDERS:    contracts@synergietechsolutions.com,accounting@synergietechsolutions.com,lpinto@synergietechsolutions.com,helpdesk@synergietechsolutions.com
+          IMPORT_FALLBACK_EMAIL:  helpdesk@synergietechsolutions.com
+          INGEST_URL:             ${{ secrets.INGEST_URL }}
+          INGEST_SECRET:          ${{ secrets.INGEST_SECRET }}
+        run: node poller.js
