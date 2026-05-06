@@ -663,22 +663,12 @@ const TimesheetSystem = () => {
     return dates;
   }
 
-  function getWeekdayDates(startDate: Date): Date[] {
-    // Mon–Fri only, for contexts that don't need weekends
-    return getWeekDates(startDate).slice(0, 5);
-  }
-
   function getWeekSunday(weekStart: Date): Date {
     const sun = new Date(weekStart);
     sun.setDate(sun.getDate() + 6);
     return sun;
   }
 
-  function getWeekFriday(weekStart: Date): Date {
-    const fri = new Date(weekStart);
-    fri.setDate(fri.getDate() + 4);
-    return fri;
-  }
 
   function detectUserLocation() {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
