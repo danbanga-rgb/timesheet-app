@@ -40,7 +40,7 @@ if (missing.length) {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MONTH_MAP = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11 };
-const DAY_ORDER = ['mon','tue','wed','thu','fri'];
+const DAY_ORDER = ['mon','tue','wed','thu','fri','sat','sun'];
 
 const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmaster@/i];
 
@@ -367,14 +367,17 @@ function parseXlsx(buffer, filename) {
               for (const dk of DAY_ORDER) {
                 const colIdx = lowers.findIndex(l => l === dk || l === dk + 'day');
                 if (colIdx >= 0) {
-                  const val = parseFloat(dataCells[colIdx]);
+                  // Strip non-numeric artifacts like '4800%' before parsing
+                  const raw = String(dataCells[colIdx]).replace(/[^0-9.]/g, '');
+                  const val = parseFloat(raw);
                   if (!isNaN(val) && val >= 0 && val <= 24) hours[dk] = val;
                 }
               }
               const totalIdx = lowers.findIndex(l => l === 'total');
               if (totalIdx >= 0) {
-                const t = parseFloat(dataCells[totalIdx]);
-                if (!isNaN(t)) total = t;
+                const raw = String(dataCells[totalIdx]).replace(/[^0-9.]/g, '');
+                const t = parseFloat(raw);
+                if (!isNaN(t) && t <= 168) total = t; // max 24h * 7 days
               }
               break;
             }
@@ -391,10 +394,19 @@ function parseXlsx(buffer, filename) {
           dt.setUTCDate(base.getUTCDate() + i);
           entries[dt.toISOString().split('T')[0]] = hours[d] || 0;
         });
+        // Ensure all 7 days have entries (default 0 for missing days)
+        const base7 = new Date(weekStartDate + 'T12:00:00Z');
+        const fullEntries = {};
+        ['mon','tue','wed','thu','fri','sat','sun'].forEach((d, i) => {
+          const dt = new Date(base7);
+          dt.setUTCDate(base7.getUTCDate() + i);
+          const key = dt.toISOString().split('T')[0];
+          fullEntries[key] = hours[d] !== undefined ? hours[d] : (entries[key] || 0);
+        });
         results.push({
           weekStart: weekStartDate,
-          entries,
-          total,
+          entries: fullEntries,
+          total: total || Object.values(fullEntries).reduce((s, h) => s + h, 0),
           nameFromSheet,
           notes: `Sheet: ${sheetName}`,
         });
@@ -452,11 +464,15 @@ async function parsePdf(buffer, filename) {
       if (lower.includes('mon') && lower.includes('fri') && Object.keys(hours).length === 0) {
         for (let offset = 1; offset <= 5; offset++) {
           const nextLine = lines[i + offset] || '';
-          const nums = (nextLine.match(/\d+\.?\d*/g) || []).map(parseFloat)
+          // Strip percentage artifacts (e.g. '4800%' → '4800' → skip if > 24)
+          const nums = (nextLine.match(/[\d.]+%?/g) || [])
+            .map(s => parseFloat(s.replace('%', '')))
             .filter(n => !isNaN(n) && n >= 0 && n <= 24);
           if (nums.length >= 5) {
-            DAY_ORDER.forEach((d, idx) => { hours[d] = nums[idx]; });
-            if (nums.length >= 8) total = nums[7];
+            DAY_ORDER.forEach((d, idx) => { if (idx < nums.length) hours[d] = nums[idx]; });
+            // Total is usually the last number if > 5 values, up to 168h
+            const totalCandidate = nums.slice(5).find(n => n > 0 && n <= 168);
+            if (totalCandidate) total = totalCandidate;
             break;
           }
         }
@@ -483,8 +499,9 @@ async function parsePdf(buffer, filename) {
       DAY_ORDER.forEach((d, i) => {
         const dt = new Date(base);
         dt.setUTCDate(base.getUTCDate() + i);
-        entries[dt.toISOString().split('T')[0]] = hours[d] || 0;
+        entries[dt.toISOString().split('T')[0]] = hours[d] !== undefined ? hours[d] : 0;
       });
+      if (!total) total = Object.values(entries).reduce((s, h) => s + h, 0);
       return [{ weekStart: weekStartDate, entries, total, nameFromSheet: nameFromPdf, notes: `PDF: ${filename}` }];
     }
     return [];
