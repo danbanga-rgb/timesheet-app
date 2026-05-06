@@ -395,9 +395,6 @@ const TimesheetSystem = () => {
   const [showReminderLog, setShowReminderLog] = useState(false);
   const [reportWeek, setReportWeek] = useState(getCurrentWeekStart());
   const [adminView, setAdminView] = useState('users');
-  const [emailTestResults, setEmailTestResults] = useState<any>(null);
-  const [emailTestLoading, setEmailTestLoading] = useState(false);
-  const [emailTestError, setEmailTestError] = useState<string | null>(null);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
@@ -1796,9 +1793,7 @@ const TimesheetSystem = () => {
               <button onClick={() => setAdminView('allocations')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'allocations' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
                 <FileText className="w-5 h-5" /> Project Allocations
               </button>
-              <button onClick={() => { setAdminView('emailtest'); setEmailTestResults(null); }} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'emailtest' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
-                <Mail className="w-5 h-5" /> Email Import Test
-              </button>
+
             </div>
           </div>
 
@@ -2080,169 +2075,6 @@ const TimesheetSystem = () => {
             );
           })()}
 
-          {/* Email Import Test Panel */}
-          {adminView === 'emailtest' && (
-            <div className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex justify-between items-center mb-4">
-                <div>
-                  <h2 className="text-xl font-bold text-gray-800">Email Import Diagnostic</h2>
-                  <p className="text-sm text-gray-500 mt-1">Read-only. Connects to the IMAP inbox, analyses emails and shows what the import system would do. Nothing is written to the database.</p>
-                </div>
-                <button
-                  onClick={async () => {
-                    setEmailTestLoading(true);
-                    setEmailTestError(null);
-                    setEmailTestResults(null);
-                    try {
-                      const { data: { session } } = await supabase.auth.getSession();
-                      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-emails`, {
-                        method: 'POST',
-                        headers: {
-                          'Content-Type': 'application/json',
-                          'Authorization': `Bearer ${session?.access_token}`,
-                          'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
-                        },
-                        body: JSON.stringify({}),
-                      });
-                      if (!res.ok) {
-                        const err = await res.json();
-                        throw new Error(err.error || `HTTP ${res.status}`);
-                      }
-                      const data = await res.json();
-                      setEmailTestResults(data);
-                    } catch (e: any) {
-                      setEmailTestError(e.message || String(e));
-                    } finally {
-                      setEmailTestLoading(false);
-                    }
-                  }}
-                  disabled={emailTestLoading}
-                  className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {emailTestLoading ? (
-                    <><span className="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full" /> Connecting…</>
-                  ) : (
-                    <><Mail className="w-4 h-4" /> Fetch &amp; Analyse Emails</>
-                  )}
-                </button>
-              </div>
-
-              {emailTestError && (
-                <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-                  <strong>Error:</strong> {emailTestError}
-                </div>
-              )}
-
-              {emailTestResults && (
-                <div>
-                  {/* Summary strip */}
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
-                    <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-center">
-                      <div className="text-2xl font-bold text-blue-600">{emailTestResults.summary.total}</div>
-                      <div className="text-xs text-gray-600 mt-1">Emails analysed</div>
-                    </div>
-                    <div className="bg-green-50 border border-green-200 p-3 rounded-lg text-center">
-                      <div className="text-2xl font-bold text-green-600">{emailTestResults.summary.success}</div>
-                      <div className="text-xs text-gray-600 mt-1">✅ Parseable</div>
-                    </div>
-                    <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-center">
-                      <div className="text-2xl font-bold text-amber-600">{emailTestResults.summary.partial}</div>
-                      <div className="text-xs text-gray-600 mt-1">⚠️ Partial</div>
-                    </div>
-                    <div className="bg-red-50 border border-red-200 p-3 rounded-lg text-center">
-                      <div className="text-2xl font-bold text-red-600">{emailTestResults.summary.failed}</div>
-                      <div className="text-xs text-gray-600 mt-1">❌ Failed</div>
-                    </div>
-                    <div className="bg-gray-100 border border-gray-300 p-3 rounded-lg text-center">
-                      <div className="text-2xl font-bold text-gray-600">{emailTestResults.summary.wouldDelete ?? 0}</div>
-                      <div className="text-xs text-gray-600 mt-1">🗑️ Would Delete</div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6 text-sm">
-                    <div className="bg-gray-50 p-3 rounded-lg"><span className="font-medium">Known users:</span> {emailTestResults.summary.knownUsers}</div>
-                    <div className="bg-gray-50 p-3 rounded-lg"><span className="font-medium">Would create:</span> {emailTestResults.summary.newUsers} new user(s)</div>
-                    <div className="bg-gray-50 p-3 rounded-lg"><span className="font-medium">With attachments:</span> {emailTestResults.summary.withAttachments}</div>
-                    <div className="bg-gray-50 p-3 rounded-lg"><span className="font-medium">Direct match:</span> {emailTestResults.summary.resolvedBy?.directMatch ?? 0}</div>
-                    <div className="bg-gray-50 p-3 rounded-lg"><span className="font-medium">Body extracted:</span> {emailTestResults.summary.resolvedBy?.bodyExtraction ?? 0}</div>
-                    <div className="bg-gray-50 p-3 rounded-lg"><span className="font-medium">Unresolved:</span> {emailTestResults.summary.resolvedBy?.failed ?? 0}</div>
-                  </div>
-
-                  {/* Per-email detail */}
-                  <h3 className="font-semibold text-gray-800 mb-3">Email-by-email breakdown</h3>
-                  <div className="space-y-4">
-                    {emailTestResults.emails.map((email: any, idx: number) => (
-                      <div key={idx} className={`border-2 rounded-lg p-4 ${
-                        email.wouldDelete ? 'border-gray-200 bg-gray-50 opacity-60' :
-                        email.parseStatus === 'success' ? 'border-green-200 bg-green-50' :
-                        email.parseStatus === 'partial' ? 'border-amber-200 bg-amber-50' :
-                        'border-red-200 bg-red-50'
-                      }`}>
-                        <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="font-semibold text-gray-800 truncate">{email.subject}</div>
-                            <div className="text-xs text-gray-500 mt-0.5">{new Date(email.receivedAt).toLocaleString()}</div>
-                          </div>
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium shrink-0 ${
-                            email.wouldDelete ? 'bg-gray-200 text-gray-600' :
-                            email.parseStatus === 'success' ? 'bg-green-200 text-green-800' :
-                            email.parseStatus === 'partial' ? 'bg-amber-200 text-amber-800' :
-                            'bg-red-200 text-red-800'
-                          }`}>
-                            {email.wouldDelete ? '🗑️ Would Delete' : email.parseStatus === 'success' ? '✅ Success' : email.parseStatus === 'partial' ? '⚠️ Partial' : '❌ Failed'}
-                          </span>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm mb-3">
-                          <div><span className="text-gray-500">From:</span> <span className="font-mono text-xs">{email.fromEmail}</span></div>
-                          <div><span className="text-gray-500">Resolved as:</span> {email.resolvedEmail
-                            ? <><span className="font-mono text-xs">{email.resolvedEmail}</span> <span className={`text-xs px-1 rounded ${email.existsInSystem ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>{email.existsInSystem ? 'known' : 'new user'}</span></>
-                            : <span className="text-red-600 text-xs">unresolved</span>}
-                          </div>
-                          <div><span className="text-gray-500">Resolution method:</span> <span className="text-xs">{email.resolvedBy}</span></div>
-                          <div><span className="text-gray-500">Forwarded email:</span> <span className="text-xs">{email.isForwarded ? 'Yes' : 'No'}</span></div>
-                          <div><span className="text-gray-500">Week start:</span> <span className="text-xs">{email.parsedWeekStart || '—'} <span className="text-gray-400">({email.weekDetectedBy})</span></span></div>
-                          <div><span className="text-gray-500">Total hours:</span> <span className="font-semibold">{email.totalHours != null ? `${email.totalHours.toFixed(1)}h` : '—'}</span></div>
-                        </div>
-
-                        {email.attachments?.length > 0 && (
-                          <div className="text-xs text-gray-600 mb-2">
-                            <span className="font-medium">Attachments:</span> {email.attachments.map((a: any) => `${a.name} (${a.type})`).join(', ')}
-                          </div>
-                        )}
-
-                        {email.parsedHours && (
-                          <div className="flex gap-2 flex-wrap mb-2">
-                            {Object.entries(email.parsedHours).map(([date, hrs]: [string, any]) => (
-                              <div key={date} className="bg-white border border-gray-200 rounded px-2 py-1 text-xs text-center">
-                                <div className="text-gray-500">{new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' })}</div>
-                                <div className="font-bold text-indigo-600">{(hrs as number).toFixed(1)}</div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        <div className="text-xs text-gray-500 italic">{email.parseNotes}</div>
-
-                        {/* Body preview */}
-                        <details className="mt-2">
-                          <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Show body preview</summary>
-                          <pre className="mt-2 text-xs text-gray-600 bg-white border border-gray-200 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">{email.bodyPreview}</pre>
-                        </details>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {!emailTestResults && !emailTestLoading && !emailTestError && (
-                <div className="text-center py-12 text-gray-400">
-                  <Mail className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                  <p>Click "Fetch &amp; Analyse Emails" to connect to the inbox and run the diagnostic.</p>
-                </div>
-              )}
-            </div>
-          )}
 
           {/* User Modal */}
           {showUserModal && (
