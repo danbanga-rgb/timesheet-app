@@ -419,92 +419,152 @@ function parseXlsx(buffer, filename) {
   }
 }
 
-// ─── PDF parser ───────────────────────────────────────────────────────────────
+// ─── PDF parser — Synergie template ─────────────────────────────────────────────
+// Handles concatenated hours in PDF text extraction, including 4800% artifact and
+// European dot date formats. Uses total as constraint to backtrack-solve day values.
+
+function parseSynergiePdfText(text, filename) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+  let weekEndingStr = null;
+  let name = null;
+  let total = null;
+  const hoursLinesCandidates = [];
+  let inHoursSection = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lower = line.toLowerCase();
+
+    // Name: field
+    if (!name && lower.startsWith('name:')) {
+      const n = line.slice(5).trim();
+      if (n && n.length > 1 && !/^\d/.test(n)) {
+        name = n;
+      } else if (lines[i + 1] && !/^\d/.test(lines[i + 1]) &&
+                 !lines[i + 1].toLowerCase().startsWith('project')) {
+        name = lines[i + 1].trim();
+      }
+    }
+
+    // Week Ending Date — same line or next line
+    if (!weekEndingStr && lower.includes('week ending date')) {
+      const m = line.match(/(\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}\.?)\s*$/);
+      if (m) weekEndingStr = m[1];
+      else if (lines[i + 1]) {
+        const m2 = lines[i + 1].match(/^(\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}\.?)$/);
+        if (m2) weekEndingStr = m2[1];
+      }
+    }
+
+    // Total Client Billable Hours — strip artifacts like 4800%
+    if (lower.includes('total client billable hours')) {
+      const cleaned = line.replace(/[^0-9.]/g, '');
+      const t = parseFloat(cleaned);
+      if (!isNaN(t) && t <= 168) total = t;
+      inHoursSection = false;
+    }
+
+    // Hours section: between "Mgr Name Signature" and "Total Client Billable"
+    if ((lower.includes('mgr name') || lower.includes('client manager name')) &&
+        lower.includes('signature')) {
+      inHoursSection = true;
+      continue;
+    }
+    if (inHoursSection) {
+      if (lower.includes('total client billable') || lower.includes('certify') ||
+          lower.startsWith('signature:')) {
+        inHoursSection = false;
+        continue;
+      }
+      hoursLinesCandidates.push(line);
+    }
+  }
+
+  // Fallback: if total > 168 (4800% artifact), find standalone number in hoursLines
+  if (!total || total > 168) {
+    for (const hl of hoursLinesCandidates) {
+      if (/^\d+$/.test(hl)) {
+        const t = parseFloat(hl);
+        if (t > 0 && t <= 168) { total = t; break; }
+      }
+    }
+  }
+
+  // Parse hours using backtracking constrained by total
+  let hours = null;
+  if (hoursLinesCandidates.length > 0 && total !== null && total <= 168) {
+    const combined = hoursLinesCandidates.join('');
+    // Strip leading manager name (letters, spaces, unicode accents, punctuation)
+    const numStr = combined.replace(/^[\p{L}\s.,\-]+/u, '').replace(/[^0-9]/g, '');
+
+    if (numStr.length >= 5) {
+      function solve(pos, remaining, vals) {
+        if (vals.length === 7) return Math.abs(remaining) < 0.01 ? vals : null;
+        if (pos >= numStr.length) return null;
+        if (pos + 1 < numStr.length) {
+          const two = parseInt(numStr.slice(pos, pos + 2));
+          if (two <= 24) {
+            const r = solve(pos + 2, remaining - two, [...vals, two]);
+            if (r) return r;
+          }
+        }
+        const one = parseInt(numStr[pos]);
+        if (one <= 24) return solve(pos + 1, remaining - one, [...vals, one]);
+        return null;
+      }
+      const result = solve(0, total, []);
+      if (result) {
+        hours = { mon: result[0], tue: result[1], wed: result[2], thu: result[3],
+                  fri: result[4], sat: result[5] || 0, sun: result[6] || 0 };
+      }
+    }
+  }
+
+  // Normalise week ending date → Monday week start
+  let weekStart = null;
+  if (weekEndingStr) {
+    // European dot: 26.4.2026. → 4/26/2026
+    weekEndingStr = weekEndingStr.replace(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\.?$/, (_, d, m, y) => `${m}/${d}/${y}`);
+    // 2-digit year
+    weekEndingStr = weekEndingStr.replace(/(\d{1,2}\/\d{1,2}\/)(\d{2})$/, (_, pre, yy) =>
+      pre + (parseInt(yy) < 50 ? `20${yy}` : `19${yy}`)
+    );
+    const d = new Date(weekEndingStr);
+    if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) {
+      const day = d.getDay();
+      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+      weekStart = d.toISOString().split('T')[0];
+    }
+  }
+
+  // Fallback week from filename if not found in text
+  if (!weekStart) weekStart = weekFromFilename(filename);
+
+  return { name, weekStart, hours, total };
+}
 
 async function parsePdf(buffer, filename) {
   try {
-    // pdf-parse v1.1.1 — simple pdfParse(buffer) => Promise<{text, numpages}>
     const pdfParse = require('pdf-parse');
     const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
     const data = await pdfParse(buf);
     const text = data.text || '';
     if (!text || text.length < 10) return [];
 
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-    const hours = {};
-    let total = null;
-    let weekStartDate = null;
-    let nameFromPdf = null;
+    const { name, weekStart, hours, total } = parseSynergiePdfText(text, filename);
 
-    for (let i = 0; i < lines.length; i++) {
-      const lower = lines[i].toLowerCase();
+    if (!hours || !weekStart) return [];
 
-      // Extract name — look for "Signature: Name" or "Signature/Name: Name"
-      if (!nameFromPdf && (lower.includes('signature') && lower.includes('name'))) {
-        const next = lines[i + 1] || '';
-        if (next && next.includes(' ') && !/^\d/.test(next) && next.length > 3 && next.length < 60) {
-          nameFromPdf = next.trim();
-        }
-      }
+    const entries = {};
+    const base = new Date(weekStart + 'T12:00:00Z');
+    DAY_ORDER.forEach((d, i) => {
+      const dt = new Date(base);
+      dt.setUTCDate(base.getUTCDate() + i);
+      entries[dt.toISOString().split('T')[0]] = hours[d] !== undefined ? hours[d] : 0;
+    });
 
-      // Week start from date header
-      if (!weekStartDate && lower.includes('client billable hours')) {
-        // Match both US format (4/20/26) and European dot format (26.4.2026.)
-        const dateMatch = lines[i].match(/(\d{1,2}[\.\/]\d{1,2}[\.\/]\d{2,4}\.?)/);
-        if (dateMatch) {
-          const raw = expandTwoDigitYear(normaliseDate(dateMatch[1]));
-          const d = new Date(raw);
-          if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) {
-            weekStartDate = getMondayOf(d);
-          }
-        }
-      }
-
-      // Day label row → scan forward for hours
-      if (lower.includes('mon') && lower.includes('fri') && Object.keys(hours).length === 0) {
-        for (let offset = 1; offset <= 5; offset++) {
-          const nextLine = lines[i + offset] || '';
-          // Strip percentage artifacts (e.g. '4800%' → '4800' → skip if > 24)
-          const nums = (nextLine.match(/[\d.]+%?/g) || [])
-            .map(s => parseFloat(s.replace('%', '')))
-            .filter(n => !isNaN(n) && n >= 0 && n <= 24);
-          if (nums.length >= 5) {
-            DAY_ORDER.forEach((d, idx) => { if (idx < nums.length) hours[d] = nums[idx]; });
-            // Total is usually the last number if > 5 values, up to 168h
-            const totalCandidate = nums.slice(5).find(n => n > 0 && n <= 168);
-            if (totalCandidate) total = totalCandidate;
-            break;
-          }
-        }
-      }
-    }
-
-    // Named day patterns fallback
-    if (Object.keys(hours).length === 0) {
-      for (const pat of HOURS_PATTERNS) {
-        pat.lastIndex = 0;
-        let m;
-        while ((m = pat.exec(text)) !== null) {
-          hours[m[1].toLowerCase().slice(0, 3)] = parseFloat(m[2]);
-        }
-      }
-    }
-
-    if (!weekStartDate) weekStartDate = weekFromFilename(filename);
-
-    if (Object.keys(hours).length > 0 && weekStartDate) {
-      if (!total) total = Object.values(hours).reduce((s, h) => s + h, 0);
-      const entries = {};
-      const base = new Date(weekStartDate + 'T12:00:00Z');
-      DAY_ORDER.forEach((d, i) => {
-        const dt = new Date(base);
-        dt.setUTCDate(base.getUTCDate() + i);
-        entries[dt.toISOString().split('T')[0]] = hours[d] !== undefined ? hours[d] : 0;
-      });
-      if (!total) total = Object.values(entries).reduce((s, h) => s + h, 0);
-      return [{ weekStart: weekStartDate, entries, total, nameFromSheet: nameFromPdf, notes: `PDF: ${filename}` }];
-    }
-    return [];
+    return [{ weekStart, entries, total: total || Object.values(entries).reduce((s, h) => s + h, 0), nameFromSheet: name, notes: `PDF: ${filename}` }];
   } catch (e) {
     console.warn(`PDF parse error for ${filename}: ${e.message}`);
     return [];
