@@ -28,11 +28,12 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
               {weekEndings.map((we: string) => {
                 const isPartial = partialWeeks.has(we);
                 const weekMon = parseLocalDate(we);
-                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4); // Keep for label
+                const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
                 return (
                   <th key={we} className={`border border-green-700 px-3 py-2 text-center whitespace-nowrap ${isPartial ? 'bg-amber-600' : ''}`}>
                     <div className="text-xs opacity-80">{isPartial ? 'Partial' : 'W/E'}</div>
-                    <div>{weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                    <div>{weekSun.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
                   </th>
                 );
               })}
@@ -409,6 +410,7 @@ const TimesheetSystem = () => {
   const [viewMode, setViewMode] = useState('form');
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
   const [selectedTimesheetForView, setSelectedTimesheetForView] = useState<Timesheet | null>(null);
+  const [showWeekendHours, setShowWeekendHours] = useState(false);
   const [showTimesheetModal, setShowTimesheetModal] = useState(false);
   const [selectedTimesheetIds, setSelectedTimesheetIds] = useState<number[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -650,15 +652,32 @@ const TimesheetSystem = () => {
   }
 
   function getWeekDates(startDate: Date): Date[] {
-    // startDate is Monday; returns Mon–Fri working days
+    // startDate is Monday; returns Mon–Sun (7 days)
     const dates: Date[] = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 7; i++) {
       const date = new Date(startDate);
       date.setDate(date.getDate() + i);
       date.setHours(0, 0, 0, 0);
       dates.push(date);
     }
     return dates;
+  }
+
+  function getWeekdayDates(startDate: Date): Date[] {
+    // Mon–Fri only, for contexts that don't need weekends
+    return getWeekDates(startDate).slice(0, 5);
+  }
+
+  function getWeekSunday(weekStart: Date): Date {
+    const sun = new Date(weekStart);
+    sun.setDate(sun.getDate() + 6);
+    return sun;
+  }
+
+  function getWeekFriday(weekStart: Date): Date {
+    const fri = new Date(weekStart);
+    fri.setDate(fri.getDate() + 4);
+    return fri;
   }
 
   function detectUserLocation() {
@@ -831,6 +850,13 @@ const TimesheetSystem = () => {
 
     if (existing) {
       setTimeEntries(existing.entries);
+      // Show weekend rows if any weekend hours exist
+      const hasWeekendHours = Object.entries(existing.entries).some(([dateKey, entry]) => {
+        const d = parseLocalDate(dateKey);
+        const dayOfWeek = d.getDay();
+        return (dayOfWeek === 0 || dayOfWeek === 6) && parseFloat((entry as TimeEntry)?.hours || '0') > 0;
+      });
+      setShowWeekendHours(hasWeekendHours);
     } else {
       const entries: Record<string, TimeEntry> = {};
       getWeekDates(weekStart).forEach(date => {
@@ -838,13 +864,14 @@ const TimesheetSystem = () => {
         const holiday = user && isHoliday(date, user.country);
         const weekend = isWeekend(date);
         entries[dateKey] = {
-          hours: (!holiday && !weekend) ? '8' : '0',
+          hours: '0',
           isHoliday: holiday || undefined,
           holidayName: holiday?.name,
           isWeekend: weekend
         };
       });
       setTimeEntries(entries);
+      setShowWeekendHours(false);
     }
   };
 
@@ -1169,14 +1196,14 @@ const TimesheetSystem = () => {
     const userTimesheets = timesheets.filter(t => {
       if (t.userId !== userId || t.status !== 'approved') return false;
       const weekMon = parseLocalDate(t.weekStart);
-      const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-      return weekMon <= endD && weekFri >= startD;
+      const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
+      return weekMon <= endD && weekSun >= startD;
     });
     return userTimesheets
       .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
       .map(ts => {
         const weekMon = parseLocalDate(ts.weekStart);
-        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
+        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4); // Keep Fri for invoice label
         let hours = 0;
         Object.entries(ts.entries).forEach(([dateKey, entry]) => {
           const d = parseLocalDate(dateKey);
@@ -1460,20 +1487,28 @@ const TimesheetSystem = () => {
     const [py, pm, pd] = prev.weekStart.split('-').map(Number);
     const prevWeek = new Date(py, pm - 1, pd);
     const newEntries: Record<string, TimeEntry> = {};
+    const prevWeekDates = getWeekDates(prevWeek);
     getWeekDates(selectedWeek).forEach((date, i) => {
       const curKey = formatDate(date);
-      const prevKey = formatDate(getWeekDates(prevWeek)[i]);
-      const e = prev.entries[prevKey];
+      const prevDate = prevWeekDates[i];
+      const prevKey = prevDate ? formatDate(prevDate) : null;
+      const e = prevKey ? prev.entries[prevKey] : undefined;
       const holiday = isHoliday(date, currentUser!.country);
       const weekend = isWeekend(date);
-      const raw = e ? (typeof e === 'object' ? e.hours : e) : '0';
+      const raw = e ? (typeof e === 'object' ? e.hours : String(e)) : '0';
       newEntries[curKey] = {
-        hours: (holiday || weekend) ? '0' : String(raw != null ? raw : '0'),
+        hours: String(raw != null ? raw : '0'),
         isHoliday: holiday || undefined,
         holidayName: holiday ? holiday.name : undefined,
         isWeekend: weekend
       };
     });
+    // Show weekend rows if previous week had weekend hours
+    const hasWeekendHours = Object.entries(newEntries).some(([k, e]) => {
+      const d = parseLocalDate(k); const day = d.getDay();
+      return (day === 0 || day === 6) && parseFloat(e?.hours || '0') > 0;
+    });
+    setShowWeekendHours(hasWeekendHours);
     setTimeEntries(newEntries);
     alert('Copied from week of ' + prevWeek.toLocaleDateString());
   };
@@ -1508,7 +1543,7 @@ const TimesheetSystem = () => {
   };
 
   const exportTimesheetList = (filtered: Timesheet[]) => {
-    let csv = 'Employee Name,Week Start,Project,Mon,Tue,Wed,Thu,Fri,Total Hours,Status,Submitted Date\n';
+    let csv = 'Employee Name,Week Start,Project,Mon,Tue,Wed,Thu,Fri,Sat,Sun,Total Hours,Status,Submitted Date\n';
     filtered.forEach(ts => {
       const project = projects.find(p => p.id === ts.projectId);
       const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
@@ -1575,7 +1610,7 @@ const TimesheetSystem = () => {
                 <h2 className="text-2xl font-bold text-gray-800">Timesheet Details</h2>
                 <div className="mt-2 space-y-1">
                   <p className="text-gray-600"><span className="font-medium">Employee:</span> {selectedTimesheetForView.userName}</p>
-                  <p className="text-gray-600"><span className="font-medium">Week:</span> {parseLocalDate(selectedTimesheetForView.weekStart).toLocaleDateString()} – {weekDates[4].toLocaleDateString()}</p>
+                  <p className="text-gray-600"><span className="font-medium">Week:</span> {parseLocalDate(selectedTimesheetForView.weekStart).toLocaleDateString()} – {getWeekSunday(parseLocalDate(selectedTimesheetForView.weekStart)).toLocaleDateString()}</p>
                   {project && <p className="text-indigo-600"><span className="font-medium">Project:</span> {project.name} ({project.code})</p>}
                   {user && (
                     <p className="text-gray-600 flex items-center gap-1">
@@ -2358,14 +2393,14 @@ const TimesheetSystem = () => {
                       <th className="border border-indigo-700 px-4 py-3 text-left">Employee</th>
                       <th className="border border-indigo-700 px-4 py-3 text-left">Week Start</th>
                       <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
-                      {['Mon','Tue','Wed','Thu','Fri'].map(d => <th key={d} className="border border-indigo-700 px-4 py-3 text-center">{d}</th>)}
+                      {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d => <th key={d} className="border border-indigo-700 px-4 py-3 text-center">{d}</th>)}
                       <th className="border border-indigo-700 px-4 py-3 text-center">Total</th>
                       <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredTimesheets.length === 0 ? (
-                      <tr><td colSpan={11} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
+                      <tr><td colSpan={13} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
                     ) : filteredTimesheets.map((ts, idx) => {
                       const project = projects.find(p => p.id === ts.projectId);
                       const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
@@ -2414,15 +2449,15 @@ const TimesheetSystem = () => {
               const teamTimesheets = timesheets.filter(t => managedUsers.some(u => u.id === t.userId));
               const inRange = teamTimesheets.filter(t => {
                 const weekMon = parseLocalDate(t.weekStart);
-                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-                return weekMon <= endD && weekFri >= startD;
+                const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
+                return weekMon <= endD && weekSun >= startD;
               });
               const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort() as string[];
               const partialWeeks = new Set<string>();
               weekEndings.forEach(we => {
                 const weekMon = parseLocalDate(we);
-                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-                if (weekMon < startD || weekFri > endD) partialWeeks.add(we);
+                const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
+                if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
               });
               const employeeRows = managedUsers.map(user => {
                 const hours: Record<string, number | null> = {};
@@ -2739,7 +2774,7 @@ const TimesheetSystem = () => {
                             const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                             const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                             const total = dailyHours.reduce((s, h) => s + h, 0);
-                            const fri = weekDates[4];
+                            const fri = weekDates[4]; // W/E Friday label for CSV // Keep Fri for W/E label on invoices
                             return (
                               <tr key={ts.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                                 <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
@@ -3072,21 +3107,21 @@ const TimesheetSystem = () => {
       if (!appliedRange.start || !appliedRange.end) return null;
       const startD = parseLocalDate(appliedRange.start), endD = parseLocalDate(appliedRange.end);
 
-      // Include any week (Mon–Fri) that overlaps the range
+      // Include any week (Mon–Sun) that overlaps the range
       const inRange = timesheets.filter(t => {
         const weekMon = parseLocalDate(t.weekStart);
-        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-        return weekMon <= endD && weekFri >= startD;
+        const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
+        return weekMon <= endD && weekSun >= startD;
       });
 
       const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
       const partialWeeks = new Set<string>();
 
-      // A week is partial if its Monday or Friday falls outside the range
+      // A week is partial if its Monday or Sunday falls outside the range
       weekEndings.forEach(we => {
         const weekMon = parseLocalDate(we);
-        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-        if (weekMon < startD || weekFri > endD) partialWeeks.add(we);
+        const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
+        if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
       });
 
       const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
@@ -3171,7 +3206,7 @@ const TimesheetSystem = () => {
                 <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Prev</button>
                 <div className="text-center">
                   <h3 className="text-lg font-semibold text-gray-800">Week of {reportWeek.toLocaleDateString()}</h3>
-                  <p className="text-sm text-gray-600">{weekDates[0].toLocaleDateString()} – {weekDates[4].toLocaleDateString()}</p>
+                  <p className="text-sm text-gray-600">{weekDates[0].toLocaleDateString()} – {weekDates[6].toLocaleDateString()}</p>
                 </div>
                 <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next →</button>
               </div>
@@ -3535,14 +3570,14 @@ const TimesheetSystem = () => {
             })();
 
             const exportTsOnlyCSV = () => {
-              let csv = 'Employee,Country,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Total Hours,Status,Submitted\n';
+              let csv = 'Employee,Country,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Sat,Sun,Total Hours,Status,Submitted\n';
               filteredTs.forEach(ts => {
                 const user = users.find(u => u.id === ts.userId);
                 const project = projects.find(p => p.id === ts.projectId);
                 const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                 const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                 const total = dailyHours.reduce((s, h) => s + h, 0);
-                const fri = weekDates[4];
+                const fri = weekDates[4]; // W/E Friday label for CSV
                 csv += `"${ts.userName}","${user ? countryName(user.country) : ''}","${ts.weekStart}","${formatDate(fri)}","${project ? project.name + ' (' + project.code + ')' : 'N/A'}",`;
                 dailyHours.forEach(h => { csv += h + ','; });
                 csv += `${total.toFixed(1)},"${ts.status}","${ts.submittedAt ? new Date(ts.submittedAt).toLocaleDateString() : ''}"
@@ -3689,7 +3724,7 @@ const TimesheetSystem = () => {
                               const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                               const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                               const total = dailyHours.reduce((s, h) => s + h, 0);
-                              const fri = weekDates[4];
+                              const fri = weekDates[4]; // W/E Friday label
                               return (
                                 <tr key={ts.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                                   <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
@@ -4140,18 +4175,17 @@ const TimesheetSystem = () => {
           )}
 
           <div className="space-y-3">
-            {weekDates.map(date => {
+            {weekDates.slice(0, 5).map(date => {
               const dateKey = formatDate(date);
-              const entry = timeEntries[dateKey] || { hours: '' };
+              const entry = timeEntries[dateKey] || { hours: '0' };
               const isDisabled = isUserInactive || currentTimesheet?.status === 'approved';
               return (
-                <div key={dateKey} className={'p-4 rounded-lg ' + (entry.isHoliday ? 'bg-red-50 border-2 border-red-200' : entry.isWeekend ? 'bg-gray-100' : 'bg-blue-50')}>
+                <div key={dateKey} className={'p-4 rounded-lg ' + (entry.isHoliday ? 'bg-red-50 border-2 border-red-200' : 'bg-blue-50')}>
                   <div className="flex items-center justify-between">
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
                         <div className="font-medium text-gray-800">{date.toLocaleDateString('en-US', { weekday: 'long' })}</div>
                         {entry.isHoliday && <span className="px-2 py-1 bg-red-100 text-red-700 text-xs rounded-full font-medium">Holiday: {entry.holidayName}</span>}
-                        {entry.isWeekend && <span className="px-2 py-1 bg-gray-200 text-gray-600 text-xs rounded-full font-medium">Weekend</span>}
                       </div>
                       <div className="text-sm text-gray-600">{date.toLocaleDateString()}</div>
                     </div>
@@ -4163,6 +4197,39 @@ const TimesheetSystem = () => {
                 </div>
               );
             })}
+
+            {/* Weekend hours — shown when data exists or user clicks button */}
+            {showWeekendHours ? (
+              weekDates.slice(5).map(date => {
+                const dateKey = formatDate(date);
+                const entry = timeEntries[dateKey] || { hours: '0' };
+                const isDisabled = isUserInactive || currentTimesheet?.status === 'approved';
+                return (
+                  <div key={dateKey} className="p-4 rounded-lg bg-gray-100 border-2 border-gray-200">
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <div className="font-medium text-gray-800">{date.toLocaleDateString('en-US', { weekday: 'long' })}</div>
+                          <span className="px-2 py-1 bg-gray-200 text-gray-600 text-xs rounded-full font-medium">Weekend</span>
+                        </div>
+                        <div className="text-sm text-gray-600">{date.toLocaleDateString()}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-sm text-gray-700 font-medium">Hours:</label>
+                        <input type="number" min="0" max="24" step="0.5" value={entry.hours} onChange={e => handleTimeEntry(dateKey, e.target.value)} disabled={isDisabled} className="w-24 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100" placeholder="0" />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (!isUserInactive && (!currentTimesheet || currentTimesheet.status !== 'approved')) ? (
+              <button
+                onClick={() => setShowWeekendHours(true)}
+                className="w-full py-2 border-2 border-dashed border-gray-300 rounded-lg text-sm text-gray-500 hover:border-gray-400 hover:text-gray-600 transition-colors flex items-center justify-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Add Weekend Hours
+              </button>
+            ) : null}
           </div>
 
           <div className="mt-6 p-4 bg-indigo-50 rounded-lg border-2 border-indigo-200">
@@ -4276,18 +4343,18 @@ const TimesheetSystem = () => {
                 <tr>
                   <th className="border border-indigo-700 px-4 py-3 text-left">W/E Date</th>
                   <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
-                  {['Mon','Tue','Wed','Thu','Fri'].map(d => <th key={d} className="border border-indigo-700 px-4 py-3 text-center">{d}</th>)}
+                  {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d => <th key={d} className="border border-indigo-700 px-4 py-3 text-center">{d}</th>)}
                   <th className="border border-indigo-700 px-4 py-3 text-center">Total</th>
                   <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredUserTimesheets.length === 0 ? (
-                  <tr><td colSpan={9} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
+                  <tr><td colSpan={11} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
                 ) : filteredUserTimesheets.map((ts, idx) => {
                   const project = projects.find(p => p.id === ts.projectId);
                   const wDates = getWeekDates(parseLocalDate(ts.weekStart));
-                  const weekFri = wDates[4]; // Friday is last working day
+                  const weekFri = wDates[4]; // W/E Friday label
                   const dailyHours = wDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                   const total = dailyHours.reduce((s, h) => s + h, 0);
                   return (
@@ -4404,8 +4471,8 @@ const TimesheetSystem = () => {
                       <div className="flex flex-wrap gap-2 mb-3">
                         {monthOptions.map(opt => {
                           const hasApproved = approvedTimesheets.some(t => {
-                            const weekFri = new Date(parseLocalDate(t.weekStart)); weekFri.setDate(weekFri.getDate() + 4);
-                            return parseLocalDate(t.weekStart) <= parseLocalDate(opt.end) && weekFri >= parseLocalDate(opt.start);
+                            const weekSun = new Date(parseLocalDate(t.weekStart)); weekSun.setDate(weekSun.getDate() + 6);
+                            return parseLocalDate(t.weekStart) <= parseLocalDate(opt.end) && weekSun >= parseLocalDate(opt.start);
                           });
                           return (
                             <button
