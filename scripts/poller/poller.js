@@ -609,13 +609,6 @@ async function processEmail(parsed, messageId, results) {
     isEml:  !!(a.contentType?.includes('message/rfc822') || (a.filename||'').match(/\.eml$/i)),
   }));
 
-  // ── DMARC ──────────────────────────────────────────────────────────────────
-  if (isDmarc(fromEmail, subject)) {
-    console.log(`  🗑️  DMARC: ${subject} — skipped`);
-    results.push({ type: 'dmarc', subject, action: 'skipped' });
-    return;
-  }
-
   const emlAtts = attachments.filter(a => a.isEml);
   const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isEml);
 
@@ -740,11 +733,12 @@ function fetchEmails() {
         if (err) return reject(err);
         imap.search(['UNSEEN'], (err, uids) => {
           if (err) return reject(err);
-          if (!uids || uids.length === 0) { imap.end(); return resolve([]); }
+          if (!uids || uids.length === 0) { imap.end(); return resolve({ imap: null, messages: [] }); }
 
           console.log(`Found ${uids.length} unseen email(s)`);
           const messages = [];
-          const fetch = imap.fetch(uids, { bodies: '', markSeen: true });
+          // markSeen: false — we'll mark/delete selectively after parsing
+          const fetch = imap.fetch(uids, { bodies: '', markSeen: false });
 
           fetch.on('message', (msg, seq) => {
             const chunks = [];
@@ -757,7 +751,7 @@ function fetchEmails() {
           });
 
           fetch.once('error', reject);
-          fetch.once('end', () => { imap.end(); resolve(messages); });
+          fetch.once('end', () => { resolve({ imap, messages }); });
         });
       });
     });
@@ -773,23 +767,66 @@ async function main() {
   console.log(`   IMAP: ${CONFIG.imapUser}@${CONFIG.imapHost}`);
   console.log(`   Ingest: ${CONFIG.ingestUrl}\n`);
 
-  const rawMessages = await fetchEmails();
+  const { imap: imapConn, messages: rawMessages } = await fetchEmails();
   if (rawMessages.length === 0) {
     console.log('No unseen emails. Done.');
     return;
   }
 
   const results = [];
+  const dmarcUids = [];
+  const processedUids = [];
+
   for (const raw of rawMessages) {
     try {
       const parsed = await simpleParser(raw.buffer);
       const messageId = parsed.messageId || `uid-${raw.uid}-${Date.now()}`;
-      await processEmail(parsed, messageId, results);
+      const fromAddr  = parsed.from?.value?.[0];
+      const fromEmail = (fromAddr?.address || '').toLowerCase();
+      const subject   = parsed.subject || '';
+
+      if (isDmarc(fromEmail, subject)) {
+        dmarcUids.push(raw.uid);
+        console.log(`  🗑️  DMARC (will delete): ${subject}`);
+        results.push({ type: 'dmarc', subject, action: 'deleted' });
+      } else {
+        processedUids.push(raw.uid);
+        await processEmail(parsed, messageId, results);
+      }
     } catch (e) {
+      processedUids.push(raw.uid); // mark seen even on error
       console.error(`Error processing uid=${raw.uid}: ${e.message}`);
       results.push({ error: e.message, uid: raw.uid });
     }
   }
+
+  // Mark legitimate emails as SEEN
+  if (imapConn && processedUids.length > 0) {
+    try {
+      await new Promise((res, rej) => {
+        imapConn.addFlags(processedUids, '\Seen', err => err ? rej(err) : res());
+      });
+    } catch (e) {
+      console.warn(`Could not mark emails as seen: ${e.message}`);
+    }
+  }
+
+  // Delete DMARC emails permanently
+  if (imapConn && dmarcUids.length > 0) {
+    try {
+      await new Promise((res, rej) => {
+        imapConn.addFlags(dmarcUids, '\Deleted', err => err ? rej(err) : res());
+      });
+      await new Promise((res, rej) => {
+        imapConn.expunge(err => err ? rej(err) : res());
+      });
+      console.log(`  🗑️  Deleted ${dmarcUids.length} DMARC email(s) from inbox`);
+    } catch (e) {
+      console.warn(`Could not delete DMARC emails: ${e.message}`);
+    }
+  }
+
+  if (imapConn) imapConn.end();
 
   console.log('\n─── Summary ──────────────────────────────────────────────');
   const success = results.filter(r => r.status >= 200 && r.status < 300).length;
