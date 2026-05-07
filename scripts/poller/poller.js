@@ -609,9 +609,10 @@ function postToIngest(payload) {
 // ─── Process one contractor's attachments ─────────────────────────────────────
 
 async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId) {
-  const xlsxAtts = attachments.filter(a => a.isXlsx);
-  const pdfAtts  = attachments.filter(a => a.isPdf && !a.name.toLowerCase().match(/invoice|billing/i));
-  const timesheets = [];
+  const xlsxAtts    = attachments.filter(a => a.isXlsx);
+  const invoiceAtts = attachments.filter(a => a.isPdf && /invoice|billing/i.test(a.name));
+  const pdfAtts     = attachments.filter(a => a.isPdf && !/invoice|billing/i.test(a.name));
+  const timesheets  = [];
 
   for (const att of xlsxAtts) {
     const parsed = parseXlsx(att.buffer, att.name);
@@ -678,6 +679,9 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   }
   // Mark invoice attachments
   invoiceAtts.forEach(a => results.push({ contractor: contractorEmail, attachmentName: a.name, action: 'invoice_skipped' }));
+
+  const parsedAttachmentNames = new Set(timesheets.map(ts => ts.attachmentName).filter(Boolean));
+  const failedAttachments = [...xlsxAtts, ...pdfAtts].filter(a => !parsedAttachmentNames.has(a.name));
 
   return { results, failedAttachments };
 }
