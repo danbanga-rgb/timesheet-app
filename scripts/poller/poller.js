@@ -592,7 +592,7 @@ function parseSynergiePdfText(text, filename) {
     };
     for (const interp of ['us', 'eu']) {
       const dates = extractDates(interp);
-      if (dates.length >= 2) {
+      if (dates.length >= 1) {
         dates.sort((a, b) => a - b);
         const span = (dates[dates.length - 1] - dates[0]) / 86400000;
         if (span <= 6) { taskLogWeekStart = getMondayOf(dates[0]); break; }
@@ -621,13 +621,9 @@ function parseSynergiePdfText(text, filename) {
     }
   }
 
-  // Prefer task-log dates when weekEnding date was ambiguous (first part ≤ 12)
-  // Task log dates are unambiguous when they form a consecutive sequence
-  if (taskLogWeekStart && weekEndingStr) {
-    const ambiguous = /^(\d{1,2})\/(\d{1,2})/.test(weekEndingStr) &&
-      parseInt(weekEndingStr.split('/')[0]) <= 12;
-    if (ambiguous) weekStart = taskLogWeekStart;
-  }
+  // Prefer task-log dates over week-ending-date when available:
+  // Task dates from the detail section are always the ground truth.
+  if (taskLogWeekStart) weekStart = taskLogWeekStart;
   if (!weekStart) weekStart = taskLogWeekStart;
 
   // Fallback week from filename if not found in text
