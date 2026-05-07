@@ -378,6 +378,8 @@ function parseXlsx(buffer, filename) {
               String(c instanceof Date ? c.toLocaleDateString() : c).trim()
             );
             const numericCount = dataCells.filter(c => {
+              // Exclude date strings (contain / or - or .) — parseFloat('4/27/2026') = 4 which is a false positive
+              if (/[\/\-]/.test(c) || (c.includes('.') && c.length > 4)) return false;
               const n = parseFloat(c);
               return !isNaN(n) && n >= 0 && n <= 24 && c !== '';
             }).length;
@@ -467,12 +469,19 @@ function parseSynergiePdfText(text, filename) {
 
     // Week Ending Date — same line or next line
     // Handles: 4/19/2026, 12/4/2026, 3. 5. 2026., 3.5.2026.
+    // Also handles reversed layout: "Remote4/19/2026Week Ending Date:"
     if (!weekEndingStr && lower.includes('week ending date')) {
+      // Normal: date after keyword
       const m = line.match(/(\d{1,2}[\s]*[\/.][\s]*\d{1,2}[\s]*[\/.][\s]*\d{2,4}\.?)\s*$/);
       if (m) weekEndingStr = m[1].replace(/\s+/g, '');
-      else if (lines[i + 1]) {
-        const m2 = lines[i + 1].match(/^(\d{1,2}[\s]*[\/.][\s]*\d{1,2}[\s]*[\/.][\s]*\d{2,4}\.?)$/);
-        if (m2) weekEndingStr = m2[1].replace(/\s+/g, '');
+      else {
+        // Reversed: date before keyword on same line
+        const m3 = line.match(/(\d{1,2}[\s]*[\/.][\s]*\d{1,2}[\s]*[\/.][\s]*\d{2,4}\.?)/);
+        if (m3) weekEndingStr = m3[1].replace(/\s+/g, '');
+        else if (lines[i + 1]) {
+          const m2 = lines[i + 1].match(/^(\d{1,2}[\s]*[\/.][\s]*\d{1,2}[\s]*[\/.][\s]*\d{2,4}\.?)$/);
+          if (m2) weekEndingStr = m2[1].replace(/\s+/g, '');
+        }
       }
     }
 
@@ -564,8 +573,17 @@ function parseSynergiePdfText(text, filename) {
         const m = line.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})/);
         if (m) {
           const a = parseInt(m[1]), b = parseInt(m[2]), y = parseInt(m[3]);
-          if (y >= 2020 && a >= 1 && b >= 1 && b <= 12 && a <= 31) {
-            const date = interpretation === 'eu' ? new Date(y, b - 1, a) : new Date(y, a - 1, b);
+          if (y >= 2020 && a >= 1 && b >= 1) {
+            let date;
+            if (interpretation === 'eu') {
+              // DD/MM — a is day, b is month
+              if (b > 12) continue; // invalid month
+              date = new Date(y, b - 1, a);
+            } else {
+              // MM/DD — a is month, b is day
+              if (a > 12) continue; // invalid month
+              date = new Date(y, a - 1, b);
+            }
             if (!isNaN(date.getTime())) taskDates.push(date);
           }
         }
