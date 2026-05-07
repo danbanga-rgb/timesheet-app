@@ -285,6 +285,13 @@ function detectWeek(subject, body, xlsxNames) {
 
 // ─── XLSX parser ──────────────────────────────────────────────────────────────
 
+// Convert Excel serial number to JS Date (Excel epoch = Jan 1 1900, 1-indexed, with leap year bug)
+function xlsxSerialToDate(serial) {
+  if (typeof serial !== 'number' || serial < 40000 || serial > 60000) return null;
+  const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function parseXlsx(buffer, filename) {
   try {
     const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
@@ -292,7 +299,9 @@ function parseXlsx(buffer, filename) {
 
     for (const sheetName of wb.SheetNames) {
       const ws = wb.Sheets[sheetName];
-      const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+      // Get raw values (numbers) AND formatted (dates as strings) in parallel
+      const jsonRaw  = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+      const json     = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
 
       let weekStartDate = null;
       let dayLabelRowIdx = -1;
@@ -301,9 +310,15 @@ function parseXlsx(buffer, filename) {
       let nameFromSheet = null;
 
       for (let i = 0; i < json.length; i++) {
-        const cells = json[i].map(c =>
-          String(c instanceof Date ? c.toLocaleDateString() : c).trim()
-        );
+        const rawCells = jsonRaw[i] || [];
+        const cells = json[i].map((c, ci) => {
+          // If raw cell is a number in plausible Excel date range → convert to date string
+          if (typeof rawCells[ci] === 'number') {
+            const asDate = xlsxSerialToDate(rawCells[ci]);
+            if (asDate) return (asDate.getUTCMonth() + 1) + '/' + asDate.getUTCDate() + '/' + asDate.getUTCFullYear();
+          }
+          return String(c instanceof Date ? c.toLocaleDateString() : c).trim();
+        });
         const lowers = cells.map(c => c.toLowerCase());
         const rowText = lowers.join(' ');
 
@@ -451,20 +466,23 @@ function parseSynergiePdfText(text, filename) {
     }
 
     // Week Ending Date — same line or next line
+    // Handles: 4/19/2026, 12/4/2026, 3. 5. 2026., 3.5.2026.
     if (!weekEndingStr && lower.includes('week ending date')) {
-      const m = line.match(/(\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}\.?)\s*$/);
-      if (m) weekEndingStr = m[1];
+      const m = line.match(/(\d{1,2}[\s]*[\/.][\s]*\d{1,2}[\s]*[\/.][\s]*\d{2,4}\.?)\s*$/);
+      if (m) weekEndingStr = m[1].replace(/\s+/g, '');
       else if (lines[i + 1]) {
-        const m2 = lines[i + 1].match(/^(\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}\.?)$/);
-        if (m2) weekEndingStr = m2[1];
+        const m2 = lines[i + 1].match(/^(\d{1,2}[\s]*[\/.][\s]*\d{1,2}[\s]*[\/.][\s]*\d{2,4}\.?)$/);
+        if (m2) weekEndingStr = m2[1].replace(/\s+/g, '');
       }
     }
 
     // Total Client Billable Hours — strip artifacts like 4800%
     if (lower.includes('total client billable hours')) {
-      const cleaned = line.replace(/[^0-9.]/g, '');
-      const t = parseFloat(cleaned);
-      if (!isNaN(t) && t <= 168) total = t;
+      const cleaned = line.replace(/[^0-9.%]/g, '');
+      let t = parseFloat(cleaned.replace(/%/g, ''));
+      // 4800% artifact: divide by 100 if result > 168 and divisible cleanly
+      if (!isNaN(t) && t > 168) t = t / 100;
+      if (!isNaN(t) && t > 0 && t <= 168) total = t;
       inHoursSection = false;
     }
 
@@ -490,6 +508,18 @@ function parseSynergiePdfText(text, filename) {
       if (/^\d+$/.test(hl)) {
         const t = parseFloat(hl);
         if (t > 0 && t <= 168) { total = t; break; }
+      }
+    }
+  }
+
+  // PDF text extraction can reorder sections — if we found no hours candidates via
+  // section detection, scan ALL lines for a manager-name + hours pattern
+  if (hoursLinesCandidates.length === 0 && total !== null && total <= 168) {
+    for (const line of lines) {
+      const nums = line.match(/\b(\d{1,2})\b/g);
+      if (nums && nums.length >= 5) {
+        const vals = nums.map(Number).filter(n => n <= 24);
+        if (vals.length >= 5) hoursLinesCandidates.push(line);
       }
     }
   }
@@ -524,11 +554,43 @@ function parseSynergiePdfText(text, filename) {
     }
   }
 
+  // Try to extract dates from task log rows — these are often more reliable than
+  // the Week Ending Date field for European-format PDFs where DD/MM is ambiguous
+  let taskLogWeekStart = null;
+  {
+    const extractDates = (interpretation) => {
+      const taskDates = [];
+      for (const line of lines) {
+        const m = line.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})/);
+        if (m) {
+          const a = parseInt(m[1]), b = parseInt(m[2]), y = parseInt(m[3]);
+          if (y >= 2020 && a >= 1 && b >= 1 && b <= 12 && a <= 31) {
+            const date = interpretation === 'eu' ? new Date(y, b - 1, a) : new Date(y, a - 1, b);
+            if (!isNaN(date.getTime())) taskDates.push(date);
+          }
+        }
+      }
+      return taskDates;
+    };
+    for (const interp of ['us', 'eu']) {
+      const dates = extractDates(interp);
+      if (dates.length >= 2) {
+        dates.sort((a, b) => a - b);
+        const span = (dates[dates.length - 1] - dates[0]) / 86400000;
+        if (span <= 6) { taskLogWeekStart = getMondayOf(dates[0]); break; }
+      }
+    }
+  }
+
   // Normalise week ending date → Monday week start
   let weekStart = null;
   if (weekEndingStr) {
-    // European dot: 26.4.2026. → 4/26/2026
+    // European dot: 26.4.2026. or 3.5.2026. → M/D/YYYY
     weekEndingStr = weekEndingStr.replace(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\.?$/, (_, d, m, y) => `${m}/${d}/${y}`);
+    // European slash DD/MM/YYYY: if first number > 12, must be day (e.g. 13/4/2026 = April 13)
+    weekEndingStr = weekEndingStr.replace(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, (_, a, b, y) =>
+      parseInt(a) > 12 ? `${b}/${a}/${y}` : `${a}/${b}/${y}`
+    );
     // 2-digit year
     weekEndingStr = weekEndingStr.replace(/(\d{1,2}\/\d{1,2}\/)(\d{2})$/, (_, pre, yy) =>
       pre + (parseInt(yy) < 50 ? `20${yy}` : `19${yy}`)
@@ -540,6 +602,15 @@ function parseSynergiePdfText(text, filename) {
       weekStart = d.toISOString().split('T')[0];
     }
   }
+
+  // Prefer task-log dates when weekEnding date was ambiguous (first part ≤ 12)
+  // Task log dates are unambiguous when they form a consecutive sequence
+  if (taskLogWeekStart && weekEndingStr) {
+    const ambiguous = /^(\d{1,2})\/(\d{1,2})/.test(weekEndingStr) &&
+      parseInt(weekEndingStr.split('/')[0]) <= 12;
+    if (ambiguous) weekStart = taskLogWeekStart;
+  }
+  if (!weekStart) weekStart = taskLogWeekStart;
 
   // Fallback week from filename if not found in text
   if (!weekStart) weekStart = weekFromFilename(filename);
