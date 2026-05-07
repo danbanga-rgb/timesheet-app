@@ -36,4 +36,7 @@ jobs:
           IMPORT_FALLBACK_EMAIL: helpdesk@synergietechsolutions.com
           INGEST_URL:            ${{ secrets.INGEST_URL }}
           INGEST_SECRET:         ${{ secrets.INGEST_SECRET }}
+          BREVO_API_KEY:         ${{ secrets.BREVO_API_KEY }}
+          FROM_EMAIL:            timesheets@mysynergie.net
+          FROM_NAME:             Synergie Timesheet System
         run: node poller.js

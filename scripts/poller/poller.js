@@ -25,6 +25,9 @@ const CONFIG = {
     'contracts@synergietechsolutions.com,accounting@synergietechsolutions.com,lpinto@synergietechsolutions.com,helpdesk@synergietechsolutions.com'
   ).split(',').map(s => s.trim().toLowerCase()),
   fallbackEmail: process.env.IMPORT_FALLBACK_EMAIL || 'helpdesk@synergietechsolutions.com',
+  brevoApiKey:   process.env.BREVO_API_KEY,
+  fromEmail:     process.env.FROM_EMAIL || 'timesheets@mysynergie.net',
+  fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
   // These addresses are never treated as contractors (internal staff / system)
   blockedContractorDomains: ['synergietechsolutions.com', 'ionos.com'],
   blockedContractorEmails: (process.env.BLOCKED_CONTRACTOR_EMAILS || '')
@@ -678,7 +681,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
 // ─── Process one parsed email ─────────────────────────────────────────────────
 
-async function processEmail(parsed, messageId, results) {
+async function processEmail(parsed, messageId, results, failedAtts, summary) {
   const fromAddr  = parsed.from?.value?.[0];
   const fromEmail = (fromAddr?.address || '').toLowerCase();
   const fromName  = fromAddr?.name || null;
@@ -785,10 +788,11 @@ async function processEmail(parsed, messageId, results) {
         }
 
         console.log(`  📧 ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
-        const r = await ingestContractor(
+        const { results: r, failedAttachments: fa } = await ingestContractor(
           contractor, contractorName, inner.subject || subject, innerBody, innerAtts, messageId
         );
         results.push(...r);
+        fa.forEach(a => failedAtts.push({ ...a, contractor }));
       } catch (e) {
         console.error(`  ❌ Error parsing ${emlAtt.name}: ${e.message}`);
         results.push({ type: 'eml', emlName: emlAtt.name, error: e.message });
@@ -825,11 +829,12 @@ async function processEmail(parsed, messageId, results) {
 
   console.log(`\n📧 ${subject}`);
   console.log(`   Contractor: ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
-  const r = await ingestContractor(
+  const { results: r, failedAttachments: fa } = await ingestContractor(
     contractor, contractorName, subject, bodyText,
     attachments.filter(a => !a.isEml), messageId
   );
   results.push(...r);
+  fa.forEach(a => failedAtts.push({ ...a, contractor }));
 }
 
 // ─── IMAP fetch ───────────────────────────────────────────────────────────────
@@ -913,6 +918,96 @@ function deleteDmarcEmails(uids) {
   });
 }
 
+// ─── Mark emails as seen via fresh IMAP connection ────────────────────────────
+
+function markEmailsSeen(uids) {
+  return new Promise((resolve, reject) => {
+    if (!uids || uids.length === 0) return resolve();
+    const imap = new Imap({
+      user: CONFIG.imapUser, password: CONFIG.imapPass,
+      host: CONFIG.imapHost, port: CONFIG.imapPort,
+      tls: true, tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 15000, authTimeout: 10000,
+    });
+    imap.once('error', reject);
+    imap.once('ready', () => {
+      imap.openBox('INBOX', false, (err) => {
+        if (err) return reject(err);
+        imap.addFlags(uids, '\\Seen', (err) => {
+          imap.end();
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+    });
+    imap.connect();
+  });
+}
+
+// ─── Send run summary email via Brevo ─────────────────────────────────────────
+
+const RETRY_SILENT_AFTER = 10;
+
+async function sendSummaryEmail(summary, leftUnseen) {
+  const hasFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER).length > 0;
+  const status = hasFailures ? '⚠️ PARTIAL' : '✅ OK';
+  const subject = `[Timesheet Poller] ${status} — ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`;
+
+  let body = `Synergie Timesheet Poller — Run Summary
+${'='.repeat(50)}
+Run time   : ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
+Emails found: ${summary.total}
+
+RESULTS
+-------
+✅ Created        : ${summary.created}
+🔁 Duplicates     : ${summary.duplicates}
+✏️  Corrections    : ${summary.corrections}
+📨 Forwarded      : ${summary.forwarded}
+🗑️  DMARC deleted  : ${summary.dmarc}
+⚠️  Parse failures : ${summary.failures.length} (${leftUnseen} left unseen for retry)
+`;
+
+  if (summary.newUsers.length > 0) {
+    body += `
+NEW USERS CREATED (${summary.newUsers.length})
+${'─'.repeat(30)}
+`;
+    summary.newUsers.forEach(u => { body += `  • ${u.name} <${u.email}>
+`; });
+  }
+
+  const reportableFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER);
+  const silentFailures     = summary.failures.filter(f => f.attemptCount > RETRY_SILENT_AFTER);
+
+  if (reportableFailures.length > 0) {
+    body += `
+FAILURES — NEEDS ATTENTION (${reportableFailures.length})
+${'─'.repeat(30)}
+`;
+    reportableFailures.forEach(f => {
+      body += `  • ${f.contractor || '?'} | ${f.attachment || 'body'}`;
+      if (f.attemptCount > 1) body += ` (attempt ${f.attemptCount})`;
+      body += `
+    Error: ${f.error || 'parse returned no hours'}
+`;
+    });
+  }
+
+  if (silentFailures.length > 0) {
+    body += `
+${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ attempts (still retrying silently).
+`;
+  }
+
+  body += `
+${'='.repeat(50)}
+This is an automated message from timesheets@mysynergie.net`;
+
+  await sendEmail(CONFIG.fallbackEmail, subject, body);
+  console.log(`  📧 Summary email sent to ${CONFIG.fallbackEmail}`);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -920,80 +1015,126 @@ async function main() {
   console.log(`   IMAP: ${CONFIG.imapUser}@${CONFIG.imapHost}`);
   console.log(`   Ingest: ${CONFIG.ingestUrl}\n`);
 
-  const { imap: imapConn, messages: rawMessages } = await fetchEmails();
+  const rawMessages = await fetchEmails();
   if (rawMessages.length === 0) {
     console.log('No unseen emails. Done.');
     return;
   }
 
-  const results = [];
-  const dmarcUids = [];
-  const processedUids = [];
+  const dmarcUids     = [];
+  const successUids   = [];
+  const failedUids    = [];
+
+  const summary = {
+    total: rawMessages.length, dmarc: 0, forwarded: 0,
+    created: 0, duplicates: 0, corrections: 0,
+    newUsers: [], failures: [],
+  };
 
   for (const raw of rawMessages) {
+    const uid = raw.uid;
+    let parsed;
     try {
-      const parsed = await simpleParser(raw.buffer);
-      const messageId = parsed.messageId || `uid-${raw.uid}-${Date.now()}`;
-      const fromAddr  = parsed.from?.value?.[0];
-      const fromEmail = (fromAddr?.address || '').toLowerCase();
-      const subject   = parsed.subject || '';
-
-      if (isDmarc(fromEmail, subject)) {
-        dmarcUids.push(raw.uid);
-        console.log(`  🗑️  DMARC (will delete): ${subject}`);
-        results.push({ type: 'dmarc', subject, action: 'deleted' });
-      } else {
-        processedUids.push(raw.uid);
-        await processEmail(parsed, messageId, results);
-      }
+      parsed = await simpleParser(raw.buffer);
     } catch (e) {
-      processedUids.push(raw.uid); // mark seen even on error
-      console.error(`Error processing uid=${raw.uid}: ${e.message}`);
-      results.push({ error: e.message, uid: raw.uid });
+      console.error(`Parse error uid=${uid}: ${e.message}`);
+      failedUids.push(uid);
+      summary.failures.push({ contractor: '?', attachment: null, error: `Parse error: ${e.message}`, attemptCount: 1 });
+      continue;
     }
+
+    const fromAddr  = parsed.from?.value?.[0];
+    const fromEmail = (fromAddr?.address || '').toLowerCase();
+    const subject   = parsed.subject || '(no subject)';
+    const bodyText  = parsed.text || (parsed.html || '').replace(/<[^>]+>/g, ' ');
+    const messageId = parsed.messageId || `uid-${uid}-${Date.now()}`;
+
+    // DMARC: delete
+    if (isDmarc(fromEmail, subject)) {
+      dmarcUids.push(uid);
+      summary.dmarc++;
+      console.log(`  🗑️  DMARC: ${subject}`);
+      continue;
+    }
+
+    const attachments = (parsed.attachments || []).map(a => ({
+      name:   a.filename || a.name || (a.contentType?.split('/')[1]) || 'unnamed',
+      buffer: a.content,
+      isXlsx: !!(a.contentType?.includes('spreadsheet') || a.contentType?.includes('excel') ||
+                 (a.filename||'').match(/\.(xlsx|xls)$/i)),
+      isPdf:  !!(a.contentType?.includes('pdf') || (a.filename||'').match(/\.pdf$/i) ||
+                 (a.contentType?.includes('octet-stream') && (a.filename||'').match(/\.pdf$/i))),
+      isEml:  !!(a.contentType?.includes('message/rfc822') || (a.filename||'').match(/\.eml$/i)),
+    }));
+
+    const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isEml);
+
+    // No timesheet content: forward to helpdesk, mark seen
+    if (!hasTimesheetContent) {
+      const reason = isInternal(fromEmail)
+        ? 'Internal sender with no timesheet attachments'
+        : 'No timesheet attachments — possible human reply or notification';
+      await forwardToHelpdesk(subject, bodyText, fromEmail, reason);
+      successUids.push(uid);
+      summary.forwarded++;
+      continue;
+    }
+
+    // Process email — collect results and failed attachments
+    const emailResults = [];
+    const emailFailedAtts = [];
+    await processEmail(parsed, messageId, emailResults, emailFailedAtts, summary);
+
+    // Accumulate summary counts
+    emailResults.forEach(r => {
+      if (r.action === 'created') summary.created++;
+      else if (r.action === 'duplicate') summary.duplicates++;
+      else if (r.action === 'correction_imported') summary.corrections++;
+      if (r.wasCreated && r.userName) summary.newUsers.push({ name: r.userName, email: r.contractor });
+      if (r.error) summary.failures.push({ contractor: r.contractor, attachment: r.attachmentName, error: r.error, attemptCount: 1 });
+    });
+    emailFailedAtts.forEach(att => {
+      summary.failures.push({ contractor: att.contractor, attachment: att.name, error: 'parse returned no hours', attemptCount: att.attemptCount || 1 });
+    });
+
+    const hasFailure = emailFailedAtts.length > 0 || emailResults.some(r => r.error);
+    if (hasFailure) failedUids.push(uid);
+    else successUids.push(uid);
   }
 
-  // Mark legitimate emails as SEEN
-  if (imapConn && processedUids.length > 0) {
-    try {
-      await new Promise((res, rej) => {
-        imapConn.addFlags(processedUids, '\Seen', err => err ? rej(err) : res());
-      });
-    } catch (e) {
-      console.warn(`Could not mark emails as seen: ${e.message}`);
-    }
+  // IMAP operations
+  if (dmarcUids.length > 0) {
+    try { await deleteDmarcEmails(dmarcUids); console.log(`  🗑️  Deleted ${dmarcUids.length} DMARC emails`); }
+    catch (e) { console.warn(`DMARC delete failed: ${e.message}`); }
+  }
+  if (successUids.length > 0) {
+    try { await markEmailsSeen(successUids); }
+    catch (e) { console.warn(`markSeen failed: ${e.message}`); }
+  }
+  if (failedUids.length > 0) {
+    console.log(`  ⚠️  ${failedUids.length} email(s) left unseen for retry`);
   }
 
-  // Delete DMARC emails permanently
-  if (imapConn && dmarcUids.length > 0) {
-    try {
-      await new Promise((res, rej) => {
-        imapConn.addFlags(dmarcUids, '\Deleted', err => err ? rej(err) : res());
-      });
-      await new Promise((res, rej) => {
-        imapConn.expunge(err => err ? rej(err) : res());
-      });
-      console.log(`  🗑️  Deleted ${dmarcUids.length} DMARC email(s) from inbox`);
-    } catch (e) {
-      console.warn(`Could not delete DMARC emails: ${e.message}`);
-    }
-  }
-
-  if (imapConn) imapConn.end();
-
+  // Console summary
   console.log('\n─── Summary ──────────────────────────────────────────────');
-  const success = results.filter(r => r.status >= 200 && r.status < 300).length;
-  const failed  = results.filter(r => r.error || (r.status && r.status >= 400)).length;
-  const skipped = results.filter(r => r.type === 'skipped' || r.type === 'dmarc').length;
-  console.log(`  Emails processed : ${rawMessages.length}`);
-  console.log(`  Timesheets sent  : ${success}`);
-  console.log(`  Skipped          : ${skipped}`);
-  console.log(`  Errors           : ${failed}`);
-  if (failed > 0) {
-    results.filter(r => r.error || (r.status && r.status >= 400))
-      .forEach(r => console.error(`  ❌ ${r.contractor || r.emlName || '?'}: ${r.error || r.status}`));
-    process.exit(1);
+  console.log(`  Emails found     : ${summary.total}`);
+  console.log(`  DMARC deleted    : ${summary.dmarc}`);
+  console.log(`  Forwarded        : ${summary.forwarded}`);
+  console.log(`  Created          : ${summary.created}`);
+  console.log(`  Duplicates       : ${summary.duplicates}`);
+  console.log(`  Corrections      : ${summary.corrections}`);
+  console.log(`  Failures (retry) : ${summary.failures.length}`);
+  console.log(`  Left unseen      : ${failedUids.length}`);
+
+  // Summary email — only if something actionable happened
+  const actionable = summary.created + summary.duplicates + summary.corrections +
+                     summary.forwarded + summary.failures.length + summary.newUsers.length;
+  if (actionable > 0) {
+    await sendSummaryEmail(summary, failedUids.length);
   }
+
+  const reportableFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER);
+  if (reportableFailures.length > 0) process.exit(1);
 }
 
 main().catch(err => {

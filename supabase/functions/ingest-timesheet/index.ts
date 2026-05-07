@@ -232,20 +232,31 @@ serve(async (req) => {
   }
 
   // ── Deduplication ─────────────────────────────────────────────────────────
+  // Allow reprocessing of partials (parser may have improved)
+  // Block only on successfully processed messages
   const { data: existingLog } = await supabase
     .from('email_import_log')
-    .select('id, parse_status')
+    .select('id, parse_status, attempt_count')
     .eq('message_id', messageId as string)
     .maybeSingle();
 
   if (existingLog) {
-    return new Response(JSON.stringify({
-      ok: true,
-      action: 'duplicate',
-      message: 'Already processed',
-      existingStatus: existingLog.parse_status,
-    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    // Already successfully processed — true duplicate
+    if (existingLog.parse_status === 'success' || existingLog.parse_status === 'duplicate') {
+      return new Response(JSON.stringify({
+        ok: true,
+        action: 'duplicate',
+        message: 'Already processed',
+        existingStatus: existingLog.parse_status,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    // Partial — delete old log entry so we can reprocess and create fresh entry
+    // attempt_count will be incremented below
+    await supabase.from('email_import_log').delete().eq('id', existingLog.id);
   }
+
+  // Track attempt count for retry monitoring
+  const attemptCount = existingLog ? (existingLog.attempt_count || 1) + 1 : 1;
 
   // ── Find or create user ───────────────────────────────────────────────────
   let userId: string;
@@ -319,6 +330,7 @@ serve(async (req) => {
     raw_hours:       entries
       ? (typeof entries === 'string' ? JSON.parse(entries as string) : entries)
       : null,
+    attempt_count:   attemptCount,
   });
 
   return new Response(JSON.stringify({
@@ -332,5 +344,6 @@ serve(async (req) => {
     timesheetId,
     weekStart,
     notes:        upsertNotes,
+    attemptCount,
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
