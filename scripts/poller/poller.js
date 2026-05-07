@@ -858,7 +858,7 @@ function fetchEmails() {
         if (err) return reject(err);
         imap.search(['UNSEEN'], (err, uids) => {
           if (err) return reject(err);
-          if (!uids || uids.length === 0) { imap.end(); return resolve({ imap: null, messages: [] }); }
+          if (!uids || uids.length === 0) { imap.end(); return resolve([]); }
 
           console.log(`Found ${uids.length} unseen email(s)`);
           const messages = [];
@@ -877,7 +877,7 @@ function fetchEmails() {
           });
 
           fetch.once('error', reject);
-          fetch.once('end', () => { imap.end(); resolve({ imap: null, messages }); });
+          fetch.once('end', () => { imap.end(); resolve(messages); });
         });
       });
     });
@@ -1016,7 +1016,7 @@ async function main() {
   console.log(`   Ingest: ${CONFIG.ingestUrl}\n`);
 
   const rawMessages = await fetchEmails();
-  if (rawMessages.length === 0) {
+  if (!rawMessages || rawMessages.length === 0) {
     console.log('No unseen emails. Done.');
     return;
   }
