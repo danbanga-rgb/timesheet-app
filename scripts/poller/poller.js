@@ -676,7 +676,10 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       console.error(`  ❌ ${contractorEmail} | ${ts.weekStart} → ${e.message}`);
     }
   }
-  return results;
+  // Mark invoice attachments
+  invoiceAtts.forEach(a => results.push({ contractor: contractorEmail, attachmentName: a.name, action: 'invoice_skipped' }));
+
+  return { results, failedAttachments };
 }
 
 // ─── Process one parsed email ─────────────────────────────────────────────────
@@ -948,6 +951,57 @@ function markEmailsSeen(uids) {
 
 const RETRY_SILENT_AFTER = 10;
 
+// ─── Send email via Brevo ────────────────────────────────────────────────────
+
+async function sendEmail(to, subject, textContent) {
+  if (!CONFIG.brevoApiKey) { console.warn('BREVO_API_KEY not set — skipping email'); return; }
+  try {
+    const body = JSON.stringify({
+      sender: { name: CONFIG.fromName, email: CONFIG.fromEmail },
+      to: [{ email: to }],
+      subject,
+      textContent,
+    });
+    await new Promise((resolve, reject) => {
+      const req = require('https').request({
+        hostname: 'api.brevo.com',
+        path: '/v3/smtp/email',
+        method: 'POST',
+        headers: {
+          'api-key': CONFIG.brevoApiKey,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      }, res => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  } catch (e) {
+    console.warn(`Email send failed: ${e.message}`);
+  }
+}
+
+// ─── Forward unrecognised email to helpdesk ───────────────────────────────────
+
+async function forwardToHelpdesk(subject, bodyText, fromEmail, reason) {
+  const fwdSubject = `[timesheets@ fwd] ${subject || '(no subject)'}`;
+  const fwdBody = `This email was received at timesheets@mysynergie.net and could not be automatically processed.
+
+Reason: ${reason}
+Original From: ${fromEmail}
+Original Subject: ${subject || '(no subject)'}
+
+--- Original Message ---
+${(bodyText || '').slice(0, 2000)}`;
+  await sendEmail(CONFIG.fallbackEmail, fwdSubject, fwdBody);
+  console.log(`  📨 Forwarded to helpdesk: ${reason}`);
+}
+
 async function sendSummaryEmail(summary, leftUnseen) {
   const hasFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER).length > 0;
   const status = hasFailures ? '⚠️ PARTIAL' : '✅ OK';
@@ -1090,16 +1144,37 @@ async function main() {
       if (r.action === 'created') summary.created++;
       else if (r.action === 'duplicate') summary.duplicates++;
       else if (r.action === 'correction_imported') summary.corrections++;
-      if (r.wasCreated && r.userName) summary.newUsers.push({ name: r.userName, email: r.contractor });
-      if (r.error) summary.failures.push({ contractor: r.contractor, attachment: r.attachmentName, error: r.error, attemptCount: 1 });
+      else if (r.action === 'invoice_skipped') { /* ignore */ }
+      if (r.wasCreated && r.userName) {
+        summary.newUsers.push({ name: r.userName, email: r.contractor });
+      }
+      if (r.error) {
+        summary.failures.push({
+          contractor: r.contractor,
+          attachment: r.attachmentName,
+          error: r.error,
+          attemptCount: r.attemptCount || 1
+        });
+      }
     });
     emailFailedAtts.forEach(att => {
-      summary.failures.push({ contractor: att.contractor, attachment: att.name, error: 'parse returned no hours', attemptCount: att.attemptCount || 1 });
+      summary.failures.push({
+        contractor: att.contractor || '?',
+        attachment: att.name,
+        error: 'parse returned no hours',
+        attemptCount: att.attemptCount || 1
+      });
     });
 
-    const hasFailure = emailFailedAtts.length > 0 || emailResults.some(r => r.error);
-    if (hasFailure) failedUids.push(uid);
-    else successUids.push(uid);
+    // Only mark email as SEEN if every attachment was processed successfully
+    // Any parse failure → leave unseen so it gets retried
+    const hasParseFailure = emailFailedAtts.length > 0;
+    const hasIngestError = emailResults.some(r => r.error && r.action !== 'invoice_skipped');
+    if (hasParseFailure || hasIngestError) {
+      failedUids.push(uid);
+    } else {
+      successUids.push(uid);
+    }
   }
 
   // IMAP operations
