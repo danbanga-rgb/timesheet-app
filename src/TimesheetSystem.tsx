@@ -395,6 +395,8 @@ const TimesheetSystem = () => {
   const [reminderEmails, setReminderEmails] = useState<ReminderEmail[]>([]);
   const [showReminderLog, setShowReminderLog] = useState(false);
   const [reportWeek, setReportWeek] = useState(getCurrentWeekStart());
+  const [reportProjectFilter, setReportProjectFilter] = useState('all');
+  const [includeStatusInExport, setIncludeStatusInExport] = useState(false);
   const [adminView, setAdminView] = useState('users');
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
@@ -1504,7 +1506,7 @@ const TimesheetSystem = () => {
   };
 
   // ─── REPORT / CSV ─────────────────────────────────────────────────────────
-  const generateReport = () => {
+  const generateReport = (projectFilter = 'all') => {
     const weekKey = formatDate(reportWeek);
     const weekTimesheets = timesheets.filter(t => t.weekStart === weekKey);
     return users.filter(u => u.role === 'timesheetuser').map(user => {
@@ -1512,23 +1514,31 @@ const TimesheetSystem = () => {
       const entries = timesheet ? timesheet.entries : {};
       const project = timesheet ? projects.find(p => p.id === timesheet.projectId) : null;
       const dailyHours = getWeekDates(reportWeek).map(date => parseFloat(entries[formatDate(date)]?.hours || '0'));
-      return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
+      return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', projectId: timesheet?.projectId || null, dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
+    }).filter(row => {
+      if (projectFilter === 'all') return true;
+      if (projectFilter === 'unassigned') return row.projectId === null;
+      return row.projectId === parseInt(projectFilter);
     });
   };
 
   const downloadCSV = () => {
-    const reportData = generateReport();
+    const reportData = generateReport(reportProjectFilter);
     const weekDates = getWeekDates(reportWeek);
     let csv = 'Employee Name,Country,Project,';
     weekDates.forEach(d => { csv += `"${d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}",`; });
-    csv += 'Total Hours,Status\n';
+    csv += 'Total Hours';
+    if (includeStatusInExport) csv += ',Status';
+    csv += '\n';
     reportData.forEach(row => {
       csv += `"${row.name}","${row.country}","${row.project}",`;
       row.dailyHours.forEach(h => { csv += h + ','; });
-      csv += `${row.total},"${row.status}"\n`;
+      csv += `${row.total}`;
+      if (includeStatusInExport) csv += `,"${row.status}"`;
+      csv += '\n';
     });
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
-    csv += `\n"Grand Total","","",`; weekDates.forEach(() => { csv += ','; }); csv += `${grandTotal},\n`;
+    csv += `\n"Grand Total","","",`; weekDates.forEach(() => { csv += ','; }); csv += `${grandTotal}\n`;
     triggerDownload(csv, `timesheet_report_${formatDate(reportWeek)}.csv`);
   };
 
@@ -3089,7 +3099,7 @@ const TimesheetSystem = () => {
 
   // ─── ACCOUNTANT VIEW ──────────────────────────────────────────────────────
   if (currentUser!.role === 'accountant') {
-    const reportData = generateReport();
+    const reportData = generateReport(reportProjectFilter);
     const weekDates = getWeekDates(reportWeek);
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
 
@@ -3187,10 +3197,22 @@ const TimesheetSystem = () => {
             <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
               <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><FileText className="w-6 h-6" /> Weekly Timesheet Report</h2>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-3 flex-wrap justify-end">
+                  <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
+                    <input type="checkbox" checked={includeStatusInExport} onChange={e => setIncludeStatusInExport(e.target.checked)} className="w-4 h-4 rounded" />
+                    Include status in export
+                  </label>
                   <button onClick={downloadCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> CSV</button>
                   <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><Printer className="w-4 h-4" /> Print</button>
                 </div>
+              </div>
+              <div className="flex items-center gap-2 mb-4 flex-wrap">
+                <span className="text-sm font-medium text-gray-600">Project:</span>
+                <button onClick={() => setReportProjectFilter('all')} className={'px-3 py-1 rounded-full text-sm font-medium transition-colors ' + (reportProjectFilter === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>All</button>
+                <button onClick={() => setReportProjectFilter('unassigned')} className={'px-3 py-1 rounded-full text-sm font-medium transition-colors ' + (reportProjectFilter === 'unassigned' ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>Not Assigned</button>
+                {projects.filter(p => p.status === 'active').map(p => (
+                  <button key={p.id} onClick={() => setReportProjectFilter(String(p.id))} className={'px-3 py-1 rounded-full text-sm font-medium transition-colors ' + (reportProjectFilter === String(p.id) ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>{p.name}</button>
+                ))}
               </div>
               <div className="flex justify-between items-center mb-6 p-4 bg-gray-50 rounded-lg">
                 <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Prev</button>
