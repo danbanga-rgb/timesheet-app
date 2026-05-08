@@ -388,6 +388,7 @@ const TimesheetSystem = () => {
   const [consolidatedRange, setConsolidatedRange] = useState({ start: '', end: '' });
   const [appliedRange, setAppliedRange] = useState({ start: '', end: '' });
   const [consolidatedMonthPreset, setConsolidatedMonthPreset] = useState('');
+  const [consolidatedProjectFilter, setConsolidatedProjectFilter] = useState('all');
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [selectedWeek, setSelectedWeek] = useState(getCurrentWeekStart());
   const [timeEntries, setTimeEntries] = useState<Record<string, TimeEntry>>({});
@@ -395,8 +396,6 @@ const TimesheetSystem = () => {
   const [reminderEmails, setReminderEmails] = useState<ReminderEmail[]>([]);
   const [showReminderLog, setShowReminderLog] = useState(false);
   const [reportWeek, setReportWeek] = useState(getCurrentWeekStart());
-  const [reportProjectFilter, setReportProjectFilter] = useState('all');
-  const [includeStatusInExport, setIncludeStatusInExport] = useState(false);
   const [adminView, setAdminView] = useState('users');
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
@@ -455,6 +454,9 @@ const TimesheetSystem = () => {
   const [vmPhoneConfirm, setVmPhoneConfirm] = useState('');
   const [tsOnlyRange, setTsOnlyRange] = useState({ start: '', end: '' });
   const [tsOnlyApplied, setTsOnlyApplied] = useState({ start: '', end: '' });
+  const [tsOnlySelectedUsers, setTsOnlySelectedUsers] = useState<string[]>([]);
+  const [tsOnlySearch, setTsOnlySearch] = useState('');
+  const [tsOnlyDropdownOpen, setTsOnlyDropdownOpen] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   // Manager consolidated view
@@ -1506,7 +1508,7 @@ const TimesheetSystem = () => {
   };
 
   // ─── REPORT / CSV ─────────────────────────────────────────────────────────
-  const generateReport = (projectFilter = 'all') => {
+  const generateReport = () => {
     const weekKey = formatDate(reportWeek);
     const weekTimesheets = timesheets.filter(t => t.weekStart === weekKey);
     return users.filter(u => u.role === 'timesheetuser').map(user => {
@@ -1514,31 +1516,23 @@ const TimesheetSystem = () => {
       const entries = timesheet ? timesheet.entries : {};
       const project = timesheet ? projects.find(p => p.id === timesheet.projectId) : null;
       const dailyHours = getWeekDates(reportWeek).map(date => parseFloat(entries[formatDate(date)]?.hours || '0'));
-      return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', projectId: timesheet?.projectId || null, dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
-    }).filter(row => {
-      if (projectFilter === 'all') return true;
-      if (projectFilter === 'unassigned') return row.projectId === null;
-      return row.projectId === parseInt(projectFilter);
+      return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
     });
   };
 
   const downloadCSV = () => {
-    const reportData = generateReport(reportProjectFilter);
+    const reportData = generateReport();
     const weekDates = getWeekDates(reportWeek);
     let csv = 'Employee Name,Country,Project,';
     weekDates.forEach(d => { csv += `"${d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}",`; });
-    csv += 'Total Hours';
-    if (includeStatusInExport) csv += ',Status';
-    csv += '\n';
+    csv += 'Total Hours,Status\n';
     reportData.forEach(row => {
       csv += `"${row.name}","${row.country}","${row.project}",`;
       row.dailyHours.forEach(h => { csv += h + ','; });
-      csv += `${row.total}`;
-      if (includeStatusInExport) csv += `,"${row.status}"`;
-      csv += '\n';
+      csv += `${row.total},"${row.status}"\n`;
     });
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
-    csv += `\n"Grand Total","","",`; weekDates.forEach(() => { csv += ','; }); csv += `${grandTotal}\n`;
+    csv += `\n"Grand Total","","",`; weekDates.forEach(() => { csv += ','; }); csv += `${grandTotal},\n`;
     triggerDownload(csv, `timesheet_report_${formatDate(reportWeek)}.csv`);
   };
 
@@ -3099,7 +3093,7 @@ const TimesheetSystem = () => {
 
   // ─── ACCOUNTANT VIEW ──────────────────────────────────────────────────────
   if (currentUser!.role === 'accountant') {
-    const reportData = generateReport(reportProjectFilter);
+    const reportData = generateReport();
     const weekDates = getWeekDates(reportWeek);
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
 
@@ -3124,7 +3118,12 @@ const TimesheetSystem = () => {
         if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
       });
 
-      const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
+      const timesheetUsers = users.filter(u => {
+        if (u.role !== 'timesheetuser') return false;
+        if (consolidatedProjectFilter === 'all') return true;
+        if (consolidatedProjectFilter === 'unassigned') return !u.projectId;
+        return String(u.projectId) === consolidatedProjectFilter;
+      });
       const employeeRows = timesheetUsers.map(user => {
         const hours: Record<string, number | null> = {}, statuses: Record<string, string> = {};
         let rowTotal = 0;
@@ -3197,22 +3196,10 @@ const TimesheetSystem = () => {
             <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
               <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><FileText className="w-6 h-6" /> Weekly Timesheet Report</h2>
-                <div className="flex items-center gap-3 flex-wrap justify-end">
-                  <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
-                    <input type="checkbox" checked={includeStatusInExport} onChange={e => setIncludeStatusInExport(e.target.checked)} className="w-4 h-4 rounded" />
-                    Include status in export
-                  </label>
+                <div className="flex gap-2">
                   <button onClick={downloadCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> CSV</button>
                   <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><Printer className="w-4 h-4" /> Print</button>
                 </div>
-              </div>
-              <div className="flex items-center gap-2 mb-4 flex-wrap">
-                <span className="text-sm font-medium text-gray-600">Project:</span>
-                <button onClick={() => setReportProjectFilter('all')} className={'px-3 py-1 rounded-full text-sm font-medium transition-colors ' + (reportProjectFilter === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>All</button>
-                <button onClick={() => setReportProjectFilter('unassigned')} className={'px-3 py-1 rounded-full text-sm font-medium transition-colors ' + (reportProjectFilter === 'unassigned' ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>Not Assigned</button>
-                {projects.filter(p => p.status === 'active').map(p => (
-                  <button key={p.id} onClick={() => setReportProjectFilter(String(p.id))} className={'px-3 py-1 rounded-full text-sm font-medium transition-colors ' + (reportProjectFilter === String(p.id) ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>{p.name}</button>
-                ))}
               </div>
               <div className="flex justify-between items-center mb-6 p-4 bg-gray-50 rounded-lg">
                 <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Prev</button>
@@ -3310,11 +3297,24 @@ const TimesheetSystem = () => {
               <div className="bg-white rounded-lg shadow-md p-6">
                 <div className="flex justify-between items-center mb-5">
                   <h2 className="text-xl font-bold text-gray-800">Consolidated Report</h2>
-                  {consolidatedReport && (
-                    <button onClick={downloadConsolidatedCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
-                      <Download className="w-4 h-4" /> Export CSV
-                    </button>
-                  )}
+                  <div className="flex items-center gap-3">
+                    <select
+                      value={consolidatedProjectFilter}
+                      onChange={e => setConsolidatedProjectFilter(e.target.value)}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 bg-white"
+                    >
+                      <option value="all">All Projects</option>
+                      <option value="unassigned">Not Assigned</option>
+                      {projects.filter(p => p.status === 'active').map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                    {consolidatedReport && (
+                      <button onClick={downloadConsolidatedCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                        <Download className="w-4 h-4" /> Export CSV
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Controls */}
@@ -3573,8 +3573,14 @@ const TimesheetSystem = () => {
           {/* Timesheet Only Tab */}
           {accountantTab === 'timesheet-only' && (() => {
             const tsOnlyUsers = users.filter(u => u.role === 'timesheetuser' && !u.invoiceEnabled);
+
+            // Initialise selection to all users on first render
+            const effectiveSelected = tsOnlySelectedUsers.length > 0
+              ? tsOnlySelectedUsers
+              : tsOnlyUsers.map(u => u.id);
+
             const filteredTs = (() => {
-              let list = timesheets.filter(t => tsOnlyUsers.some(u => u.id === t.userId));
+              let list = timesheets.filter(t => effectiveSelected.includes(t.userId));
               if (tsOnlyApplied.start && tsOnlyApplied.end) {
                 list = list.filter(t => t.weekStart >= tsOnlyApplied.start && t.weekStart <= tsOnlyApplied.end);
               }
@@ -3589,13 +3595,21 @@ const TimesheetSystem = () => {
                 const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                 const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                 const total = dailyHours.reduce((s, h) => s + h, 0);
-                const fri = weekDates[4]; // W/E Friday label for CSV
+                const fri = weekDates[4];
                 csv += `"${ts.userName}","${user ? countryName(user.country) : ''}","${ts.weekStart}","${formatDate(fri)}","${project ? project.name + ' (' + project.code + ')' : 'N/A'}",`;
                 dailyHours.forEach(h => { csv += h + ','; });
                 csv += `${total.toFixed(1)},"${ts.status}","${ts.submittedAt ? new Date(ts.submittedAt).toLocaleDateString() : ''}"
 `;
-              });
+            });
               triggerDownload(csv, `timesheet_only_users_${Date.now()}.csv`);
+            };
+
+            const searchedUsers = tsOnlyUsers.filter(u =>
+              u.name.toLowerCase().includes(tsOnlySearch.toLowerCase())
+            );
+            const toggleUser = (id: string) => {
+              const current = tsOnlySelectedUsers.length > 0 ? tsOnlySelectedUsers : tsOnlyUsers.map(u => u.id);
+              setTsOnlySelectedUsers(current.includes(id) ? current.filter(x => x !== id) : [...current, id]);
             };
 
             return (
@@ -3616,149 +3630,188 @@ const TimesheetSystem = () => {
                     </button>
                   </div>
 
-                  {/* User summary cards */}
                   {tsOnlyUsers.length === 0 ? (
                     <div className="text-center py-8 text-gray-400">
                       <Users className="w-10 h-10 mx-auto mb-2 opacity-30" />
                       <p>No users without invoice module.</p>
-                      <p className="text-sm mt-1">Go to Admin → Users to set Invoice Module to No for a user.</p>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-6">
-                      {tsOnlyUsers.map(u => {
-                        const userTs = timesheets.filter(t => t.userId === u.id);
-                        const pending = userTs.filter(t => t.status === 'pending').length;
-                        const approved = userTs.filter(t => t.status === 'approved').length;
+                    <>
+                      {/* User picker */}
+                      <div className="mb-5 relative">
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Filter Users</label>
+                        <button
+                          onClick={() => setTsOnlyDropdownOpen(o => !o)}
+                          className="w-full flex items-center justify-between px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm hover:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        >
+                          <span className="text-gray-700">
+                            {effectiveSelected.length === tsOnlyUsers.length
+                              ? 'All users selected'
+                              : `${effectiveSelected.length} of ${tsOnlyUsers.length} users selected`}
+                          </span>
+                          <svg className={`w-4 h-4 text-gray-500 transition-transform ${tsOnlyDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+
+                        {tsOnlyDropdownOpen && (
+                          <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg">
+                            {/* Search */}
+                            <div className="p-2 border-b border-gray-100">
+                              <input
+                                type="text"
+                                value={tsOnlySearch}
+                                onChange={e => setTsOnlySearch(e.target.value)}
+                                placeholder="Search users..."
+                                className="w-full px-3 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                autoFocus
+                              />
+                            </div>
+                            {/* Select all / Clear */}
+                            <div className="flex gap-2 px-3 py-1.5 border-b border-gray-100 bg-gray-50">
+                              <button
+                                onClick={() => setTsOnlySelectedUsers(tsOnlyUsers.map(u => u.id))}
+                                className="text-xs text-indigo-600 hover:underline font-medium"
+                              >Select all</button>
+                              <span className="text-gray-300">|</span>
+                              <button
+                                onClick={() => setTsOnlySelectedUsers([])}
+                                className="text-xs text-gray-500 hover:underline"
+                              >Clear</button>
+                            </div>
+                            {/* User list */}
+                            <div className="max-h-60 overflow-y-auto">
+                              {searchedUsers.length === 0 ? (
+                                <p className="text-sm text-gray-400 text-center py-4">No users match</p>
+                              ) : (
+                                searchedUsers.map(u => (
+                                  <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-indigo-50 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={effectiveSelected.includes(u.id)}
+                                      onChange={() => toggleUser(u.id)}
+                                      className="w-4 h-4 rounded text-indigo-600"
+                                    />
+                                    <span className="text-sm text-gray-800">{u.name}</span>
+                                    <span className="text-xs text-gray-400 ml-auto">{countryName(u.country)}</span>
+                                  </label>
+                                ))
+                              )}
+                            </div>
+                            <div className="p-2 border-t border-gray-100 bg-gray-50 text-right">
+                              <button
+                                onClick={() => { setTsOnlyDropdownOpen(false); setTsOnlySearch(''); }}
+                                className="px-3 py-1.5 bg-indigo-600 text-white text-xs rounded-lg hover:bg-indigo-700"
+                              >Done</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Quick select presets */}
+                      {(() => {
+                        const now = new Date();
+                        const monthOpts = Array.from({ length: 6 }, (_, i) => {
+                          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                          const start = formatDate(new Date(d.getFullYear(), d.getMonth(), 1));
+                          const end   = formatDate(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+                          return { label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }), start, end };
+                        });
+                        const todayMon = (() => { const d = new Date(); d.setHours(0,0,0,0); const day = d.getDay(); d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day)); return d; })();
+                        const biWeekEnd = new Date(todayMon); biWeekEnd.setDate(biWeekEnd.getDate() - 1);
+                        const biWeekStart = new Date(todayMon); biWeekStart.setDate(biWeekStart.getDate() - 14);
+                        const biWeekLabel = `${biWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${biWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+                        const isActive = (s: string, e: string) => tsOnlyApplied.start === s && tsOnlyApplied.end === e;
                         return (
-                          <div key={u.id} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
-                            <div className="font-semibold text-gray-800 text-sm">{u.name}</div>
-                            <div className="text-xs text-gray-500 mt-0.5">{countryName(u.country)}{u.region ? ', ' + u.region : ''}</div>
-                            <div className="flex gap-2 mt-2">
-                              {pending > 0 && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full">{pending} pending</span>}
-                              {approved > 0 && <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">{approved} approved</span>}
-                              {userTs.length === 0 && <span className="text-xs text-gray-400">No timesheets</span>}
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4 space-y-4">
+                            <div>
+                              <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Bi-Weekly</label>
+                              <button
+                                onClick={() => { const s = formatDate(biWeekStart); const e = formatDate(biWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(biWeekStart), formatDate(biWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
+                              >Last 2 Weeks ({biWeekLabel})</button>
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Month</label>
+                              <div className="flex flex-wrap gap-2">
+                                {monthOpts.map(opt => (
+                                  <button
+                                    key={opt.start}
+                                    onClick={() => { setTsOnlyRange({ start: opt.start, end: opt.end }); setTsOnlyApplied({ start: opt.start, end: opt.end }); }}
+                                    className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(opt.start, opt.end) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
+                                  >{opt.label}</button>
+                                ))}
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Custom Range</label>
+                              <div className="flex flex-wrap gap-3 items-end">
+                                <div>
+                                  <label className="block text-xs text-gray-500 mb-1">From</label>
+                                  <input type="date" value={tsOnlyRange.start} onChange={e => setTsOnlyRange({...tsOnlyRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
+                                </div>
+                                <div>
+                                  <label className="block text-xs text-gray-500 mb-1">To</label>
+                                  <input type="date" value={tsOnlyRange.end} onChange={e => setTsOnlyRange({...tsOnlyRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
+                                </div>
+                                <button onClick={() => setTsOnlyApplied(tsOnlyRange)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium">Apply</button>
+                                <button onClick={() => { setTsOnlyRange({ start: '', end: '' }); setTsOnlyApplied({ start: '', end: '' }); }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm">Clear All</button>
+                              </div>
                             </div>
                           </div>
                         );
-                      })}
-                    </div>
-                  )}
+                      })()}
 
-                  {/* Quick select presets */}
-                  {(() => {
-                    const now = new Date();
-                    // Month presets — last 6 months
-                    const monthOpts = Array.from({ length: 6 }, (_, i) => {
-                      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-                      const start = formatDate(new Date(d.getFullYear(), d.getMonth(), 1));
-                      const end   = formatDate(new Date(d.getFullYear(), d.getMonth() + 1, 0));
-                      return { label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }), start, end };
-                    });
-                    // Bi-weekly — last 2 completed weeks
-                    const todayMon = (() => { const d = new Date(); d.setHours(0,0,0,0); const day = d.getDay(); d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day)); return d; })();
-                    const biWeekEnd = new Date(todayMon); biWeekEnd.setDate(biWeekEnd.getDate() - 1); // last Friday of prev week
-                    const biWeekStart = new Date(todayMon); biWeekStart.setDate(biWeekStart.getDate() - 14); // 2 weeks back Monday
-                    const biWeekLabel = `${biWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${biWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
-                    const isActive = (s: string, e: string) => tsOnlyApplied.start === s && tsOnlyApplied.end === e;
-                    return (
-                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4 space-y-4">
-                        {/* Bi-weekly */}
-                        <div>
-                          <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Bi-Weekly</label>
-                          <button
-                            onClick={() => { const s = formatDate(biWeekStart); const e = formatDate(biWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
-                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(biWeekStart), formatDate(biWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
-                          >
-                            Last 2 Weeks ({biWeekLabel})
-                          </button>
-                        </div>
-                        {/* Month presets */}
-                        <div>
-                          <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Month</label>
-                          <div className="flex flex-wrap gap-2">
-                            {monthOpts.map(opt => (
-                              <button
-                                key={opt.start}
-                                onClick={() => { setTsOnlyRange({ start: opt.start, end: opt.end }); setTsOnlyApplied({ start: opt.start, end: opt.end }); }}
-                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(opt.start, opt.end) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
-                              >
-                                {opt.label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                        {/* Custom date range */}
-                        <div>
-                          <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Custom Range</label>
-                          <div className="flex flex-wrap gap-3 items-end">
-                            <div>
-                              <label className="block text-xs text-gray-500 mb-1">From</label>
-                              <input type="date" value={tsOnlyRange.start} onChange={e => setTsOnlyRange({...tsOnlyRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
-                            </div>
-                            <div>
-                              <label className="block text-xs text-gray-500 mb-1">To</label>
-                              <input type="date" value={tsOnlyRange.end} onChange={e => setTsOnlyRange({...tsOnlyRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
-                            </div>
-                            <button onClick={() => setTsOnlyApplied(tsOnlyRange)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium">Apply</button>
-                            <button onClick={() => { setTsOnlyRange({ start: '', end: '' }); setTsOnlyApplied({ start: '', end: '' }); }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm">Clear All</button>
-                          </div>
-                        </div>
+                      {/* Timesheets table */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full border-collapse text-sm">
+                          <thead className="bg-indigo-600 text-white">
+                            <tr>
+                              <th className="border border-indigo-700 px-3 py-2 text-left">Employee</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-left">Country</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-left">Week Ending</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-left">Project</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center">Mon</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center">Tue</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center">Wed</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center">Thu</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center">Fri</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center">Total</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredTs.length === 0 ? (
+                              <tr><td colSpan={11} className="text-center py-6 text-gray-400">No timesheets found for selected range</td></tr>
+                            ) : (
+                              filteredTs.map((ts, idx) => {
+                                const user = users.find(u => u.id === ts.userId);
+                                const project = projects.find(p => p.id === ts.projectId);
+                                const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
+                                const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
+                                const total = dailyHours.reduce((s, h) => s + h, 0);
+                                const fri = weekDates[4];
+                                return (
+                                  <tr key={ts.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                    <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
+                                    <td className="border border-gray-200 px-3 py-2 text-gray-500 text-xs">{user ? countryName(user.country) : ''}</td>
+                                    <td className="border border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+                                    <td className="border border-gray-200 px-3 py-2 text-indigo-600 text-xs">{project ? `${project.name} (${project.code})` : '—'}</td>
+                                    {dailyHours.map((h, i) => (
+                                      <td key={i} className="border border-gray-200 px-3 py-2 text-center">{h > 0 ? h.toFixed(1) : <span className="text-gray-300">—</span>}</td>
+                                    ))}
+                                    <td className="border border-gray-200 px-3 py-2 text-center font-bold text-indigo-600">{total.toFixed(1)}</td>
+                                    <td className="border border-gray-200 px-3 py-2 text-center">
+                                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                        {ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
                       </div>
-                    );
-                  })()}
-
-                  {/* Timesheets table */}
-                  {tsOnlyUsers.length > 0 && (
-                    <div className="overflow-x-auto">
-                      <table className="w-full border-collapse text-sm">
-                        <thead className="bg-indigo-600 text-white">
-                          <tr>
-                            <th className="border border-indigo-700 px-3 py-2 text-left">Employee</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-left">Country</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-left">Week Ending</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-left">Project</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-center">Mon</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-center">Tue</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-center">Wed</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-center">Thu</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-center">Fri</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-center">Total</th>
-                            <th className="border border-indigo-700 px-3 py-2 text-center">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredTs.length === 0 ? (
-                            <tr><td colSpan={11} className="text-center py-6 text-gray-400">No timesheets found for selected range</td></tr>
-                          ) : (
-                            filteredTs.map((ts, idx) => {
-                              const user = users.find(u => u.id === ts.userId);
-                              const project = projects.find(p => p.id === ts.projectId);
-                              const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
-                              const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
-                              const total = dailyHours.reduce((s, h) => s + h, 0);
-                              const fri = weekDates[4]; // W/E Friday label
-                              return (
-                                <tr key={ts.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                                  <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
-                                  <td className="border border-gray-200 px-3 py-2 text-gray-500 text-xs">{user ? countryName(user.country) : ''}</td>
-                                  <td className="border border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
-                                  <td className="border border-gray-200 px-3 py-2 text-indigo-600 text-xs">{project ? `${project.name} (${project.code})` : '—'}</td>
-                                  {dailyHours.map((h, i) => (
-                                    <td key={i} className="border border-gray-200 px-3 py-2 text-center">{h > 0 ? h.toFixed(1) : <span className="text-gray-300">—</span>}</td>
-                                  ))}
-                                  <td className="border border-gray-200 px-3 py-2 text-center font-bold text-indigo-600">{total.toFixed(1)}</td>
-                                  <td className="border border-gray-200 px-3 py-2 text-center">
-                                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                                      {ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}
-                                    </span>
-                                  </td>
-                                </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                    </>
                   )}
                 </div>
               </div>
