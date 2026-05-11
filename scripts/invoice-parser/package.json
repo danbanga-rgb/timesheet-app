@@ -1,0 +1,13 @@
+{
+  "name": "invoice-parser",
+  "version": "1.0.0",
+  "description": "Standalone invoice PDF parser harness — iterate and test before integrating into the poller",
+  "main": "parser.js",
+  "scripts": {
+    "test": "node run.js samples/",
+    "test:text": "node run.js samples/ --dump-text"
+  },
+  "dependencies": {
+    "pdf-parse": "1.1.1"
+  }
+}
