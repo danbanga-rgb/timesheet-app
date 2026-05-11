@@ -427,6 +427,7 @@ const TimesheetSystem = () => {
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
   const [accountantInvoiceFilter, setAccountantInvoiceFilter] = useState('all');
+  const [showConsolidatedExportMenu, setShowConsolidatedExportMenu] = useState(false);
   const [invoiceDateRange, setInvoiceDateRange] = useState({ start: '', end: '' });
   const [invoicePayDateRange, setInvoicePayDateRange] = useState({ start: '', end: '' });
   const [invoicePaidDateRange, setInvoicePaidDateRange] = useState({ start: '', end: '' });
@@ -3262,7 +3263,7 @@ const TimesheetSystem = () => {
               monthOptions.push({ label, value: monthVal, start: formatDate(firstDay), end: formatDate(lastDay) });
             }
 
-            const downloadConsolidatedCSV = () => {
+            const downloadConsolidatedCSV = (includeStatus: boolean) => {
               if (!consolidatedReport) return;
               const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
               let csv = 'Employee,Country,Project';
@@ -3272,7 +3273,7 @@ const TimesheetSystem = () => {
                 const label = partialWeeks.has(we)
                   ? `Partial W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
                   : `W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
-                csv += `,"${label}","Status"`;
+                csv += includeStatus ? `,"${label}","Status"` : `,"${label}"`;
               });
               csv += ',Total Hours\n';
               employeeRows.forEach(row => {
@@ -3280,17 +3281,22 @@ const TimesheetSystem = () => {
                 weekEndings.forEach(we => {
                   const h = row.hours[we];
                   const st = row.statuses[we];
-                  csv += `,"${h !== null ? h.toFixed(1) : '-'}","${st}"`;
+                  csv += includeStatus
+                    ? `,"${h !== null ? h.toFixed(1) : '-'}","${st}"`
+                    : `,"${h !== null ? h.toFixed(1) : '-'}"`;
                 });
                 csv += `,"${row.rowTotal.toFixed(1)}"\n`;
               });
               csv += `"TOTAL","",""`;
-              weekEndings.forEach(we => { csv += `,"${colTotals[we].toFixed(1)}",""` });
+              weekEndings.forEach(we => {
+                csv += includeStatus ? `,"${colTotals[we].toFixed(1)}",""` : `,"${colTotals[we].toFixed(1)}"`;
+              });
               csv += `,"${gt.toFixed(1)}"\n`;
               const rangeLabel = appliedRange.start && appliedRange.end
                 ? `${appliedRange.start}_to_${appliedRange.end}`
                 : 'consolidated';
-              triggerDownload(csv, `consolidated_report_${rangeLabel}.csv`);
+              const suffix = includeStatus ? '' : '_hours_only';
+              triggerDownload(csv, `consolidated_report${suffix}_${rangeLabel}.csv`);
             };
 
             return (
@@ -3310,9 +3316,33 @@ const TimesheetSystem = () => {
                       ))}
                     </select>
                     {consolidatedReport && (
-                      <button onClick={downloadConsolidatedCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
-                        <Download className="w-4 h-4" /> Export CSV
-                      </button>
+                      <div className="relative">
+                        <button
+                          onClick={() => setShowConsolidatedExportMenu(v => !v)}
+                          className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                        >
+                          <Download className="w-4 h-4" /> Export CSV
+                        </button>
+                        {showConsolidatedExportMenu && (
+                          <>
+                            <div className="fixed inset-0 z-10" onClick={() => setShowConsolidatedExportMenu(false)} />
+                            <div className="absolute right-0 mt-1 w-52 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1">
+                              <button
+                                onClick={() => { downloadConsolidatedCSV(true); setShowConsolidatedExportMenu(false); }}
+                                className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                              >
+                                With approval status
+                              </button>
+                              <button
+                                onClick={() => { downloadConsolidatedCSV(false); setShowConsolidatedExportMenu(false); }}
+                                className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                              >
+                                Hours only
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
