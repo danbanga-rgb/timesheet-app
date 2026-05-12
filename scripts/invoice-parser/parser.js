@@ -99,7 +99,16 @@ function extractInvoiceNumber(text) {
     /invoice\s*(?:number|num)\s*num\.?\s*(\d[\w\-\/\.]{0,20})/i,
     // Bare "Invoice: CI-STS-22" — negative lookahead to skip date/number/no labels
     /invoice[:\s]+(?!(?:date|number|num|no|#)\b)([A-Z0-9][\w\-\/]{2,25})/i,
+    // "Invoice - 02/26" — dash-separated label (no colon)
+    /invoice\s*[-–]\s*([A-Z0-9][\w\/\-\.]{1,25})/i,
     /inv[.\-#\s]+([A-Z0-9][\w\-]{1,25})/i,
+    // "No 002/05/2026" — bare "No" label before numeric invoice number
+    /\bNo\.?[ \t]+(\d[\d\/\-\.]{2,20})/i,
+    // "# STS 04/2026" — hash at line-start or mid-line (after whitespace), letters+digits form
+    /(?:^|\n)\s*#[ \t]*([A-Z0-9][\w\-\/\.]+(?:[ \t]+[A-Z0-9][\w\-\/\.]+)?)/m,
+    /(?:^|[ \t])#[ \t]*([A-Z]{2,6}[ \t]+\d{2}[\/\-]\d{4})/m,
+    // "INVOICE NUMBER DATE OF ISSUE\n6" — number on next line after column header
+    /invoice\s+number\s+date\s+of\s+issue[^\n]*\n[ \t]*(\d[\d\-]{0,10})\b/i,
     // "BROJ RACUNA/RAČUNA" (Croatian "invoice number", noun first order)
     /(?:broj|br\.?)\s*ra[cčg]una?[:\s]+([A-Z0-9][\w\-\/]{1,25})/i,
     // "Racun BR." / "RACUN BR." (Bosnian/Serbian/Croatian, verb first order)
@@ -110,8 +119,8 @@ function extractInvoiceNumber(text) {
     /\breference\s+no\.?\s*:\s*(\d[\d\-\/\.]{1,25})/i,
     // "Poziv na broj: 2026-24-1-1" (Croatian payment reference, last resort)
     /poziv\s+na\s+broj[:\s]+([A-Z0-9][\w\-\/]{1,25})/i,
-    // Bare "#07" or "#INV-001" at start of line
-    /(?:^|\n)\s*#\s*([A-Z0-9][\w\-]{1,25})/m,
+    // "Invoice5/V01/0" — no space between "Invoice" and number, must contain "/" or "-"
+    /invoice([0-9][\w]*[\/\-][\/\w\-\.]+)/i,
   ];
   for (const p of patterns) {
     const m = text.match(p);
@@ -330,12 +339,27 @@ function extractIban(text) {
 }
 
 function extractSwift(text) {
-  // Labeled: "SWIFT:", "BIC:", "SWIFT/BIC:", "Swift Code:", "BIC/SWIFT:"
-  const labeled = text.match(/(?:swift(?:\/bic)?|bic(?:\/swift)?|swift\s+code)[:\s#]*([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b/i);
-  if (labeled) return labeled[1].toUpperCase();
-  // Bare 8/11-char BIC as fallback
-  const bare = text.match(/\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b/);
-  if (bare) return bare[1].toUpperCase();
+  const upper = text.toUpperCase();
+  // Labeled: "SWIFT:", "BIC:", "SWIFT/BIC:", "BIC/SWIFT:", "Swift Code:"
+  // Restrict separator to [ \t:#] so the pattern cannot cross a newline into a table header.
+  // Space-split BICs ("UNCRBA 22") are handled by stripping spaces from the capture.
+  // Always return the 8-char prefix: OCR noise can make the suffix ambiguous ("NOBIBA22A Vat").
+  // SWIFT\s+CODE must come before SWIFT(?:\/BIC)? so "SWIFT CODE RZBABA2S" isn't
+  // greedily matched as label="SWIFT" + BIC="CODE RZBABA2S"
+  const labeled = upper.match(/(?:SWIFT\s+CODE|SWIFT(?:\/BIC)?|BIC(?:\/SWIFT)?)[ \t:#]*([A-Z0-9][A-Z0-9 ]{7,13})/);
+  if (labeled) {
+    const s = labeled[1].replace(/\s+/g, '');
+    const m = s.match(/^([A-Z]{4}[A-Z]{2}[A-Z0-9]{2})/);
+    if (m) return m[1];
+  }
+  // Bare 8/11-char BIC fallback — require at least one digit in location code (chars 6-7)
+  // to filter English words like "ACTIVITY". Also skip if first 6 chars spell a document
+  // keyword (e.g. "INVOIC" from "Invoice5/V01/0" → "INVOIC" + "E5" → false BIC).
+  const bare = upper.match(/\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b/g);
+  if (bare) {
+    const bic = bare.find(b => /\d/.test(b.slice(6, 8)) && b.slice(0, 6) !== 'INVOIC');
+    if (bic) return bic;
+  }
   return null;
 }
 
@@ -392,7 +416,8 @@ function extractBankName(text) {
 function extractCompanyName(text) {
   const patterns = [
     /(?:bill(?:ed)?\s+from|remit\s+to|pay(?:able)?\s+to)[:\s]+([^\n]{3,60})/i,
-    /(?:^|\n)\s*company\s*(?:name)?[:\s]+([^\n]{3,60})/im,
+    // Require explicit colon to avoid matching "Company Details:" as "Details:"
+    /(?:^|\n)\s*company\s*(?:name)?\s*:[ \t]*([^\n]{3,60})/im,
     // "Issued by:" — only grab same-line content (don't cross newline)
     /(?:issued\s+by)\s*:[ \t]*([^\n]{3,60})/i,
   ];
@@ -400,8 +425,9 @@ function extractCompanyName(text) {
     const m = text.match(p);
     if (m) {
       const val = m[1].trim();
-      // Reject obvious non-names
-      if (val.length > 3 && !/^\d/.test(val) && !/^\d+$/.test(val) && !/^(synergie|llc|ltd|signature)/i.test(val)) return val;
+      // Reject obvious non-names: section labels, digits, known client/boilerplate names
+      if (val.length > 3 && !/^\d/.test(val) && !/^\d+$/.test(val) &&
+          !/^(synergie|llc|ltd|signature|details|invoice|date|number|payment|bank|achinformation)/i.test(val)) return val;
     }
   }
   return null;
