@@ -292,6 +292,10 @@ function extractHours(text) {
     [/\bsat[ai]?\s+(\d{2,3}[\.,]?\d*)\b/i,              s => cleanHours(s)],
     // "per hour × 176" or "per h x 176" — rate-first formula where hours follows the multiplier
     [/per\s*h(?:our|r)?\s*[x×*]\s*(\d+[\.,]?\d*)/i,    s => cleanHours(s)],
+    // Table line with European-format quantity: service keyword + short unit + N,NNN or N.NNN
+    // Handles templates where unit label (e.g. "Pon", "kom") precedes qty in European notation.
+    // Only matches 2–3 digit numbers before the separator (rules out prices like "6,500").
+    [/(?:software|development|consulting|programming|maintenance|testing|engineering|management|services?)\b[^\n]{0,60}\b[a-z]{2,5}\s+(\d{2,3}[,\.]\d{3})\b/i, s => cleanHours(s)],
     // Last resort: bare "X hours"
     [/\b(\d+[\.,]?\d*)\s*hours?\b/i,                    s => cleanHours(s)],
   ];
@@ -537,10 +541,26 @@ function parseInvoice(text, filename) {
   let rate        = extractRate(text);
   let totalAmount = extractTotal(text);
 
+  // Multi-contractor detection: if the text contains 3+ distinct person+hours patterns
+  // (e.g. "Sancanin 160h $35"), the invoice covers multiple contractors. Hours extracted
+  // from the first matching line do not correspond to the aggregate total, so derivation
+  // would produce a meaningless blended rate. Clear both fields in this case.
+  const contractorLines = (text.match(/\b[A-Z][a-z]+\s+\d+h\b/g) || []);
+  const isMultiContractor = contractorLines.length >= 3;
+  if (isMultiContractor) {
+    totalHours = null;
+    rate       = null;
+  }
+
   // Mathematical derivation: if any 2 of {hours, rate, total} are known, compute the 3rd.
   // Only accept derived hours/rate when the result is close to an integer (0.5% tolerance),
-  // which rules out false derivations from unrelated rate/total values (e.g. multi-contractor totals).
+  // which rules out false derivations from unrelated rate/total values.
+  // Also cross-validate: if all three are known but rate × hours is inconsistent with total
+  // (off by more than 10%), the extracted rate is likely wrong — clear it so it can be derived.
   const nearInt = n => Math.abs(n - Math.round(n)) / Math.max(1, Math.abs(n)) < 0.005;
+  if (totalHours != null && rate != null && totalAmount != null) {
+    if (Math.abs(totalHours * rate - totalAmount) / totalAmount > 0.10) rate = null;
+  }
   if (totalHours == null && rate != null && totalAmount != null) {
     const h = totalAmount / rate;
     if (h >= 1 && h <= 720 && nearInt(h)) totalHours = Math.round(h);
