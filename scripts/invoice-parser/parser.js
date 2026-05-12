@@ -165,6 +165,100 @@ function extractCurrency(text) {
   return null;
 }
 
+// ─── Payment detail extractors ────────────────────────────────────────────────
+
+function extractIban(text) {
+  // IBAN: 2-letter country code + 2 check digits + up to 30 alphanumeric chars
+  // Allow spaces (common formatting: GB29 NWBK 6016 1331 9268 19)
+  const m = text.match(/\b([A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7})\b/);
+  if (!m) return null;
+  const candidate = m[1].replace(/\s/g, '');
+  // Basic sanity: 15–34 chars after stripping spaces
+  return candidate.length >= 15 && candidate.length <= 34 ? candidate : null;
+}
+
+function extractSwift(text) {
+  // SWIFT/BIC: 8 or 11 chars — 4 bank + 2 country + 2 location + optional 3 branch
+  const m = text.match(/(?:swift|bic|swift\/bic)[:\s#]*([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b/i);
+  if (m) return m[1].toUpperCase();
+  // Bare BIC pattern as fallback (less reliable without the label)
+  const bare = text.match(/\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b/);
+  if (bare) return bare[1].toUpperCase();
+  return null;
+}
+
+function extractAccountNumber(text) {
+  const patterns = [
+    /account\s*(?:number|num|no\.?|#)[:\s#]+(\d[\d\s\-]{4,24}\d)/i,
+    /a\/c\s*(?:no\.?|#)?[:\s]*(\d[\d\s\-]{4,24}\d)/i,
+    /acct\.?\s*(?:no\.?|#)?[:\s]*(\d[\d\s\-]{4,24}\d)/i,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) return m[1].replace(/\s/g, '');
+  }
+  return null;
+}
+
+function extractSortCode(text) {
+  // UK sort code: 6 digits in XX-XX-XX or XX XX XX format
+  const m = text.match(/(?:sort\s*code|sc)[:\s]*(\d{2}[-\s]\d{2}[-\s]\d{2})/i)
+         || text.match(/\b(\d{2}-\d{2}-\d{2})\b/);
+  if (m) return m[1].replace(/\s/g, '-');
+  return null;
+}
+
+function extractRoutingNumber(text) {
+  // US ABA routing: exactly 9 digits, labelled
+  const m = text.match(/(?:routing\s*(?:number|num|no\.?|#)|aba)[:\s#]*(\d{9})\b/i);
+  return m ? m[1] : null;
+}
+
+function extractBankName(text) {
+  const patterns = [
+    /bank\s*name[:\s]+([^\n,]{3,50})/i,
+    /(?:^|\n)\s*bank[:\s]+([^\n,]{3,50})/im,
+    /(?:payable\s+(?:to|through)|pay\s+(?:to|via))[:\s]+([^\n,]{3,50})/i,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) {
+      const val = m[1].trim();
+      // Reject obvious non-names (short codes, numbers)
+      if (val.length > 3 && !/^\d+$/.test(val)) return val;
+    }
+  }
+  return null;
+}
+
+function extractCompanyName(text) {
+  // Look for "Bill from:", "Remit to:", "Company:", or the first substantial line
+  const patterns = [
+    /(?:bill(?:ed)?\s+from|remit\s+to|pay(?:able)?\s+to|company\s+name)[:\s]+([^\n]{3,60})/i,
+    /(?:^|\n)\s*company[:\s]+([^\n]{3,60})/im,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) {
+      const val = m[1].trim();
+      if (val.length > 3) return val;
+    }
+  }
+  return null;
+}
+
+function extractPaymentDetails(text) {
+  return {
+    iban:          extractIban(text),
+    swift:         extractSwift(text),
+    accountNumber: extractAccountNumber(text),
+    sortCode:      extractSortCode(text),
+    routingNumber: extractRoutingNumber(text),
+    bankName:      extractBankName(text),
+    companyName:   extractCompanyName(text),
+  };
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 function parseInvoice(text, filename) {
@@ -180,17 +274,22 @@ function parseInvoice(text, filename) {
   const { periodStart, periodEnd } = extractPeriod(text);
   track('periodStart', periodStart);
   track('periodEnd',   periodEnd);
-  const totalHours  = track('totalHours',  extractHours(text));
-  const rate        = track('rate',        extractRate(text));
-  const totalAmount = track('totalAmount', extractTotal(text));
-  const currency    = track('currency',    extractCurrency(text));
+  const totalHours    = track('totalHours',  extractHours(text));
+  const rate          = track('rate',        extractRate(text));
+  const totalAmount   = track('totalAmount', extractTotal(text));
+  const currency      = track('currency',    extractCurrency(text));
+
+  // Payment details tracked individually
+  const paymentDetails = extractPaymentDetails(text);
+  const pdFields = ['iban', 'swift', 'accountNumber', 'sortCode', 'routingNumber', 'bankName', 'companyName'];
+  pdFields.forEach(f => track(`payment.${f}`, paymentDetails[f]));
 
   const parseNotes = [
-    found.length   ? `Found: ${found.join(', ')}`   : null,
+    found.length   ? `Found: ${found.join(', ')}`    : null,
     missing.length ? `Missing: ${missing.join(', ')}` : null,
   ].filter(Boolean).join(' | ');
 
-  return { invoiceNumber, periodStart, periodEnd, totalHours, rate, totalAmount, currency, parseNotes };
+  return { invoiceNumber, periodStart, periodEnd, totalHours, rate, totalAmount, currency, paymentDetails, parseNotes };
 }
 
 module.exports = { parseInvoice };
