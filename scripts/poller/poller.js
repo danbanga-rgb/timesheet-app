@@ -47,6 +47,9 @@ const DAY_ORDER = ['mon','tue','wed','thu','fri','sat','sun'];
 
 const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmaster@/i];
 
+// Filenames that are never timesheets — filter silently so they don't appear as failures
+const NON_TIMESHEET_DOC_RE = /\b(vendor\s*consulting\s*agreement|consulting\s*agreement|vendor\s*agreement|\baup\b|acceptable[._\s-]use|genworth.*policy|policy.*acknowledg|acknowledg.*policy|acknowledgem[ae]nt\s*page|\bsow\b|statement[._\s-]of[._\s-]work|account[._\s-]confirmation|confirmation[._\s-]letter|consolidated[._-]report)\b/i;
+
 const FWD_PATTERNS = [
   /from:\s*([^<\n]*?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi,
   /from:\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi,
@@ -808,9 +811,17 @@ function postToIngest(payload) {
 // ─── Process one contractor's attachments ─────────────────────────────────────
 
 async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId) {
-  const xlsxAtts    = attachments.filter(a => a.isXlsx);
-  const invoiceAtts = attachments.filter(a => a.isPdf && /invoice|billing/i.test(a.name));
-  const pdfAtts     = attachments.filter(a => a.isPdf && !/invoice|billing/i.test(a.name));
+  // Strip non-timesheet documents silently — agreements, AUPs, SOWs, etc.
+  const isInvoiceName = n => /invoice|billing|\binv-\d|\bpaymentrequest\b/i.test(n);
+  const nonTimesheetAtts = attachments.filter(a => (a.isPdf || a.isXlsx) && NON_TIMESHEET_DOC_RE.test(a.name));
+  if (nonTimesheetAtts.length) {
+    nonTimesheetAtts.forEach(a => console.log(`  ⏭️  Non-timesheet doc skipped: ${a.name}`));
+  }
+  const relevantAtts = attachments.filter(a => !NON_TIMESHEET_DOC_RE.test(a.name));
+
+  const xlsxAtts    = relevantAtts.filter(a => a.isXlsx);
+  const invoiceAtts = relevantAtts.filter(a => a.isPdf && isInvoiceName(a.name));
+  const pdfAtts     = relevantAtts.filter(a => a.isPdf && !isInvoiceName(a.name));
   const timesheets  = [];
 
   for (const att of xlsxAtts) {
@@ -838,8 +849,11 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     }
   }
 
-  // No attachments parsed but we have a contractor — log partial
-  if (timesheets.length === 0) {
+  // No attachments parsed but we have a contractor — log partial.
+  // Skip the body fallback when every attachment was a non-timesheet doc or invoice
+  // (nothing to process, not a real failure).
+  const hadRealAttachments = xlsxAtts.length > 0 || pdfAtts.length > 0;
+  if (timesheets.length === 0 && hadRealAttachments) {
     const { week, by } = detectWeek(subject, bodyText, []);
     timesheets.push({
       weekStart: week,
@@ -983,7 +997,10 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
 
         if (!contractor) {
           console.warn(`  ⚠️  Cannot identify contractor in ${emlAtt.name}`);
-          results.push({ type: 'eml', emlName: emlAtt.name, error: 'could not identify contractor' });
+          await forwardToHelpdesk(inner.subject || subject, innerBody, fromEmail,
+            `Could not identify contractor in EML attachment: ${emlAtt.name}`);
+          results.push({ type: 'eml', emlName: emlAtt.name, action: 'forwarded_unidentified' });
+          summary.forwarded++;
           continue;
         }
 
@@ -1016,7 +1033,10 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
     const extracted = extractSenderFromBody(bodyText);
     if (!extracted) {
       console.warn(`  ⚠️  Cannot extract contractor from: ${subject}`);
-      results.push({ type: 'forward', subject, error: 'could not identify contractor' });
+      // Forward to helpdesk for manual handling and mark seen — retrying won't help.
+      await forwardToHelpdesk(subject, bodyText, fromEmail, 'Could not identify contractor email in forwarded message');
+      results.push({ type: 'forward', subject, action: 'forwarded_unidentified' });
+      summary.forwarded++;
       return;
     }
     contractor = extracted.email;
