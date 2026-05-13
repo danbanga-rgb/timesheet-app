@@ -569,6 +569,9 @@ function parseSynergiePdfText(text, filename) {
     // Hours section: between "Mgr Name Signature" and "Total Client Billable"
     if ((lower.includes('mgr name') || lower.includes('client manager name')) &&
         lower.includes('signature')) {
+      // Ensure a section exists even when no "Client Billable Hours" date header was found
+      // (PDFs where that header has no concatenated dates, or uses a different format).
+      if (!currentSection) currentSection = { headerDates: [], hoursLines: [], total: null };
       inHoursSection = true;
       continue;
     }
