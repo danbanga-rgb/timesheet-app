@@ -71,6 +71,31 @@ const HOURS_PATTERNS = [
   /(fri(?:day)?)[:\s\-]+(\d+\.?\d*)/gi,
 ];
 
+// ─── MIME encoded-word decoder (RFC 2047) ─────────────────────────────────────
+// Forwarded email bodies contain raw MIME words like =?UTF-8?Q?Name?= as plain
+// text — mailparser only decodes these in real headers, not in body text.
+
+function decodeMimeWords(str) {
+  if (!str || !str.includes('=?')) return str;
+  return str.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (_, charset, enc, text) => {
+    try {
+      let bytes;
+      if (enc.toUpperCase() === 'B') {
+        bytes = Buffer.from(text, 'base64');
+      } else {
+        // Quoted-printable: _ → space, =XX → byte
+        const qp = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, h) =>
+          String.fromCharCode(parseInt(h, 16))
+        );
+        bytes = Buffer.from(qp, 'binary');
+      }
+      return bytes.toString(charset.toLowerCase().replace('utf-8', 'utf8'));
+    } catch {
+      return text; // leave undecoded rather than crash
+    }
+  });
+}
+
 // ─── Sender / name helpers ────────────────────────────────────────────────────
 
 function getMondayOf(date) {
@@ -104,11 +129,11 @@ function extractSenderFromBody(text) {
   const skip = [CONFIG.imapUser.toLowerCase()];
 
   // Pattern 1: From: Display Name <email@domain>
-  const namedPattern = /from:\s*([^<\n\r]{1,60}?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi;
+  const namedPattern = /from:\s*([^<\n\r]{1,120}?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi;
   namedPattern.lastIndex = 0;
   let m;
   while ((m = namedPattern.exec(text)) !== null) {
-    const name  = m[1].replace(/["']/g, '').trim();
+    const name  = decodeMimeWords(m[1].replace(/["']/g, '').trim());
     const email = m[2].toLowerCase();
     if (!isInternal(email) && !isBlockedContractor(email) && !skip.includes(email)) {
       return { email, name: name || null };
@@ -180,8 +205,8 @@ function extractNameFromFilename(filename) {
   name = name.replace(/[_\-]+/g, ' ').replace(/\s+/g, ' ').trim();
   // Must have a space (first + last name) and be reasonable length
   if (name && name.includes(' ') && name.length > 3 && name.length < 60) {
-    // Title case
-    return name.replace(/\b\w/g, c => c.toUpperCase());
+    // Title case — use Unicode-aware split so accented first chars (Č, Š, Đ...) capitalise correctly
+    return name.split(' ').map(w => w.length ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
   }
   return null;
 }
@@ -248,9 +273,10 @@ function weekFromFilename(name) {
     const d = new Date(`${m2[3]}-${m2[1]}-${m2[2]}`);
     if (!isNaN(d.getTime())) return getMondayOf(d);
   }
-  const m3 = name.match(/(\d{4}-\d{2}-\d{2})/);
+  const m3 = name.match(/(\d{4})-(\d{2})-(\d{2})/);
   if (m3) {
-    const d = new Date(m3[1]);
+    // Use local-noon construction to avoid UTC-midnight timezone shift
+    const d = new Date(+m3[1], +m3[2] - 1, +m3[3], 12, 0, 0);
     if (!isNaN(d.getTime())) return getMondayOf(d);
   }
   return null;
@@ -401,6 +427,19 @@ function parseXlsx(buffer, filename) {
               }
               break;
             }
+          }
+        }
+      }
+
+      // If the XLSX-derived week is more than 6 months in the past, the template
+      // likely has stale dates from a prior year. Fall back to the filename date.
+      if (weekStartDate) {
+        const weekAge = (Date.now() - new Date(weekStartDate).getTime()) / 86400000;
+        if (weekAge > 180) {
+          const filenameWeek = weekFromFilename(filename);
+          if (filenameWeek) {
+            console.warn(`XLSX: stale template date (${weekStartDate}), using filename date: ${filenameWeek}`);
+            weekStartDate = filenameWeek;
           }
         }
       }
@@ -621,10 +660,18 @@ function parseSynergiePdfText(text, filename) {
     }
   }
 
-  // Prefer task-log dates over week-ending-date when available:
-  // Task dates from the detail section are always the ground truth.
-  if (taskLogWeekStart) weekStart = taskLogWeekStart;
-  if (!weekStart) weekStart = taskLogWeekStart;
+  // Prefer task-log dates over week-ending-date, but only when they agree
+  // within 21 days. If they diverge further the task log likely has copy-pasted
+  // dates from a prior week/month and the Week Ending Date header is more reliable.
+  if (taskLogWeekStart) {
+    if (!weekStart) {
+      weekStart = taskLogWeekStart;
+    } else {
+      const drift = Math.abs(new Date(taskLogWeekStart) - new Date(weekStart)) / 86400000;
+      if (drift <= 21) weekStart = taskLogWeekStart;
+      // else: task log dates are stale — keep weekStart from Week Ending Date
+    }
+  }
 
   // Fallback week from filename if not found in text
   if (!weekStart) weekStart = weekFromFilename(filename);
