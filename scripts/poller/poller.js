@@ -488,8 +488,13 @@ function parseSynergiePdfText(text, filename) {
   let weekEndingStr = null;
   let name = null;
   let total = null;
-  const hoursLinesCandidates = [];
   let inHoursSection = false;
+
+  // Section tracking: each complete "Mgr Name Signature → Total" block is one section.
+  // When a PDF contains multiple timesheet tables (e.g. remnant from prior week + current
+  // week), we collect all sections then pick the one matching the identified weekStart.
+  const sections = [];      // [{ headerDates: Date[], hoursLines: [], total: null }]
+  let currentSection = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -524,13 +529,37 @@ function parseSynergiePdfText(text, filename) {
       }
     }
 
-    // Total Client Billable Hours — strip artifacts like 4800%
+    // "Client Billable Hours" date header — marks the start of a new timesheet section.
+    // Format: "Client Billable Hours5/4/265/5/265/6/265/7/265/8/265/9/265/10/26"
+    // Dates are M/D/YY concatenated (no spaces), so we derive the year from the end of the
+    // line and use a lookahead to separate each date from the next date's leading month digit.
+    if (lower.startsWith('client billable hours') && /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(line)) {
+      const yrMatch = line.match(/\/(\d{2,4})$/);
+      const yrStr   = yrMatch?.[1] ?? null;
+      const year    = yrStr ? (yrStr.length <= 2 ? 2000 + +yrStr : +yrStr) : null;
+      let headerDates = [];
+      if (year && year >= 2020) {
+        const re = new RegExp(`(\\d{1,2})\\/(\\d{1,2})\\/${yrStr}(?=\\d|$)`, 'g');
+        headerDates = [...line.matchAll(re)].map(m => new Date(year, +m[1] - 1, +m[2]))
+          .filter(d => !isNaN(d.getTime()) && d.getFullYear() >= 2020);
+      }
+      currentSection = { headerDates, hoursLines: [], total: null };
+      inHoursSection = false;
+    }
+
+    // Total Client Billable Hours — closes the current section
     if (lower.includes('total client billable hours')) {
       const cleaned = line.replace(/[^0-9.%]/g, '');
       let t = parseFloat(cleaned.replace(/%/g, ''));
       // 4800% artifact: divide by 100 if result > 168 and divisible cleanly
       if (!isNaN(t) && t > 168) t = t / 100;
-      if (!isNaN(t) && t > 0 && t <= 168) total = t;
+      if (!isNaN(t) && t > 0 && t <= 168) {
+        total = t; // keep for downstream use
+        if (!currentSection) currentSection = { headerDates: [], hoursLines: [], total: null };
+        currentSection.total = t;
+        sections.push(currentSection);
+        currentSection = null;
+      }
       inHoursSection = false;
     }
 
@@ -546,9 +575,47 @@ function parseSynergiePdfText(text, filename) {
         inHoursSection = false;
         continue;
       }
-      hoursLinesCandidates.push(line);
+      if (currentSection) currentSection.hoursLines.push(line);
     }
   }
+
+  // Select which section to use for hours extraction.
+  // weekStart is computed later but we need it here — compute it early from weekEndingStr.
+  let earlyWeekStart = null;
+  if (weekEndingStr) {
+    let wes = weekEndingStr
+      .replace(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\.?$/, (_, d, m, y) => `${m}/${d}/${y}`)
+      .replace(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, (_, a, b, y) =>
+        parseInt(a) > 12 ? `${b}/${a}/${y}` : `${a}/${b}/${y}`
+      )
+      .replace(/(\d{1,2}\/\d{1,2}\/)(\d{2})$/, (_, pre, yy) =>
+        pre + (parseInt(yy) < 50 ? `20${yy}` : `19${yy}`)
+      );
+    const d = new Date(wes);
+    if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) {
+      const x = new Date(d);
+      x.setDate(x.getDate() - (x.getDay() === 0 ? 6 : x.getDay() - 1));
+      earlyWeekStart = x.toISOString().split('T')[0];
+    }
+  }
+
+  // Pick the section matching earlyWeekStart; fall back to the last section.
+  let chosenSection = sections.at(-1) ?? null;
+  if (sections.length > 1 && earlyWeekStart) {
+    const ws = new Date(earlyWeekStart + 'T12:00:00');
+    const we = new Date(earlyWeekStart + 'T12:00:00');
+    we.setDate(we.getDate() + 6);
+    for (const s of sections) {
+      if (s.headerDates.some(d => d >= ws && d <= we)) {
+        chosenSection = s;
+        break;
+      }
+    }
+  }
+
+  // Use chosen section's data
+  const hoursLinesCandidates = chosenSection?.hoursLines ?? [];
+  if (chosenSection?.total != null) total = chosenSection.total;
 
   // Fallback: if total > 168 (4800% artifact), find standalone number in hoursLines
   if (!total || total > 168) {
