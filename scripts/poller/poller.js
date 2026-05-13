@@ -1092,8 +1092,9 @@ function fetchEmails() {
           console.log(`Found ${uids.length} unseen email(s)`);
           const messages = [];
           // markSeen: true — mark all as seen on fetch (reliable)
-          // DMARC emails will be deleted in a separate pass after processing
-          const fetch = imap.fetch(uids, { bodies: '', markSeen: true });
+          // Fetch without marking seen — we mark seen selectively after processing.
+          // Failed emails stay unseen so the next run retries them.
+          const fetch = imap.fetch(uids, { bodies: '', markSeen: false });
 
           fetch.on('message', (msg, seq) => {
             const chunks = [];
