@@ -28,6 +28,7 @@ const CONFIG = {
   brevoApiKey:   process.env.BREVO_API_KEY,
   fromEmail:     process.env.FROM_EMAIL || 'timesheets@mysynergie.net',
   fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
   // These addresses are never treated as contractors (internal staff / system)
   blockedContractorDomains: ['synergietechsolutions.com', 'ionos.com'],
   blockedContractorEmails: (process.env.BLOCKED_CONTRACTOR_EMAILS || '')
@@ -753,27 +754,121 @@ function parseSynergiePdfText(text, filename) {
   return { name, weekStart, hours, total };
 }
 
+// ─── Claude API fallback for PDFs that fail regex parsing ────────────────────
+
+const CLAUDE_TIMESHEET_SYSTEM = `You are a timesheet data extractor. Extract the weekly timesheet from the document.
+Return ONLY a valid JSON object — no markdown, no explanation. Use null for any field not found.
+
+Required shape:
+{
+  "weekStart": "YYYY-MM-DD",
+  "contractorName": string | null,
+  "dailyHours": { "mon": 0, "tue": 0, "wed": 0, "thu": 0, "fri": 0, "sat": 0, "sun": 0 },
+  "totalHours": number | null
+}
+
+Rules:
+- weekStart must be the Monday of the work week (ISO YYYY-MM-DD).
+- dailyHours: plain numbers (e.g. 8, 0, 4.5). Use 0 for non-working or absent days.
+- Partial weeks (e.g. only Mon–Wed worked) still get 0 for the unused days.
+- If the document shows multiple contractors, extract the primary / only one.
+- European dates: DD/MM/YYYY or DD.MM.YYYY. US dates: MM/DD/YYYY.`;
+
+async function claudeExtractTimesheet(pdfBuffer, textContent) {
+  if (!CONFIG.anthropicApiKey) return null;
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
+
+    // Prefer sending the raw PDF (handles both text and image PDFs);
+    // fall back to plain text if buffer unavailable.
+    let userContent;
+    if (pdfBuffer) {
+      userContent = [
+        {
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') },
+        },
+        { type: 'text', text: 'Extract the weekly timesheet data from this document.' },
+      ];
+    } else {
+      userContent = `Extract the weekly timesheet data:\n\n${textContent}`;
+    }
+
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 512,
+      system: CLAUDE_TIMESHEET_SYSTEM,
+      messages: [{ role: 'user', content: userContent }],
+    });
+
+    const raw = (response.content[0]?.text ?? '').trim()
+      .replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    const parsed = JSON.parse(raw);
+
+    // Coerce dailyHours values to numbers
+    if (parsed.dailyHours) {
+      for (const k of Object.keys(parsed.dailyHours)) {
+        const v = parsed.dailyHours[k];
+        parsed.dailyHours[k] = typeof v === 'number' ? v : (parseFloat(v) || 0);
+      }
+    }
+    // Ensure weekStart is a Monday
+    if (parsed.weekStart) {
+      const d = new Date(parsed.weekStart + 'T12:00:00');
+      if (!isNaN(d.getTime())) parsed.weekStart = getMondayOf(d);
+    }
+
+    return parsed;
+  } catch (e) {
+    console.warn(`Claude timesheet extraction failed: ${e.message}`);
+    return null;
+  }
+}
+
+// ─── PDF parser ───────────────────────────────────────────────────────────────
+
 async function parsePdf(buffer, filename) {
   try {
     const pdfParse = require('pdf-parse');
     const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
     const data = await pdfParse(buf);
     const text = data.text || '';
-    if (!text || text.length < 10) return [];
+    const hasText = (data.text?.match(/[a-zA-Z0-9]/g) || []).length > 30;
 
-    const { name, weekStart, hours, total } = parseSynergiePdfText(text, filename);
+    // ── 1. Regex parser (fast, free) ──────────────────────────────────────────
+    if (hasText) {
+      const { name, weekStart, hours, total } = parseSynergiePdfText(text, filename);
+      if (hours && weekStart) {
+        const entries = {};
+        const base = new Date(weekStart + 'T12:00:00Z');
+        DAY_ORDER.forEach((d, i) => {
+          const dt = new Date(base);
+          dt.setUTCDate(base.getUTCDate() + i);
+          entries[dt.toISOString().split('T')[0]] = hours[d] !== undefined ? hours[d] : 0;
+        });
+        return [{ weekStart, entries, total: total || Object.values(entries).reduce((s, h) => s + h, 0), nameFromSheet: name, notes: `PDF: ${filename}` }];
+      }
+    }
 
-    if (!hours || !weekStart) return [];
+    // ── 2. Claude fallback ────────────────────────────────────────────────────
+    if (CONFIG.anthropicApiKey) {
+      console.log(`  🤖 Claude fallback: ${filename}`);
+      const result = await claudeExtractTimesheet(buf, hasText ? text : null);
+      if (result?.weekStart && result?.dailyHours) {
+        const entries = {};
+        const base = new Date(result.weekStart + 'T12:00:00Z');
+        DAY_ORDER.forEach((d, i) => {
+          const dt = new Date(base);
+          dt.setUTCDate(base.getUTCDate() + i);
+          entries[dt.toISOString().split('T')[0]] = result.dailyHours[d] ?? 0;
+        });
+        const total = result.totalHours ?? Object.values(entries).reduce((s, h) => s + h, 0);
+        return [{ weekStart: result.weekStart, entries, total, nameFromSheet: result.contractorName || null, notes: `PDF(claude): ${filename}` }];
+      }
+    }
 
-    const entries = {};
-    const base = new Date(weekStart + 'T12:00:00Z');
-    DAY_ORDER.forEach((d, i) => {
-      const dt = new Date(base);
-      dt.setUTCDate(base.getUTCDate() + i);
-      entries[dt.toISOString().split('T')[0]] = hours[d] !== undefined ? hours[d] : 0;
-    });
-
-    return [{ weekStart, entries, total: total || Object.values(entries).reduce((s, h) => s + h, 0), nameFromSheet: name, notes: `PDF: ${filename}` }];
+    return [];
   } catch (e) {
     console.warn(`PDF parse error for ${filename}: ${e.message}`);
     return [];

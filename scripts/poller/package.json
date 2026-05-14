@@ -7,6 +7,7 @@
     "start": "node poller.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "imap": "^0.8.19",
     "mailparser": "^3.7.1",
     "pdf-parse": "1.1.1",
