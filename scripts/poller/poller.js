@@ -47,8 +47,9 @@ const DAY_ORDER = ['mon','tue','wed','thu','fri','sat','sun'];
 
 const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmaster@/i];
 
-// Filenames that are never timesheets — filter silently so they don't appear as failures
-const NON_TIMESHEET_DOC_RE = /\b(vendor\s*consulting\s*agreement|consulting\s*agreement|vendor\s*agreement|\baup\b|acceptable[._\s-]use|genworth.*policy|policy.*acknowledg|acknowledg.*policy|acknowledgem[ae]nt\s*page|\bsow\b|statement[._\s-]of[._\s-]work|account[._\s-]confirmation|confirmation[._\s-]letter|consolidated[._-]report)\b/i;
+// Filenames that are never timesheets — filter silently so they don't appear as failures.
+// No outer \b wrappers — many patterns appear mid-word or before digits (e.g. "SOW002", "AUP.pdf").
+const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$/i;
 
 const FWD_PATTERNS = [
   /from:\s*([^<\n]*?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi,
@@ -999,11 +1000,8 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
         }
 
         if (!contractor) {
-          console.warn(`  ⚠️  Cannot identify contractor in ${emlAtt.name}`);
-          await forwardToHelpdesk(inner.subject || subject, innerBody, fromEmail,
-            `Could not identify contractor in EML attachment: ${emlAtt.name}`);
-          results.push({ type: 'eml', emlName: emlAtt.name, action: 'forwarded_unidentified' });
-          summary.forwarded++;
+          console.warn(`  ⚠️  Cannot identify contractor in ${emlAtt.name} — skipping`);
+          results.push({ type: 'eml', emlName: emlAtt.name, action: 'skipped_unidentified' });
           continue;
         }
 
@@ -1035,11 +1033,8 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
     // Extract contractor from forwarded body
     const extracted = extractSenderFromBody(bodyText);
     if (!extracted) {
-      console.warn(`  ⚠️  Cannot extract contractor from: ${subject}`);
-      // Forward to helpdesk for manual handling and mark seen — retrying won't help.
-      await forwardToHelpdesk(subject, bodyText, fromEmail, 'Could not identify contractor email in forwarded message');
-      results.push({ type: 'forward', subject, action: 'forwarded_unidentified' });
-      summary.forwarded++;
+      console.warn(`  ⚠️  Cannot extract contractor from: ${subject} — skipping`);
+      results.push({ type: 'forward', subject, action: 'skipped_unidentified' });
       return;
     }
     contractor = extracted.email;
