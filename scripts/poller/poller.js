@@ -768,6 +768,72 @@ function parseSynergiePdfText(text, filename) {
   return { name, weekStart, hours, total };
 }
 
+// ─── PDF attachment classifier ────────────────────────────────────────────────
+// Returns 'timesheet' | 'invoice' | 'both' | 'unknown'
+
+function classifyByFilename(name) {
+  const n = name.toLowerCase();
+  const isInvoice   = /invoice|billing|\binv[-_]?\d|\bpaymentrequest\b/.test(n);
+  const isTimesheet = /timesheet|timesheets?|weekly.?time|time.?sheet/.test(n);
+  if (isInvoice && isTimesheet) return 'both';
+  if (isInvoice)   return 'invoice';
+  if (isTimesheet) return 'timesheet';
+  return null; // ambiguous
+}
+
+async function classifyPdf(buffer, filename) {
+  // Strong filename signals
+  const byCName = classifyByFilename(filename);
+  if (byCName === 'invoice' || byCName === 'timesheet' || byCName === 'both') return byCName;
+
+  // Try extracting text for content scoring (cheap — no Claude call)
+  let text = '';
+  try {
+    const pdfParse = require('pdf-parse');
+    const data = await pdfParse(buffer);
+    text = (data.text || '').toLowerCase();
+  } catch {}
+
+  if (!text || text.replace(/\s/g, '').length < 20) return 'unknown';
+
+  // Score invoice signals
+  const invoiceSignals = [
+    /invoice\s*(number|no\.?|#)/,
+    /\bamount\s+due\b/,
+    /\btotal\s+amount\b/,
+    /\biban\b/,
+    /\bswift\b/,
+    /\bbill\s+to\b/,
+    /\bpayment\s+(terms|details|instructions)\b/,
+    /\bremit\s+to\b/,
+    /\binvoice\s+date\b/,
+    /\bdue\s+date\b/,
+  ];
+  const timesheetSignals = [
+    /week\s+ending\s+(date)?/,
+    /client\s+billable\s+hours/,
+    /\bmon(day)?\b.*\btue(sday)?\b/,
+    /\bmanager\s+(name|signature)\b/,
+    /\bdaily\s+hours\b/,
+    /\btimesheet\b/,
+    /\bproject\s+(code|name)\b.*hours/,
+  ];
+
+  let invoiceScore   = 0;
+  let timesheetScore = 0;
+  for (const re of invoiceSignals)   if (re.test(text)) invoiceScore++;
+  for (const re of timesheetSignals) if (re.test(text)) timesheetScore++;
+
+  if (invoiceScore >= 2 && timesheetScore >= 2) return 'both';
+  if (invoiceScore >= 2) return 'invoice';
+  if (timesheetScore >= 2) return 'timesheet';
+
+  // Weak: one signal each — use whichever is stronger
+  if (invoiceScore > timesheetScore) return 'invoice';
+  if (timesheetScore > invoiceScore) return 'timesheet';
+  return 'unknown';
+}
+
 // ─── Claude API ───────────────────────────────────────────────────────────────
 
 const CLAUDE_INVOICE_SYSTEM = `You are an invoice data extractor. Extract structured fields from invoice documents.
@@ -1076,16 +1142,35 @@ function postToIngest(payload, targetUrl) {
 
 async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId) {
   // Strip non-timesheet documents silently — agreements, AUPs, SOWs, etc.
-  const isInvoiceName = n => /invoice|billing|\binv-\d|\bpaymentrequest\b/i.test(n);
   const nonTimesheetAtts = attachments.filter(a => (a.isPdf || a.isXlsx) && NON_TIMESHEET_DOC_RE.test(a.name));
   if (nonTimesheetAtts.length) {
     nonTimesheetAtts.forEach(a => console.log(`  ⏭️  Non-timesheet doc skipped: ${a.name}`));
   }
   const relevantAtts = attachments.filter(a => !NON_TIMESHEET_DOC_RE.test(a.name));
 
+  // Classify each PDF as timesheet / invoice / both / unknown via content scoring.
+  // XLSX is always treated as a timesheet (no invoice XLSX path exists).
   const xlsxAtts    = relevantAtts.filter(a => a.isXlsx);
-  const invoiceAtts = relevantAtts.filter(a => a.isPdf && isInvoiceName(a.name));
-  const pdfAtts     = relevantAtts.filter(a => a.isPdf && !isInvoiceName(a.name));
+  const pdfQueue    = relevantAtts.filter(a => a.isPdf);
+
+  const invoiceAtts   = [];
+  const timesheetPdfs = [];
+  const unknownPdfs   = [];
+
+  for (const att of pdfQueue) {
+    const cls = await classifyPdf(att.buffer, att.name);
+    att._classification = cls;
+    if (cls === 'invoice')   { invoiceAtts.push(att); }
+    else if (cls === 'both') { invoiceAtts.push(att); timesheetPdfs.push(att); }
+    else if (cls === 'unknown') {
+      console.log(`  ❓ Unknown PDF type (will not retry): ${att.name}`);
+      unknownPdfs.push(att);
+    } else {
+      timesheetPdfs.push(att); // 'timesheet'
+    }
+  }
+
+  const pdfAtts = timesheetPdfs;
   const timesheets  = [];
 
   for (const att of xlsxAtts) {
@@ -1216,7 +1301,12 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   }
 
   const parsedAttachmentNames = new Set(timesheets.map(ts => ts.attachmentName).filter(Boolean));
-  const failedAttachments = [...xlsxAtts, ...pdfAtts].filter(a => !parsedAttachmentNames.has(a.name));
+  // Invoice and unknown PDFs are handled separately — don't count as timesheet failures.
+  const invoiceAttNames = new Set(invoiceAtts.map(a => a.name));
+  const unknownAttNames = new Set(unknownPdfs.map(a => a.name));
+  const failedAttachments = [...xlsxAtts, ...pdfAtts].filter(a =>
+    !parsedAttachmentNames.has(a.name) && !invoiceAttNames.has(a.name) && !unknownAttNames.has(a.name)
+  );
 
   return { results, failedAttachments };
 }
