@@ -241,8 +241,12 @@ serve(async (req) => {
     .maybeSingle();
 
   if (existingLog) {
-    // Already successfully processed — true duplicate
-    if (existingLog.parse_status === 'success' || existingLog.parse_status === 'duplicate') {
+    // Already handled — don't reprocess.
+    // 'success', 'duplicate'          → created or already deduped
+    // 'correction', 'correction_pending' → correction was applied; re-running would
+    //   delete this log entry and apply another correction on every poller run forever.
+    const DONE_STATUSES = ['success', 'duplicate', 'correction', 'correction_pending'];
+    if (DONE_STATUSES.includes(existingLog.parse_status)) {
       return new Response(JSON.stringify({
         ok: true,
         action: 'duplicate',
@@ -250,7 +254,7 @@ serve(async (req) => {
         existingStatus: existingLog.parse_status,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
-    // Partial — delete old log entry so we can reprocess and create fresh entry
+    // Partial / failed — delete old log entry so we can reprocess and create fresh entry
     // attempt_count will be incremented below
     await supabase.from('email_import_log').delete().eq('id', existingLog.id);
   }
