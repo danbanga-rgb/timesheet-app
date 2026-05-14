@@ -36,6 +36,8 @@ jobs:
           IMPORT_FALLBACK_EMAIL: helpdesk@synergietechsolutions.com
           INGEST_URL:            ${{ secrets.INGEST_URL }}
           INGEST_SECRET:         ${{ secrets.INGEST_SECRET }}
+          INVOICE_INGEST_URL:    ${{ secrets.INVOICE_INGEST_URL }}
+          INVOICE_INGEST_ENABLED: "false"
           BREVO_API_KEY:         ${{ secrets.BREVO_API_KEY }}
           ANTHROPIC_API_KEY:     ${{ secrets.ANTHROPIC_API_KEY }}
           FROM_EMAIL:            timesheets@mysynergie.net

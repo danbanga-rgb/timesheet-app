@@ -21,6 +21,10 @@ const CONFIG = {
   imapPort:     parseInt(process.env.IMAP_PORT || '993'),
   ingestUrl:    process.env.INGEST_URL,
   ingestSecret: process.env.INGEST_SECRET,
+  // Invoice ingestion — INVOICE_INGEST_ENABLED must be explicitly 'true' to write to DB.
+  // Leave unset for dry-run mode: invoices are parsed and reported but not stored.
+  invoiceIngestUrl:     process.env.INVOICE_INGEST_URL || null,
+  invoiceIngestEnabled: process.env.INVOICE_INGEST_ENABLED === 'true',
   internalForwarders: (process.env.INTERNAL_FORWARDERS ||
     'contracts@synergietechsolutions.com,accounting@synergietechsolutions.com,lpinto@synergietechsolutions.com,helpdesk@synergietechsolutions.com'
   ).split(',').map(s => s.trim().toLowerCase()),
@@ -764,7 +768,38 @@ function parseSynergiePdfText(text, filename) {
   return { name, weekStart, hours, total };
 }
 
-// ─── Claude API fallback for PDFs that fail regex parsing ────────────────────
+// ─── Claude API ───────────────────────────────────────────────────────────────
+
+const CLAUDE_INVOICE_SYSTEM = `You are a contractor invoice data extractor. Extract structured billing data from the document.
+Return ONLY a valid JSON object — no markdown, no explanation. Use null for any field not found.
+
+Required shape:
+{
+  "invoiceNumber": string | null,
+  "periodStart": "YYYY-MM-DD" | null,
+  "periodEnd": "YYYY-MM-DD" | null,
+  "totalHours": number | null,
+  "rate": number | null,
+  "totalAmount": number | null,
+  "currency": string | null,
+  "paymentDetails": {
+    "bankName": string | null,
+    "accountNumber": string | null,
+    "iban": string | null,
+    "swift": string | null,
+    "sortCode": string | null,
+    "routingNumber": string | null,
+    "companyName": string | null
+  },
+  "parseNotes": string
+}
+
+Rules:
+- periodStart / periodEnd: ISO YYYY-MM-DD. If invoice covers a calendar month, use first and last day.
+- totalHours, rate, totalAmount: plain numbers only (no currency symbols, no strings).
+- currency: ISO 4217 code (USD, EUR, GBP, CAD …). Default to USD if not stated.
+- paymentDetails.sortCode: UK sort code (e.g. "60-16-13"). routingNumber: US ACH routing number.
+- parseNotes: one sentence summarising what was found and what was missing.`;
 
 const CLAUDE_TIMESHEET_SYSTEM = `You are a timesheet data extractor. Extract the weekly timesheet from the document.
 Return ONLY a valid JSON object — no markdown, no explanation. Use null for any field not found.
@@ -855,6 +890,68 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
   }
 }
 
+// ─── Invoice extractor ────────────────────────────────────────────────────────
+
+async function claudeExtractInvoice(pdfBuffer, filename) {
+  if (!CONFIG.anthropicApiKey) return null;
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      system: CLAUDE_INVOICE_SYSTEM,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') },
+          },
+          { type: 'text', text: 'Extract invoice data from this document.' },
+        ],
+      }],
+    });
+    const raw = (response.content[0]?.text ?? '').trim();
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON in Claude invoice response');
+    return JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    console.warn(`  Claude invoice extraction failed for ${filename}: ${e.message}`);
+    return null;
+  }
+}
+
+// Returns a multi-line string showing every field as PARSED, NOT FOUND, or ASSUMED.
+function formatInvoiceReport(filename, contractorEmail, parsed) {
+  const tag = (val, assumedLabel) => {
+    if (val != null && val !== '') return '[PARSED]';
+    return assumedLabel ? `[NOT FOUND → assumed ${assumedLabel}]` : '[NOT FOUND]';
+  };
+  const pd = parsed?.paymentDetails || {};
+  const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
+
+  return [
+    `  ┌─ Invoice: ${filename}  (${contractorEmail})`,
+    `  │  Invoice #   : ${parsed?.invoiceNumber   ?? '—'}  ${tag(parsed?.invoiceNumber,   'auto-generated')}`,
+    `  │  Period      : ${parsed?.periodStart ?? '—'} → ${parsed?.periodEnd ?? '—'}  start:${tag(parsed?.periodStart)}  end:${tag(parsed?.periodEnd)}`,
+    `  │  Hours       : ${parsed?.totalHours   ?? '—'}  ${tag(parsed?.totalHours)}`,
+    `  │  Rate        : ${parsed?.rate         ?? '—'}  ${tag(parsed?.rate,         '$0')}`,
+    `  │  Amount      : ${parsed?.totalAmount  ?? '—'}  ${tag(parsed?.totalAmount,  'hours × rate')}`,
+    `  │  Currency    : ${parsed?.currency     ?? '—'}  ${tag(parsed?.currency,     'USD')}`,
+    `  │  ── Payment Details ──────────────────────────────────────`,
+    `  │  Company     : ${pd.companyName   ?? '—'}  ${tag(pd.companyName)}`,
+    `  │  Bank        : ${pd.bankName      ?? '—'}  ${tag(pd.bankName)}`,
+    `  │  Account #   : ${pd.accountNumber ?? '—'}  ${tag(pd.accountNumber)}`,
+    `  │  IBAN        : ${pd.iban          ?? '—'}  ${tag(pd.iban)}`,
+    `  │  SWIFT       : ${pd.swift         ?? '—'}  ${tag(pd.swift)}`,
+    `  │  Sort Code   : ${pd.sortCode      ?? '—'}  ${tag(pd.sortCode)}`,
+    `  │  Routing #   : ${pd.routingNumber ?? '—'}  ${tag(pd.routingNumber)}`,
+    parsed?.parseNotes ? `  │  Notes       : ${parsed.parseNotes}` : null,
+    `  └─ ${canIngest ? '✅ Sufficient data to ingest' : '⚠️  Missing required fields (period or hours) — would skip ingestion'}`,
+  ].filter(Boolean).join('\n');
+}
+
 // ─── PDF parser ───────────────────────────────────────────────────────────────
 
 async function parsePdf(buffer, filename) {
@@ -910,10 +1007,10 @@ async function parsePdf(buffer, filename) {
 
 // ─── HTTP POST to edge function ───────────────────────────────────────────────
 
-function postToIngest(payload) {
+function postToIngest(payload, targetUrl) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
-    const url = new URL(CONFIG.ingestUrl);
+    const url = new URL(targetUrl || CONFIG.ingestUrl);
     const isHttps = url.protocol === 'https:';
     const options = {
       hostname: url.hostname,
@@ -1037,8 +1134,51 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       console.error(`  ❌ ${contractorEmail} | ${ts.weekStart} → ${e.message}`);
     }
   }
-  // Mark invoice attachments
-  invoiceAtts.forEach(a => results.push({ contractor: contractorEmail, attachmentName: a.name, action: 'invoice_skipped' }));
+  // ── Invoice PDFs — parse and report (ingest if enabled) ──────────────────
+  for (const att of invoiceAtts) {
+    console.log(`  🧾 Invoice attachment: ${att.name}`);
+    if (!CONFIG.anthropicApiKey) {
+      console.log(`     ⚠️  No ANTHROPIC_API_KEY — cannot parse invoice`);
+      results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_skipped' });
+      continue;
+    }
+    const parsed = await claudeExtractInvoice(att.buffer, att.name);
+    console.log(formatInvoiceReport(att.name, contractorEmail, parsed));
+    const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
+
+    if (CONFIG.invoiceIngestEnabled && CONFIG.invoiceIngestUrl && canIngest) {
+      try {
+        const res = await postToIngest({
+          messageId:       `${messageId}::${att.name}`,
+          contractorEmail,
+          contractorName:  displayName,
+          subject,
+          attachmentName:  att.name,
+          invoiceNumber:   parsed.invoiceNumber   || null,
+          periodStart:     parsed.periodStart,
+          periodEnd:       parsed.periodEnd,
+          totalHours:      parsed.totalHours,
+          rate:            parsed.rate            || null,
+          totalAmount:     parsed.totalAmount     || null,
+          currency:        parsed.currency        || null,
+          paymentDetails:  parsed.paymentDetails  || null,
+          parseNotes:      parsed.parseNotes      || '',
+          pdfBase64:       att.buffer.toString('base64'),
+          rawExtracted:    parsed,
+        }, CONFIG.invoiceIngestUrl);
+        const action = res.body?.action || res.status;
+        console.log(`     ✅ Ingested → ${action}`);
+        results.push({ contractor: contractorEmail, attachmentName: att.name, action: `invoice_${action}`, parsed });
+      } catch (e) {
+        console.error(`     ❌ Ingest failed: ${e.message}`);
+        results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
+      }
+    } else {
+      const reason = !CONFIG.invoiceIngestEnabled ? 'dry-run mode' : !canIngest ? 'missing fields' : 'no INVOICE_INGEST_URL';
+      console.log(`     ℹ️  Not ingested (${reason})`);
+      results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_reported', parsed });
+    }
+  }
 
   const parsedAttachmentNames = new Set(timesheets.map(ts => ts.attachmentName).filter(Boolean));
   const failedAttachments = [...xlsxAtts, ...pdfAtts].filter(a => !parsedAttachmentNames.has(a.name));
@@ -1385,6 +1525,7 @@ RESULTS
 📨 Forwarded      : ${summary.forwarded}
 🗑️  DMARC deleted  : ${summary.dmarc}
 ⚠️  Parse failures : ${summary.failures.length} (${leftUnseen} left unseen for retry)
+🧾 Invoices parsed : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? ' (ingested)' : ' (dry-run — not ingested)'}
 `;
 
   if (summary.newUsers.length > 0) {
@@ -1419,6 +1560,31 @@ ${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ atte
 `;
   }
 
+  if (summary.invoiceReports.length > 0) {
+    body += `
+INVOICE PARSE REPORTS (${summary.invoiceReports.length})${CONFIG.invoiceIngestEnabled ? '' : ' — DRY RUN, nothing written to DB'}
+${'─'.repeat(50)}
+`;
+    for (const inv of summary.invoiceReports) {
+      const p = inv.parsed;
+      const pd = p?.paymentDetails || {};
+      const canIngest = p?.periodStart && p?.periodEnd && p?.totalHours != null;
+      const tag = (val, assumed) => val != null && val !== '' ? `${val}` : (assumed ? `(assumed: ${assumed})` : '—');
+
+      body += `
+  ${inv.email}  |  ${inv.filename}
+  Invoice #  : ${tag(p?.invoiceNumber, 'auto-generated')}
+  Period     : ${tag(p?.periodStart)} → ${tag(p?.periodEnd)}
+  Hours      : ${tag(p?.totalHours)}   Rate: ${tag(p?.rate, '0')}   Amount: ${tag(p?.totalAmount, 'hours × rate')}   Currency: ${tag(p?.currency, 'USD')}
+  Company    : ${tag(pd.companyName)}
+  Bank       : ${tag(pd.bankName)}   Account: ${tag(pd.accountNumber)}   IBAN: ${tag(pd.iban)}
+  SWIFT      : ${tag(pd.swift)}   Sort Code: ${tag(pd.sortCode)}   Routing: ${tag(pd.routingNumber)}
+  ${p?.parseNotes ? `Notes: ${p.parseNotes}` : ''}
+  ${canIngest ? '>> OK to ingest' : '>> MISSING required fields (period or hours)'}
+`;
+    }
+  }
+
   body += `
 ${'='.repeat(50)}
 This is an automated message from timesheets@mysynergie.net`;
@@ -1447,7 +1613,7 @@ async function main() {
   const summary = {
     total: rawMessages.length, dmarc: 0, forwarded: 0,
     created: 0, duplicates: 0, corrections: 0,
-    newUsers: [], failures: [],
+    newUsers: [], failures: [], invoiceReports: [],
   };
 
   for (const raw of rawMessages) {
@@ -1509,7 +1675,10 @@ async function main() {
       if (r.action === 'created') summary.created++;
       else if (r.action === 'duplicate') summary.duplicates++;
       else if (r.action === 'correction_imported') summary.corrections++;
-      else if (r.action === 'invoice_skipped') { /* ignore */ }
+      else if (r.action === 'invoice_skipped') { /* no anthropic key — ignore */ }
+      else if (r.action?.startsWith('invoice_')) {
+        summary.invoiceReports.push({ email: r.contractor, filename: r.attachmentName, parsed: r.parsed, action: r.action });
+      }
       if (r.wasCreated && r.userName) {
         summary.newUsers.push({ name: r.userName, email: r.contractor });
       }
@@ -1563,12 +1732,14 @@ async function main() {
   console.log(`  Created          : ${summary.created}`);
   console.log(`  Duplicates       : ${summary.duplicates}`);
   console.log(`  Corrections      : ${summary.corrections}`);
+  console.log(`  Invoices parsed  : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? '' : ' (dry-run)'}`);
   console.log(`  Failures (retry) : ${summary.failures.length}`);
   console.log(`  Left unseen      : ${failedUids.length}`);
 
   // Summary email — only if something actionable happened
   const actionable = summary.created + summary.duplicates + summary.corrections +
-                     summary.forwarded + summary.failures.length + summary.newUsers.length;
+                     summary.forwarded + summary.failures.length + summary.newUsers.length +
+                     summary.invoiceReports.length;
   if (actionable > 0) {
     await sendSummaryEmail(summary, failedUids.length);
   }
