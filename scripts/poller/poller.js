@@ -770,10 +770,10 @@ function parseSynergiePdfText(text, filename) {
 
 // ─── Claude API ───────────────────────────────────────────────────────────────
 
-const CLAUDE_INVOICE_SYSTEM = `You are a contractor invoice data extractor. Extract structured billing data from the document.
+const CLAUDE_INVOICE_SYSTEM = `You are an invoice data extractor. Extract structured fields from invoice documents.
 Return ONLY a valid JSON object — no markdown, no explanation. Use null for any field not found.
 
-Required shape:
+Required JSON shape:
 {
   "invoiceNumber": string | null,
   "periodStart": "YYYY-MM-DD" | null,
@@ -781,24 +781,38 @@ Required shape:
   "totalHours": number | null,
   "rate": number | null,
   "totalAmount": number | null,
-  "currency": string | null,
+  "currency": "USD" | "EUR" | "GBP" | "CAD" | "AUD" | "CHF" | string | null,
   "paymentDetails": {
-    "bankName": string | null,
-    "accountNumber": string | null,
     "iban": string | null,
     "swift": string | null,
+    "accountNumber": string | null,
     "sortCode": string | null,
     "routingNumber": string | null,
+    "bankName": string | null,
     "companyName": string | null
   },
   "parseNotes": string
 }
 
 Rules:
-- periodStart / periodEnd: ISO YYYY-MM-DD. If invoice covers a calendar month, use first and last day.
-- totalHours, rate, totalAmount: plain numbers only (no currency symbols, no strings).
-- currency: ISO 4217 code (USD, EUR, GBP, CAD …). Default to USD if not stated.
-- paymentDetails.sortCode: UK sort code (e.g. "60-16-13"). routingNumber: US ACH routing number.
+- periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
+- totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h" or "hrs" suffix.
+- rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols.
+- totalAmount: total invoice amount as a plain number. Ignore currency symbols.
+- currency: 3-letter ISO code only (USD, EUR, GBP, etc.).
+- iban: compact electronic format, NO spaces (e.g. "HR1234567890123456789" not "HR12 3456 7890").
+- swift: SWIFT/BIC code (8 or 11 chars).
+- accountNumber: bank account number if not an IBAN.
+- sortCode: UK sort code (XX-XX-XX format).
+- routingNumber: US ABA routing number (9 digits).
+- bankName: name of the bank (not the account holder).
+- companyName: name of the invoice issuer / contractor company.
+- If the invoice is multi-contractor (multiple people with individual hours listed), set totalHours and rate to null.
+- Date format: many invoices use European DD/MM/YYYY, not US MM/DD/YYYY. Determine the format from context:
+  * If the IBAN starts with HR, RS, BA, SI, MK, DE, AT, NL, FR, IT, ES, BE, SE, NO, FI, DK, PL, or other EU/EEA country codes → use DD/MM/YYYY.
+  * If the document uses a routing number (US ABA), or amounts are clearly in USD with no IBAN → use MM/DD/YYYY.
+  * When truly ambiguous (both components ≤ 12 and no country signal), prefer DD/MM/YYYY as most contractors are European.
+  * Cross-check: these are monthly billing periods. If periodEnd is in month M, periodStart must also be in month M. If they differ wildly, you have the date format wrong — flip DD and MM and re-derive.
 - parseNotes: one sentence summarising what was found and what was missing.`;
 
 const CLAUDE_TIMESHEET_SYSTEM = `You are a timesheet data extractor. Extract the weekly timesheet from the document.
@@ -915,7 +929,28 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
     const raw = (response.content[0]?.text ?? '').trim();
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON in Claude invoice response');
-    return JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    // Normalise MM/DD/YYYY → YYYY-MM-DD (Claude ignores the format instruction occasionally)
+    for (const f of ['periodStart', 'periodEnd']) {
+      const s = parsed[f];
+      if (s && typeof s === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+        if (m) {
+          const [, a, b, y] = m;
+          parsed[f] = parseInt(a, 10) > 12
+            ? `${y}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`
+            : `${y}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`;
+        }
+      }
+    }
+
+    // Strip spaces from IBAN — electronic format has no spaces
+    if (parsed.paymentDetails?.iban) {
+      parsed.paymentDetails.iban = parsed.paymentDetails.iban.replace(/\s+/g, '').toUpperCase();
+    }
+
+    return parsed;
   } catch (e) {
     console.warn(`  Claude invoice extraction failed for ${filename}: ${e.message}`);
     return null;
