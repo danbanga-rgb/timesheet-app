@@ -50,7 +50,7 @@ const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmast
 
 // Filenames that are never timesheets — filter silently so they don't appear as failures.
 // No outer \b wrappers — many patterns appear mid-word or before digits (e.g. "SOW002", "AUP.pdf").
-const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$/i;
+const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$|synergie_\d{4}_\d{2}_nt_/i;
 
 const FWD_PATTERNS = [
   /from:\s*([^<\n]*?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi,
@@ -802,9 +802,11 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
       messages: [{ role: 'user', content: userContent }],
     });
 
-    const raw = (response.content[0]?.text ?? '').trim()
-      .replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-    const parsed = JSON.parse(raw);
+    const raw = (response.content[0]?.text ?? '').trim();
+    // Extract first JSON object — handles markdown fences and trailing text after the object
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON object in Claude response');
+    const parsed = JSON.parse(jsonMatch[0]);
 
     // Coerce dailyHours values to numbers
     if (parsed.dailyHours) {
@@ -813,10 +815,27 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
         parsed.dailyHours[k] = typeof v === 'number' ? v : (parseFloat(v) || 0);
       }
     }
+
+    // Reject if all hours are zero — Claude likely couldn't identify timesheet content
+    const totalFromDays = Object.values(parsed.dailyHours || {}).reduce((s, v) => s + v, 0);
+    if (totalFromDays === 0) {
+      console.warn(`  ⚠️  Claude: all daily hours are 0 — not a timesheet, ignoring`);
+      return null;
+    }
+
     // Ensure weekStart is a Monday
     if (parsed.weekStart) {
       const d = new Date(parsed.weekStart + 'T12:00:00');
       if (!isNaN(d.getTime())) parsed.weekStart = getMondayOf(d);
+    }
+
+    // Reject implausible weekStart (> 180 days ago or > 14 days in the future)
+    if (parsed.weekStart) {
+      const daysAgo = (Date.now() - new Date(parsed.weekStart + 'T12:00:00').getTime()) / 86400000;
+      if (daysAgo < -14 || daysAgo > 180) {
+        console.warn(`  ⚠️  Claude: implausible weekStart ${parsed.weekStart} — rejecting`);
+        return null;
+      }
     }
 
     return parsed;
@@ -866,6 +885,10 @@ async function parsePdf(buffer, filename) {
         const total = result.totalHours ?? Object.values(entries).reduce((s, h) => s + h, 0);
         return [{ weekStart: result.weekStart, entries, total, nameFromSheet: result.contractorName || null, notes: `PDF(claude): ${filename}` }];
       }
+      // Claude was tried but could not extract timesheet data.
+      // Return a sentinel so the caller treats this attachment as "done" and does NOT retry it.
+      console.log(`  ⏭️  Claude found no timesheet in ${filename} — will not retry`);
+      return [{ claudeAttempted: true, weekStart: null, entries: null, total: null, notes: `PDF(claude-gave-up): ${filename}` }];
     }
 
     return [];
@@ -967,6 +990,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
   const results = [];
   for (const ts of timesheets) {
+    if (ts.claudeAttempted) continue; // sentinel — Claude gave up, don't post and don't retry
     try {
       const res = await postToIngest({
         messageId:       `${messageId}::${ts.attachmentName || 'body'}`,
