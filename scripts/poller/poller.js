@@ -368,6 +368,7 @@ function parseXlsx(buffer, filename) {
         }
 
         // Date row — week start from first valid date
+        // Require >= 1 date (not 5) so partial-week templates (e.g. Fri–Sun only) still work.
         if (!weekStartDate && dayLabelRowIdx === -1) {
           const dateCells = cells.filter(c => {
             const d = new Date(c);
@@ -376,7 +377,7 @@ function parseXlsx(buffer, filename) {
               c.match(/\d{4}/) &&
               d.getFullYear() >= 2020;
           });
-          if (dateCells.length >= 5) {
+          if (dateCells.length >= 1) {
             const d = new Date(dateCells[0]);
             if (!isNaN(d.getTime())) weekStartDate = getMondayOf(d);
           }
@@ -398,9 +399,9 @@ function parseXlsx(buffer, filename) {
         }
 
         // Day label row → scan forward for hours row
-        const hasMon = lowers.includes('mon') || lowers.includes('monday');
-        const hasFri = lowers.includes('fri') || lowers.includes('friday');
-        if (hasMon && hasFri && dayLabelRowIdx === -1) {
+        // Require >= 3 day labels (not Mon+Fri specifically) so partial-week templates work.
+        const dayLabelCount = DAY_ORDER.filter(d => lowers.includes(d) || lowers.includes(d + 'day')).length;
+        if (dayLabelCount >= 3 && dayLabelRowIdx === -1) {
           dayLabelRowIdx = i;
           for (let offset = 1; offset <= 5; offset++) {
             const dataRow = json[i + offset];
@@ -414,7 +415,7 @@ function parseXlsx(buffer, filename) {
               const n = parseFloat(c);
               return !isNaN(n) && n >= 0 && n <= 24 && c !== '';
             }).length;
-            if (numericCount >= 5) {
+            if (numericCount >= 3) {
               for (const dk of DAY_ORDER) {
                 const colIdx = lowers.findIndex(l => l === dk || l === dk + 'day');
                 if (colIdx >= 0) {
@@ -446,6 +447,15 @@ function parseXlsx(buffer, filename) {
             console.warn(`XLSX: stale template date (${weekStartDate}), using filename date: ${filenameWeek}`);
             weekStartDate = filenameWeek;
           }
+        }
+      }
+
+      // No date found anywhere in the sheet — try filename as last resort
+      if (!weekStartDate) {
+        const filenameWeek = weekFromFilename(filename);
+        if (filenameWeek) {
+          console.warn(`XLSX: no date in sheet, using filename: ${filenameWeek} (${filename})`);
+          weekStartDate = filenameWeek;
         }
       }
 
@@ -948,6 +958,20 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
   for (const att of xlsxAtts) {
     const parsed = parseXlsx(att.buffer, att.name);
+    if (parsed.length === 0) {
+      // XLSX could not be parsed — push a sentinel so this attachment does NOT land in
+      // failedAttachments (which would cause the email to be retried every hour forever).
+      const fallbackWeek = weekFromFilename(att.name);
+      timesheets.push({
+        weekStart: fallbackWeek || null, entries: null, total: null,
+        attachmentName: att.name, attachmentType: 'xlsx',
+        resolvedName: displayName,
+        xlsxParseFailed: true,
+        notes: `XLSX parse failed: ${att.name}`,
+      });
+      console.log(`  ⚠️  XLSX parse failed for ${att.name} — will not retry`);
+      continue;
+    }
     for (const ts of parsed) {
       // Best name: XLSX sheet > email display name > filename > email prefix
       const name = bestName([
@@ -990,7 +1014,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
   const results = [];
   for (const ts of timesheets) {
-    if (ts.claudeAttempted) continue; // sentinel — Claude gave up, don't post and don't retry
+    if (ts.claudeAttempted || ts.xlsxParseFailed) continue; // sentinels — don't post, don't retry
     try {
       const res = await postToIngest({
         messageId:       `${messageId}::${ts.attachmentName || 'body'}`,
