@@ -133,28 +133,49 @@ function parsePeriodFromFilename(filename) {
 
 function applyFilenamePeriodFallback(result, filename) {
   const { periodStart, periodEnd } = result;
+  const fallback = parsePeriodFromFilename(filename);
 
-  // Is the extracted period plausible? (between 5 and 45 days)
-  let plausible = false;
   if (periodStart && periodEnd) {
     const span = (new Date(periodEnd) - new Date(periodStart)) / 86400000;
-    plausible = span >= 5 && span <= 45;
+    const plausible = span >= 5 && span <= 45;
+
+    if (plausible && fallback) {
+      // Span looks valid but check month against filename.
+      // Invoice numbers often contain date components (e.g. "002/05/2026", "2026-04-0007")
+      // which Claude misreads as the billing period. If the filename clearly names a different
+      // month, the filename wins.
+      const extractedYM  = periodStart.slice(0, 7); // YYYY-MM
+      const filenameYM   = fallback.periodStart.slice(0, 7);
+      if (extractedYM === filenameYM) return result; // months agree — trust Claude
+      return { ...result, periodStart: fallback.periodStart, periodEnd: fallback.periodEnd };
+    }
+
+    if (plausible) return result; // plausible and no filename fallback — keep
   }
 
-  if (plausible) return result; // Claude's dates are good — keep them
-
-  const fallback = parsePeriodFromFilename(filename);
-  if (!fallback) return result; // no month found in filename either
-
-  return {
-    ...result,
-    periodStart: result.periodStart && plausible ? result.periodStart : fallback.periodStart,
-    periodEnd:   result.periodEnd   && plausible ? result.periodEnd   : fallback.periodEnd,
-  };
+  // Implausible or missing period — use filename if available
+  if (!fallback) return result;
+  return { ...result, periodStart: fallback.periodStart, periodEnd: fallback.periodEnd };
 }
 
 // Claude returns a flat-ish object; normalise to the shape run.js expects
 function flattenResult(r, filename) {
+  const rawIban = r.paymentDetails?.iban ?? null;
+  const pd = {
+    iban:          rawIban ? rawIban.replace(/\s+/g, '').toUpperCase() : null,
+    swift:         r.paymentDetails?.swift         ?? null,
+    accountNumber: r.paymentDetails?.accountNumber ?? null,
+    sortCode:      r.paymentDetails?.sortCode      ?? null,
+    routingNumber: r.paymentDetails?.routingNumber ?? null,
+    bankName:      r.paymentDetails?.bankName      ?? null,
+    companyName:   r.paymentDetails?.companyName   ?? null,
+  };
+
+  const invoiceFields = ['invoiceNumber', 'periodStart', 'periodEnd', 'totalHours', 'rate', 'totalAmount'];
+  const hasInvoiceData = invoiceFields.some(f => r[f] != null);
+  const hasPaymentData = Object.values(pd).some(v => v != null);
+  const paymentOnly    = !hasInvoiceData && hasPaymentData;
+
   const base = {
     invoiceNumber: r.invoiceNumber ?? null,
     periodStart:   r.periodStart   ?? null,
@@ -163,17 +184,10 @@ function flattenResult(r, filename) {
     rate:          r.rate          ?? null,
     totalAmount:   r.totalAmount   ?? null,
     currency:      r.currency      ?? null,
-    paymentDetails: {
-      iban:          r.paymentDetails?.iban          ?? null,
-      swift:         r.paymentDetails?.swift         ?? null,
-      accountNumber: r.paymentDetails?.accountNumber ?? null,
-      sortCode:      r.paymentDetails?.sortCode      ?? null,
-      routingNumber: r.paymentDetails?.routingNumber ?? null,
-      bankName:      r.paymentDetails?.bankName      ?? null,
-      companyName:   r.paymentDetails?.companyName   ?? null,
-    },
-    parseNotes: r.parseNotes ?? null,
-    rawText:    null,
+    paymentDetails: pd,
+    parseNotes:    paymentOnly ? 'PAYMENT DETAILS ONLY — no invoice fields' : (r.parseNotes ?? null),
+    paymentOnly,
+    rawText:       null,
   };
 
   return applyFilenamePeriodFallback(base, filename);
@@ -232,7 +246,25 @@ function printPaymentDetails(results) {
 }
 
 function printNotes(results) {
-  const withNotes = results.filter(r => r.parseNotes || r.error);
+  const paymentOnly = results.filter(r => r.paymentOnly);
+  if (paymentOnly.length) {
+    console.log('\nPayment-details-only files (no invoice fields — bank info to store against contractor):');
+    paymentOnly.forEach(r => {
+      const pd = r.paymentDetails;
+      const parts = [
+        pd.companyName && `Company: ${pd.companyName}`,
+        pd.iban        && `IBAN: ${pd.iban}`,
+        pd.swift       && `SWIFT: ${pd.swift}`,
+        pd.bankName    && `Bank: ${pd.bankName}`,
+        pd.accountNumber && `Account: ${pd.accountNumber}`,
+        pd.routingNumber && `Routing: ${pd.routingNumber}`,
+      ].filter(Boolean);
+      console.log(`  ${r.filename}`);
+      parts.forEach(p => console.log(`    ${p}`));
+    });
+  }
+
+  const withNotes = results.filter(r => (r.parseNotes || r.error) && !r.paymentOnly);
   if (!withNotes.length) return;
   console.log('\nErrors / notes:');
   withNotes.forEach(r => {

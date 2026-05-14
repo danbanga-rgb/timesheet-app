@@ -34,12 +34,12 @@ Required JSON shape:
 }
 
 Rules:
-- periodStart / periodEnd: the billing period (first and last day of the work period). If only a month is given (e.g. "April 2026"), use the first and last day of that month.
+- periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
 - totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h" or "hrs" suffix.
 - rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols.
 - totalAmount: total invoice amount as a plain number. Ignore currency symbols.
 - currency: 3-letter ISO code only (USD, EUR, GBP, etc.).
-- iban: full IBAN string, preserve spaces/formatting.
+- iban: compact electronic format, NO spaces (e.g. "HR1234567890123456789" not "HR12 3456 7890").
 - swift: SWIFT/BIC code (8 or 11 chars).
 - accountNumber: bank account number if not an IBAN.
 - sortCode: UK sort code (XX-XX-XX format).
@@ -99,6 +99,23 @@ async function extractFromImages(imageBuffers) {
   return parseClaudeResponse(response);
 }
 
+// Normalize any date string Claude returns into YYYY-MM-DD.
+// Handles: MM/DD/YYYY, DD/MM/YYYY, MM-DD-YYYY (all ambiguous per first-component > 12 rule).
+function normalizeDateStr(str) {
+  if (!str || typeof str !== 'string') return str;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str; // already ISO
+  const m = str.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+  if (m) {
+    const [, a, b, y] = m;
+    const pa = a.padStart(2, '0'), pb = b.padStart(2, '0');
+    // If first component > 12 it must be the day (DD/MM/YYYY)
+    if (parseInt(a, 10) > 12) return `${y}-${pb}-${pa}`;
+    // Otherwise treat as MM/DD/YYYY (Claude's default when it ignores the prompt format)
+    return `${y}-${pa}-${pb}`;
+  }
+  return str;
+}
+
 // ─── Parse and validate Claude's JSON response ────────────────────────────────
 
 function parseClaudeResponse(response) {
@@ -123,6 +140,15 @@ function parseClaudeResponse(response) {
       const n = parseFloat(parsed[f].replace(/[^\d.\-]/g, ''));
       parsed[f] = isNaN(n) ? null : n;
     }
+  }
+
+  // Normalize date formats to YYYY-MM-DD (Claude sometimes returns MM/DD/YYYY)
+  parsed.periodStart = normalizeDateStr(parsed.periodStart);
+  parsed.periodEnd   = normalizeDateStr(parsed.periodEnd);
+
+  // Strip all spaces from IBAN — IBAN electronic format has no spaces
+  if (parsed.paymentDetails.iban) {
+    parsed.paymentDetails.iban = parsed.paymentDetails.iban.replace(/\s+/g, '').toUpperCase();
   }
 
   // Date consistency fix: contractor invoices cover one calendar month (~28–31 days).
