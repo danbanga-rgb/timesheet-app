@@ -21,6 +21,10 @@ const CONFIG = {
   imapPort:     parseInt(process.env.IMAP_PORT || '993'),
   ingestUrl:    process.env.INGEST_URL,
   ingestSecret: process.env.INGEST_SECRET,
+  // Invoice ingestion — INVOICE_INGEST_ENABLED must be explicitly 'true' to write to DB.
+  // Leave unset for dry-run mode: invoices are parsed and reported but not stored.
+  invoiceIngestUrl:     process.env.INVOICE_INGEST_URL || null,
+  invoiceIngestEnabled: process.env.INVOICE_INGEST_ENABLED === 'true',
   internalForwarders: (process.env.INTERNAL_FORWARDERS ||
     'contracts@synergietechsolutions.com,accounting@synergietechsolutions.com,lpinto@synergietechsolutions.com,helpdesk@synergietechsolutions.com'
   ).split(',').map(s => s.trim().toLowerCase()),
@@ -50,7 +54,7 @@ const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmast
 
 // Filenames that are never timesheets — filter silently so they don't appear as failures.
 // No outer \b wrappers — many patterns appear mid-word or before digits (e.g. "SOW002", "AUP.pdf").
-const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$|synergie_\d{4}_\d{2}_nt_/i;
+const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$/i;
 
 const FWD_PATTERNS = [
   /from:\s*([^<\n]*?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi,
@@ -764,7 +768,121 @@ function parseSynergiePdfText(text, filename) {
   return { name, weekStart, hours, total };
 }
 
-// ─── Claude API fallback for PDFs that fail regex parsing ────────────────────
+// ─── PDF attachment classifier ────────────────────────────────────────────────
+// Returns 'timesheet' | 'invoice' | 'both' | 'unknown'
+
+function classifyByFilename(name) {
+  const n = name.toLowerCase();
+  const isInvoice   = /invoice|billing|\binv\b|\bpaymentrequest\b/.test(n);
+  const isTimesheet = /timesheet|timesheets?|weekly.?time|time.?sheet/.test(n);
+  if (isInvoice && isTimesheet) return 'both';
+  if (isInvoice)   return 'invoice';
+  if (isTimesheet) return 'timesheet';
+  return null; // ambiguous
+}
+
+async function classifyPdf(buffer, filename) {
+  // Strong filename signals
+  const byCName = classifyByFilename(filename);
+  if (byCName === 'invoice' || byCName === 'timesheet' || byCName === 'both') return byCName;
+
+  // Try extracting text for content scoring (cheap — no Claude call)
+  let text = '';
+  try {
+    const pdfParse = require('pdf-parse');
+    const data = await pdfParse(buffer);
+    text = (data.text || '').toLowerCase();
+  } catch {}
+
+  if (!text || text.replace(/\s/g, '').length < 20) return 'unknown';
+
+  // Score invoice signals
+  const invoiceSignals = [
+    /invoice\s*(number|no\.?|#)/,
+    /\bamount\s+due\b/,
+    /\btotal\s+amount\b/,
+    /\biban\b/,
+    /\bswift\b/,
+    /\bbill\s+to\b/,
+    /\bpayment\s+(terms|details|instructions)\b/,
+    /\bremit\s+to\b/,
+    /\binvoice\s+date\b/,
+    /\bdue\s+date\b/,
+  ];
+  const timesheetSignals = [
+    /week\s+ending\s+(date)?/,
+    /client\s+billable\s+hours/,
+    /\bmon(day)?\b.*\btue(sday)?\b/,
+    /\bmanager\s+(name|signature)\b/,
+    /\bdaily\s+hours\b/,
+    /\btimesheet\b/,
+    /\bproject\s+(code|name)\b.*hours/,
+  ];
+
+  let invoiceScore   = 0;
+  let timesheetScore = 0;
+  for (const re of invoiceSignals)   if (re.test(text)) invoiceScore++;
+  for (const re of timesheetSignals) if (re.test(text)) timesheetScore++;
+
+  if (invoiceScore >= 2 && timesheetScore >= 2) return 'both';
+  if (invoiceScore >= 2) return 'invoice';
+  if (timesheetScore >= 2) return 'timesheet';
+
+  // Weak: one signal each — use whichever is stronger
+  if (invoiceScore > timesheetScore) return 'invoice';
+  if (timesheetScore > invoiceScore) return 'timesheet';
+  return 'unknown';
+}
+
+// ─── Claude API ───────────────────────────────────────────────────────────────
+
+const CLAUDE_INVOICE_SYSTEM = `You are an invoice data extractor. Extract structured fields from invoice documents.
+Return ONLY a valid JSON object — no markdown, no explanation. Use null for any field not found.
+
+Required JSON shape:
+{
+  "invoiceNumber": string | null,
+  "periodStart": "YYYY-MM-DD" | null,
+  "periodEnd": "YYYY-MM-DD" | null,
+  "totalHours": number | null,
+  "rate": number | null,
+  "totalAmount": number | null,
+  "currency": "USD" | "EUR" | "GBP" | "CAD" | "AUD" | "CHF" | string | null,
+  "isMultiContractor": boolean,
+  "paymentDetails": {
+    "iban": string | null,
+    "swift": string | null,
+    "accountNumber": string | null,
+    "sortCode": string | null,
+    "routingNumber": string | null,
+    "bankName": string | null,
+    "companyName": string | null
+  },
+  "parseNotes": string
+}
+
+Rules:
+- isMultiContractor: set to true if the invoice lists multiple contractors/consultants with individual line items; false for a single contractor invoice.
+- periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
+- totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h" or "hrs" suffix.
+- rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols. If the invoice shows rates in multiple currencies (e.g. both EUR and USD columns), extract the USD rate.
+- totalAmount: total invoice amount as a plain number. Ignore currency symbols. If the invoice shows amounts in multiple currencies, extract the USD amount.
+- currency: 3-letter ISO code (USD, EUR, GBP, etc.). Set to the currency of the amounts you extracted — if you found USD amounts, set "USD".
+- iban: compact electronic format, NO spaces (e.g. "HR1234567890123456789" not "HR12 3456 7890").
+- swift: SWIFT/BIC code (8 or 11 chars).
+- accountNumber: bank account number if not an IBAN.
+- sortCode: UK sort code (XX-XX-XX format).
+- routingNumber: US ABA routing number (9 digits).
+- bankName: name of the bank (not the account holder).
+- companyName: name of the invoice issuer / contractor company.
+- If the invoice is multi-contractor (multiple people with individual hours listed), set totalHours and rate to null.
+- Date format: many invoices use European DD/MM/YYYY, not US MM/DD/YYYY. Determine the format from context:
+  * If the IBAN starts with HR, RS, BA, SI, MK, DE, AT, NL, FR, IT, ES, BE, SE, NO, FI, DK, PL, or other EU/EEA country codes → use DD/MM/YYYY.
+  * If the document uses a routing number (US ABA), or amounts are clearly in USD with no IBAN → use MM/DD/YYYY.
+  * When truly ambiguous (both components ≤ 12 and no country signal), prefer DD/MM/YYYY as most contractors are European.
+  * Cross-check: these are monthly billing periods. If periodEnd is in month M, periodStart must also be in month M. If they differ wildly, you have the date format wrong — flip DD and MM and re-derive.
+- If no explicit billing period is stated but an invoice date is present, infer periodStart and periodEnd as the first and last day of that invoice date's calendar month (e.g. invoice date 09 Apr 2026 → periodStart: 2026-04-01, periodEnd: 2026-04-30).
+- parseNotes: one sentence summarising what was found and what was missing.`;
 
 const CLAUDE_TIMESHEET_SYSTEM = `You are a timesheet data extractor. Extract the weekly timesheet from the document.
 Return ONLY a valid JSON object — no markdown, no explanation. Use null for any field not found.
@@ -855,6 +973,89 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
   }
 }
 
+// ─── Invoice extractor ────────────────────────────────────────────────────────
+
+async function claudeExtractInvoice(pdfBuffer, filename) {
+  if (!CONFIG.anthropicApiKey) return null;
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      system: CLAUDE_INVOICE_SYSTEM,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') },
+          },
+          { type: 'text', text: 'Extract invoice data from this document.' },
+        ],
+      }],
+    });
+    const raw = (response.content[0]?.text ?? '').trim();
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON in Claude invoice response');
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    // Normalise MM/DD/YYYY → YYYY-MM-DD (Claude ignores the format instruction occasionally)
+    for (const f of ['periodStart', 'periodEnd']) {
+      const s = parsed[f];
+      if (s && typeof s === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+        if (m) {
+          const [, a, b, y] = m;
+          parsed[f] = parseInt(a, 10) > 12
+            ? `${y}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`
+            : `${y}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`;
+        }
+      }
+    }
+
+    // Strip spaces from IBAN — electronic format has no spaces
+    if (parsed.paymentDetails?.iban) {
+      parsed.paymentDetails.iban = parsed.paymentDetails.iban.replace(/\s+/g, '').toUpperCase();
+    }
+
+    return parsed;
+  } catch (e) {
+    console.warn(`  Claude invoice extraction failed for ${filename}: ${e.message}`);
+    return null;
+  }
+}
+
+// Returns a multi-line string showing every field as PARSED, NOT FOUND, or ASSUMED.
+function formatInvoiceReport(filename, contractorEmail, parsed) {
+  const tag = (val, assumedLabel) => {
+    if (val != null && val !== '') return '[PARSED]';
+    return assumedLabel ? `[NOT FOUND → assumed ${assumedLabel}]` : '[NOT FOUND]';
+  };
+  const pd = parsed?.paymentDetails || {};
+  const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
+
+  return [
+    `  ┌─ Invoice: ${filename}  (${contractorEmail})`,
+    `  │  Invoice #   : ${parsed?.invoiceNumber   ?? '—'}  ${tag(parsed?.invoiceNumber,   'auto-generated')}`,
+    `  │  Period      : ${parsed?.periodStart ?? '—'} → ${parsed?.periodEnd ?? '—'}  start:${tag(parsed?.periodStart)}  end:${tag(parsed?.periodEnd)}`,
+    `  │  Hours       : ${parsed?.totalHours   ?? '—'}  ${tag(parsed?.totalHours)}`,
+    `  │  Rate        : ${parsed?.rate         ?? '—'}  ${tag(parsed?.rate,         '$0')}`,
+    `  │  Amount      : ${parsed?.totalAmount  ?? '—'}  ${tag(parsed?.totalAmount,  'hours × rate')}`,
+    `  │  Currency    : ${parsed?.currency     ?? '—'}  ${tag(parsed?.currency,     'USD')}`,
+    `  │  ── Payment Details ──────────────────────────────────────`,
+    `  │  Company     : ${pd.companyName   ?? '—'}  ${tag(pd.companyName)}`,
+    `  │  Bank        : ${pd.bankName      ?? '—'}  ${tag(pd.bankName)}`,
+    `  │  Account #   : ${pd.accountNumber ?? '—'}  ${tag(pd.accountNumber)}`,
+    `  │  IBAN        : ${pd.iban          ?? '—'}  ${tag(pd.iban)}`,
+    `  │  SWIFT       : ${pd.swift         ?? '—'}  ${tag(pd.swift)}`,
+    `  │  Sort Code   : ${pd.sortCode      ?? '—'}  ${tag(pd.sortCode)}`,
+    `  │  Routing #   : ${pd.routingNumber ?? '—'}  ${tag(pd.routingNumber)}`,
+    parsed?.parseNotes ? `  │  Notes       : ${parsed.parseNotes}` : null,
+    `  └─ ${canIngest ? '✅ Sufficient data to ingest' : '⚠️  Missing required fields (period or hours) — would skip ingestion'}`,
+  ].filter(Boolean).join('\n');
+}
+
 // ─── PDF parser ───────────────────────────────────────────────────────────────
 
 async function parsePdf(buffer, filename) {
@@ -910,10 +1111,10 @@ async function parsePdf(buffer, filename) {
 
 // ─── HTTP POST to edge function ───────────────────────────────────────────────
 
-function postToIngest(payload) {
+function postToIngest(payload, targetUrl) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
-    const url = new URL(CONFIG.ingestUrl);
+    const url = new URL(targetUrl || CONFIG.ingestUrl);
     const isHttps = url.protocol === 'https:';
     const options = {
       hostname: url.hostname,
@@ -944,16 +1145,35 @@ function postToIngest(payload) {
 
 async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId) {
   // Strip non-timesheet documents silently — agreements, AUPs, SOWs, etc.
-  const isInvoiceName = n => /invoice|billing|\binv-\d|\bpaymentrequest\b/i.test(n);
   const nonTimesheetAtts = attachments.filter(a => (a.isPdf || a.isXlsx) && NON_TIMESHEET_DOC_RE.test(a.name));
   if (nonTimesheetAtts.length) {
     nonTimesheetAtts.forEach(a => console.log(`  ⏭️  Non-timesheet doc skipped: ${a.name}`));
   }
   const relevantAtts = attachments.filter(a => !NON_TIMESHEET_DOC_RE.test(a.name));
 
+  // Classify each PDF as timesheet / invoice / both / unknown via content scoring.
+  // XLSX is always treated as a timesheet (no invoice XLSX path exists).
   const xlsxAtts    = relevantAtts.filter(a => a.isXlsx);
-  const invoiceAtts = relevantAtts.filter(a => a.isPdf && isInvoiceName(a.name));
-  const pdfAtts     = relevantAtts.filter(a => a.isPdf && !isInvoiceName(a.name));
+  const pdfQueue    = relevantAtts.filter(a => a.isPdf);
+
+  const invoiceAtts   = [];
+  const timesheetPdfs = [];
+  const unknownPdfs   = [];
+
+  for (const att of pdfQueue) {
+    const cls = await classifyPdf(att.buffer, att.name);
+    att._classification = cls;
+    if (cls === 'invoice')   { invoiceAtts.push(att); }
+    else if (cls === 'both') { invoiceAtts.push(att); timesheetPdfs.push(att); }
+    else if (cls === 'unknown') {
+      console.log(`  ❓ Unknown PDF type (will not retry): ${att.name}`);
+      unknownPdfs.push(att);
+    } else {
+      timesheetPdfs.push(att); // 'timesheet'
+    }
+  }
+
+  const pdfAtts = timesheetPdfs;
   const timesheets  = [];
 
   for (const att of xlsxAtts) {
@@ -1037,11 +1257,59 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       console.error(`  ❌ ${contractorEmail} | ${ts.weekStart} → ${e.message}`);
     }
   }
-  // Mark invoice attachments
-  invoiceAtts.forEach(a => results.push({ contractor: contractorEmail, attachmentName: a.name, action: 'invoice_skipped' }));
+  // ── Invoice PDFs — parse and report (ingest if enabled) ──────────────────
+  for (const att of invoiceAtts) {
+    console.log(`  🧾 Invoice attachment: ${att.name}`);
+    if (!CONFIG.anthropicApiKey) {
+      console.log(`     ⚠️  No ANTHROPIC_API_KEY — cannot parse invoice`);
+      results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_skipped' });
+      continue;
+    }
+    const parsed = await claudeExtractInvoice(att.buffer, att.name);
+    console.log(formatInvoiceReport(att.name, contractorEmail, parsed));
+    const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
+
+    if (CONFIG.invoiceIngestEnabled && CONFIG.invoiceIngestUrl && canIngest) {
+      try {
+        const res = await postToIngest({
+          messageId:       `${messageId}::${att.name}`,
+          contractorEmail,
+          contractorName:  displayName,
+          subject,
+          attachmentName:  att.name,
+          invoiceNumber:   parsed.invoiceNumber   || null,
+          periodStart:     parsed.periodStart,
+          periodEnd:       parsed.periodEnd,
+          totalHours:      parsed.totalHours,
+          rate:            parsed.rate            || null,
+          totalAmount:     parsed.totalAmount     || null,
+          currency:        parsed.currency        || null,
+          paymentDetails:  parsed.paymentDetails  || null,
+          parseNotes:      parsed.parseNotes      || '',
+          pdfBase64:       att.buffer.toString('base64'),
+          rawExtracted:    parsed,
+        }, CONFIG.invoiceIngestUrl);
+        const action = res.body?.action || res.status;
+        console.log(`     ✅ Ingested → ${action}`);
+        results.push({ contractor: contractorEmail, attachmentName: att.name, action: `invoice_${action}`, parsed });
+      } catch (e) {
+        console.error(`     ❌ Ingest failed: ${e.message}`);
+        results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
+      }
+    } else {
+      const reason = !CONFIG.invoiceIngestEnabled ? 'dry-run mode' : !canIngest ? 'missing fields' : 'no INVOICE_INGEST_URL';
+      console.log(`     ℹ️  Not ingested (${reason})`);
+      results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_reported', parsed });
+    }
+  }
 
   const parsedAttachmentNames = new Set(timesheets.map(ts => ts.attachmentName).filter(Boolean));
-  const failedAttachments = [...xlsxAtts, ...pdfAtts].filter(a => !parsedAttachmentNames.has(a.name));
+  // Invoice and unknown PDFs are handled separately — don't count as timesheet failures.
+  const invoiceAttNames = new Set(invoiceAtts.map(a => a.name));
+  const unknownAttNames = new Set(unknownPdfs.map(a => a.name));
+  const failedAttachments = [...xlsxAtts, ...pdfAtts].filter(a =>
+    !parsedAttachmentNames.has(a.name) && !invoiceAttNames.has(a.name) && !unknownAttNames.has(a.name)
+  );
 
   return { results, failedAttachments };
 }
@@ -1148,6 +1416,12 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
           continue;
         }
 
+        if (isInternal(contractor)) {
+          console.warn(`  ⚠️  Extracted contractor is internal address (${contractor}) in ${emlAtt.name} — skipping`);
+          results.push({ type: 'eml', emlName: emlAtt.name, action: 'skipped_internal' });
+          continue;
+        }
+
         if (isBlockedContractor(contractor)) {
           console.log(`  ⏭️  Blocked contractor in ${emlAtt.name}: ${contractor}`);
           results.push({ type: 'skipped', reason: `blocked: ${contractor}` });
@@ -1182,6 +1456,11 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
     }
     contractor = extracted.email;
     contractorName = extracted.name;
+    if (isInternal(contractor)) {
+      console.warn(`  ⚠️  Extracted contractor is internal address (${contractor}) — skipping: ${subject}`);
+      results.push({ type: 'forward', subject, action: 'skipped_internal' });
+      return;
+    }
   } else {
     // Direct email from contractor
     contractor = fromEmail;
@@ -1229,10 +1508,10 @@ function fetchEmails() {
 
           console.log(`Found ${uids.length} unseen email(s)`);
           const messages = [];
-          // markSeen: true — mark all as seen on fetch (reliable)
-          // Fetch without marking seen — we mark seen selectively after processing.
-          // Failed emails stay unseen so the next run retries them.
-          const fetch = imap.fetch(uids, { bodies: '', markSeen: false });
+          // markSeen: true — mark as seen on fetch so emails are never re-processed.
+          // Retry for parse failures is handled via attempt_count in the DB log,
+          // not by leaving emails unseen (which caused duplicate Claude API calls).
+          const fetch = imap.fetch(uids, { bodies: '', markSeen: true });
 
           fetch.on('message', (msg, seq) => {
             const chunks = [];
@@ -1384,7 +1663,8 @@ RESULTS
 ✏️  Corrections    : ${summary.corrections}
 📨 Forwarded      : ${summary.forwarded}
 🗑️  DMARC deleted  : ${summary.dmarc}
-⚠️  Parse failures : ${summary.failures.length} (${leftUnseen} left unseen for retry)
+⚠️  Parse failures : ${summary.failures.length}
+🧾 Invoices parsed : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? ' (ingested)' : ' (dry-run — not ingested)'}
 `;
 
   if (summary.newUsers.length > 0) {
@@ -1419,6 +1699,31 @@ ${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ atte
 `;
   }
 
+  if (summary.invoiceReports.length > 0) {
+    body += `
+INVOICE PARSE REPORTS (${summary.invoiceReports.length})${CONFIG.invoiceIngestEnabled ? '' : ' — DRY RUN, nothing written to DB'}
+${'─'.repeat(50)}
+`;
+    for (const inv of summary.invoiceReports) {
+      const p = inv.parsed;
+      const pd = p?.paymentDetails || {};
+      const canIngest = p?.periodStart && p?.periodEnd && p?.totalHours != null;
+      const tag = (val, assumed) => val != null && val !== '' ? `${val}` : (assumed ? `(assumed: ${assumed})` : '—');
+
+      body += `
+  ${inv.email}  |  ${inv.filename}
+  Invoice #  : ${tag(p?.invoiceNumber, 'auto-generated')}
+  Period     : ${tag(p?.periodStart)} → ${tag(p?.periodEnd)}
+  Hours      : ${tag(p?.totalHours)}   Rate: ${tag(p?.rate, '0')}   Amount: ${tag(p?.totalAmount, 'hours × rate')}   Currency: ${tag(p?.currency, 'USD')}
+  Company    : ${tag(pd.companyName)}
+  Bank       : ${tag(pd.bankName)}   Account: ${tag(pd.accountNumber)}   IBAN: ${tag(pd.iban)}
+  SWIFT      : ${tag(pd.swift)}   Sort Code: ${tag(pd.sortCode)}   Routing: ${tag(pd.routingNumber)}
+  ${p?.parseNotes ? `Notes: ${p.parseNotes}` : ''}
+  ${canIngest ? '>> OK to ingest' : '>> MISSING required fields (period or hours)'}
+`;
+    }
+  }
+
   body += `
 ${'='.repeat(50)}
 This is an automated message from timesheets@mysynergie.net`;
@@ -1441,13 +1746,11 @@ async function main() {
   }
 
   const dmarcUids     = [];
-  const successUids   = [];
-  const failedUids    = [];
 
   const summary = {
     total: rawMessages.length, dmarc: 0, forwarded: 0,
     created: 0, duplicates: 0, corrections: 0,
-    newUsers: [], failures: [],
+    newUsers: [], failures: [], invoiceReports: [],
   };
 
   for (const raw of rawMessages) {
@@ -1509,7 +1812,10 @@ async function main() {
       if (r.action === 'created') summary.created++;
       else if (r.action === 'duplicate') summary.duplicates++;
       else if (r.action === 'correction_imported') summary.corrections++;
-      else if (r.action === 'invoice_skipped') { /* ignore */ }
+      else if (r.action === 'invoice_skipped') { /* no anthropic key — ignore */ }
+      else if (r.action?.startsWith('invoice_')) {
+        summary.invoiceReports.push({ email: r.contractor, filename: r.attachmentName, parsed: r.parsed, action: r.action });
+      }
       if (r.wasCreated && r.userName) {
         summary.newUsers.push({ name: r.userName, email: r.contractor });
       }
@@ -1531,28 +1837,12 @@ async function main() {
       });
     });
 
-    // Only mark email as SEEN if every attachment was processed successfully
-    // Any parse failure → leave unseen so it gets retried
-    const hasParseFailure = emailFailedAtts.length > 0;
-    const hasIngestError = emailResults.some(r => r.error && r.action !== 'invoice_skipped');
-    if (hasParseFailure || hasIngestError) {
-      failedUids.push(uid);
-    } else {
-      successUids.push(uid);
-    }
   }
 
-  // IMAP operations
+  // IMAP operations — only DMARC deletes needed (emails already marked seen on fetch)
   if (dmarcUids.length > 0) {
     try { await deleteDmarcEmails(dmarcUids); console.log(`  🗑️  Deleted ${dmarcUids.length} DMARC emails`); }
     catch (e) { console.warn(`DMARC delete failed: ${e.message}`); }
-  }
-  if (successUids.length > 0) {
-    try { await markEmailsSeen(successUids); }
-    catch (e) { console.warn(`markSeen failed: ${e.message}`); }
-  }
-  if (failedUids.length > 0) {
-    console.log(`  ⚠️  ${failedUids.length} email(s) left unseen for retry`);
   }
 
   // Console summary
@@ -1563,14 +1853,15 @@ async function main() {
   console.log(`  Created          : ${summary.created}`);
   console.log(`  Duplicates       : ${summary.duplicates}`);
   console.log(`  Corrections      : ${summary.corrections}`);
-  console.log(`  Failures (retry) : ${summary.failures.length}`);
-  console.log(`  Left unseen      : ${failedUids.length}`);
+  console.log(`  Invoices parsed  : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? '' : ' (dry-run)'}`);
+  console.log(`  Failures         : ${summary.failures.length}`);
 
   // Summary email — only if something actionable happened
   const actionable = summary.created + summary.duplicates + summary.corrections +
-                     summary.forwarded + summary.failures.length + summary.newUsers.length;
+                     summary.forwarded + summary.failures.length + summary.newUsers.length +
+                     summary.invoiceReports.length;
   if (actionable > 0) {
-    await sendSummaryEmail(summary, failedUids.length);
+    await sendSummaryEmail(summary, 0);
   }
 
   const reportableFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER);

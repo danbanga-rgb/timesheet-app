@@ -178,6 +178,10 @@ interface Invoice {
   paymentMethodOverride: string | null; // accountant-editable: 'Intuit' or 'Convera'
   isVendorInvoice: boolean;
   vendorManagerId: string | null;
+  source: 'direct' | 'imported' | null;
+  reconciliationStatus: 'matched' | 'mismatch' | 'unverifiable' | null;
+  reconciliationDelta: number | null;
+  reconciliationNotes: string | null;
 }
 
 interface ReminderEmail {
@@ -261,6 +265,42 @@ const WORLD_COUNTRIES = [
   "Ukraine","United Arab Emirates","United Kingdom","United States","Uruguay",
   "Uzbekistan","Vanuatu","Vatican City","Vietnam","Zambia"
 ].sort();
+
+// ─── Live invoice reconciliation (pure, no DB writes) ────────────────────────
+// Called on every render so it always reflects the latest loaded timesheets.
+function reconcileInvoiceLive(
+  invoice: Invoice,
+  allTimesheets: Timesheet[]
+): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null } {
+  const { userId, periodStart, periodEnd, totalHours } = invoice;
+
+  // Week range: week_start can be up to 6 days before periodStart and still contain period days
+  const rangeStart = new Date(periodStart + 'T12:00:00');
+  rangeStart.setDate(rangeStart.getDate() - 6);
+  const rangeStartStr = rangeStart.toISOString().slice(0, 10);
+
+  const relevant = allTimesheets.filter(ts =>
+    ts.userId === userId && ts.weekStart >= rangeStartStr && ts.weekStart <= periodEnd
+  );
+
+  if (!relevant.length) return { status: 'unverifiable', delta: null, timesheetHours: null };
+
+  let tsHours = 0;
+  for (const ts of relevant) {
+    for (const [date, entry] of Object.entries(ts.entries)) {
+      if (date >= periodStart && date <= periodEnd) {
+        const h = parseFloat(entry.hours);
+        if (!isNaN(h) && h > 0) tsHours += h;
+      }
+    }
+  }
+
+  if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0 };
+
+  const delta = Math.round((totalHours - tsHours) * 100) / 100;
+  const matched = Math.abs(delta) < 0.01;
+  return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours };
+}
 
 const TimesheetSystem = () => {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -434,6 +474,8 @@ const TimesheetSystem = () => {
   const [pendingPayOnDate, setPendingPayOnDate] = useState('');   // expected pay on date (set on approve or anytime)
   const [pendingPaymentMethod, setPendingPaymentMethod] = useState(''); // accountant-editable payment method
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
+  const [pendingUsdRate, setPendingUsdRate] = useState('');       // accountant-entered USD rate for non-USD imported invoices
+  const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
   // PDF attachment
   const [invoiceAttachmentFile, setInvoiceAttachmentFile] = useState<File | null>(null);
   const [invoicePhoneConfirm, setInvoicePhoneConfirm] = useState('');
@@ -1175,6 +1217,10 @@ const TimesheetSystem = () => {
       paymentMethodOverride: (r.payment_method as string) || null,
       isVendorInvoice: !!(r.is_vendor_invoice as boolean),
       vendorManagerId: (r.vendor_manager_id as string) || null,
+      source: (r.source as 'direct' | 'imported') || null,
+      reconciliationStatus: (r.reconciliation_status as 'matched' | 'mismatch' | 'unverifiable') || null,
+      reconciliationDelta: r.reconciliation_delta != null ? Number(r.reconciliation_delta) : null,
+      reconciliationNotes: (r.reconciliation_notes as string) || null,
     };
   }
 
@@ -1287,6 +1333,17 @@ const TimesheetSystem = () => {
     await fetchInvoices();
   };
 
+  const applyUsdRate = async (inv: Invoice, usdRate: number) => {
+    const totalAmount = Math.round(inv.totalHours * usdRate * 100) / 100;
+    const newLines = inv.lines.map(l => ({ ...l, rate: usdRate, amount: Math.round(l.hours * usdRate * 100) / 100 }));
+    const { error } = await supabase.from('invoices').update({
+      rate: usdRate, total_amount: totalAmount, currency: 'USD', lines: newLines,
+    }).eq('id', inv.id);
+    if (error) { alert('Error updating rate: ' + error.message); return; }
+    await fetchInvoices();
+    setPendingUsdRate('');
+  };
+
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string) => {
     const update: Record<string, unknown> = {
       status,
@@ -1303,6 +1360,7 @@ const TimesheetSystem = () => {
     setPendingPayOnDate('');
     setPendingPaidDate('');
     setPendingPaymentMethod('');
+    setPendingUsdRate('');
   };
 
   // Save approval status and/or pay on date without closing modal
@@ -3443,7 +3501,16 @@ const TimesheetSystem = () => {
             if (invoicePaidDateRange.start && invoicePaidDateRange.end) {
               filtered = filtered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
             }
+            // Month preset filter
+            if (invoiceMonthPreset) {
+              filtered = filtered.filter(i => i.periodStart && i.periodStart.slice(0, 7) === invoiceMonthPreset);
+            }
             filtered = [...filtered].sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
+
+            // Build month pills from distinct months in loaded invoices
+            const invoiceMonths = [...new Set(
+              invoices.map(i => i.periodStart?.slice(0, 7)).filter(Boolean) as string[]
+            )].sort((a, b) => b.localeCompare(a)).slice(0, 12);
 
             const totalPaid = invoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
             const totalApproved = invoices.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
@@ -3461,6 +3528,26 @@ const TimesheetSystem = () => {
                 <div className="bg-white rounded-lg shadow-md p-6">
                   {/* Filters */}
                   <div className="flex flex-col gap-3 mb-5">
+                    {/* Month pills */}
+                    {invoiceMonths.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        <button onClick={() => setInvoiceMonthPreset('')}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${!invoiceMonthPreset ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                          All months
+                        </button>
+                        {invoiceMonths.map(ym => {
+                          const [y, m] = ym.split('-');
+                          const label = new Date(parseInt(y), parseInt(m) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+                          const count = invoices.filter(i => i.periodStart?.slice(0, 7) === ym).length;
+                          return (
+                            <button key={ym} onClick={() => setInvoiceMonthPreset(invoiceMonthPreset === ym ? '' : ym)}
+                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoiceMonthPreset === ym ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                              {label} <span className="opacity-70">({count})</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                     <div className="flex flex-wrap gap-2">
                       {['all','submitted','approved','paid','rejected'].map(s => (
                         <button key={s} onClick={() => setAccountantInvoiceFilter(s)}
@@ -3523,6 +3610,7 @@ const TimesheetSystem = () => {
                             <th className="border border-indigo-700 px-4 py-3 text-center">Payment Method</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Paid Date</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Recon</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">PDF</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Actions</th>
                           </tr>
@@ -3539,7 +3627,12 @@ const TimesheetSystem = () => {
                                 <td className="border border-gray-200 px-4 py-3 text-indigo-600 text-xs">{project?.name || '—'}</td>
                                 <td className="border border-gray-200 px-4 py-3 text-center">{inv.totalHours.toFixed(2)}</td>
                                 <td className="border border-gray-200 px-4 py-3 text-center text-gray-500">{sym}{inv.rate.toFixed(2)}</td>
-                                <td className="border border-gray-200 px-4 py-3 text-right font-bold text-gray-800">{sym}{inv.totalAmount.toFixed(2)}</td>
+                                <td className="border border-gray-200 px-4 py-3 text-right font-bold text-gray-800">
+                                  {sym}{inv.totalAmount.toFixed(2)}
+                                  {inv.source === 'imported' && inv.currency !== 'USD' && (
+                                    <span className="ml-1 text-amber-500 text-xs font-semibold" title={`Extracted in ${inv.currency} — set USD rate in invoice detail`}>⚠ {inv.currency}</span>
+                                  )}
+                                </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
                                   {inv.payOnDate
                                     ? <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">{new Date(inv.payOnDate).toLocaleDateString()}</span>
@@ -3556,6 +3649,30 @@ const TimesheetSystem = () => {
                                     : <span className="text-gray-300 text-xs">—</span>}
                                 </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
+                                <td className="border border-gray-200 px-4 py-3 text-center">
+                                  {inv.source === 'imported' ? (() => {
+                                    const recon = reconcileInvoiceLive(inv, timesheets);
+                                    const tooltip = recon.timesheetHours == null
+                                      ? 'No timesheets found for period'
+                                      : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
+                                    return (
+                                      <div className="flex flex-col items-center gap-0.5" title={tooltip}>
+                                        {recon.status === 'matched' ? (
+                                          <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Matched</span>
+                                        ) : recon.status === 'mismatch' ? (
+                                          <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-medium">
+                                            ⚠ {recon.delta != null ? (recon.delta > 0 ? '+' : '') + recon.delta + 'h' : 'Mismatch'}
+                                          </span>
+                                        ) : (
+                                          <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
+                                        )}
+                                        {recon.timesheetHours != null && (
+                                          <span className="text-gray-400 text-xs">TS: {recon.timesheetHours}h</span>
+                                        )}
+                                      </div>
+                                    );
+                                  })() : <span className="text-gray-300 text-xs">—</span>}
+                                </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
                                   {inv.attachmentPath ? (
                                     <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs font-medium">
@@ -3589,7 +3706,7 @@ const TimesheetSystem = () => {
                             <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + i.totalHours, 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
-                            <td className="border border-gray-200 px-4 py-3" colSpan={4}></td>
+                            <td className="border border-gray-200 px-4 py-3" colSpan={5}></td>
                           </tr>
                         </tfoot>
                       </table>
@@ -3928,6 +4045,47 @@ const TimesheetSystem = () => {
                     {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
                     {inv.reviewedBy && <p className="text-sm text-gray-500 mb-4">Reviewed by {inv.reviewedBy} on {inv.reviewedAt ? new Date(inv.reviewedAt).toLocaleDateString() : '—'}</p>}
 
+                    {/* USD rate override — only for non-USD imported invoices */}
+                    {inv.source === 'imported' && inv.currency !== 'USD' && (() => {
+                      const historicalRate = invoices
+                        .filter(i => i.userId === inv.userId && i.currency === 'USD' && i.rate > 0 && i.id !== inv.id)
+                        .sort((a, b) => b.periodStart.localeCompare(a.periodStart))[0]?.rate ?? null;
+                      const rateVal = parseFloat(pendingUsdRate);
+                      const previewAmt = rateVal > 0 ? Math.round(inv.totalHours * rateVal * 100) / 100 : null;
+                      return (
+                        <div className="mb-5 border border-amber-200 rounded-lg overflow-hidden">
+                          <div className="bg-amber-50 px-4 py-2.5 border-b border-amber-200">
+                            <span className="font-semibold text-amber-800 text-sm">⚠ Invoice extracted in {inv.currency} — set USD rate to approve</span>
+                          </div>
+                          <div className="p-4 space-y-2">
+                            <p className="text-sm text-gray-600">
+                              Parsed rate: {inv.currency === 'EUR' ? '€' : inv.currency}{inv.rate.toFixed(2)}/hr.
+                              {historicalRate != null && <span className="ml-1 text-gray-500">Last known USD rate for this contractor: <strong>${historicalRate.toFixed(2)}/hr</strong>.</span>}
+                            </p>
+                            <div className="flex flex-wrap gap-2 items-center">
+                              <span className="text-sm text-gray-600">USD Rate:</span>
+                              <div className="flex items-center gap-1">
+                                <span className="text-sm text-gray-500">$</span>
+                                <input type="number" step="0.01" min="0"
+                                  placeholder={historicalRate != null ? String(historicalRate) : 'e.g. 40.00'}
+                                  value={pendingUsdRate}
+                                  onChange={e => setPendingUsdRate(e.target.value)}
+                                  className="w-28 px-2 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-amber-400"
+                                />
+                                <span className="text-sm text-gray-500">/hr</span>
+                              </div>
+                              {previewAmt != null && <span className="text-sm font-medium text-gray-700">→ ${previewAmt.toFixed(2)} total</span>}
+                              <button
+                                disabled={!(rateVal > 0)}
+                                onClick={() => applyUsdRate(inv, rateVal)}
+                                className="px-3 py-1.5 bg-amber-500 text-white rounded text-sm font-medium hover:bg-amber-600 disabled:opacity-40"
+                              >Apply USD Rate</button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                     {/* PDF Attachment — accountant view (read-only open) */}
                     <div className="mb-5 border border-gray-200 rounded-lg overflow-hidden">
                       <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
@@ -3946,7 +4104,19 @@ const TimesheetSystem = () => {
                             </button>
                           </div>
                         ) : (
-                          <p className="text-sm text-gray-400 text-center py-2">No attachment provided</p>
+                          <div>
+                            <p className="text-sm text-gray-400 mb-2">No attachment on file.</p>
+                            <label className="flex items-center gap-2 cursor-pointer px-3 py-1.5 border border-dashed border-gray-300 rounded-lg hover:border-indigo-400 hover:bg-indigo-50 transition-colors w-fit">
+                              <Paperclip className="w-4 h-4 text-gray-500" />
+                              <span className="text-sm text-gray-600">{attachmentUploading ? 'Uploading…' : 'Upload PDF / DOCX'}</span>
+                              <input type="file" accept=".pdf,.doc,.docx,.msg" className="hidden"
+                                onChange={async e => {
+                                  const file = e.target.files?.[0];
+                                  if (file) await handleAttachmentUploadForExisting(inv, file);
+                                  e.target.value = '';
+                                }} />
+                            </label>
+                          </div>
                         )}
                       </div>
                     </div>
