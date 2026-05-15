@@ -178,6 +178,10 @@ interface Invoice {
   paymentMethodOverride: string | null; // accountant-editable: 'Intuit' or 'Convera'
   isVendorInvoice: boolean;
   vendorManagerId: string | null;
+  source: 'direct' | 'imported' | null;
+  reconciliationStatus: 'matched' | 'mismatch' | 'unverifiable' | null;
+  reconciliationDelta: number | null;
+  reconciliationNotes: string | null;
 }
 
 interface ReminderEmail {
@@ -1175,6 +1179,10 @@ const TimesheetSystem = () => {
       paymentMethodOverride: (r.payment_method as string) || null,
       isVendorInvoice: !!(r.is_vendor_invoice as boolean),
       vendorManagerId: (r.vendor_manager_id as string) || null,
+      source: (r.source as 'direct' | 'imported') || null,
+      reconciliationStatus: (r.reconciliation_status as 'matched' | 'mismatch' | 'unverifiable') || null,
+      reconciliationDelta: r.reconciliation_delta != null ? Number(r.reconciliation_delta) : null,
+      reconciliationNotes: (r.reconciliation_notes as string) || null,
     };
   }
 
@@ -3523,6 +3531,7 @@ const TimesheetSystem = () => {
                             <th className="border border-indigo-700 px-4 py-3 text-center">Payment Method</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Paid Date</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center">Recon</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">PDF</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Actions</th>
                           </tr>
@@ -3556,6 +3565,28 @@ const TimesheetSystem = () => {
                                     : <span className="text-gray-300 text-xs">—</span>}
                                 </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
+                                <td className="border border-gray-200 px-4 py-3 text-center" title={inv.reconciliationNotes || undefined}>
+                                  {inv.source === 'imported' ? (() => {
+                                    const tsMatch = inv.reconciliationNotes?.match(/Timesheet: (\d+\.?\d*)h/);
+                                    const tsHours = tsMatch ? parseFloat(tsMatch[1]) : null;
+                                    return (
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        {inv.reconciliationStatus === 'matched' ? (
+                                          <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Matched</span>
+                                        ) : inv.reconciliationStatus === 'mismatch' ? (
+                                          <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-medium">
+                                            ⚠ {inv.reconciliationDelta != null ? (inv.reconciliationDelta > 0 ? '+' : '') + inv.reconciliationDelta + 'h' : 'Mismatch'}
+                                          </span>
+                                        ) : inv.reconciliationStatus === 'unverifiable' ? (
+                                          <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
+                                        ) : null}
+                                        {tsHours != null && (
+                                          <span className="text-gray-400 text-xs">TS: {tsHours}h</span>
+                                        )}
+                                      </div>
+                                    );
+                                  })() : <span className="text-gray-300 text-xs">—</span>}
+                                </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
                                   {inv.attachmentPath ? (
                                     <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs font-medium">
@@ -3589,7 +3620,7 @@ const TimesheetSystem = () => {
                             <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + i.totalHours, 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
-                            <td className="border border-gray-200 px-4 py-3" colSpan={4}></td>
+                            <td className="border border-gray-200 px-4 py-3" colSpan={5}></td>
                           </tr>
                         </tfoot>
                       </table>

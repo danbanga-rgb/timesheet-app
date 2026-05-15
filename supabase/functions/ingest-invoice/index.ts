@@ -153,11 +153,11 @@ async function reconcile(
   rangeStart.setDate(rangeStart.getDate() - 6);
   const rangeStartStr = rangeStart.toISOString().slice(0, 10);
 
+  // Status filter intentionally omitted — all submitted/pending/approved timesheets count.
   const { data: timesheets, error } = await supabase
     .from('timesheets')
     .select('entries')
     .eq('user_id', userId)
-    .eq('status', 'approved')
     .gte('week_start', rangeStartStr)
     .lte('week_start', periodEnd);
 
@@ -166,7 +166,7 @@ async function reconcile(
   }
 
   if (!timesheets || timesheets.length === 0) {
-    return { status: 'unverifiable', delta: null, notes: 'No approved timesheets found for period' };
+    return { status: 'unverifiable', delta: null, notes: 'No timesheets found for period' };
   }
 
   // Sum only entries whose date falls within [periodStart, periodEnd]
@@ -182,7 +182,7 @@ async function reconcile(
   }
 
   if (timesheetHours === 0) {
-    return { status: 'unverifiable', delta: null, notes: 'Timesheets found but zero billable hours in period' };
+    return { status: 'unverifiable', delta: null, notes: `Timesheet: 0h · Invoice: ${invoiceHours}h · Zero hours in period` };
   }
 
   const delta = Math.round((invoiceHours - timesheetHours) * 100) / 100;
