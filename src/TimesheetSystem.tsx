@@ -184,6 +184,16 @@ interface Invoice {
   reconciliationNotes: string | null;
 }
 
+interface ConveraPaymentRow {
+  itemNumber: string;
+  beneficiary: string;
+  amount: number;
+  currency: string;
+  invoiceRef: string;
+  matchedInvoice: Invoice | null;
+  selected: boolean;
+}
+
 interface ReminderEmail {
   id: number;
   userId: string;
@@ -490,6 +500,14 @@ const TimesheetSystem = () => {
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [pendingUsdRate, setPendingUsdRate] = useState('');       // accountant-entered USD rate for non-USD imported invoices
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
+  // Convera import
+  const [showConveraModal, setShowConveraModal] = useState(false);
+  const [converaFile, setConveraFile] = useState<File | null>(null);
+  const [converaRows, setConveraRows] = useState<ConveraPaymentRow[]>([]);
+  const [converaParsing, setConveraParsing] = useState(false);
+  const [converaApplying, setConveraApplying] = useState(false);
+  const [converaPaidDate, setConveraPaidDate] = useState('');
+  const [converaError, setConveraError] = useState('');
   // PDF attachment
   const [invoiceAttachmentFile, setInvoiceAttachmentFile] = useState<File | null>(null);
   const [invoicePhoneConfirm, setInvoicePhoneConfirm] = useState('');
@@ -1453,23 +1471,31 @@ const TimesheetSystem = () => {
     return path;
   };
 
-  const getAttachmentSignedUrl = async (path: string): Promise<string | null> => {
+  const getAttachmentSignedUrl = async (path: string): Promise<{ url: string | null; error: string | null }> => {
     const { data, error } = await supabase.storage.from('invoice-attachments').createSignedUrl(path, 3600);
-    if (error || !data) return null;
-    return data.signedUrl;
+    if (error) return { url: null, error: error.message };
+    if (!data?.signedUrl) return { url: null, error: 'No URL returned' };
+    return { url: data.signedUrl, error: null };
   };
 
   const openAttachment = async (inv: Invoice) => {
     if (!inv.attachmentPath) return;
-    // Use cached URL if fresh enough, otherwise fetch a new one
+    // Open the window synchronously (before any async work) to avoid popup-blocker
+    const win = window.open('', '_blank');
+    if (!win) { alert('Please allow popups for this site to open attachments.'); return; }
+    // Use cached URL if available
     if (attachmentSignedUrls[inv.id]) {
-      window.open(attachmentSignedUrls[inv.id], '_blank');
+      win.location.href = attachmentSignedUrls[inv.id];
       return;
     }
-    const url = await getAttachmentSignedUrl(inv.attachmentPath);
-    if (!url) { alert('Could not open attachment.'); return; }
+    const { url, error } = await getAttachmentSignedUrl(inv.attachmentPath);
+    if (!url) {
+      win.close();
+      alert(`Could not open attachment: ${error || 'Unknown error'}\n\nPath: ${inv.attachmentPath}`);
+      return;
+    }
     setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: url }));
-    window.open(url, '_blank');
+    win.location.href = url;
   };
 
   const handleAttachmentUploadForExisting = async (inv: Invoice, file: File) => {
@@ -1485,6 +1511,71 @@ const TimesheetSystem = () => {
       }
     }
     setAttachmentUploading(false);
+  };
+
+  // ─── Convera import ───────────────────────────────────────────────────────────
+
+  function normaliseRef(s: string): string {
+    return (s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  }
+
+  const parseConveraPdf = async () => {
+    if (!converaFile) return;
+    setConveraParsing(true);
+    setConveraError('');
+    setConveraRows([]);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const form = new FormData();
+      form.append('pdf', converaFile);
+      const resp = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/parse-convera`,
+        { method: 'POST', headers: { 'Authorization': `Bearer ${session?.access_token}` }, body: form }
+      );
+      const json = await resp.json();
+      if (!resp.ok || json.error) { setConveraError(json.error || 'Parse failed'); return; }
+      const rows: ConveraPaymentRow[] = (json.payments || []).map((p: { itemNumber: string; beneficiary: string; amount: number; currency: string; invoiceRef: string }) => {
+        const ref = (p.invoiceRef || '').trim();
+        const match = invoices.find(inv => normaliseRef(inv.invoiceNumber) === normaliseRef(ref));
+        return { ...p, matchedInvoice: match ?? null, selected: !!match && match.status !== 'paid' };
+      });
+      setConveraRows(rows);
+      // Default paid date to today
+      if (!converaPaidDate) setConveraPaidDate(new Date().toISOString().slice(0, 10));
+    } catch (e: unknown) {
+      setConveraError(e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setConveraParsing(false);
+    }
+  };
+
+  const applyConveraPayments = async () => {
+    const selected = converaRows.filter(r => r.selected && r.matchedInvoice);
+    if (!selected.length) return;
+    if (!converaPaidDate) { alert('Please enter the payment date.'); return; }
+    setConveraApplying(true);
+    let ok = 0, failed = 0;
+    for (const row of selected) {
+      const inv = row.matchedInvoice!;
+      const { error } = await supabase.from('invoices').update({
+        status: 'paid',
+        paid_date: converaPaidDate,
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: currentUser!.name,
+      }).eq('id', inv.id);
+      if (error) failed++; else ok++;
+    }
+    await fetchInvoices();
+    setConveraApplying(false);
+    if (failed) {
+      alert(`${ok} invoices marked paid, ${failed} failed.`);
+    } else {
+      alert(`${ok} invoice${ok !== 1 ? 's' : ''} marked as paid on ${converaPaidDate}.`);
+      setShowConveraModal(false);
+      setConveraRows([]);
+      setConveraFile(null);
+      setConveraError('');
+    }
   };
 
   const exportInvoicesCSV = (list: Invoice[]) => {
@@ -3600,7 +3691,8 @@ const TimesheetSystem = () => {
                         </div>
                       </div>
                     </div>
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-2">
+                      <button onClick={() => setShowConveraModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><UploadCloud className="w-4 h-4" /> Import Convera PDF</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                     </div>
                   </div>
@@ -3978,6 +4070,156 @@ const TimesheetSystem = () => {
               </div>
             );
           })()}
+
+          {/* Convera Import Modal */}
+          {showConveraModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => { if (!converaParsing && !converaApplying) setShowConveraModal(false); }}>
+              <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                <div className="p-6">
+                  <div className="flex items-center justify-between mb-5">
+                    <h2 className="text-xl font-bold text-gray-900">Import Convera Payment Confirmation</h2>
+                    <button onClick={() => setShowConveraModal(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+                  </div>
+
+                  {/* Step 1: File upload */}
+                  {converaRows.length === 0 && (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-4">Upload the Convera outgoing payment confirmation PDF. The system will extract each payment line and match it to an invoice by reference number.</p>
+                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
+                        {converaFile ? (
+                          <div className="flex items-center justify-center gap-2 text-indigo-700">
+                            <FileText className="w-5 h-5" />
+                            <span className="text-sm font-medium">{converaFile.name}</span>
+                            <button onClick={() => setConveraFile(null)} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                          </div>
+                        ) : (
+                          <label className="cursor-pointer">
+                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
+                            <p className="text-sm text-gray-600">Click to select PDF</p>
+                            <input type="file" accept=".pdf" className="hidden" onChange={e => setConveraFile(e.target.files?.[0] ?? null)} />
+                          </label>
+                        )}
+                      </div>
+                      {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
+                      <div className="flex justify-end">
+                        <button
+                          onClick={parseConveraPdf}
+                          disabled={!converaFile || converaParsing}
+                          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm"
+                        >
+                          {converaParsing ? <><Clock className="w-4 h-4 animate-spin" /> Parsing…</> : <><FileText className="w-4 h-4" /> Parse PDF</>}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Step 2: Review and apply */}
+                  {converaRows.length > 0 && (() => {
+                    const matched   = converaRows.filter(r => r.matchedInvoice);
+                    const alreadyPaid = converaRows.filter(r => r.matchedInvoice?.status === 'paid');
+                    const unmatched = converaRows.filter(r => !r.matchedInvoice);
+                    const selectedCount = converaRows.filter(r => r.selected).length;
+                    const totalSelected = converaRows.filter(r => r.selected).reduce((s, r) => s + r.amount, 0);
+                    return (
+                      <div>
+                        {/* Summary pills */}
+                        <div className="flex flex-wrap gap-2 mb-4">
+                          <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">{converaRows.length} payments in PDF</span>
+                          <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">{matched.length} matched</span>
+                          {alreadyPaid.length > 0 && <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">{alreadyPaid.length} already paid</span>}
+                          {unmatched.length > 0 && <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">{unmatched.length} unmatched</span>}
+                        </div>
+
+                        {/* Payment date */}
+                        <div className="flex items-center gap-3 mb-4">
+                          <label className="text-sm font-medium text-gray-700 whitespace-nowrap">Payment date:</label>
+                          <input type="date" value={converaPaidDate} onChange={e => setConveraPaidDate(e.target.value)} className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-400" />
+                          <span className="text-xs text-gray-400">Applied to all selected invoices</span>
+                        </div>
+
+                        {/* Table */}
+                        <div className="overflow-x-auto rounded-lg border border-gray-200 mb-4">
+                          <table className="w-full text-sm border-collapse">
+                            <thead className="bg-gray-50 text-gray-600">
+                              <tr>
+                                <th className="px-3 py-2 text-center w-8">
+                                  <input type="checkbox"
+                                    checked={converaRows.filter(r => r.matchedInvoice && r.matchedInvoice.status !== 'paid').every(r => r.selected)}
+                                    onChange={e => setConveraRows(prev => prev.map(r =>
+                                      r.matchedInvoice && r.matchedInvoice.status !== 'paid' ? { ...r, selected: e.target.checked } : r
+                                    ))}
+                                  />
+                                </th>
+                                <th className="px-3 py-2 text-left">Item</th>
+                                <th className="px-3 py-2 text-left">Beneficiary</th>
+                                <th className="px-3 py-2 text-right">Amount</th>
+                                <th className="px-3 py-2 text-left">Inv Ref (PDF)</th>
+                                <th className="px-3 py-2 text-left">Matched Invoice</th>
+                                <th className="px-3 py-2 text-center">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {converaRows.map((row, idx) => {
+                                const isPaid = row.matchedInvoice?.status === 'paid';
+                                const rowBg = !row.matchedInvoice ? 'bg-red-50' : isPaid ? 'bg-blue-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50';
+                                const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-600', submitted: 'bg-yellow-100 text-yellow-700', approved: 'bg-green-100 text-green-700', rejected: 'bg-red-100 text-red-700', paid: 'bg-blue-100 text-blue-700' };
+                                return (
+                                  <tr key={idx} className={rowBg}>
+                                    <td className="px-3 py-2 text-center">
+                                      {row.matchedInvoice && !isPaid ? (
+                                        <input type="checkbox" checked={row.selected}
+                                          onChange={e => setConveraRows(prev => prev.map((r, i) => i === idx ? { ...r, selected: e.target.checked } : r))}
+                                        />
+                                      ) : <span className="text-gray-300">—</span>}
+                                    </td>
+                                    <td className="px-3 py-2 text-xs text-gray-500 font-mono">{row.itemNumber}</td>
+                                    <td className="px-3 py-2 font-medium text-gray-800">{row.beneficiary}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-gray-700">${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                    <td className="px-3 py-2 text-xs text-gray-600 font-mono">{row.invoiceRef}</td>
+                                    <td className="px-3 py-2 text-xs">
+                                      {row.matchedInvoice
+                                        ? <span className="text-gray-800">{row.matchedInvoice.invoiceNumber} <span className="text-gray-400">· {row.matchedInvoice.userName}</span></span>
+                                        : <span className="text-red-500">No match</span>
+                                      }
+                                    </td>
+                                    <td className="px-3 py-2 text-center">
+                                      {row.matchedInvoice
+                                        ? <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[row.matchedInvoice.status] || ''}`}>{row.matchedInvoice.status}</span>
+                                        : <span className="text-gray-300 text-xs">—</span>
+                                      }
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
+
+                        {/* Actions */}
+                        <div className="flex items-center justify-between">
+                          <button onClick={() => { setConveraRows([]); setConveraFile(null); setConveraError(''); }} className="text-sm text-gray-500 hover:text-gray-700">← Upload different file</button>
+                          <div className="flex items-center gap-3">
+                            {selectedCount > 0 && (
+                              <span className="text-sm text-gray-600">{selectedCount} selected · ${totalSelected.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                            )}
+                            <button
+                              onClick={applyConveraPayments}
+                              disabled={selectedCount === 0 || !converaPaidDate || converaApplying}
+                              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+                            >
+                              {converaApplying ? <><Clock className="w-4 h-4 animate-spin" /> Applying…</> : <><CheckCircle className="w-4 h-4" /> Mark {selectedCount} as Paid</>}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Invoice Detail Modal (shared, also used in accountant view) */}
           {showInvoiceModal && selectedInvoice && (() => {
