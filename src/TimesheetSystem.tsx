@@ -268,10 +268,16 @@ const WORLD_COUNTRIES = [
 
 // ─── Live invoice reconciliation (pure, no DB writes) ────────────────────────
 // Called on every render so it always reflects the latest loaded timesheets.
+interface ReconTimesheetRow {
+  ts: Timesheet;
+  hoursInPeriod: number;
+  weekEnd: string; // Sunday of the week
+}
+
 function reconcileInvoiceLive(
   invoice: Invoice,
   allTimesheets: Timesheet[]
-): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null } {
+): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null; rows: ReconTimesheetRow[] } {
   const { userId, periodStart, periodEnd, totalHours } = invoice;
 
   // Week range: week_start can be up to 6 days before periodStart and still contain period days
@@ -283,23 +289,31 @@ function reconcileInvoiceLive(
     ts.userId === userId && ts.weekStart >= rangeStartStr && ts.weekStart <= periodEnd
   );
 
-  if (!relevant.length) return { status: 'unverifiable', delta: null, timesheetHours: null };
+  if (!relevant.length) return { status: 'unverifiable', delta: null, timesheetHours: null, rows: [] };
 
+  const rows: ReconTimesheetRow[] = [];
   let tsHours = 0;
   for (const ts of relevant) {
+    let hoursInPeriod = 0;
     for (const [date, entry] of Object.entries(ts.entries)) {
       if (date >= periodStart && date <= periodEnd) {
         const h = parseFloat(entry.hours);
-        if (!isNaN(h) && h > 0) tsHours += h;
+        if (!isNaN(h) && h > 0) hoursInPeriod += h;
       }
     }
+    // weekEnd = weekStart + 6 days (Sunday)
+    const sun = new Date(ts.weekStart + 'T12:00:00');
+    sun.setDate(sun.getDate() + 6);
+    rows.push({ ts, hoursInPeriod: Math.round(hoursInPeriod * 100) / 100, weekEnd: sun.toISOString().slice(0, 10) });
+    tsHours += hoursInPeriod;
   }
+  tsHours = Math.round(tsHours * 100) / 100;
 
-  if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0 };
+  if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0, rows };
 
   const delta = Math.round((totalHours - tsHours) * 100) / 100;
   const matched = Math.abs(delta) < 0.01;
-  return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours };
+  return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours, rows };
 }
 
 const TimesheetSystem = () => {
@@ -4120,6 +4134,86 @@ const TimesheetSystem = () => {
                         )}
                       </div>
                     </div>
+                    {/* ── Timesheet reconciliation section ── */}
+                    {(() => {
+                      const recon = reconcileInvoiceLive(inv, timesheets);
+                      const statusBg: Record<string, string> = {
+                        matched:      'bg-green-50 border-green-200',
+                        mismatch:     'bg-red-50 border-red-200',
+                        unverifiable: 'bg-gray-50 border-gray-200',
+                      };
+                      const statusText: Record<string, string> = {
+                        matched:      'text-green-700',
+                        mismatch:     'text-red-700',
+                        unverifiable: 'text-gray-500',
+                      };
+                      const statusLabel: Record<string, string> = {
+                        matched:      '✓ Matched',
+                        mismatch:     '⚠ Mismatch',
+                        unverifiable: '— No timesheets found',
+                      };
+                      return (
+                        <div className={`mb-5 border rounded-lg overflow-hidden ${statusBg[recon.status]}`}>
+                          <div className={`px-4 py-2.5 border-b flex items-center justify-between ${statusBg[recon.status]}`} style={{borderColor: 'inherit'}}>
+                            <span className={`font-semibold text-sm ${statusText[recon.status]}`}>
+                              Timesheets · {statusLabel[recon.status]}
+                            </span>
+                            {recon.timesheetHours != null && (
+                              <span className={`text-sm font-mono ${statusText[recon.status]}`}>
+                                Invoice {inv.totalHours.toFixed(2)} h · TS {recon.timesheetHours.toFixed(2)} h
+                                {recon.delta != null && recon.delta !== 0 && (
+                                  <span className="ml-2 font-semibold">
+                                    ({recon.delta > 0 ? '+' : ''}{recon.delta.toFixed(2)} h)
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                          </div>
+                          <div className="p-3">
+                            {recon.rows.length === 0 ? (
+                              <p className="text-sm text-gray-400 py-1">
+                                No approved or pending timesheets found for {inv.userName} covering {parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}.
+                              </p>
+                            ) : (
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="text-xs text-gray-500 border-b border-gray-200">
+                                    <th className="text-left pb-1.5 pr-3 font-medium">Week</th>
+                                    <th className="text-center pb-1.5 px-2 font-medium">Status</th>
+                                    <th className="text-right pb-1.5 font-medium">Hrs in Period</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {recon.rows.map(({ ts, hoursInPeriod, weekEnd }) => {
+                                    const tsStatusColors: Record<string, string> = {
+                                      approved: 'bg-green-100 text-green-700',
+                                      pending:  'bg-yellow-100 text-yellow-700',
+                                      rejected: 'bg-red-100 text-red-700',
+                                    };
+                                    return (
+                                      <tr key={ts.id} className="border-b border-gray-100 last:border-0">
+                                        <td className="py-1.5 pr-3 text-gray-700 font-mono text-xs">
+                                          {parseLocalDate(ts.weekStart).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}–{parseLocalDate(weekEnd).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                                        </td>
+                                        <td className="py-1.5 px-2 text-center">
+                                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${tsStatusColors[ts.status] || 'bg-gray-100 text-gray-600'}`}>
+                                            {ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}
+                                          </span>
+                                        </td>
+                                        <td className={`py-1.5 text-right font-mono font-medium ${hoursInPeriod === 0 ? 'text-gray-400' : 'text-gray-800'}`}>
+                                          {hoursInPeriod > 0 ? `${hoursInPeriod.toFixed(2)} h` : '—'}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                     {inv.status === 'submitted' && (
                       <div className="mt-5 space-y-3">
                         <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
