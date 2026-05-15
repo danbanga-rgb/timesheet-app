@@ -1497,10 +1497,10 @@ function fetchEmails() {
 
           console.log(`Found ${uids.length} unseen email(s)`);
           const messages = [];
-          // markSeen: true — mark all as seen on fetch (reliable)
-          // Fetch without marking seen — we mark seen selectively after processing.
-          // Failed emails stay unseen so the next run retries them.
-          const fetch = imap.fetch(uids, { bodies: '', markSeen: false });
+          // markSeen: true — mark as seen on fetch so emails are never re-processed.
+          // Retry for parse failures is handled via attempt_count in the DB log,
+          // not by leaving emails unseen (which caused duplicate Claude API calls).
+          const fetch = imap.fetch(uids, { bodies: '', markSeen: true });
 
           fetch.on('message', (msg, seq) => {
             const chunks = [];
@@ -1652,7 +1652,7 @@ RESULTS
 ✏️  Corrections    : ${summary.corrections}
 📨 Forwarded      : ${summary.forwarded}
 🗑️  DMARC deleted  : ${summary.dmarc}
-⚠️  Parse failures : ${summary.failures.length} (${leftUnseen} left unseen for retry)
+⚠️  Parse failures : ${summary.failures.length}
 🧾 Invoices parsed : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? ' (ingested)' : ' (dry-run — not ingested)'}
 `;
 
@@ -1735,8 +1735,6 @@ async function main() {
   }
 
   const dmarcUids     = [];
-  const successUids   = [];
-  const failedUids    = [];
 
   const summary = {
     total: rawMessages.length, dmarc: 0, forwarded: 0,
@@ -1828,28 +1826,12 @@ async function main() {
       });
     });
 
-    // Only mark email as SEEN if every attachment was processed successfully
-    // Any parse failure → leave unseen so it gets retried
-    const hasParseFailure = emailFailedAtts.length > 0;
-    const hasIngestError = emailResults.some(r => r.error && r.action !== 'invoice_skipped');
-    if (hasParseFailure || hasIngestError) {
-      failedUids.push(uid);
-    } else {
-      successUids.push(uid);
-    }
   }
 
-  // IMAP operations
+  // IMAP operations — only DMARC deletes needed (emails already marked seen on fetch)
   if (dmarcUids.length > 0) {
     try { await deleteDmarcEmails(dmarcUids); console.log(`  🗑️  Deleted ${dmarcUids.length} DMARC emails`); }
     catch (e) { console.warn(`DMARC delete failed: ${e.message}`); }
-  }
-  if (successUids.length > 0) {
-    try { await markEmailsSeen(successUids); }
-    catch (e) { console.warn(`markSeen failed: ${e.message}`); }
-  }
-  if (failedUids.length > 0) {
-    console.log(`  ⚠️  ${failedUids.length} email(s) left unseen for retry`);
   }
 
   // Console summary
@@ -1861,15 +1843,14 @@ async function main() {
   console.log(`  Duplicates       : ${summary.duplicates}`);
   console.log(`  Corrections      : ${summary.corrections}`);
   console.log(`  Invoices parsed  : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? '' : ' (dry-run)'}`);
-  console.log(`  Failures (retry) : ${summary.failures.length}`);
-  console.log(`  Left unseen      : ${failedUids.length}`);
+  console.log(`  Failures         : ${summary.failures.length}`);
 
   // Summary email — only if something actionable happened
   const actionable = summary.created + summary.duplicates + summary.corrections +
                      summary.forwarded + summary.failures.length + summary.newUsers.length +
                      summary.invoiceReports.length;
   if (actionable > 0) {
-    await sendSummaryEmail(summary, failedUids.length);
+    await sendSummaryEmail(summary, 0);
   }
 
   const reportableFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER);
