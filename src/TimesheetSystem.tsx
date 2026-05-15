@@ -266,6 +266,42 @@ const WORLD_COUNTRIES = [
   "Uzbekistan","Vanuatu","Vatican City","Vietnam","Zambia"
 ].sort();
 
+// ─── Live invoice reconciliation (pure, no DB writes) ────────────────────────
+// Called on every render so it always reflects the latest loaded timesheets.
+function reconcileInvoiceLive(
+  invoice: Invoice,
+  allTimesheets: Timesheet[]
+): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null } {
+  const { userId, periodStart, periodEnd, totalHours } = invoice;
+
+  // Week range: week_start can be up to 6 days before periodStart and still contain period days
+  const rangeStart = new Date(periodStart + 'T12:00:00');
+  rangeStart.setDate(rangeStart.getDate() - 6);
+  const rangeStartStr = rangeStart.toISOString().slice(0, 10);
+
+  const relevant = allTimesheets.filter(ts =>
+    ts.userId === userId && ts.weekStart >= rangeStartStr && ts.weekStart <= periodEnd
+  );
+
+  if (!relevant.length) return { status: 'unverifiable', delta: null, timesheetHours: null };
+
+  let tsHours = 0;
+  for (const ts of relevant) {
+    for (const [date, entry] of Object.entries(ts.entries)) {
+      if (date >= periodStart && date <= periodEnd) {
+        const h = parseFloat(entry.hours);
+        if (!isNaN(h) && h > 0) tsHours += h;
+      }
+    }
+  }
+
+  if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0 };
+
+  const delta = Math.round((totalHours - tsHours) * 100) / 100;
+  const matched = Math.abs(delta) < 0.01;
+  return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours };
+}
+
 const TimesheetSystem = () => {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -3565,23 +3601,25 @@ const TimesheetSystem = () => {
                                     : <span className="text-gray-300 text-xs">—</span>}
                                 </td>
                                 <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
-                                <td className="border border-gray-200 px-4 py-3 text-center" title={inv.reconciliationNotes || undefined}>
+                                <td className="border border-gray-200 px-4 py-3 text-center">
                                   {inv.source === 'imported' ? (() => {
-                                    const tsMatch = inv.reconciliationNotes?.match(/Timesheet: (\d+\.?\d*)h/);
-                                    const tsHours = tsMatch ? parseFloat(tsMatch[1]) : null;
+                                    const recon = reconcileInvoiceLive(inv, timesheets);
+                                    const tooltip = recon.timesheetHours == null
+                                      ? 'No timesheets found for period'
+                                      : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
                                     return (
-                                      <div className="flex flex-col items-center gap-0.5">
-                                        {inv.reconciliationStatus === 'matched' ? (
+                                      <div className="flex flex-col items-center gap-0.5" title={tooltip}>
+                                        {recon.status === 'matched' ? (
                                           <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Matched</span>
-                                        ) : inv.reconciliationStatus === 'mismatch' ? (
+                                        ) : recon.status === 'mismatch' ? (
                                           <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-medium">
-                                            ⚠ {inv.reconciliationDelta != null ? (inv.reconciliationDelta > 0 ? '+' : '') + inv.reconciliationDelta + 'h' : 'Mismatch'}
+                                            ⚠ {recon.delta != null ? (recon.delta > 0 ? '+' : '') + recon.delta + 'h' : 'Mismatch'}
                                           </span>
-                                        ) : inv.reconciliationStatus === 'unverifiable' ? (
+                                        ) : (
                                           <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
-                                        ) : null}
-                                        {tsHours != null && (
-                                          <span className="text-gray-400 text-xs">TS: {tsHours}h</span>
+                                        )}
+                                        {recon.timesheetHours != null && (
+                                          <span className="text-gray-400 text-xs">TS: {recon.timesheetHours}h</span>
                                         )}
                                       </div>
                                     );
