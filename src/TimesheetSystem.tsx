@@ -78,6 +78,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
 
 import { useState, useEffect, useRef } from 'react';
 import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -185,7 +186,7 @@ interface Invoice {
 }
 
 interface ConveraPaymentRow {
-  source: 'convera' | 'intuit';
+  source: 'convera' | 'quickbooks' | 'intuit';
   itemNumber: string;       // OTR ref for Convera; empty for Intuit
   beneficiary: string;
   amount: number;
@@ -502,10 +503,11 @@ const TimesheetSystem = () => {
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [pendingUsdRate, setPendingUsdRate] = useState('');       // accountant-entered USD rate for non-USD imported invoices
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
-  // Payment import (Convera PDF + Intuit emails)
+  // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
   const [showConveraModal, setShowConveraModal] = useState(false);
-  const [converaTab, setConveraTab] = useState<'convera' | 'intuit'>('convera');
+  const [converaTab, setConveraTab] = useState<'convera' | 'quickbooks' | 'intuit'>('quickbooks');
   const [converaFile, setConveraFile] = useState<File | null>(null);
+  const [qbFile, setQbFile] = useState<File | null>(null);
   const [intuitText, setIntuitText] = useState('');
   const [converaRows, setConveraRows] = useState<ConveraPaymentRow[]>([]);
   const [converaParsing, setConveraParsing] = useState(false);
@@ -538,7 +540,8 @@ const TimesheetSystem = () => {
   const [tsOnlyDropdownOpen, setTsOnlyDropdownOpen] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
-  const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);
+  const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);   // blob: URL
+  const [pdfViewerLoading, setPdfViewerLoading] = useState(false);
   // Manager consolidated view
   const [managerConsolidatedRange, setManagerConsolidatedRange] = useState({ start: '', end: '' });
   const [managerAppliedRange, setManagerAppliedRange] = useState({ start: '', end: '' });
@@ -1485,17 +1488,29 @@ const TimesheetSystem = () => {
 
   const openAttachment = async (inv: Invoice) => {
     if (!inv.attachmentPath) return;
+    // If we already have a cached blob URL for this invoice, reuse it
     if (attachmentSignedUrls[inv.id]) {
       setPdfViewerUrl(attachmentSignedUrls[inv.id]);
       return;
     }
-    const { url, error } = await getAttachmentSignedUrl(inv.attachmentPath);
-    if (!url) {
-      alert(`Could not open attachment: ${error || 'Unknown error'}\n\nPath: ${inv.attachmentPath}`);
-      return;
+    setPdfViewerLoading(true);
+    setPdfViewerUrl(null);
+    try {
+      const { url: signedUrl, error } = await getAttachmentSignedUrl(inv.attachmentPath);
+      if (!signedUrl) {
+        alert(`Could not open attachment: ${error || 'Unknown error'}\n\nPath: ${inv.attachmentPath}`);
+        return;
+      }
+      // Fetch as blob so we get a same-origin blob: URL — avoids X-Frame-Options blocks
+      const resp = await fetch(signedUrl);
+      if (!resp.ok) { alert(`Could not download attachment (${resp.status})`); return; }
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: blobUrl }));
+      setPdfViewerUrl(blobUrl);
+    } finally {
+      setPdfViewerLoading(false);
     }
-    setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: url }));
-    setPdfViewerUrl(url);
   };
 
   const handleAttachmentUploadForExisting = async (inv: Invoice, file: File) => {
@@ -1569,6 +1584,95 @@ const TimesheetSystem = () => {
     if (!mon) return '';
     return `${new Date().getFullYear()}-${mon}-${day}`;
   }
+
+  const parseQbXlsx = async () => {
+    if (!qbFile) return;
+    setConveraError('');
+    setConveraRows([]);
+    try {
+      const buffer = await qbFile.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as unknown[][];
+
+      // Find header row: look for a row containing "Date" and "Name"
+      let headerIdx = -1;
+      for (let i = 0; i < rawRows.length; i++) {
+        const r = rawRows[i] as string[];
+        if (r.some(c => String(c).trim() === 'Date') && r.some(c => String(c).trim() === 'Name')) {
+          headerIdx = i;
+          break;
+        }
+      }
+      if (headerIdx < 0) { setConveraError('Could not find header row. Expected columns: Date, Name, Memo/Description, Split, Amount.'); return; }
+
+      const headers = (rawRows[headerIdx] as string[]).map(h => String(h).trim().toLowerCase());
+      const col = (name: string) => headers.indexOf(name);
+      const iDate = col('date'), iName = col('name'), iMemo = col('memo/description'), iSplit = col('split'), iAmt = col('amount');
+
+      if ([iDate, iName, iAmt].some(i => i < 0)) { setConveraError('Missing required columns: Date, Name, Amount.'); return; }
+
+      // Extract payments: take "Business Checking" split rows (have invoice memo + positive amount = the offset entry)
+      // OR take "Contractor Payment" rows (negative amount = the actual outgoing payment)
+      // We use Business Checking rows because they carry the Inv# memo.
+      const payments: ConveraPaymentRow[] = [];
+      for (let i = headerIdx + 1; i < rawRows.length; i++) {
+        const r = rawRows[i] as (string | number)[];
+        const split  = iSplit >= 0 ? String(r[iSplit]).trim() : '';
+        const amt    = parseFloat(String(r[iAmt]));
+        if (isNaN(amt) || amt <= 0) continue; // skip negatives, totals, empty rows
+        if (split !== 'Business Checking') continue; // only take the memo-bearing row
+
+        const dateRaw = String(r[iDate]).trim();
+        const name    = String(r[iName]).trim();
+        const memo    = iMemo >= 0 ? String(r[iMemo]).trim() : '';
+
+        // Parse date MM/DD/YYYY → YYYY-MM-DD
+        const dm = dateRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        const paidDate = dm ? `${dm[3]}-${dm[1].padStart(2,'0')}-${dm[2].padStart(2,'0')}` : '';
+
+        // Extract invoice ref from memo ("Inv# XXX" or "Invoice# XXX")
+        const invMatch = memo.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
+        const invoiceRef = invMatch?.[1]?.trim() ?? '';
+
+        // Match: try invoice number first, then company name + amount
+        let matchedInvoice: Invoice | null = null;
+        if (invoiceRef) {
+          matchedInvoice = invoices.find(inv => normaliseRef(inv.invoiceNumber) === normaliseRef(invoiceRef)) ?? null;
+        }
+        if (!matchedInvoice) {
+          const normName = normaliseCompany(name);
+          matchedInvoice = invoices.find(inv => {
+            const invComp = normaliseCompany(inv.paymentProfile?.companyName || inv.userName);
+            return (invComp.includes(normName) || normName.includes(invComp)) && Math.abs(inv.totalAmount - amt) < 0.02;
+          }) ?? null;
+        }
+
+        payments.push({
+          source: 'quickbooks',
+          itemNumber: '',
+          beneficiary: name,
+          amount: amt,
+          currency: 'USD',
+          invoiceRef,
+          suggestedDate: paidDate,
+          matchedInvoice,
+          selected: !!matchedInvoice && matchedInvoice.status !== 'paid',
+        });
+      }
+
+      if (!payments.length) { setConveraError('No outgoing payments found. Make sure this is a QuickBooks Transaction Detail export with a "Split" column.'); return; }
+
+      setConveraRows(payments);
+      // Pre-fill paid date from most common date in the export
+      const dates = payments.map(p => p.suggestedDate).filter(Boolean);
+      const dateFreq = dates.reduce<Record<string, number>>((acc, d) => { acc[d] = (acc[d] || 0) + 1; return acc; }, {});
+      const mostCommon = Object.entries(dateFreq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+      if (!converaPaidDate && mostCommon) setConveraPaidDate(mostCommon);
+    } catch (e: unknown) {
+      setConveraError(e instanceof Error ? e.message : 'Failed to parse file');
+    }
+  };
 
   const parseIntuitEmails = () => {
     if (!intuitText.trim()) return;
@@ -4150,8 +4254,38 @@ const TimesheetSystem = () => {
                   {/* Source tabs */}
                   {converaRows.length === 0 && (
                     <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-5 w-fit">
+                      <button onClick={() => { setConveraTab('quickbooks'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'quickbooks' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>QuickBooks Export</button>
                       <button onClick={() => { setConveraTab('convera'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'convera' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera PDF</button>
-                      <button onClick={() => { setConveraTab('intuit'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>QuickBooks / Intuit</button>
+                      <button onClick={() => { setConveraTab('intuit'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Intuit Emails</button>
+                    </div>
+                  )}
+
+                  {/* Step 1: QuickBooks XLSX export */}
+                  {converaRows.length === 0 && converaTab === 'quickbooks' && (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-1">Upload the QuickBooks <strong>Transaction Detail by Account</strong> export (.xlsx). Payments are matched by invoice number from the Memo field, falling back to company name + amount.</p>
+                      <p className="text-xs text-gray-400 mb-4">In QuickBooks: Reports → Transaction Detail by Account → export to Excel</p>
+                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
+                        {qbFile ? (
+                          <div className="flex items-center justify-center gap-2 text-indigo-700">
+                            <FileText className="w-5 h-5" />
+                            <span className="text-sm font-medium">{qbFile.name}</span>
+                            <button onClick={() => setQbFile(null)} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                          </div>
+                        ) : (
+                          <label className="cursor-pointer">
+                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
+                            <p className="text-sm text-gray-600">Click to select .xlsx file</p>
+                            <input type="file" accept=".xlsx,.xls" className="hidden" onChange={e => setQbFile(e.target.files?.[0] ?? null)} />
+                          </label>
+                        )}
+                      </div>
+                      {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
+                      <div className="flex justify-end">
+                        <button onClick={parseQbXlsx} disabled={!qbFile} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                          <FileText className="w-4 h-4" /> Parse Export
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -4211,7 +4345,7 @@ const TimesheetSystem = () => {
                     const unmatched    = converaRows.filter(r => !r.matchedInvoice);
                     const selectedCount = converaRows.filter(r => r.selected).length;
                     const totalSelected = converaRows.filter(r => r.selected).reduce((s, r) => s + r.amount, 0);
-                    const isIntuit     = converaRows[0]?.source === 'intuit';
+                    const hasInvRefs   = converaRows.some(r => r.invoiceRef);
                     const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-600', submitted: 'bg-yellow-100 text-yellow-700', approved: 'bg-green-100 text-green-700', rejected: 'bg-red-100 text-red-700', paid: 'bg-blue-100 text-blue-700' };
                     return (
                       <div>
@@ -4225,7 +4359,7 @@ const TimesheetSystem = () => {
                         <div className="flex items-center gap-3 mb-4">
                           <label className="text-sm font-medium text-gray-700 whitespace-nowrap">Payment date:</label>
                           <input type="date" value={converaPaidDate} onChange={e => setConveraPaidDate(e.target.value)} className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-400" />
-                          {isIntuit && <span className="text-xs text-gray-400">Pre-filled from email</span>}
+                          {converaRows[0]?.source !== 'convera' && <span className="text-xs text-gray-400">Pre-filled from export</span>}
                         </div>
 
                         <div className="overflow-x-auto rounded-lg border border-gray-200 mb-4">
@@ -4242,7 +4376,7 @@ const TimesheetSystem = () => {
                                 </th>
                                 <th className="px-3 py-2 text-left">Beneficiary (from payment)</th>
                                 <th className="px-3 py-2 text-right">Amount</th>
-                                {!isIntuit && <th className="px-3 py-2 text-left">Inv Ref</th>}
+                                {hasInvRefs && <th className="px-3 py-2 text-left">Inv Ref</th>}
                                 <th className="px-3 py-2 text-left">Matched Invoice</th>
                                 <th className="px-3 py-2 text-center">Status</th>
                               </tr>
@@ -4260,7 +4394,7 @@ const TimesheetSystem = () => {
                                     </td>
                                     <td className="px-3 py-2 font-medium text-gray-800">{row.beneficiary}</td>
                                     <td className="px-3 py-2 text-right font-mono text-gray-700">${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                    {!isIntuit && <td className="px-3 py-2 text-xs text-gray-500 font-mono">{row.invoiceRef}</td>}
+                                    {hasInvRefs && <td className="px-3 py-2 text-xs text-gray-500 font-mono">{row.invoiceRef || '—'}</td>}
                                     <td className="px-3 py-2 text-xs">
                                       {row.matchedInvoice
                                         ? <span className="text-gray-800">{row.matchedInvoice.invoiceNumber} <span className="text-gray-400">· {row.matchedInvoice.userName}</span></span>
@@ -4281,7 +4415,7 @@ const TimesheetSystem = () => {
                         {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
 
                         <div className="flex items-center justify-between">
-                          <button onClick={() => { setConveraRows([]); setConveraFile(null); setIntuitText(''); setConveraError(''); }} className="text-sm text-gray-500 hover:text-gray-700">← Start over</button>
+                          <button onClick={() => { setConveraRows([]); setConveraFile(null); setQbFile(null); setIntuitText(''); setConveraError(''); }} className="text-sm text-gray-500 hover:text-gray-700">← Start over</button>
                           <div className="flex items-center gap-3">
                             {selectedCount > 0 && <span className="text-sm text-gray-600">{selectedCount} selected · ${totalSelected.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
                             <button onClick={applyConveraPayments} disabled={selectedCount === 0 || !converaPaidDate || converaApplying} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm">
@@ -5797,18 +5931,21 @@ const TimesheetSystem = () => {
         )}
       </div>
 
-      {/* PDF Viewer Modal — opens attachments inline so the page doesn't re-render */}
-      {pdfViewerUrl && (
+      {/* PDF Viewer Modal — blob URL avoids X-Frame-Options cross-origin blocks */}
+      {(pdfViewerLoading || pdfViewerUrl) && (
         <div className="fixed inset-0 bg-black bg-opacity-75 flex flex-col z-[60]" onClick={() => setPdfViewerUrl(null)}>
           <div className="flex items-center justify-between px-4 py-2 bg-gray-900 text-white flex-shrink-0" onClick={e => e.stopPropagation()}>
             <span className="text-sm font-medium">Invoice Attachment</span>
             <div className="flex items-center gap-3">
-              <a href={pdfViewerUrl} download target="_blank" rel="noreferrer" className="text-xs text-indigo-300 hover:text-indigo-100 underline">Open in new tab</a>
+              {pdfViewerUrl && <a href={pdfViewerUrl} download="invoice.pdf" className="text-xs text-indigo-300 hover:text-indigo-100 underline">Download</a>}
               <button onClick={() => setPdfViewerUrl(null)} className="text-gray-400 hover:text-white"><X className="w-5 h-5" /></button>
             </div>
           </div>
-          <div className="flex-1 min-h-0" onClick={e => e.stopPropagation()}>
-            <iframe src={pdfViewerUrl} className="w-full h-full border-0" title="Invoice PDF" />
+          <div className="flex-1 min-h-0 flex items-center justify-center" onClick={e => e.stopPropagation()}>
+            {pdfViewerLoading
+              ? <div className="text-white text-sm flex items-center gap-2"><Clock className="w-5 h-5 animate-spin" /> Loading attachment…</div>
+              : <iframe src={pdfViewerUrl!} className="w-full h-full border-0" title="Invoice PDF" />
+            }
           </div>
         </div>
       )}
