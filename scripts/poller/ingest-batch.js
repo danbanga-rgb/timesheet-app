@@ -2,7 +2,7 @@
 
 // Batch invoice ingestion — two phases:
 //   Phase 1: IMAP re-scan (all emails, or since --since date)
-//   Phase 2: local PDF folder (default: ../invoice-parser/samples/)
+//   Phase 2: local PDF folder (only runs if --samples-dir is explicitly set)
 //
 // Usage:
 //   node ingest-batch.js
@@ -18,8 +18,6 @@
 //   INVOICE_INGEST_URL   (edge function URL)
 //   INGEST_SECRET
 
-require('dotenv').config();
-
 const Imap             = require('imap');
 const { simpleParser } = require('mailparser');
 const https            = require('https');
@@ -34,13 +32,13 @@ const dryRun      = args.includes('--dry-run');
 const skipImap    = args.includes('--skip-imap');
 const skipSamples = args.includes('--skip-samples');
 
-const sinceArg    = args[args.indexOf('--since') + 1];
+const sinceIdx    = args.indexOf('--since');
+const sinceArg    = sinceIdx !== -1 ? args[sinceIdx + 1] : null;
 const sinceDate   = sinceArg ? new Date(sinceArg) : null;
 
-const samplesArg  = args[args.indexOf('--samples-dir') + 1];
-const SAMPLES_DIR = samplesArg
-  ? path.resolve(samplesArg)
-  : path.resolve(__dirname, '../invoice-parser/samples');
+const samplesIdx  = args.indexOf('--samples-dir');
+const samplesArg  = samplesIdx !== -1 ? args[samplesIdx + 1] : null;
+const SAMPLES_DIR = samplesArg ? path.resolve(samplesArg) : null;
 
 const CONFIG = {
   imapUser:     process.env.IMAP_USER     || 'timesheets@mysynergie.net',
@@ -64,7 +62,7 @@ if (!skipImap && !CONFIG.imapPass) { console.error('IMAP_PASS not set (use --ski
 
 function classifyByFilename(name) {
   const n = name.toLowerCase();
-  const isInvoice   = /invoice|billing|\binv[-_]?\d|\bpaymentrequest\b/.test(n);
+  const isInvoice   = /invoice|billing|\binv\b|\bpaymentrequest\b/.test(n);
   const isTimesheet = /timesheet|timesheets?|weekly.?time|time.?sheet/.test(n);
   if (isInvoice && isTimesheet) return 'both';
   if (isInvoice)   return 'invoice';
@@ -132,6 +130,7 @@ Required JSON shape:
   "rate": number | null,
   "totalAmount": number | null,
   "currency": "USD" | "EUR" | "GBP" | "CAD" | "AUD" | "CHF" | string | null,
+  "isMultiContractor": boolean,
   "paymentDetails": {
     "iban": string | null,
     "swift": string | null,
@@ -145,6 +144,7 @@ Required JSON shape:
 }
 
 Rules:
+- isMultiContractor: set to true if the invoice lists multiple contractors/consultants with individual line items; false for a single contractor invoice.
 - periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
 - totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h" or "hrs" suffix.
 - rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols.
@@ -163,6 +163,7 @@ Rules:
   * If the document uses a routing number (US ABA), or amounts are clearly in USD with no IBAN → use MM/DD/YYYY.
   * When truly ambiguous (both components ≤ 12 and no country signal), prefer DD/MM/YYYY as most contractors are European.
   * Cross-check: these are monthly billing periods. If periodEnd is in month M, periodStart must also be in month M. If they differ wildly, you have the date format wrong — flip DD and MM and re-derive.
+- If no explicit billing period is stated but an invoice date is present, infer periodStart and periodEnd as the first and last day of that invoice date's calendar month (e.g. invoice date 09 Apr 2026 → periodStart: 2026-04-01, periodEnd: 2026-04-30).
 - parseNotes: one sentence summarising what was found and what was missing.`;
 
 async function claudeExtractInvoice(pdfBuffer, filename) {
@@ -208,6 +209,39 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
   }
 
   return parsed;
+}
+
+// ─── Period helpers ───────────────────────────────────────────────────────────
+
+const MONTH_ABBR = {
+  jan:1,january:1,feb:2,february:2,mar:3,march:3,apr:4,april:4,may:5,
+  jun:6,june:6,jul:7,july:7,aug:8,august:8,sep:9,sept:9,september:9,
+  oct:10,october:10,nov:11,november:11,dec:12,december:12,
+};
+
+function parsePeriodFromFilename(filename) {
+  const m = filename.match(
+    /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr{1,2}(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)['\s\-_](\d{2,4})\b/i
+  );
+  if (!m) return null;
+  const month = MONTH_ABBR[m[1].toLowerCase().replace(/r+/, 'r')];
+  if (!month) return null;
+  let year = parseInt(m[2], 10);
+  if (year < 100) year += 2000;
+  const lastDay = new Date(year, month, 0).getDate();
+  return {
+    periodStart: `${year}-${String(month).padStart(2, '0')}-01`,
+    periodEnd:   `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+  };
+}
+
+function clampPeriodEnd(dateStr) {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const maxDay = new Date(y, m, 0).getDate(); // day 0 of next month = last of this
+  return d > maxDay
+    ? `${String(y).padStart(4,'0')}-${String(m).padStart(2,'0')}-${String(maxDay).padStart(2,'0')}`
+    : dateStr;
 }
 
 // ─── HTTP POST to ingest-invoice ──────────────────────────────────────────────
@@ -270,8 +304,31 @@ async function processPdf(buffer, filename, messageId, contractorEmail, stats) {
     return;
   }
 
+  // Filename period fallback — if Claude couldn't find the period, try the filename
+  if (parsed && (!parsed.periodStart || !parsed.periodEnd)) {
+    const fallback = parsePeriodFromFilename(filename);
+    if (fallback) {
+      if (!parsed.periodStart) parsed.periodStart = fallback.periodStart;
+      if (!parsed.periodEnd)   parsed.periodEnd   = fallback.periodEnd;
+    }
+  }
+
+  // Clamp invalid dates (e.g. 2026-02-29 in a non-leap year)
+  if (parsed) {
+    parsed.periodEnd = clampPeriodEnd(parsed.periodEnd);
+  }
+
   const pd = parsed?.paymentDetails || {};
-  const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
+  // Block multi-contractor consolidated invoices — those belong to a different pipeline
+  if (parsed?.isMultiContractor) {
+    console.log(`     ⏭️  Multi-contractor invoice — skipped`);
+    stats.skipped++;
+    return;
+  }
+
+  // Ingest if we have the period plus either hours or a total amount
+  const canIngest = parsed?.periodStart && parsed?.periodEnd &&
+    (parsed?.totalHours != null || parsed?.totalAmount != null);
 
   console.log(`     Invoice #  : ${parsed?.invoiceNumber ?? '—'}`);
   console.log(`     Period     : ${parsed?.periodStart ?? '—'} → ${parsed?.periodEnd ?? '—'}`);
@@ -349,7 +406,7 @@ function fetchAllEmails(since) {
       imap.openBox('INBOX', true, (err) => {
         if (err) return reject(err);
 
-        const criteria = since ? ['SINCE', imapDateStr(since)] : ['ALL'];
+        const criteria = since ? [['SINCE', since]] : ['ALL'];
         imap.search(criteria, (err, uids) => {
           if (err) return reject(err);
           if (!uids || uids.length === 0) { imap.end(); return resolve([]); }
@@ -449,6 +506,8 @@ async function runImapPhase(stats) {
 // ─── Phase 2: Local samples folder ───────────────────────────────────────────
 
 async function runSamplesPhase(stats) {
+  if (!SAMPLES_DIR) return; // opt-in only via --samples-dir flag
+
   console.log('\n━━━ Phase 2: Local samples ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(`  Dir: ${SAMPLES_DIR}`);
 

@@ -388,7 +388,6 @@ serve(async (req) => {
         pay_on_date:              null,
         paid_date:                null,
         attachment_path:          null,
-        payment_method_override:  null,
         is_vendor_invoice:        false,
         vendor_manager_id:        null,
         source:                   'imported',

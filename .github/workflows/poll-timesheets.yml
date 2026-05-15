@@ -37,7 +37,7 @@ jobs:
           INGEST_URL:            ${{ secrets.INGEST_URL }}
           INGEST_SECRET:         ${{ secrets.INGEST_SECRET }}
           INVOICE_INGEST_URL:    ${{ secrets.INVOICE_INGEST_URL }}
-          INVOICE_INGEST_ENABLED: "false"
+          INVOICE_INGEST_ENABLED: "true"
           BREVO_API_KEY:         ${{ secrets.BREVO_API_KEY }}
           ANTHROPIC_API_KEY:     ${{ secrets.ANTHROPIC_API_KEY }}
           FROM_EMAIL:            timesheets@mysynergie.net

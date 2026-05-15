@@ -54,7 +54,7 @@ const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmast
 
 // Filenames that are never timesheets — filter silently so they don't appear as failures.
 // No outer \b wrappers — many patterns appear mid-word or before digits (e.g. "SOW002", "AUP.pdf").
-const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$|synergie_\d{4}_\d{2}_nt_/i;
+const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$/i;
 
 const FWD_PATTERNS = [
   /from:\s*([^<\n]*?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi,
@@ -773,7 +773,7 @@ function parseSynergiePdfText(text, filename) {
 
 function classifyByFilename(name) {
   const n = name.toLowerCase();
-  const isInvoice   = /invoice|billing|\binv[-_]?\d|\bpaymentrequest\b/.test(n);
+  const isInvoice   = /invoice|billing|\binv\b|\bpaymentrequest\b/.test(n);
   const isTimesheet = /timesheet|timesheets?|weekly.?time|time.?sheet/.test(n);
   if (isInvoice && isTimesheet) return 'both';
   if (isInvoice)   return 'invoice';
@@ -848,6 +848,7 @@ Required JSON shape:
   "rate": number | null,
   "totalAmount": number | null,
   "currency": "USD" | "EUR" | "GBP" | "CAD" | "AUD" | "CHF" | string | null,
+  "isMultiContractor": boolean,
   "paymentDetails": {
     "iban": string | null,
     "swift": string | null,
@@ -861,6 +862,7 @@ Required JSON shape:
 }
 
 Rules:
+- isMultiContractor: set to true if the invoice lists multiple contractors/consultants with individual line items; false for a single contractor invoice.
 - periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
 - totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h" or "hrs" suffix.
 - rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols.
@@ -879,6 +881,7 @@ Rules:
   * If the document uses a routing number (US ABA), or amounts are clearly in USD with no IBAN → use MM/DD/YYYY.
   * When truly ambiguous (both components ≤ 12 and no country signal), prefer DD/MM/YYYY as most contractors are European.
   * Cross-check: these are monthly billing periods. If periodEnd is in month M, periodStart must also be in month M. If they differ wildly, you have the date format wrong — flip DD and MM and re-derive.
+- If no explicit billing period is stated but an invoice date is present, infer periodStart and periodEnd as the first and last day of that invoice date's calendar month (e.g. invoice date 09 Apr 2026 → periodStart: 2026-04-01, periodEnd: 2026-04-30).
 - parseNotes: one sentence summarising what was found and what was missing.`;
 
 const CLAUDE_TIMESHEET_SYSTEM = `You are a timesheet data extractor. Extract the weekly timesheet from the document.
