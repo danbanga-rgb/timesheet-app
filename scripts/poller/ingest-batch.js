@@ -1,5 +1,7 @@
 'use strict';
 
+require('dotenv').config();
+
 // Batch invoice ingestion — two phases:
 //   Phase 1: IMAP re-scan (all emails, or since --since date)
 //   Phase 2: local PDF folder (only runs if --samples-dir is explicitly set)

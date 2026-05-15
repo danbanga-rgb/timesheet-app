@@ -8,9 +8,13 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "canvas": "^3.2.3",
+    "dotenv": "^16.0.0",
     "imap": "^0.8.19",
     "mailparser": "^3.7.1",
     "pdf-parse": "1.1.1",
+    "pdfjs-dist": "^5.7.284",
     "xlsx": "^0.18.5"
   }
 }

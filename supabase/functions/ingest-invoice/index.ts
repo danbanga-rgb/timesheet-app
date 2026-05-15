@@ -377,6 +377,67 @@ serve(async (req) => {
       isDefault:      false,
     } : null;
 
+    // ── Check for existing invoice for same user + period (re-attach case) ──
+    // If one exists with no attachment_path, just upload the PDF and return.
+    // This handles re-ingestion from samples without creating duplicates.
+    const { data: existingInvoice } = await supabase
+      .from('invoices')
+      .select('id, attachment_path')
+      .eq('user_id', userId)
+      .eq('period_start', parsedPeriodStart)
+      .eq('period_end', parsedPeriodEnd)
+      .eq('source', 'imported')
+      .maybeSingle();
+
+    if (existingInvoice) {
+      invoiceId  = existingInvoice.id;
+      actionNotes = existingInvoice.attachment_path
+        ? `Invoice already exists (id=${invoiceId}) with attachment — skipped`
+        : `Invoice already exists (id=${invoiceId}) — attaching PDF only`;
+
+      if (!existingInvoice.attachment_path && pdfBase64 && typeof pdfBase64 === 'string') {
+        const attName2 = (attachmentName as string) || '';
+        const extM2    = attName2.match(/\.([a-zA-Z0-9]+)$/);
+        const ext2     = extM2 ? extM2[1].toLowerCase() : 'pdf';
+        const mimeMap2: Record<string, string> = {
+          pdf:  'application/pdf',
+          docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          doc:  'application/msword',
+          msg:  'application/vnd.ms-outlook',
+        };
+        const sp2 = `${invoiceId}/original.${ext2}`;
+        const { error: upErr } = await supabase.storage
+          .from('invoice-attachments')
+          .upload(sp2, Uint8Array.from(atob(pdfBase64), c => c.charCodeAt(0)),
+            { contentType: mimeMap2[ext2] || 'application/octet-stream', upsert: true });
+        if (!upErr) {
+          await supabase.from('invoices').update({ attachment_path: sp2 }).eq('id', invoiceId);
+          actionNotes = `Re-attached PDF to existing invoice (id=${invoiceId})`;
+        } else {
+          actionNotes += ` | PDF upload failed: ${upErr.message}`;
+        }
+      }
+
+      await supabase.from('email_invoice_log').insert({
+        message_id:     messageId,
+        from_email:     contractorEmail,
+        subject:        subject || null,
+        attachment_name: attachmentName || null,
+        parse_status:   'duplicate',
+        parse_notes:    actionNotes,
+        user_id:        userId,
+        invoice_id:     invoiceId,
+        period_start:   parsedPeriodStart,
+        period_end:     parsedPeriodEnd,
+        attempt_count:  attemptCount,
+      });
+
+      return new Response(JSON.stringify({
+        ok: true, action: 'reattached', parseStatus: 'duplicate',
+        userId, userName, invoiceId, periodStart: parsedPeriodStart, notes: actionNotes,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     // ── Reconcile against approved timesheets ─────────────────────────────
     const recon = await reconcile(userId, parsedPeriodStart, parsedPeriodEnd, parsedHours, supabase);
 
@@ -421,18 +482,28 @@ serve(async (req) => {
     invoiceId = inserted.id;
     actionNotes = `Reconciliation: ${recon.notes}`;
 
-    // ── Upload PDF to storage ─────────────────────────────────────────────
+    // ── Upload attachment to storage ──────────────────────────────────────
     if (pdfBase64 && typeof pdfBase64 === 'string') {
       try {
-        const pdfBytes = Uint8Array.from(atob(pdfBase64), c => c.charCodeAt(0));
-        const storagePath = `${invoiceId}/original.pdf`;
+        const attBytes = Uint8Array.from(atob(pdfBase64), c => c.charCodeAt(0));
+        const attName = (attachmentName as string) || '';
+        const extMatch = attName.match(/\.([a-zA-Z0-9]+)$/);
+        const ext = extMatch ? extMatch[1].toLowerCase() : 'pdf';
+        const mimeMap: Record<string, string> = {
+          pdf:  'application/pdf',
+          docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          doc:  'application/msword',
+          msg:  'application/vnd.ms-outlook',
+        };
+        const contentType = mimeMap[ext] || 'application/octet-stream';
+        const storagePath = `${invoiceId}/original.${ext}`;
 
         const { error: uploadErr } = await supabase.storage
           .from('invoice-attachments')
-          .upload(storagePath, pdfBytes, { contentType: 'application/pdf', upsert: false });
+          .upload(storagePath, attBytes, { contentType, upsert: false });
 
         if (uploadErr) {
-          console.warn(`PDF upload failed for invoice ${invoiceId}: ${uploadErr.message}`);
+          console.warn(`Attachment upload failed for invoice ${invoiceId}: ${uploadErr.message}`);
         } else {
           await supabase
             .from('invoices')
@@ -440,7 +511,7 @@ serve(async (req) => {
             .eq('id', invoiceId);
         }
       } catch (uploadEx) {
-        console.warn(`PDF upload exception for invoice ${invoiceId}: ${String(uploadEx)}`);
+        console.warn(`Attachment upload exception for invoice ${invoiceId}: ${String(uploadEx)}`);
       }
     }
 

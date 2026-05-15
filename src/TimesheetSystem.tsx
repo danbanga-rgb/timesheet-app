@@ -4104,7 +4104,19 @@ const TimesheetSystem = () => {
                             </button>
                           </div>
                         ) : (
-                          <p className="text-sm text-gray-400 text-center py-2">No attachment provided</p>
+                          <div>
+                            <p className="text-sm text-gray-400 mb-2">No attachment on file.</p>
+                            <label className="flex items-center gap-2 cursor-pointer px-3 py-1.5 border border-dashed border-gray-300 rounded-lg hover:border-indigo-400 hover:bg-indigo-50 transition-colors w-fit">
+                              <Paperclip className="w-4 h-4 text-gray-500" />
+                              <span className="text-sm text-gray-600">{attachmentUploading ? 'Uploading…' : 'Upload PDF / DOCX'}</span>
+                              <input type="file" accept=".pdf,.doc,.docx,.msg" className="hidden"
+                                onChange={async e => {
+                                  const file = e.target.files?.[0];
+                                  if (file) await handleAttachmentUploadForExisting(inv, file);
+                                  e.target.value = '';
+                                }} />
+                            </label>
+                          </div>
                         )}
                       </div>
                     </div>
