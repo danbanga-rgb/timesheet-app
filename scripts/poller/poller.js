@@ -865,9 +865,9 @@ Rules:
 - isMultiContractor: set to true if the invoice lists multiple contractors/consultants with individual line items; false for a single contractor invoice.
 - periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
 - totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h" or "hrs" suffix.
-- rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols.
-- totalAmount: total invoice amount as a plain number. Ignore currency symbols.
-- currency: 3-letter ISO code only (USD, EUR, GBP, etc.).
+- rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols. If the invoice shows rates in multiple currencies (e.g. both EUR and USD columns), extract the USD rate.
+- totalAmount: total invoice amount as a plain number. Ignore currency symbols. If the invoice shows amounts in multiple currencies, extract the USD amount.
+- currency: 3-letter ISO code (USD, EUR, GBP, etc.). Set to the currency of the amounts you extracted — if you found USD amounts, set "USD".
 - iban: compact electronic format, NO spaces (e.g. "HR1234567890123456789" not "HR12 3456 7890").
 - swift: SWIFT/BIC code (8 or 11 chars).
 - accountNumber: bank account number if not an IBAN.
@@ -1416,6 +1416,12 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
           continue;
         }
 
+        if (isInternal(contractor)) {
+          console.warn(`  ⚠️  Extracted contractor is internal address (${contractor}) in ${emlAtt.name} — skipping`);
+          results.push({ type: 'eml', emlName: emlAtt.name, action: 'skipped_internal' });
+          continue;
+        }
+
         if (isBlockedContractor(contractor)) {
           console.log(`  ⏭️  Blocked contractor in ${emlAtt.name}: ${contractor}`);
           results.push({ type: 'skipped', reason: `blocked: ${contractor}` });
@@ -1450,6 +1456,11 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
     }
     contractor = extracted.email;
     contractorName = extracted.name;
+    if (isInternal(contractor)) {
+      console.warn(`  ⚠️  Extracted contractor is internal address (${contractor}) — skipping: ${subject}`);
+      results.push({ type: 'forward', subject, action: 'skipped_internal' });
+      return;
+    }
   } else {
     // Direct email from contractor
     contractor = fromEmail;
