@@ -538,6 +538,7 @@ const TimesheetSystem = () => {
   const [tsOnlyDropdownOpen, setTsOnlyDropdownOpen] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
+  const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);
   // Manager consolidated view
   const [managerConsolidatedRange, setManagerConsolidatedRange] = useState({ start: '', end: '' });
   const [managerAppliedRange, setManagerAppliedRange] = useState({ start: '', end: '' });
@@ -1484,22 +1485,17 @@ const TimesheetSystem = () => {
 
   const openAttachment = async (inv: Invoice) => {
     if (!inv.attachmentPath) return;
-    // Open the window synchronously (before any async work) to avoid popup-blocker
-    const win = window.open('', '_blank');
-    if (!win) { alert('Please allow popups for this site to open attachments.'); return; }
-    // Use cached URL if available
     if (attachmentSignedUrls[inv.id]) {
-      win.location.href = attachmentSignedUrls[inv.id];
+      setPdfViewerUrl(attachmentSignedUrls[inv.id]);
       return;
     }
     const { url, error } = await getAttachmentSignedUrl(inv.attachmentPath);
     if (!url) {
-      win.close();
       alert(`Could not open attachment: ${error || 'Unknown error'}\n\nPath: ${inv.attachmentPath}`);
       return;
     }
     setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: url }));
-    win.location.href = url;
+    setPdfViewerUrl(url);
   };
 
   const handleAttachmentUploadForExisting = async (inv: Invoice, file: File) => {
@@ -5800,6 +5796,22 @@ const TimesheetSystem = () => {
           </div>
         )}
       </div>
+
+      {/* PDF Viewer Modal — opens attachments inline so the page doesn't re-render */}
+      {pdfViewerUrl && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex flex-col z-[60]" onClick={() => setPdfViewerUrl(null)}>
+          <div className="flex items-center justify-between px-4 py-2 bg-gray-900 text-white flex-shrink-0" onClick={e => e.stopPropagation()}>
+            <span className="text-sm font-medium">Invoice Attachment</span>
+            <div className="flex items-center gap-3">
+              <a href={pdfViewerUrl} download target="_blank" rel="noreferrer" className="text-xs text-indigo-300 hover:text-indigo-100 underline">Open in new tab</a>
+              <button onClick={() => setPdfViewerUrl(null)} className="text-gray-400 hover:text-white"><X className="w-5 h-5" /></button>
+            </div>
+          </div>
+          <div className="flex-1 min-h-0" onClick={e => e.stopPropagation()}>
+            <iframe src={pdfViewerUrl} className="w-full h-full border-0" title="Invoice PDF" />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
