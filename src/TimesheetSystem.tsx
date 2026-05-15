@@ -185,11 +185,13 @@ interface Invoice {
 }
 
 interface ConveraPaymentRow {
-  itemNumber: string;
+  source: 'convera' | 'intuit';
+  itemNumber: string;       // OTR ref for Convera; empty for Intuit
   beneficiary: string;
   amount: number;
   currency: string;
-  invoiceRef: string;
+  invoiceRef: string;       // from "Re: Inv#" for Convera; empty for Intuit
+  suggestedDate: string;    // date from Intuit email; empty for Convera
   matchedInvoice: Invoice | null;
   selected: boolean;
 }
@@ -500,9 +502,11 @@ const TimesheetSystem = () => {
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [pendingUsdRate, setPendingUsdRate] = useState('');       // accountant-entered USD rate for non-USD imported invoices
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
-  // Convera import
+  // Payment import (Convera PDF + Intuit emails)
   const [showConveraModal, setShowConveraModal] = useState(false);
+  const [converaTab, setConveraTab] = useState<'convera' | 'intuit'>('convera');
   const [converaFile, setConveraFile] = useState<File | null>(null);
+  const [intuitText, setIntuitText] = useState('');
   const [converaRows, setConveraRows] = useState<ConveraPaymentRow[]>([]);
   const [converaParsing, setConveraParsing] = useState(false);
   const [converaApplying, setConveraApplying] = useState(false);
@@ -1537,16 +1541,80 @@ const TimesheetSystem = () => {
       const rows: ConveraPaymentRow[] = (json.payments || []).map((p: { itemNumber: string; beneficiary: string; amount: number; currency: string; invoiceRef: string }) => {
         const ref = (p.invoiceRef || '').trim();
         const match = invoices.find(inv => normaliseRef(inv.invoiceNumber) === normaliseRef(ref));
-        return { ...p, matchedInvoice: match ?? null, selected: !!match && match.status !== 'paid' };
+        return { source: 'convera' as const, suggestedDate: '', ...p, matchedInvoice: match ?? null, selected: !!match && match.status !== 'paid' };
       });
       setConveraRows(rows);
-      // Default paid date to today
       if (!converaPaidDate) setConveraPaidDate(new Date().toISOString().slice(0, 10));
     } catch (e: unknown) {
       setConveraError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setConveraParsing(false);
     }
+  };
+
+  function normaliseCompany(s: string): string {
+    return (s || '')
+      .toLowerCase()
+      .replace(/\b(inc|corp|llc|ltd|d\.?o\.?o\.?|s\.?r\.?o\.?|gmbh|co|technologies|solutions|services|agency|group|digital|labs?|tech)\b\.?/gi, '')
+      .replace(/[^a-z0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function parseIntuitDateStr(s: string): string {
+    const months: Record<string, string> = {
+      january:'01', february:'02', march:'03', april:'04', may:'05', june:'06',
+      july:'07', august:'08', september:'09', october:'10', november:'11', december:'12',
+    };
+    const m = s.match(/(\w+)\s+(\d+)/);
+    if (!m) return '';
+    const mon = months[m[1].toLowerCase()];
+    const day = m[2].padStart(2, '0');
+    if (!mon) return '';
+    return `${new Date().getFullYear()}-${mon}-${day}`;
+  }
+
+  const parseIntuitEmails = () => {
+    if (!intuitText.trim()) return;
+    setConveraError('');
+    // Each email: "payment of $X.XX to COMPANY has been scheduled. ...paid on Month Nth"
+    const pattern = /payment\s+of\s+\$([\d,]+\.?\d*)\s+to\s+(.+?)\s+has\s+been\s+scheduled[\s\S]*?paid\s+on\s+(\w+\s+\d+(?:st|nd|rd|th)?)/gi;
+    const matches = [...intuitText.matchAll(pattern)];
+    if (!matches.length) {
+      setConveraError('No payment entries found. Make sure the pasted text includes "payment of $X.XX to COMPANY has been scheduled".');
+      return;
+    }
+    const rows: ConveraPaymentRow[] = matches.map(m => {
+      const amount    = parseFloat(m[1].replace(/,/g, ''));
+      const beneficiary = m[2].trim();
+      const dateStr   = m[3].trim();
+      const suggestedDate = parseIntuitDateStr(dateStr);
+
+      // Match by: (normalised company name ≈ userName or paymentProfile.companyName) AND amount
+      const normBenef = normaliseCompany(beneficiary);
+      const match = invoices.find(inv => {
+        const invComp = normaliseCompany(inv.paymentProfile?.companyName || inv.userName);
+        const nameOk = invComp.includes(normBenef) || normBenef.includes(invComp);
+        const amtOk  = Math.abs(inv.totalAmount - amount) < 0.02;
+        return nameOk && amtOk && inv.status !== 'paid';
+      }) ?? null;
+
+      return {
+        source: 'intuit' as const,
+        itemNumber: '',
+        beneficiary,
+        amount,
+        currency: 'USD',
+        invoiceRef: '',
+        suggestedDate,
+        matchedInvoice: match,
+        selected: !!match,
+      };
+    });
+    setConveraRows(rows);
+    // Pre-populate paid date from first entry if all same
+    const dates = [...new Set(rows.map(r => r.suggestedDate).filter(Boolean))];
+    if (dates.length === 1 && !converaPaidDate) setConveraPaidDate(dates[0]);
   };
 
   const applyConveraPayments = async () => {
@@ -1557,9 +1625,10 @@ const TimesheetSystem = () => {
     let ok = 0, failed = 0;
     for (const row of selected) {
       const inv = row.matchedInvoice!;
+      const paidDate = converaPaidDate || row.suggestedDate;
       const { error } = await supabase.from('invoices').update({
         status: 'paid',
-        paid_date: converaPaidDate,
+        paid_date: paidDate,
         reviewed_at: new Date().toISOString(),
         reviewed_by: currentUser!.name,
       }).eq('id', inv.id);
@@ -1574,6 +1643,7 @@ const TimesheetSystem = () => {
       setShowConveraModal(false);
       setConveraRows([]);
       setConveraFile(null);
+      setIntuitText('');
       setConveraError('');
     }
   };
@@ -4071,20 +4141,28 @@ const TimesheetSystem = () => {
             );
           })()}
 
-          {/* Convera Import Modal */}
+          {/* Payment Import Modal — Convera PDF + Intuit Emails */}
           {showConveraModal && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => { if (!converaParsing && !converaApplying) setShowConveraModal(false); }}>
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => { if (!converaParsing && !converaApplying) { setShowConveraModal(false); setConveraRows([]); setConveraFile(null); setIntuitText(''); setConveraError(''); } }}>
               <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                 <div className="p-6">
-                  <div className="flex items-center justify-between mb-5">
-                    <h2 className="text-xl font-bold text-gray-900">Import Convera Payment Confirmation</h2>
-                    <button onClick={() => setShowConveraModal(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-xl font-bold text-gray-900">Import Payments</h2>
+                    <button onClick={() => { setShowConveraModal(false); setConveraRows([]); setConveraFile(null); setIntuitText(''); setConveraError(''); }} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
                   </div>
 
-                  {/* Step 1: File upload */}
+                  {/* Source tabs */}
                   {converaRows.length === 0 && (
+                    <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-5 w-fit">
+                      <button onClick={() => { setConveraTab('convera'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'convera' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera PDF</button>
+                      <button onClick={() => { setConveraTab('intuit'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>QuickBooks / Intuit</button>
+                    </div>
+                  )}
+
+                  {/* Step 1A: Convera PDF upload */}
+                  {converaRows.length === 0 && converaTab === 'convera' && (
                     <div>
-                      <p className="text-sm text-gray-600 mb-4">Upload the Convera outgoing payment confirmation PDF. The system will extract each payment line and match it to an invoice by reference number.</p>
+                      <p className="text-sm text-gray-600 mb-4">Upload the Convera outgoing payment confirmation PDF. Each payment is matched to an invoice by reference number (Re: Inv#).</p>
                       <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
                         {converaFile ? (
                           <div className="flex items-center justify-center gap-2 text-indigo-700">
@@ -4102,42 +4180,58 @@ const TimesheetSystem = () => {
                       </div>
                       {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
                       <div className="flex justify-end">
-                        <button
-                          onClick={parseConveraPdf}
-                          disabled={!converaFile || converaParsing}
-                          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm"
-                        >
+                        <button onClick={parseConveraPdf} disabled={!converaFile || converaParsing} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
                           {converaParsing ? <><Clock className="w-4 h-4 animate-spin" /> Parsing…</> : <><FileText className="w-4 h-4" /> Parse PDF</>}
                         </button>
                       </div>
                     </div>
                   )}
 
-                  {/* Step 2: Review and apply */}
+                  {/* Step 1B: Intuit email paste */}
+                  {converaRows.length === 0 && converaTab === 'intuit' && (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-1">Paste one or more QuickBooks payment confirmation emails below. Payments are matched by company name and amount.</p>
+                      <p className="text-xs text-gray-400 mb-3">Each email must include: <em>"payment of $X to COMPANY has been scheduled…paid on Month Nth"</em></p>
+                      <textarea
+                        value={intuitText}
+                        onChange={e => setIntuitText(e.target.value)}
+                        rows={10}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-400 font-mono resize-y"
+                        placeholder="Paste QuickBooks payment emails here…"
+                      />
+                      {converaError && <p className="text-red-600 text-sm mt-2 mb-1">{converaError}</p>}
+                      <div className="flex justify-end mt-3">
+                        <button onClick={parseIntuitEmails} disabled={!intuitText.trim()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                          <FileText className="w-4 h-4" /> Parse Emails
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Step 2: Review and apply (shared for both sources) */}
                   {converaRows.length > 0 && (() => {
-                    const matched   = converaRows.filter(r => r.matchedInvoice);
-                    const alreadyPaid = converaRows.filter(r => r.matchedInvoice?.status === 'paid');
-                    const unmatched = converaRows.filter(r => !r.matchedInvoice);
+                    const matched      = converaRows.filter(r => r.matchedInvoice);
+                    const alreadyPaid  = converaRows.filter(r => r.matchedInvoice?.status === 'paid');
+                    const unmatched    = converaRows.filter(r => !r.matchedInvoice);
                     const selectedCount = converaRows.filter(r => r.selected).length;
                     const totalSelected = converaRows.filter(r => r.selected).reduce((s, r) => s + r.amount, 0);
+                    const isIntuit     = converaRows[0]?.source === 'intuit';
+                    const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-600', submitted: 'bg-yellow-100 text-yellow-700', approved: 'bg-green-100 text-green-700', rejected: 'bg-red-100 text-red-700', paid: 'bg-blue-100 text-blue-700' };
                     return (
                       <div>
-                        {/* Summary pills */}
                         <div className="flex flex-wrap gap-2 mb-4">
-                          <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">{converaRows.length} payments in PDF</span>
+                          <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">{converaRows.length} payments</span>
                           <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">{matched.length} matched</span>
                           {alreadyPaid.length > 0 && <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">{alreadyPaid.length} already paid</span>}
-                          {unmatched.length > 0 && <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">{unmatched.length} unmatched</span>}
+                          {unmatched.length > 0 && <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">{unmatched.length} no match</span>}
                         </div>
 
-                        {/* Payment date */}
                         <div className="flex items-center gap-3 mb-4">
                           <label className="text-sm font-medium text-gray-700 whitespace-nowrap">Payment date:</label>
                           <input type="date" value={converaPaidDate} onChange={e => setConveraPaidDate(e.target.value)} className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-400" />
-                          <span className="text-xs text-gray-400">Applied to all selected invoices</span>
+                          {isIntuit && <span className="text-xs text-gray-400">Pre-filled from email</span>}
                         </div>
 
-                        {/* Table */}
                         <div className="overflow-x-auto rounded-lg border border-gray-200 mb-4">
                           <table className="w-full text-sm border-collapse">
                             <thead className="bg-gray-50 text-gray-600">
@@ -4150,10 +4244,9 @@ const TimesheetSystem = () => {
                                     ))}
                                   />
                                 </th>
-                                <th className="px-3 py-2 text-left">Item</th>
-                                <th className="px-3 py-2 text-left">Beneficiary</th>
+                                <th className="px-3 py-2 text-left">Beneficiary (from payment)</th>
                                 <th className="px-3 py-2 text-right">Amount</th>
-                                <th className="px-3 py-2 text-left">Inv Ref (PDF)</th>
+                                {!isIntuit && <th className="px-3 py-2 text-left">Inv Ref</th>}
                                 <th className="px-3 py-2 text-left">Matched Invoice</th>
                                 <th className="px-3 py-2 text-center">Status</th>
                               </tr>
@@ -4162,31 +4255,25 @@ const TimesheetSystem = () => {
                               {converaRows.map((row, idx) => {
                                 const isPaid = row.matchedInvoice?.status === 'paid';
                                 const rowBg = !row.matchedInvoice ? 'bg-red-50' : isPaid ? 'bg-blue-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50';
-                                const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-600', submitted: 'bg-yellow-100 text-yellow-700', approved: 'bg-green-100 text-green-700', rejected: 'bg-red-100 text-red-700', paid: 'bg-blue-100 text-blue-700' };
                                 return (
                                   <tr key={idx} className={rowBg}>
                                     <td className="px-3 py-2 text-center">
-                                      {row.matchedInvoice && !isPaid ? (
-                                        <input type="checkbox" checked={row.selected}
-                                          onChange={e => setConveraRows(prev => prev.map((r, i) => i === idx ? { ...r, selected: e.target.checked } : r))}
-                                        />
-                                      ) : <span className="text-gray-300">—</span>}
+                                      {row.matchedInvoice && !isPaid
+                                        ? <input type="checkbox" checked={row.selected} onChange={e => setConveraRows(prev => prev.map((r, i) => i === idx ? { ...r, selected: e.target.checked } : r))} />
+                                        : <span className="text-gray-300">—</span>}
                                     </td>
-                                    <td className="px-3 py-2 text-xs text-gray-500 font-mono">{row.itemNumber}</td>
                                     <td className="px-3 py-2 font-medium text-gray-800">{row.beneficiary}</td>
                                     <td className="px-3 py-2 text-right font-mono text-gray-700">${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                    <td className="px-3 py-2 text-xs text-gray-600 font-mono">{row.invoiceRef}</td>
+                                    {!isIntuit && <td className="px-3 py-2 text-xs text-gray-500 font-mono">{row.invoiceRef}</td>}
                                     <td className="px-3 py-2 text-xs">
                                       {row.matchedInvoice
                                         ? <span className="text-gray-800">{row.matchedInvoice.invoiceNumber} <span className="text-gray-400">· {row.matchedInvoice.userName}</span></span>
-                                        : <span className="text-red-500">No match</span>
-                                      }
+                                        : <span className="text-red-500 italic">No match</span>}
                                     </td>
                                     <td className="px-3 py-2 text-center">
                                       {row.matchedInvoice
                                         ? <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[row.matchedInvoice.status] || ''}`}>{row.matchedInvoice.status}</span>
-                                        : <span className="text-gray-300 text-xs">—</span>
-                                      }
+                                        : <span className="text-gray-300 text-xs">—</span>}
                                     </td>
                                   </tr>
                                 );
@@ -4197,18 +4284,11 @@ const TimesheetSystem = () => {
 
                         {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
 
-                        {/* Actions */}
                         <div className="flex items-center justify-between">
-                          <button onClick={() => { setConveraRows([]); setConveraFile(null); setConveraError(''); }} className="text-sm text-gray-500 hover:text-gray-700">← Upload different file</button>
+                          <button onClick={() => { setConveraRows([]); setConveraFile(null); setIntuitText(''); setConveraError(''); }} className="text-sm text-gray-500 hover:text-gray-700">← Start over</button>
                           <div className="flex items-center gap-3">
-                            {selectedCount > 0 && (
-                              <span className="text-sm text-gray-600">{selectedCount} selected · ${totalSelected.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                            )}
-                            <button
-                              onClick={applyConveraPayments}
-                              disabled={selectedCount === 0 || !converaPaidDate || converaApplying}
-                              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
-                            >
+                            {selectedCount > 0 && <span className="text-sm text-gray-600">{selectedCount} selected · ${totalSelected.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
+                            <button onClick={applyConveraPayments} disabled={selectedCount === 0 || !converaPaidDate || converaApplying} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm">
                               {converaApplying ? <><Clock className="w-4 h-4 animate-spin" /> Applying…</> : <><CheckCircle className="w-4 h-4" /> Mark {selectedCount} as Paid</>}
                             </button>
                           </div>

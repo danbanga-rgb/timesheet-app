@@ -1,7 +1,7 @@
 // Supabase Edge Function: parse-convera
 //
-// Accepts a Convera outgoing payment confirmation PDF, calls Claude Haiku
-// to extract individual payment line items, and returns structured JSON.
+// Accepts a Convera outgoing payment confirmation PDF, extracts text with
+// pdf-parse, then regex-parses each OTR payment block. No Claude/AI calls.
 //
 // Auth: user JWT (Authorization: Bearer <token>), role must be accountant or admin.
 //
@@ -16,20 +16,77 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// ─── Convera text parser ──────────────────────────────────────────────────────
+
+interface Payment {
+  itemNumber: string;
+  beneficiary: string;
+  amount: number;
+  currency: string;
+  invoiceRef: string;
+}
+
+function parseConveraText(text: string): Payment[] {
+  const payments: Payment[] = [];
+
+  // Split into per-payment blocks on OTR item references (e.g. OTR6575131-1)
+  // The regex matches OTR followed by digits, a separator, and more digits.
+  const otrRe = /OTR\d+[-–]\d+/g;
+  const otrMatches = [...text.matchAll(otrRe)];
+
+  for (let i = 0; i < otrMatches.length; i++) {
+    const otrRef   = otrMatches[i][0];
+    const start    = otrMatches[i].index ?? 0;
+    const end      = i + 1 < otrMatches.length ? (otrMatches[i + 1].index ?? text.length) : text.length;
+    const block    = text.slice(start, end);
+
+    // Amount: "$1,234.56 USD" or "USD 1,234.56" or plain "1,234.56"
+    const amountMatch = block.match(/\$\s*([\d,]+\.?\d*)\s*(USD|EUR)/i)
+                     ?? block.match(/(USD|EUR)\s*([\d,]+\.?\d*)/i);
+    let amount   = 0;
+    let currency = 'USD';
+    if (amountMatch) {
+      const rawNum = amountMatch[1].startsWith('$') ? amountMatch[2] : amountMatch[1].includes(',') ? amountMatch[1] : amountMatch[2] ?? amountMatch[1];
+      amount   = parseFloat((rawNum ?? amountMatch[1]).replace(/,/g, ''));
+      currency = (amountMatch[2] ?? amountMatch[1]).toUpperCase() === 'EUR' ? 'EUR' : 'USD';
+    }
+
+    // Invoice ref: "Re: Inv# XXX" or "Invoice: XXX" or "Re: XXX"
+    const invRefMatch = block.match(/Re:\s*(?:Inv#?\s*)?([A-Za-z0-9][\w\-\/\.]+)/i)
+                     ?? block.match(/Invoice[:\s#]+([A-Za-z0-9][\w\-\/\.]+)/i);
+    const invoiceRef = invRefMatch?.[1]?.trim() ?? '';
+
+    // Beneficiary: first substantial line in the block after the OTR reference line
+    const lines = block.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 1);
+    const otrLineIdx = lines.findIndex(l => l.includes(otrRef));
+    let beneficiary = '';
+    for (let j = otrLineIdx + 1; j < lines.length; j++) {
+      const line = lines[j];
+      // Skip lines that look like addresses, account numbers, SWIFTs, amounts, or "Re:"
+      if (/^[A-Z]{2}\d{6,}/.test(line)) continue;       // IBAN-like
+      if (/^[A-Z]{8,11}$/.test(line)) continue;          // SWIFT-like
+      if (/\$|USD|EUR|\d{4,}/.test(line)) continue;      // amount/account line
+      if (/^Re:|^Invoice|^Payment|^Item/.test(line)) break;
+      if (line.length > 2 && /[a-zA-Z]/.test(line)) { beneficiary = line; break; }
+    }
+
+    if (invoiceRef || amount > 0) {
+      payments.push({ itemNumber: otrRef, beneficiary, amount, currency, invoiceRef });
+    }
+  }
+
+  return payments;
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  const supabaseUrl  = Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceKey   = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-  const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
-
-  if (!anthropicKey) {
-    return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY not configured in edge function secrets' }), {
-      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
-  }
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+  const serviceKey  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
   // Verify JWT and role
   const authHeader = req.headers.get('Authorization') ?? '';
@@ -50,13 +107,13 @@ serve(async (req) => {
 
   const { data: profile } = await admin.from('profiles').select('role').eq('id', user.id).single();
   if (!['accountant', 'admin'].includes(profile?.role ?? '')) {
-    return new Response(JSON.stringify({ error: 'Forbidden: accountant or admin role required' }), {
+    return new Response(JSON.stringify({ error: 'Forbidden' }), {
       status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 
-  // Extract PDF bytes from multipart form data
-  let pdfBase64: string;
+  // Extract PDF bytes
+  let pdfBytes: Uint8Array;
   try {
     const form = await req.formData();
     const file = form.get('pdf') as File | null;
@@ -65,70 +122,39 @@ serve(async (req) => {
         status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    pdfBase64 = btoa(binary);
+    pdfBytes = new Uint8Array(await file.arrayBuffer());
   } catch (e) {
     return new Response(JSON.stringify({ error: `Failed to read PDF: ${e}` }), {
       status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 
-  // Call Claude Haiku with the PDF as a native document
-  const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': anthropicKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 3000,
-      system: `You are a payment confirmation parser. Extract every individual payment line item from this Convera outgoing payment confirmation PDF.
-
-For each payment entry extract:
-- itemNumber: the OTR item reference (e.g. "OTR6575131-1")
-- beneficiary: the recipient/contractor name exactly as shown
-- amount: the payment amount as a plain number (no currency symbol, no commas, e.g. 2500.00)
-- currency: currency code (e.g. "USD")
-- invoiceRef: the invoice reference from the "Re:" or "Inv#" field — extract ONLY the invoice number/code, stripping prefixes like "Inv#", "Invoice", "Re:", "Invoice Number:", etc. Preserve the exact number/code including slashes, hyphens, and alphanumeric characters.
-
-Return ONLY a valid JSON array — no markdown fences, no explanation, nothing else:
-[{"itemNumber":"OTR...","beneficiary":"Name","amount":1234.56,"currency":"USD","invoiceRef":"2025-001"}]`,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 },
-          },
-          { type: 'text', text: 'Extract all payment line items from this Convera payment confirmation PDF.' },
-        ],
-      }],
-    }),
-  });
-
-  if (!claudeResp.ok) {
-    const errText = await claudeResp.text();
-    return new Response(JSON.stringify({ error: `Claude API error: ${errText}` }), {
+  // Extract text with pdf-parse (import the lib file directly to avoid fs test loading)
+  let extractedText = '';
+  try {
+    // @ts-ignore — npm compat
+    const pdfParse = (await import('npm:pdf-parse/lib/pdf-parse.js')).default;
+    const result = await pdfParse(pdfBytes);
+    extractedText = result.text ?? '';
+  } catch (e) {
+    return new Response(JSON.stringify({ error: `PDF text extraction failed: ${e}. Try pasting text instead.` }), {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 
-  const claude = await claudeResp.json();
-  const raw = (claude.content?.[0]?.text ?? '').trim();
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-
-  let payments: unknown[];
-  try {
-    payments = JSON.parse(cleaned);
-    if (!Array.isArray(payments)) throw new Error('Not an array');
-  } catch {
-    return new Response(JSON.stringify({ error: 'Claude returned unparseable JSON', raw }), {
-      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  if (extractedText.trim().length < 50) {
+    return new Response(JSON.stringify({ error: 'Could not extract text from PDF (possibly a scanned image). Try pasting the text manually.' }), {
+      status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
+  }
+
+  const payments = parseConveraText(extractedText);
+
+  if (payments.length === 0) {
+    return new Response(JSON.stringify({
+      error: 'No OTR payment entries found. Make sure this is a Convera outgoing payment confirmation.',
+      extractedTextPreview: extractedText.slice(0, 500),
+    }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 
   return new Response(JSON.stringify({ payments }), {
