@@ -541,8 +541,6 @@ const TimesheetSystem = () => {
   const [tsOnlyDropdownOpen, setTsOnlyDropdownOpen] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
-  const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null);   // blob: URL
-  const [pdfViewerLoading, setPdfViewerLoading] = useState(false);
   // Manager consolidated view
   const [managerConsolidatedRange, setManagerConsolidatedRange] = useState({ start: '', end: '' });
   const [managerAppliedRange, setManagerAppliedRange] = useState({ start: '', end: '' });
@@ -1493,38 +1491,18 @@ const TimesheetSystem = () => {
   };
 
   const openAttachment = async (inv: Invoice) => {
-    console.log('[openAttachment] called, attachmentPath:', inv.attachmentPath, 'cached:', !!attachmentSignedUrls[inv.id]);
     if (!inv.attachmentPath) return;
+    // Use cached blob URL if available (avoids re-fetching)
     if (attachmentSignedUrls[inv.id]) {
-      console.log('[openAttachment] using cached URL');
-      setPdfViewerUrl(attachmentSignedUrls[inv.id]);
+      window.open(attachmentSignedUrls[inv.id], '_blank', 'noopener');
       return;
     }
-    console.log('[openAttachment] fetching signed URL…');
-    setPdfViewerLoading(true);
-    setPdfViewerUrl(null);
-    try {
-      const { url: signedUrl, error } = await getAttachmentSignedUrl(inv.attachmentPath);
-      console.log('[openAttachment] signedUrl:', signedUrl, 'error:', error);
-      if (!signedUrl) {
-        alert(`Could not open attachment: ${error || 'Unknown error'}\n\nPath: ${inv.attachmentPath}`);
-        return;
-      }
-      console.log('[openAttachment] fetching blob…');
-      const resp = await fetch(signedUrl);
-      console.log('[openAttachment] fetch status:', resp.status, resp.ok);
-      if (!resp.ok) { alert(`Could not download attachment (${resp.status})`); return; }
-      const blob = await resp.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      console.log('[openAttachment] blob URL created, showing viewer');
-      setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: blobUrl }));
-      setPdfViewerUrl(blobUrl);
-    } catch (e) {
-      console.error('[openAttachment] error:', e);
-      alert('Error opening attachment: ' + e);
-    } finally {
-      setPdfViewerLoading(false);
-    }
+    const { url: signedUrl, error } = await getAttachmentSignedUrl(inv.attachmentPath);
+    if (!signedUrl) { alert(`Could not open attachment: ${error || 'Unknown error'}`); return; }
+    // Open the signed URL directly — it's a short-lived HTTPS URL that the browser
+    // can display natively. No blob fetch needed; re-render is prevented by loadedUserIdRef.
+    setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: signedUrl }));
+    window.open(signedUrl, '_blank', 'noopener');
   };
 
   const handleAttachmentUploadForExisting = async (inv: Invoice, file: File) => {
@@ -5945,29 +5923,6 @@ const TimesheetSystem = () => {
         )}
       </div>
 
-      {/* PDF Viewer Modal — blob URL avoids X-Frame-Options cross-origin blocks */}
-      {(pdfViewerLoading || pdfViewerUrl) && (
-        <div className="fixed inset-0 bg-black bg-opacity-75 flex flex-col z-[60]" onClick={() => setPdfViewerUrl(null)}>
-          <div className="flex items-center justify-between px-4 py-2 bg-gray-900 text-white flex-shrink-0" onClick={e => e.stopPropagation()}>
-            <span className="text-sm font-medium">Invoice Attachment</span>
-            <div className="flex items-center gap-3">
-              {pdfViewerUrl && <a href={pdfViewerUrl} download={`Inv# ${selectedInvoice?.invoiceNumber || 'attachment'}.pdf`} className="text-xs text-indigo-300 hover:text-indigo-100 underline">Download</a>}
-              <button onClick={() => setPdfViewerUrl(null)} className="text-gray-400 hover:text-white"><X className="w-5 h-5" /></button>
-            </div>
-          </div>
-          <div className="flex-1 min-h-0 flex items-center justify-center" onClick={e => e.stopPropagation()}>
-            {pdfViewerLoading
-              ? <div className="text-white text-sm flex items-center gap-2"><Clock className="w-5 h-5 animate-spin" /> Loading attachment…</div>
-              : (
-                // <object> keeps PDFs inline; <iframe> lets Chrome hijack to a new tab
-                <object data={pdfViewerUrl!} type="application/pdf" className="w-full h-full">
-                  <embed src={pdfViewerUrl!} type="application/pdf" className="w-full h-full" />
-                </object>
-              )
-            }
-          </div>
-        </div>
-      )}
     </div>
   );
 };
