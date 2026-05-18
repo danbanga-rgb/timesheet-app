@@ -65,6 +65,28 @@ async function processFile(filePath, dumpText, noClaude) {
           result = await extractFromText(pdfText);
           method = 'claude-text';
 
+          // Override EUR→USD when invoice has both currencies but Claude picked EUR.
+          // Croatian/Bosnian templates list EUR prominently in the footer; the USD rate
+          // is the billing currency and appears as "N USD per h" in the line item.
+          if (result.currency === 'EUR') {
+            const usdRateM = pdfText.match(/(\d+(?:[.,]\d+)?)\s*USD\s*per\s*h/i);
+            if (usdRateM) {
+              const usdRate = parseFloat(usdRateM[1].replace(',', '.'));
+              const usdTotalM = pdfText.match(/T\s*O\s*T\s*A\s*L\s*:?\s*\(?USD\)?\s*[:\s]*([\d.,]+)\s*USD/i)
+                             || pdfText.match(/([\d.,]+)USD/i);
+              let usdTotal = null;
+              if (usdTotalM) {
+                const raw = usdTotalM[1].trim();
+                usdTotal = /^\d{1,3}(?:\.\d{3})*,\d{2}$/.test(raw)
+                  ? parseFloat(raw.replace(/\./g, '').replace(',', '.'))
+                  : parseFloat(raw.replace(/,/g, ''));
+              }
+              result.rate     = usdRate;
+              result.currency = 'USD';
+              if (usdTotal && usdTotal > usdRate) result.totalAmount = usdTotal;
+            }
+          }
+
           if (dumpText) {
             console.log(`\n${'═'.repeat(80)}`);
             console.log(`FILE: ${filename}  [${method}]`);

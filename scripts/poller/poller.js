@@ -1019,6 +1019,34 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
       parsed.paymentDetails.iban = parsed.paymentDetails.iban.replace(/\s+/g, '').toUpperCase();
     }
 
+    // Override EUR→USD when invoice shows both currencies but Claude picked EUR.
+    // Croatian/Bosnian invoice templates list the EUR equivalent prominently in the footer,
+    // which fools Claude. If we find an explicit "N USD per h" rate in the PDF text, use it.
+    if (parsed.currency === 'EUR') {
+      try {
+        const pdfParse = require('pdf-parse');
+        const { text } = await pdfParse(pdfBuffer);
+        const usdRateM = text.match(/(\d+(?:[.,]\d+)?)\s*USD\s*per\s*h/i);
+        if (usdRateM) {
+          const usdRate = parseFloat(usdRateM[1].replace(',', '.'));
+          // "T O T A L : (USD): 6.160,00 USD" or "6.160,00USD"
+          const usdTotalM = text.match(/T\s*O\s*T\s*A\s*L\s*:?\s*\(?USD\)?\s*[:\s]*([\d.,]+)\s*USD/i)
+                         || text.match(/([\d.,]+)USD/i);
+          let usdTotal = null;
+          if (usdTotalM) {
+            const raw = usdTotalM[1].trim();
+            // Handle European thousands-separator: "6.160,00" → 6160
+            usdTotal = /^\d{1,3}(?:\.\d{3})*,\d{2}$/.test(raw)
+              ? parseFloat(raw.replace(/\./g, '').replace(',', '.'))
+              : parseFloat(raw.replace(/,/g, ''));
+          }
+          parsed.rate        = usdRate;
+          parsed.currency    = 'USD';
+          if (usdTotal && usdTotal > usdRate) parsed.totalAmount = usdTotal;
+        }
+      } catch (_) {}
+    }
+
     return parsed;
   } catch (e) {
     console.warn(`  Claude invoice extraction failed for ${filename}: ${e.message}`);
