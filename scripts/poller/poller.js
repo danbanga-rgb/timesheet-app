@@ -908,10 +908,12 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
 
-    // Prefer sending the raw PDF (handles both text and image PDFs);
-    // fall back to plain text if buffer unavailable.
+    // Prefer plain text (much cheaper) when available; fall back to PDF document
+    // block only for image PDFs where no text could be extracted.
     let userContent;
-    if (pdfBuffer) {
+    if (textContent) {
+      userContent = `Extract the weekly timesheet data:\n\n${textContent}`;
+    } else if (pdfBuffer) {
       userContent = [
         {
           type: 'document',
@@ -920,7 +922,7 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
         { type: 'text', text: 'Extract the weekly timesheet data from this document.' },
       ];
     } else {
-      userContent = `Extract the weekly timesheet data:\n\n${textContent}`;
+      return null; // nothing to send
     }
 
     const response = await client.messages.create({
@@ -1027,20 +1029,38 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
   try {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
+
+    // Try cheap text extraction first; only send the raw PDF if text isn't available
+    // (image PDFs). This mirrors run.js and avoids the much more expensive document token cost.
+    let userContent;
+    let pdfText = '';
+    try {
+      const pdfParse = require('pdf-parse');
+      const data = await pdfParse(pdfBuffer);
+      const wordChars = (data.text?.match(/[a-zA-Z0-9]/g) || []).length;
+      if (wordChars > 30) {
+        pdfText = data.text;
+        userContent = `Extract invoice data from this document:\n\n${pdfText}`;
+      }
+    } catch (_) {}
+
+    if (!userContent) {
+      // Image PDF — fall back to sending the full PDF as a document block (more expensive)
+      console.log(`  📄 ${filename}: no extractable text — using PDF vision (costs more)`);
+      userContent = [
+        {
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') },
+        },
+        { type: 'text', text: 'Extract invoice data from this document.' },
+      ];
+    }
+
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
       system: CLAUDE_INVOICE_SYSTEM,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') },
-          },
-          { type: 'text', text: 'Extract invoice data from this document.' },
-        ],
-      }],
+      messages: [{ role: 'user', content: userContent }],
     });
     const raw = (response.content[0]?.text ?? '').trim();
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -1068,30 +1088,26 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
 
     // Override EUR→USD when invoice shows both currencies but Claude picked EUR.
     // Croatian/Bosnian invoice templates list the EUR equivalent prominently in the footer,
-    // which fools Claude. If we find an explicit "N USD per h" rate in the PDF text, use it.
-    if (parsed.currency === 'EUR') {
-      try {
-        const pdfParse = require('pdf-parse');
-        const { text } = await pdfParse(pdfBuffer);
-        const usdRateM = text.match(/(\d+(?:[.,]\d+)?)\s*USD\s*per\s*h/i);
-        if (usdRateM) {
-          const usdRate = parseFloat(usdRateM[1].replace(',', '.'));
-          // "T O T A L : (USD): 6.160,00 USD" or "6.160,00USD"
-          const usdTotalM = text.match(/T\s*O\s*T\s*A\s*L\s*:?\s*\(?USD\)?\s*[:\s]*([\d.,]+)\s*USD/i)
-                         || text.match(/([\d.,]+)USD/i);
-          let usdTotal = null;
-          if (usdTotalM) {
-            const raw = usdTotalM[1].trim();
-            // Handle European thousands-separator: "6.160,00" → 6160
-            usdTotal = /^\d{1,3}(?:\.\d{3})*,\d{2}$/.test(raw)
-              ? parseFloat(raw.replace(/\./g, '').replace(',', '.'))
-              : parseFloat(raw.replace(/,/g, ''));
-          }
-          parsed.rate        = usdRate;
-          parsed.currency    = 'USD';
-          if (usdTotal && usdTotal > usdRate) parsed.totalAmount = usdTotal;
+    // which fools Claude. Reuse pdfText already extracted above (no second pdf-parse call).
+    if (parsed.currency === 'EUR' && pdfText) {
+      const usdRateM = pdfText.match(/(\d+(?:[.,]\d+)?)\s*USD\s*per\s*h/i);
+      if (usdRateM) {
+        const usdRate = parseFloat(usdRateM[1].replace(',', '.'));
+        // "T O T A L : (USD): 6.160,00 USD" or "6.160,00USD"
+        const usdTotalM = pdfText.match(/T\s*O\s*T\s*A\s*L\s*:?\s*\(?USD\)?\s*[:\s]*([\d.,]+)\s*USD/i)
+                       || pdfText.match(/([\d.,]+)USD/i);
+        let usdTotal = null;
+        if (usdTotalM) {
+          const raw = usdTotalM[1].trim();
+          // Handle European thousands-separator: "6.160,00" → 6160
+          usdTotal = /^\d{1,3}(?:\.\d{3})*,\d{2}$/.test(raw)
+            ? parseFloat(raw.replace(/\./g, '').replace(',', '.'))
+            : parseFloat(raw.replace(/,/g, ''));
         }
-      } catch (_) {}
+        parsed.rate        = usdRate;
+        parsed.currency    = 'USD';
+        if (usdTotal && usdTotal > usdRate) parsed.totalAmount = usdTotal;
+      }
     }
 
     // Rate cross-validation: if rate × hours is off from totalAmount by >10%, the rate
