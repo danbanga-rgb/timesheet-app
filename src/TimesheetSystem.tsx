@@ -331,6 +331,7 @@ function reconcileInvoiceLive(
 
 const TimesheetSystem = () => {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const loadedUserIdRef = useRef<string | null>(null); // guard against duplicate SIGNED_IN from gotrue lock recovery
   const [loading, setLoading] = useState(true);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -579,8 +580,13 @@ const TimesheetSystem = () => {
         setLoading(false);
       } else if (event === 'SIGNED_IN' && session?.user) {
         if (passwordResetMode) return; // don't redirect while resetting password
+        // Guard: gotrue-js can re-fire SIGNED_IN after lock recovery (React StrictMode / tab focus).
+        // Skip if we already have data loaded for this user.
+        if (session.user.id === loadedUserIdRef.current) return;
+        loadedUserIdRef.current = session.user.id;
         await loadProfileAndData(session.user.id);
       } else if (event === 'SIGNED_OUT') {
+        loadedUserIdRef.current = null;
         setCurrentUser(null);
         setPasswordResetMode(false);
         setUsers([]);
@@ -5944,7 +5950,12 @@ const TimesheetSystem = () => {
           <div className="flex-1 min-h-0 flex items-center justify-center" onClick={e => e.stopPropagation()}>
             {pdfViewerLoading
               ? <div className="text-white text-sm flex items-center gap-2"><Clock className="w-5 h-5 animate-spin" /> Loading attachment…</div>
-              : <iframe src={pdfViewerUrl!} className="w-full h-full border-0" title="Invoice PDF" />
+              : (
+                // <object> keeps PDFs inline; <iframe> lets Chrome hijack to a new tab
+                <object data={pdfViewerUrl!} type="application/pdf" className="w-full h-full">
+                  <embed src={pdfViewerUrl!} type="application/pdf" className="w-full h-full" />
+                </object>
+              )
             }
           </div>
         </div>
