@@ -973,6 +973,53 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
   }
 }
 
+// ─── Filename period fallback (same logic as invoice-parser/run.js) ──────────
+
+const INVOICE_MONTH_ABBR = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+  apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+  aug: 8, august: 8, sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+};
+
+function parsePeriodFromFilename(filename) {
+  const m = filename.match(
+    /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr{1,2}(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)['\s\-_](\d{2,4})\b/i
+  );
+  if (!m) return null;
+  const month = INVOICE_MONTH_ABBR[m[1].toLowerCase().replace(/r+/, 'r')];
+  if (!month) return null;
+  let year = parseInt(m[2], 10);
+  if (year < 100) year += 2000;
+  const lastDay = new Date(year, month, 0).getDate();
+  return {
+    periodStart: `${year}-${String(month).padStart(2, '0')}-01`,
+    periodEnd:   `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+  };
+}
+
+function applyFilenamePeriodFallback(parsed, filename) {
+  const { periodStart, periodEnd } = parsed;
+  const fallback = parsePeriodFromFilename(filename);
+
+  if (periodStart && periodEnd) {
+    const span = (new Date(periodEnd) - new Date(periodStart)) / 86400000;
+    const plausible = span >= 5 && span <= 45;
+    if (plausible && fallback) {
+      // If Claude extracted a plausible span but the filename names a different month,
+      // the filename wins — Claude commonly picks up the invoice date instead of billing period.
+      const extractedYM = periodStart.slice(0, 7);
+      const filenameYM  = fallback.periodStart.slice(0, 7);
+      if (extractedYM === filenameYM) return parsed; // agree — trust Claude
+      return { ...parsed, periodStart: fallback.periodStart, periodEnd: fallback.periodEnd };
+    }
+    if (plausible) return parsed;
+  }
+
+  if (!fallback) return parsed;
+  return { ...parsed, periodStart: fallback.periodStart, periodEnd: fallback.periodEnd };
+}
+
 // ─── Invoice extractor ────────────────────────────────────────────────────────
 
 async function claudeExtractInvoice(pdfBuffer, filename) {
@@ -1059,7 +1106,11 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
       if (derived >= 1 && derived < 10000) parsed.rate = Math.round(derived * 100) / 100;
     }
 
-    return parsed;
+    // Filename period fallback: if the attachment filename contains a month name that
+    // disagrees with Claude's extracted period, the filename wins. Prevents Claude from
+    // using the invoice date instead of the billing period (e.g. "3_April_Invoice.pdf"
+    // invoiced in May → Claude extracts May, filename says April → use April).
+    return applyFilenamePeriodFallback(parsed, filename);
   } catch (e) {
     console.warn(`  Claude invoice extraction failed for ${filename}: ${e.message}`);
     return null;
