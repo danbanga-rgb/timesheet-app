@@ -1493,27 +1493,35 @@ const TimesheetSystem = () => {
   };
 
   const openAttachment = async (inv: Invoice) => {
+    console.log('[openAttachment] called, attachmentPath:', inv.attachmentPath, 'cached:', !!attachmentSignedUrls[inv.id]);
     if (!inv.attachmentPath) return;
-    // If we already have a cached blob URL for this invoice, reuse it
     if (attachmentSignedUrls[inv.id]) {
+      console.log('[openAttachment] using cached URL');
       setPdfViewerUrl(attachmentSignedUrls[inv.id]);
       return;
     }
+    console.log('[openAttachment] fetching signed URL…');
     setPdfViewerLoading(true);
     setPdfViewerUrl(null);
     try {
       const { url: signedUrl, error } = await getAttachmentSignedUrl(inv.attachmentPath);
+      console.log('[openAttachment] signedUrl:', signedUrl, 'error:', error);
       if (!signedUrl) {
         alert(`Could not open attachment: ${error || 'Unknown error'}\n\nPath: ${inv.attachmentPath}`);
         return;
       }
-      // Fetch as blob so we get a same-origin blob: URL — avoids X-Frame-Options blocks
+      console.log('[openAttachment] fetching blob…');
       const resp = await fetch(signedUrl);
+      console.log('[openAttachment] fetch status:', resp.status, resp.ok);
       if (!resp.ok) { alert(`Could not download attachment (${resp.status})`); return; }
       const blob = await resp.blob();
       const blobUrl = URL.createObjectURL(blob);
+      console.log('[openAttachment] blob URL created, showing viewer');
       setAttachmentSignedUrls(prev => ({ ...prev, [inv.id]: blobUrl }));
       setPdfViewerUrl(blobUrl);
+    } catch (e) {
+      console.error('[openAttachment] error:', e);
+      alert('Error opening attachment: ' + e);
     } finally {
       setPdfViewerLoading(false);
     }
@@ -4569,7 +4577,7 @@ const TimesheetSystem = () => {
                           <div className="flex items-center justify-between gap-3">
                             <div className="flex items-center gap-2 min-w-0">
                               <FileText className="w-5 h-5 text-indigo-500 flex-shrink-0" />
-                              <span className="text-sm text-gray-700 truncate">{inv.attachmentPath.split('/').pop()}</span>
+                              <span className="text-sm text-gray-700 truncate">Inv# {inv.invoiceNumber}.{inv.attachmentPath!.split('.').pop()}</span>
                             </div>
                             <button onClick={() => openAttachment(inv)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 font-medium flex-shrink-0">
                               <ExternalLink className="w-3.5 h-3.5" /> Open PDF
@@ -5943,7 +5951,7 @@ const TimesheetSystem = () => {
           <div className="flex items-center justify-between px-4 py-2 bg-gray-900 text-white flex-shrink-0" onClick={e => e.stopPropagation()}>
             <span className="text-sm font-medium">Invoice Attachment</span>
             <div className="flex items-center gap-3">
-              {pdfViewerUrl && <a href={pdfViewerUrl} download="invoice.pdf" className="text-xs text-indigo-300 hover:text-indigo-100 underline">Download</a>}
+              {pdfViewerUrl && <a href={pdfViewerUrl} download={`Inv# ${selectedInvoice?.invoiceNumber || 'attachment'}.pdf`} className="text-xs text-indigo-300 hover:text-indigo-100 underline">Download</a>}
               <button onClick={() => setPdfViewerUrl(null)} className="text-gray-400 hover:text-white"><X className="w-5 h-5" /></button>
             </div>
           </div>
