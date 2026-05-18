@@ -769,7 +769,7 @@ function parseSynergiePdfText(text, filename) {
 }
 
 // ─── PDF attachment classifier ────────────────────────────────────────────────
-// Returns 'timesheet' | 'invoice' | 'both' | 'unknown'
+// Returns { type: 'timesheet'|'invoice'|'both'|'unknown', pdfText: string, isImagePdf: boolean }
 
 function classifyByFilename(name) {
   const n = name.toLowerCase();
@@ -782,19 +782,27 @@ function classifyByFilename(name) {
 }
 
 async function classifyPdf(buffer, filename) {
-  // Strong filename signals
-  const byCName = classifyByFilename(filename);
-  if (byCName === 'invoice' || byCName === 'timesheet' || byCName === 'both') return byCName;
-
-  // Try extracting text for content scoring (cheap — no Claude call)
-  let text = '';
+  // Extract text once — used for both content scoring and downstream parsing.
+  // Keeping original case in rawText; scoring uses lowercased version.
+  let rawText    = '';
+  let isImagePdf = true;
   try {
     const pdfParse = require('pdf-parse');
-    const data = await pdfParse(buffer);
-    text = (data.text || '').toLowerCase();
+    const data     = await pdfParse(buffer);
+    const wordChars = (data.text?.match(/[a-zA-Z0-9]/g) || []).length;
+    if (wordChars > 30) { rawText = data.text; isImagePdf = false; }
   } catch {}
 
-  if (!text || text.replace(/\s/g, '').length < 20) return 'unknown';
+  // Strong filename signals — skip content scoring but keep extracted text
+  const byCName = classifyByFilename(filename);
+  if (byCName === 'invoice' || byCName === 'timesheet' || byCName === 'both') {
+    return { type: byCName, pdfText: rawText, isImagePdf };
+  }
+
+  const text = rawText.toLowerCase();
+  if (!text || text.replace(/\s/g, '').length < 20) {
+    return { type: 'unknown', pdfText: rawText, isImagePdf };
+  }
 
   // Score invoice signals
   const invoiceSignals = [
@@ -824,14 +832,15 @@ async function classifyPdf(buffer, filename) {
   for (const re of invoiceSignals)   if (re.test(text)) invoiceScore++;
   for (const re of timesheetSignals) if (re.test(text)) timesheetScore++;
 
-  if (invoiceScore >= 2 && timesheetScore >= 2) return 'both';
-  if (invoiceScore >= 2) return 'invoice';
-  if (timesheetScore >= 2) return 'timesheet';
+  let type;
+  if (invoiceScore >= 2 && timesheetScore >= 2) type = 'both';
+  else if (invoiceScore >= 2)                    type = 'invoice';
+  else if (timesheetScore >= 2)                  type = 'timesheet';
+  else if (invoiceScore > timesheetScore)         type = 'invoice';
+  else if (timesheetScore > invoiceScore)         type = 'timesheet';
+  else                                            type = 'unknown';
 
-  // Weak: one signal each — use whichever is stronger
-  if (invoiceScore > timesheetScore) return 'invoice';
-  if (timesheetScore > invoiceScore) return 'timesheet';
-  return 'unknown';
+  return { type, pdfText: rawText, isImagePdf };
 }
 
 // ─── Claude API ───────────────────────────────────────────────────────────────
@@ -1022,52 +1031,148 @@ function applyFilenamePeriodFallback(parsed, filename) {
   return { ...parsed, periodStart: fallback.periodStart, periodEnd: fallback.periodEnd };
 }
 
-// ─── Invoice extractor ────────────────────────────────────────────────────────
+// ─── Invoice extraction — regex-first, Claude fallback ───────────────────────
 
-async function claudeExtractInvoice(pdfBuffer, filename) {
+// Truncate + normalize whitespace before sending to Claude (reduces input tokens).
+// Regex parser always gets the full original text.
+function prepareInvoiceText(text) {
+  return text.replace(/[ \t]{3,}/g, '  ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 3000);
+}
+
+// Shared post-processing: EUR→USD override + rate cross-validation.
+// Applied to both regex and Claude results before returning.
+function postProcessInvoice(result, pdfText) {
+  if (!result) return result;
+
+  // Croatian/Bosnian templates show EUR total prominently but USD is billing currency.
+  if (result.currency === 'EUR' && pdfText) {
+    const usdRateM = pdfText.match(/(\d+(?:[.,]\d+)?)\s*USD\s*per\s*h/i);
+    if (usdRateM) {
+      const usdRate   = parseFloat(usdRateM[1].replace(',', '.'));
+      const usdTotalM = pdfText.match(/T\s*O\s*T\s*A\s*L\s*:?\s*\(?USD\)?\s*[:\s]*([\d.,]+)\s*USD/i)
+                     || pdfText.match(/([\d.,]+)USD/i);
+      let usdTotal = null;
+      if (usdTotalM) {
+        const raw = usdTotalM[1].trim();
+        usdTotal = /^\d{1,3}(?:\.\d{3})*,\d{2}$/.test(raw)
+          ? parseFloat(raw.replace(/\./g, '').replace(',', '.'))
+          : parseFloat(raw.replace(/,/g, ''));
+      }
+      result = { ...result, rate: usdRate, currency: 'USD' };
+      if (usdTotal && usdTotal > usdRate) result = { ...result, totalAmount: usdTotal };
+    }
+  }
+
+  // Rate cross-validation: rate × hours off from total by >10% → recompute from total ÷ hours.
+  const h = result.totalHours, r = result.rate, t = result.totalAmount;
+  if (h != null && r != null && t != null && t > 0 && Math.abs(h * r - t) / t > 0.10) {
+    result = { ...result, rate: null };
+  }
+  if (result.totalHours != null && result.rate == null && result.totalAmount != null) {
+    const derived = result.totalAmount / result.totalHours;
+    if (derived >= 1 && derived < 10000) result = { ...result, rate: Math.round(derived * 100) / 100 };
+  }
+
+  return result;
+}
+
+// Merge regex and Claude results: regex wins on every field it found (deterministic);
+// Claude fills in whatever regex missed.
+function mergeInvoiceResults(regex, claude) {
+  const merged = { ...claude, paymentDetails: { ...(claude.paymentDetails || {}) } };
+  if (!regex) return merged;
+  for (const f of ['invoiceNumber', 'periodStart', 'periodEnd', 'totalHours', 'rate', 'totalAmount', 'currency']) {
+    if (regex[f] != null) merged[f] = regex[f];
+  }
+  for (const f of ['iban', 'swift', 'accountNumber', 'sortCode', 'routingNumber', 'bankName', 'companyName']) {
+    if (regex.paymentDetails?.[f] != null) merged.paymentDetails[f] = regex.paymentDetails[f];
+  }
+  return merged;
+}
+
+// Claude: payment details only — much smaller prompt + response (~100 vs ~300 output tokens).
+const CLAUDE_PAYMENT_SYSTEM = `Extract bank/payment details from this invoice document.
+Return ONLY a valid JSON object — no markdown, no explanation. Use null for any field not found.
+
+{
+  "iban": string | null,
+  "swift": string | null,
+  "accountNumber": string | null,
+  "sortCode": string | null,
+  "routingNumber": string | null,
+  "bankName": string | null,
+  "companyName": string | null
+}
+
+Rules:
+- iban: compact format, NO spaces (e.g. "HR1234567890123456789")
+- swift: SWIFT/BIC code (8 or 11 chars)
+- accountNumber: bank account number if not an IBAN
+- sortCode: UK sort code (XX-XX-XX format)
+- routingNumber: US ABA routing number (9 digits)
+- bankName: name of the bank (not the account holder)
+- companyName: name of the invoice issuer / contractor company`;
+
+async function claudeExtractPaymentOnly(text, pdfBuffer, isImagePdf) {
+  if (!CONFIG.anthropicApiKey) return null;
+  try {
+    const Anthropic   = require('@anthropic-ai/sdk');
+    const client      = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
+    const userContent = text
+      ? `Extract payment/bank details:\n\n${text}`
+      : (isImagePdf && pdfBuffer)
+        ? [
+            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') } },
+            { type: 'text', text: 'Extract payment/bank details from this document.' },
+          ]
+        : null;
+    if (!userContent) return null;
+
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001', max_tokens: 256,
+      system: CLAUDE_PAYMENT_SYSTEM,
+      messages: [{ role: 'user', content: userContent }],
+    });
+    const raw = (response.content[0]?.text ?? '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    const pd  = JSON.parse(raw);
+    if (pd.iban) pd.iban = pd.iban.replace(/\s+/g, '').toUpperCase();
+    return pd;
+  } catch (e) {
+    console.warn(`  Claude payment-only extraction failed: ${e.message}`);
+    return null;
+  }
+}
+
+// Claude: full invoice extraction — only called when regex lacks period or hours.
+async function claudeFullExtractInvoice(text, pdfBuffer, isImagePdf, filename) {
   if (!CONFIG.anthropicApiKey) return null;
   try {
     const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
-
-    // Try cheap text extraction first; only send the raw PDF if text isn't available
-    // (image PDFs). This mirrors run.js and avoids the much more expensive document token cost.
+    const client    = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
     let userContent;
-    let pdfText = '';
-    try {
-      const pdfParse = require('pdf-parse');
-      const data = await pdfParse(pdfBuffer);
-      const wordChars = (data.text?.match(/[a-zA-Z0-9]/g) || []).length;
-      if (wordChars > 30) {
-        pdfText = data.text;
-        userContent = `Extract invoice data from this document:\n\n${pdfText}`;
-      }
-    } catch (_) {}
-
-    if (!userContent) {
-      // Image PDF — fall back to sending the full PDF as a document block (more expensive)
-      console.log(`  📄 ${filename}: no extractable text — using PDF vision (costs more)`);
+    if (text) {
+      userContent = `Extract invoice data from this document:\n\n${text}`;
+    } else if (isImagePdf && pdfBuffer) {
+      console.log(`  📄 ${filename}: image PDF — using vision (costs more)`);
       userContent = [
-        {
-          type: 'document',
-          source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') },
-        },
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') } },
         { type: 'text', text: 'Extract invoice data from this document.' },
       ];
+    } else {
+      return null;
     }
 
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      model: 'claude-haiku-4-5-20251001', max_tokens: 1024,
       system: CLAUDE_INVOICE_SYSTEM,
       messages: [{ role: 'user', content: userContent }],
     });
-    const raw = (response.content[0]?.text ?? '').trim();
+
+    const raw      = (response.content[0]?.text ?? '').trim();
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON in Claude invoice response');
     const parsed = JSON.parse(jsonMatch[0]);
 
-    // Normalise MM/DD/YYYY → YYYY-MM-DD (Claude ignores the format instruction occasionally)
     for (const f of ['periodStart', 'periodEnd']) {
       const s = parsed[f];
       if (s && typeof s === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(s)) {
@@ -1081,56 +1186,82 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
       }
     }
 
-    // Strip spaces from IBAN — electronic format has no spaces
-    if (parsed.paymentDetails?.iban) {
-      parsed.paymentDetails.iban = parsed.paymentDetails.iban.replace(/\s+/g, '').toUpperCase();
-    }
-
-    // Override EUR→USD when invoice shows both currencies but Claude picked EUR.
-    // Croatian/Bosnian invoice templates list the EUR equivalent prominently in the footer,
-    // which fools Claude. Reuse pdfText already extracted above (no second pdf-parse call).
-    if (parsed.currency === 'EUR' && pdfText) {
-      const usdRateM = pdfText.match(/(\d+(?:[.,]\d+)?)\s*USD\s*per\s*h/i);
-      if (usdRateM) {
-        const usdRate = parseFloat(usdRateM[1].replace(',', '.'));
-        // "T O T A L : (USD): 6.160,00 USD" or "6.160,00USD"
-        const usdTotalM = pdfText.match(/T\s*O\s*T\s*A\s*L\s*:?\s*\(?USD\)?\s*[:\s]*([\d.,]+)\s*USD/i)
-                       || pdfText.match(/([\d.,]+)USD/i);
-        let usdTotal = null;
-        if (usdTotalM) {
-          const raw = usdTotalM[1].trim();
-          // Handle European thousands-separator: "6.160,00" → 6160
-          usdTotal = /^\d{1,3}(?:\.\d{3})*,\d{2}$/.test(raw)
-            ? parseFloat(raw.replace(/\./g, '').replace(',', '.'))
-            : parseFloat(raw.replace(/,/g, ''));
-        }
-        parsed.rate        = usdRate;
-        parsed.currency    = 'USD';
-        if (usdTotal && usdTotal > usdRate) parsed.totalAmount = usdTotal;
+    // Date consistency: if span > 40 days, start date likely has day/month swapped.
+    if (parsed.periodStart && parsed.periodEnd) {
+      const start = new Date(parsed.periodStart), end = new Date(parsed.periodEnd);
+      if ((end - start) / 86400000 > 40) {
+        const [y, m, d] = parsed.periodStart.split('-');
+        const swapped   = `${y}-${d.padStart(2, '0')}-${m.padStart(2, '0')}`;
+        const newSpan   = (end - new Date(swapped)) / 86400000;
+        if (!isNaN(new Date(swapped)) && newSpan >= 0 && newSpan <= 40) parsed.periodStart = swapped;
       }
     }
 
-    // Rate cross-validation: if rate × hours is off from totalAmount by >10%, the rate
-    // is likely in the wrong currency (EUR rate on a USD-billed invoice, image PDF case).
-    // Recompute rate from hours + total — mirrors what the regex parser already does.
-    const _h = parsed.totalHours, _r = parsed.rate, _t = parsed.totalAmount;
-    if (_h != null && _r != null && _t != null && _t > 0) {
-      if (Math.abs(_h * _r - _t) / _t > 0.10) parsed.rate = null;
+    if (parsed.paymentDetails?.iban) {
+      parsed.paymentDetails.iban = parsed.paymentDetails.iban.replace(/\s+/g, '').toUpperCase();
     }
-    if (parsed.totalHours != null && parsed.rate == null && parsed.totalAmount != null) {
-      const derived = parsed.totalAmount / parsed.totalHours;
-      if (derived >= 1 && derived < 10000) parsed.rate = Math.round(derived * 100) / 100;
-    }
-
-    // Filename period fallback: if the attachment filename contains a month name that
-    // disagrees with Claude's extracted period, the filename wins. Prevents Claude from
-    // using the invoice date instead of the billing period (e.g. "3_April_Invoice.pdf"
-    // invoiced in May → Claude extracts May, filename says April → use April).
-    return applyFilenamePeriodFallback(parsed, filename);
+    return parsed;
   } catch (e) {
-    console.warn(`  Claude invoice extraction failed for ${filename}: ${e.message}`);
+    console.warn(`  Claude full invoice extraction failed for ${filename}: ${e.message}`);
     return null;
   }
+}
+
+// ─── Main invoice orchestrator ────────────────────────────────────────────────
+// 1. Regex (free, always runs on text PDFs) via parser.js
+// 2a. Regex has period + hours + payment → done, zero Claude calls
+// 2b. Regex has period + hours, missing payment → Claude for payment details only
+// 2c. Regex missing period or hours → full Claude extract, merge regex on top
+async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename) {
+  // ── Step 1: regex parser ───────────────────────────────────────────────────
+  let regexResult = null;
+  if (pdfText && pdfText.length > 30) {
+    try {
+      const { parseInvoice } = require('../invoice-parser/parser.js');
+      regexResult = parseInvoice(pdfText, filename);
+      regexResult = applyFilenamePeriodFallback(regexResult, filename);
+    } catch (_) {}
+  }
+
+  const regexHasPeriod  = !!(regexResult?.periodStart && regexResult?.periodEnd);
+  const regexHasHours   = regexResult?.totalHours != null;
+  const regexSufficient = regexHasPeriod && regexHasHours;
+
+  // ── Step 2a: regex complete ────────────────────────────────────────────────
+  if (regexSufficient) {
+    const pd         = regexResult.paymentDetails || {};
+    const hasPayment = !!(pd.iban || pd.swift || pd.accountNumber || pd.routingNumber);
+
+    if (hasPayment || !CONFIG.anthropicApiKey) {
+      if (hasPayment) console.log(`  ✅ Regex: ${filename}`);
+      return postProcessInvoice(regexResult, pdfText);
+    }
+
+    // ── Step 2b: regex has numbers, Claude fills payment details only ────────
+    console.log(`  💳 Claude payment-only: ${filename}`);
+    const claudePd = await claudeExtractPaymentOnly(
+      pdfText ? prepareInvoiceText(pdfText) : null, pdfBuffer, isImagePdf
+    );
+    return postProcessInvoice(
+      { ...regexResult, paymentDetails: claudePd ?? regexResult.paymentDetails },
+      pdfText
+    );
+  }
+
+  // ── Step 2c: regex insufficient — full Claude extract ─────────────────────
+  if (!CONFIG.anthropicApiKey) {
+    return regexResult ? postProcessInvoice(regexResult, pdfText) : null;
+  }
+
+  console.log(`  🤖 Claude: ${filename}`);
+  const claudeResult = await claudeFullExtractInvoice(
+    pdfText ? prepareInvoiceText(pdfText) : null, pdfBuffer, isImagePdf, filename
+  );
+
+  if (!claudeResult) return regexResult ? postProcessInvoice(regexResult, pdfText) : null;
+
+  const merged = mergeInvoiceResults(regexResult, claudeResult);
+  return postProcessInvoice(applyFilenamePeriodFallback(merged, filename), pdfText);
 }
 
 // Returns a multi-line string showing every field as PARSED, NOT FOUND, or ASSUMED.
@@ -1165,13 +1296,21 @@ function formatInvoiceReport(filename, contractorEmail, parsed) {
 
 // ─── PDF parser ───────────────────────────────────────────────────────────────
 
-async function parsePdf(buffer, filename) {
+async function parsePdf(buffer, filename, cachedText, cachedIsImagePdf) {
   try {
-    const pdfParse = require('pdf-parse');
     const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-    const data = await pdfParse(buf);
-    const text = data.text || '';
-    const hasText = (data.text?.match(/[a-zA-Z0-9]/g) || []).length > 30;
+
+    // Use text cached by classifyPdf if available — avoids a second pdf-parse call
+    let text     = cachedText ?? '';
+    let hasText  = (text.match(/[a-zA-Z0-9]/g) || []).length > 30;
+    if (!hasText && !cachedIsImagePdf) {
+      try {
+        const pdfParse = require('pdf-parse');
+        const data = await pdfParse(buf);
+        text    = data.text || '';
+        hasText = (text.match(/[a-zA-Z0-9]/g) || []).length > 30;
+      } catch {}
+    }
 
     // ── 1. Regex parser (fast, free) ──────────────────────────────────────────
     if (hasText) {
@@ -1268,11 +1407,13 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   const unknownPdfs   = [];
 
   for (const att of pdfQueue) {
-    const cls = await classifyPdf(att.buffer, att.name);
-    att._classification = cls;
-    if (cls === 'invoice')   { invoiceAtts.push(att); }
-    else if (cls === 'both') { invoiceAtts.push(att); timesheetPdfs.push(att); }
-    else if (cls === 'unknown') {
+    const { type, pdfText, isImagePdf } = await classifyPdf(att.buffer, att.name);
+    att._classification = type;
+    att.pdfText         = pdfText;    // cached — no second pdf-parse downstream
+    att.isImagePdf      = isImagePdf;
+    if (type === 'invoice')   { invoiceAtts.push(att); }
+    else if (type === 'both') { invoiceAtts.push(att); timesheetPdfs.push(att); }
+    else if (type === 'unknown') {
       console.log(`  ❓ Unknown PDF type (will not retry): ${att.name}`);
       unknownPdfs.push(att);
     } else {
@@ -1311,7 +1452,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   }
 
   for (const att of pdfAtts) {
-    const parsed = await parsePdf(att.buffer, att.name);
+    const parsed = await parsePdf(att.buffer, att.name, att.pdfText, att.isImagePdf);
     for (const ts of parsed) {
       const name = bestName([
         { name: ts.nameFromSheet },
@@ -1367,12 +1508,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   // ── Invoice PDFs — parse and report (ingest if enabled) ──────────────────
   for (const att of invoiceAtts) {
     console.log(`  🧾 Invoice attachment: ${att.name}`);
-    if (!CONFIG.anthropicApiKey) {
-      console.log(`     ⚠️  No ANTHROPIC_API_KEY — cannot parse invoice`);
-      results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_skipped' });
-      continue;
-    }
-    const parsed = await claudeExtractInvoice(att.buffer, att.name);
+    const parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name);
     console.log(formatInvoiceReport(att.name, contractorEmail, parsed));
     const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
 
