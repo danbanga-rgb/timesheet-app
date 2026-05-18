@@ -1047,6 +1047,18 @@ async function claudeExtractInvoice(pdfBuffer, filename) {
       } catch (_) {}
     }
 
+    // Rate cross-validation: if rate × hours is off from totalAmount by >10%, the rate
+    // is likely in the wrong currency (EUR rate on a USD-billed invoice, image PDF case).
+    // Recompute rate from hours + total — mirrors what the regex parser already does.
+    const _h = parsed.totalHours, _r = parsed.rate, _t = parsed.totalAmount;
+    if (_h != null && _r != null && _t != null && _t > 0) {
+      if (Math.abs(_h * _r - _t) / _t > 0.10) parsed.rate = null;
+    }
+    if (parsed.totalHours != null && parsed.rate == null && parsed.totalAmount != null) {
+      const derived = parsed.totalAmount / parsed.totalHours;
+      if (derived >= 1 && derived < 10000) parsed.rate = Math.round(derived * 100) / 100;
+    }
+
     return parsed;
   } catch (e) {
     console.warn(`  Claude invoice extraction failed for ${filename}: ${e.message}`);

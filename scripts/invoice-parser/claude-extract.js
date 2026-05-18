@@ -151,6 +151,18 @@ function parseClaudeResponse(response) {
     parsed.paymentDetails.iban = parsed.paymentDetails.iban.replace(/\s+/g, '').toUpperCase();
   }
 
+  // Rate cross-validation: if rate × hours is off from totalAmount by >10%, the rate
+  // is likely in the wrong currency (e.g. EUR rate extracted from a USD-billed invoice).
+  // Clear the bad rate and recompute from hours + total, matching what the regex parser does.
+  const h = parsed.totalHours, r = parsed.rate, t = parsed.totalAmount;
+  if (h != null && r != null && t != null && t > 0) {
+    if (Math.abs(h * r - t) / t > 0.10) parsed.rate = null;
+  }
+  if (parsed.totalHours != null && parsed.rate == null && parsed.totalAmount != null) {
+    const derived = parsed.totalAmount / parsed.totalHours;
+    if (derived >= 1 && derived < 10000) parsed.rate = Math.round(derived * 100) / 100;
+  }
+
   // Date consistency fix: contractor invoices cover one calendar month (~28–31 days).
   // If the extracted span is > 40 days, the start date likely has day/month swapped
   // (European DD/MM read as US MM/DD). Try swapping and accept if the new span ≤ 40 days.
