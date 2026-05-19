@@ -33,6 +33,7 @@ const CONFIG = {
   fromEmail:     process.env.FROM_EMAIL || 'timesheets@mysynergie.net',
   fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
+  timesheetReportUrl: process.env.TIMESHEET_REPORT_URL || 'https://mimlatvdwxqtgxrgcins.supabase.co/functions/v1/send-timesheet-report',
   // These addresses are never treated as contractors (internal staff / system)
   blockedContractorDomains: ['synergietechsolutions.com', 'ionos.com'],
   blockedContractorEmails: (process.env.BLOCKED_CONTRACTOR_EMAILS || '')
@@ -1834,6 +1835,28 @@ function markEmailsSeen(uids) {
   });
 }
 
+// ─── Trigger weekly timesheet report ─────────────────────────────────────────
+
+async function triggerTimesheetReport() {
+  if (!CONFIG.timesheetReportUrl || !CONFIG.ingestSecret) return;
+  try {
+    const res = await fetch(CONFIG.timesheetReportUrl, {
+      method: 'POST',
+      headers: { 'x-ingest-secret': CONFIG.ingestSecret, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (res.ok) {
+      const data = await res.json();
+      console.log(`  📊 Timesheet report sent — ${data.submitted}/${data.total} submitted, ${data.missing} missing`);
+    } else {
+      const err = await res.text();
+      console.log(`  ⚠️  Timesheet report error: ${res.status} ${err.slice(0, 120)}`);
+    }
+  } catch (e) {
+    console.log(`  ⚠️  Timesheet report failed: ${e.message}`);
+  }
+}
+
 // ─── Send run summary email via Brevo ─────────────────────────────────────────
 
 const RETRY_SILENT_AFTER = 10;
@@ -2105,6 +2128,7 @@ async function main() {
                      summary.invoiceReports.length;
   if (actionable > 0) {
     await sendSummaryEmail(summary, 0);
+    await triggerTimesheetReport();
   }
 
   const reportableFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER);
