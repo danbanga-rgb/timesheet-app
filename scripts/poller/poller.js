@@ -1454,16 +1454,18 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
   // Weeks already covered by a successful XLSX parse — skip timesheet PDFs for those weeks
   // to avoid a redundant (and potentially costly) Claude call for the same data.
-  const xlsxWeeks = new Set(
+  const xlsxWeeks    = new Set(
     timesheets.filter(t => t.attachmentType === 'xlsx' && !t.xlsxParseFailed && t.weekStart)
               .map(t => t.weekStart)
   );
+  const skippedAttNames = new Set(); // intentionally skipped — must be excluded from failedAttachments
 
   for (const att of pdfAtts) {
     // Quick week check from filename before doing any parsing work.
     const filenameWeek = weekFromFilename(att.name);
     if (filenameWeek && xlsxWeeks.has(filenameWeek)) {
       console.log(`  ⏭️  PDF skipped — week ${filenameWeek} already covered by XLSX: ${att.name}`);
+      skippedAttNames.add(att.name);
       continue;
     }
 
@@ -1473,6 +1475,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     const covered = parsed.length > 0 && parsed.every(ts => ts.weekStart && xlsxWeeks.has(ts.weekStart));
     if (covered) {
       console.log(`  ⏭️  PDF skipped — week already covered by XLSX: ${att.name}`);
+      skippedAttNames.add(att.name);
       continue;
     }
 
@@ -1574,7 +1577,8 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   const invoiceAttNames = new Set(invoiceAtts.map(a => a.name));
   const unknownAttNames = new Set(unknownPdfs.map(a => a.name));
   const failedAttachments = [...xlsxAtts, ...pdfAtts].filter(a =>
-    !parsedAttachmentNames.has(a.name) && !invoiceAttNames.has(a.name) && !unknownAttNames.has(a.name)
+    !parsedAttachmentNames.has(a.name) && !invoiceAttNames.has(a.name) &&
+    !unknownAttNames.has(a.name) && !skippedAttNames.has(a.name)
   );
 
   return { results, failedAttachments };
