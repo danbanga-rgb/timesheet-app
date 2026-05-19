@@ -6,7 +6,7 @@
 //
 // Correction rules:
 //   - source='direct' exists → never overwrite, log as correction_pending
-//   - source='imported' exists → update hours, set status='pending' for review
+//   - source='imported' exists → update hours, keep auto-approved (trusted import channel)
 //   - no existing record → create as approved (auto-approved on import)
 //
 // Auth: shared secret via x-ingest-secret header. JWT verification DISABLED.
@@ -154,19 +154,19 @@ async function upsertTimesheet(
     };
   }
 
-  // ── Rule 2: Imported timesheet exists → correction, needs review ──────────
+  // ── Rule 2: Imported timesheet exists → update and keep auto-approved ──────
   if (existing?.source === 'imported') {
     await supabase.from('timesheets').update({
       entries,
-      status:      'pending',   // back to pending — needs manager review
-      approved_by: null,
-      approved_at: null,
+      status:       'approved',
+      approved_by:  'system-import',
+      approved_at:  new Date().toISOString(),
       submitted_at: new Date().toISOString(),
     }).eq('id', existing.id);
     return {
       timesheetId: existing.id,
       action: 'correction_imported',
-      notes: 'Correction received — reset to pending for manager review',
+      notes: 'Correction received — auto-approved (imported source)',
     };
   }
 
