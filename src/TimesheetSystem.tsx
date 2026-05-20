@@ -651,8 +651,18 @@ const TimesheetSystem = () => {
   }
 
   async function fetchUsers() {
-    const { data } = await supabase.from('profiles').select('*').order('name');
+    const { data, error } = await supabase.from('profiles').select('*').order('name');
+    if (error) console.error('fetchUsers failed:', error.message);
     if (data) setUsers(data.map(normaliseProfile));
+  }
+
+  // Applies a single-field profile update with RLS-block detection and optimistic UI.
+  async function updateProfileField(userId: string, field: string, value: unknown) {
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, [field === 'reminders_enabled' ? 'remindersEnabled' : field === 'invoice_enabled' ? 'invoiceEnabled' : field]: value } : u));
+    const { data: updated, error } = await supabase.from('profiles').update({ [field]: value }).eq('id', userId).select('id');
+    if (error) { alert('Error: ' + error.message); await fetchUsers(); return; }
+    if (!updated || updated.length === 0) { alert('Update failed — your session may have expired. Please refresh the page.'); await fetchUsers(); return; }
+    await fetchUsers();
   }
 
   async function fetchProjects() {
@@ -1063,8 +1073,9 @@ const TimesheetSystem = () => {
         reminders_enabled: userForm.reminders_enabled,
         vendor_manager_id: userForm.vendor_manager_id || null,
       };
-      const { error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id);
+      const { data: updated, error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id).select('id');
       if (error) { alert('Error updating user: ' + error.message); return; }
+      if (!updated || updated.length === 0) { alert('Save failed — your session may have expired. Please refresh the page and try again.'); return; }
       await fetchUsers();
       setShowUserModal(false);
       setEditingUser(null);
@@ -2220,12 +2231,7 @@ const TimesheetSystem = () => {
                         <td className="px-4 py-3 text-center">
                           {user.role === 'timesheetuser' ? (
                             <button
-                              onClick={async () => {
-                                const next = !user.invoiceEnabled;
-                                const { error } = await supabase.from('profiles').update({ invoice_enabled: next }).eq('id', user.id);
-                                if (error) { alert('Error: ' + error.message); return; }
-                                await fetchUsers();
-                              }}
+                              onClick={() => updateProfileField(user.id, 'invoice_enabled', !user.invoiceEnabled)}
                               className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${user.invoiceEnabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
                               title={user.invoiceEnabled ? 'Click to disable invoices' : 'Click to enable invoices'}
                             >
@@ -2236,12 +2242,7 @@ const TimesheetSystem = () => {
                         <td className="px-4 py-3 text-center">
                           {user.role === 'timesheetuser' ? (
                             <button
-                              onClick={async () => {
-                                const next = !user.remindersEnabled;
-                                const { error } = await supabase.from('profiles').update({ reminders_enabled: next }).eq('id', user.id);
-                                if (error) { alert('Error: ' + error.message); return; }
-                                await fetchUsers();
-                              }}
+                              onClick={() => updateProfileField(user.id, 'reminders_enabled', !user.remindersEnabled)}
                               className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${user.remindersEnabled ? 'bg-green-500' : 'bg-gray-300'}`}
                               title={user.remindersEnabled ? 'Click to disable reminders' : 'Click to enable reminders'}
                             >
