@@ -97,6 +97,7 @@ interface UserProfile {
   phone: string | null;
   emailApprovalsEnabled: boolean;
   invoiceEnabled: boolean;
+  remindersEnabled: boolean;
   vendorManagerId: string | null;
 }
 
@@ -224,6 +225,7 @@ interface UserForm {
   phone: string;
   email_approvals_enabled: boolean;
   invoice_enabled: boolean;
+  reminders_enabled: boolean;
   vendor_manager_id: string | null;
 }
 
@@ -471,7 +473,7 @@ const TimesheetSystem = () => {
   const [showGeneratedPassword, setShowGeneratedPassword] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, vendor_manager_id: null
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -686,6 +688,7 @@ const TimesheetSystem = () => {
       phone: (p.phone as string) || null,
       emailApprovalsEnabled: !!(p.email_approvals_enabled as boolean),
       invoiceEnabled: p.invoice_enabled === undefined ? true : !!(p.invoice_enabled as boolean),
+      remindersEnabled: p.reminders_enabled === undefined ? true : !!(p.reminders_enabled as boolean),
       vendorManagerId: (p.vendor_manager_id as string) || null,
     };
   }
@@ -1024,11 +1027,11 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, vendor_manager_id: user.vendorManagerId || null });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, reminders_enabled: user.remindersEnabled !== false, vendor_manager_id: user.vendorManagerId || null });
     } else {
       setEditingUser(null);
       const autoPassword = generatePassword();
-      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, vendor_manager_id: null });
+      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null });
     }
     setShowGeneratedPassword(true);
     setShowUserModal(true);
@@ -1056,6 +1059,7 @@ const TimesheetSystem = () => {
         phone: userForm.phone || null,
         email_approvals_enabled: userForm.email_approvals_enabled,
         invoice_enabled: userForm.invoice_enabled,
+        reminders_enabled: userForm.reminders_enabled,
         vendor_manager_id: userForm.vendor_manager_id || null,
       };
       const { error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id);
@@ -1107,6 +1111,7 @@ const TimesheetSystem = () => {
         phone: userForm.phone || null,
         email_approvals_enabled: userForm.email_approvals_enabled,
         invoice_enabled: userForm.invoice_enabled,
+        reminders_enabled: userForm.reminders_enabled,
         vendor_manager_id: userForm.vendor_manager_id || null,
       });
 
@@ -2185,6 +2190,7 @@ const TimesheetSystem = () => {
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">End Date</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Manager</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Invoices</th>
+                      <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Reminders</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Actions</th>
                     </tr>
                   </thead>
@@ -2223,6 +2229,22 @@ const TimesheetSystem = () => {
                               title={user.invoiceEnabled ? 'Click to disable invoices' : 'Click to enable invoices'}
                             >
                               <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${user.invoiceEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                            </button>
+                          ) : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {user.role === 'timesheetuser' ? (
+                            <button
+                              onClick={async () => {
+                                const next = !user.remindersEnabled;
+                                const { error } = await supabase.from('profiles').update({ reminders_enabled: next }).eq('id', user.id);
+                                if (error) { alert('Error: ' + error.message); return; }
+                                await fetchUsers();
+                              }}
+                              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${user.remindersEnabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                              title={user.remindersEnabled ? 'Click to disable reminders' : 'Click to enable reminders'}
+                            >
+                              <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${user.remindersEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
                             </button>
                           ) : <span className="text-gray-300">—</span>}
                         </td>
@@ -2522,6 +2544,20 @@ const TimesheetSystem = () => {
                         className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.invoice_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
                       >
                         <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${userForm.invoice_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between p-4 bg-green-50 border-2 border-green-200 rounded-lg">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-800">Reminder Emails</p>
+                        <p className="text-xs text-gray-500 mt-0.5">Send automated reminders for missing timesheets</p>
+                        <p className="text-xs font-semibold mt-1 text-green-700">{userForm.reminders_enabled ? '✓ Enabled' : '✗ Disabled'}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setUserForm({...userForm, reminders_enabled: !userForm.reminders_enabled})}
+                        className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.reminders_enabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                      >
+                        <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${userForm.reminders_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
                       </button>
                     </div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>

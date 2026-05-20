@@ -55,8 +55,14 @@ grant select, insert
 
 alter table public.email_invoice_log enable row level security;
 
-create policy "authenticated users can read invoice log"
-  on public.email_invoice_log for select to authenticated using (true);
+do $$ begin
+  create policy "authenticated users can read invoice log"
+    on public.email_invoice_log for select to authenticated using (true);
+exception when duplicate_object then null;
+end $$;
 
-create policy "authenticated users can insert invoice log"
-  on public.email_invoice_log for insert to authenticated with check (true);
+do $$ begin
+  create policy "authenticated users can insert invoice log"
+    on public.email_invoice_log for insert to authenticated with check (true);
+exception when duplicate_object then null;
+end $$;
