@@ -891,7 +891,7 @@ Rules:
   * If the document uses a routing number (US ABA), or amounts are clearly in USD with no IBAN → use MM/DD/YYYY.
   * When truly ambiguous (both components ≤ 12 and no country signal), prefer DD/MM/YYYY as most contractors are European.
   * Cross-check: these are monthly billing periods. If periodEnd is in month M, periodStart must also be in month M. If they differ wildly, you have the date format wrong — flip DD and MM and re-derive.
-- If no explicit billing period is stated but an invoice date is present, infer periodStart and periodEnd as the first and last day of that invoice date's calendar month (e.g. invoice date 09 Apr 2026 → periodStart: 2026-04-01, periodEnd: 2026-04-30).
+- If no explicit billing period is stated but an invoice date is present: determine whether this is an invoice for the PREVIOUS month's work. Contractors routinely invoice in the first days of month N for work completed in month N-1. Use the PREVIOUS calendar month when EITHER condition holds: (a) the invoice date is on or before the 10th of the month, OR (b) the total hours claimed are implausibly high for the days elapsed since the start of the invoice month (e.g. 176h on May 7 — only 7 working days elapsed, impossible). Otherwise use the invoice date's own calendar month. Examples: invoice date 07 May 2026, 176h → previous month → periodStart: 2026-04-01, periodEnd: 2026-04-30. Invoice date 25 May 2026, 160h → same month → periodStart: 2026-05-01, periodEnd: 2026-05-31.
 - parseNotes: one sentence summarising what was found and what was missing.`;
 
 const CLAUDE_TIMESHEET_SYSTEM = `You are a timesheet data extractor. Extract the weekly timesheet from the document.
