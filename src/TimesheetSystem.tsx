@@ -467,6 +467,7 @@ const TimesheetSystem = () => {
   const [showReminderLog, setShowReminderLog] = useState(false);
   const [reportWeek, setReportWeek] = useState(getCurrentWeekStart());
   const [adminView, setAdminView] = useState('users');
+  const [allocationsProjectFilter, setAllocationsProjectFilter] = useState<number | null>(null);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
@@ -2292,11 +2293,13 @@ const TimesheetSystem = () => {
 
           {adminView === 'allocations' && (() => {
             const timesheetUsers = users.filter(u => u.role === 'timesheetuser');
-            const allProjects = projects;
+            const visibleProjects = allocationsProjectFilter
+              ? projects.filter(p => p.id === allocationsProjectFilter)
+              : projects;
 
             const exportAllocations = () => {
               let csv = 'Project,Project Code,Status,Employee Name,Email,Country,Region,Start Date,End Date,Active\n';
-              allProjects.forEach(project => {
+              visibleProjects.forEach(project => {
                 const allocated = timesheetUsers.filter(u => u.projectId === project.id);
                 if (allocated.length === 0) {
                   csv += `"${project.name}","${project.code}","${project.status}","(no users)","","","","","",""\n`;
@@ -2307,17 +2310,20 @@ const TimesheetSystem = () => {
                   });
                 }
               });
-              // Unallocated users
-              const unallocated = timesheetUsers.filter(u => !u.projectId);
-              unallocated.forEach(user => {
-                const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
-                csv += `"(No Project)","","","${user.name}","${user.email}","${countryName(user.country)}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
-              });
+              // Unallocated users — only include when showing all projects
+              if (!allocationsProjectFilter) {
+                const unallocated = timesheetUsers.filter(u => !u.projectId);
+                unallocated.forEach(user => {
+                  const isInactive = !!(user.endDate && new Date() > parseLocalDate(user.endDate));
+                  csv += `"(No Project)","","","${user.name}","${user.email}","${countryName(user.country)}","${user.region || ''}","${user.startDate || ''}","${user.endDate || ''}","${isInactive ? 'No' : 'Yes'}"\n`;
+                });
+              }
+              const selectedProject = allocationsProjectFilter ? projects.find(p => p.id === allocationsProjectFilter) : null;
               const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
               const url = URL.createObjectURL(blob);
               const link = document.createElement('a');
               link.href = url;
-              link.download = 'project_allocations_' + new Date().toISOString().split('T')[0] + '.csv';
+              link.download = (selectedProject ? selectedProject.code + '_allocations_' : 'project_allocations_') + new Date().toISOString().split('T')[0] + '.csv';
               link.style.display = 'none';
               document.body.appendChild(link);
               link.click();
@@ -2327,17 +2333,27 @@ const TimesheetSystem = () => {
 
             return (
               <div className="bg-white rounded-lg shadow-md p-6">
-                <div className="flex justify-between items-center mb-6">
+                <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
                   <div>
                     <h2 className="text-xl font-bold text-gray-800">Project Allocations</h2>
-                    <p className="text-sm text-gray-500 mt-1">All timesheet users grouped by assigned project</p>
+                    <p className="text-sm text-gray-500 mt-1">Timesheet users grouped by assigned project</p>
                   </div>
-                  <button onClick={exportAllocations} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
-                    <Download className="w-4 h-4" /> Export CSV
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <select
+                      value={allocationsProjectFilter ?? ''}
+                      onChange={e => setAllocationsProjectFilter(e.target.value ? parseInt(e.target.value) : null)}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <option value="">All Projects</option>
+                      {projects.map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
+                    </select>
+                    <button onClick={exportAllocations} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                      <Download className="w-4 h-4" /> Export CSV
+                    </button>
+                  </div>
                 </div>
 
-                {allProjects.map(project => {
+                {visibleProjects.map(project => {
                   const allocated = timesheetUsers.filter(u => u.projectId === project.id);
                   return (
                     <div key={project.id} className="mb-6 border border-gray-200 rounded-lg overflow-hidden">
@@ -2405,8 +2421,8 @@ const TimesheetSystem = () => {
                   );
                 })}
 
-                {/* Unallocated users */}
-                {(() => {
+                {/* Unallocated users — hidden when a specific project is filtered */}
+                {!allocationsProjectFilter && (() => {
                   const unallocated = timesheetUsers.filter(u => !u.projectId);
                   if (unallocated.length === 0) return null;
                   return (
