@@ -24,6 +24,8 @@ const tzMap: Record<string, string> = {
   'HR-Croatia': 'Europe/Zagreb', 'RS-Serbia': 'Europe/Belgrade',
   'BA-Bosnia and Herzegovina': 'Europe/Sarajevo', 'SI-Slovenia': 'Europe/Ljubljana',
   'MK-North Macedonia': 'Europe/Skopje',
+  'IN-': 'Asia/Kolkata',
+  'NL-': 'Europe/Amsterdam',
 };
 
 function getUserLocalTime(country: string, region: string): Date {
