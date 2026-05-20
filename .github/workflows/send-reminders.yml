@@ -1,0 +1,20 @@
+name: Send Timesheet Reminders
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # top of every hour — edge function filters by local time
+  workflow_dispatch:       # allow manual trigger
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger send-reminder
+        run: |
+          curl -s -X POST \
+            "https://mimlatvdwxqtgxrgcins.supabase.co/functions/v1/send-reminder" \
+            -H "apikey: sb_publishable_qYa4tmVYu2zsIZfUhvT7hg_UaGgAgKc" \
+            -H "Content-Type: application/json" \
+            -d '{}' | head -c 2000
