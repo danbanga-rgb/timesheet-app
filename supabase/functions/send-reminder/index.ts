@@ -87,7 +87,7 @@ async function sendEmail(
   return res.ok ? { ok: true } : { ok: false, error: JSON.stringify(data) };
 }
 
-function wrapHtml(accentColor: string, headerTitle: string, innerHtml: string, appUrl: string): string {
+function wrapHtml(accentColor: string, headerTitle: string, innerHtml: string, appUrl: string, buttonLabel = 'Open Timesheet App →'): string {
   return `<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px">
     <div style="background:${accentColor};color:white;padding:20px;border-radius:8px 8px 0 0">
       <h2 style="margin:0">${headerTitle}</h2>
@@ -95,7 +95,7 @@ function wrapHtml(accentColor: string, headerTitle: string, innerHtml: string, a
     <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
       ${innerHtml}
       <div style="margin-top:24px">
-        <a href="${appUrl}" style="background:${accentColor};color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Open Timesheet App →</a>
+        <a href="${appUrl}" style="background:${accentColor};color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">${buttonLabel}</a>
       </div>
       <p style="margin-top:24px;font-size:12px;color:#9ca3af">This is an automated reminder from the Synergie Timesheet System.</p>
     </div>
@@ -386,17 +386,44 @@ These links are valid for 7 days and are single-use.`;
       return `<li style="margin:6px 0">Week ending <strong>${fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</strong>${isCurrent ? ' <span style="color:#f59e0b;font-size:12px">(current week)</span>' : ''}</li>`;
     }).join('');
 
-    const subject   = isFirst ? `Reminder: ${missing.length} Timesheet${missing.length > 1 ? 's' : ''} Pending` : `URGENT: ${missing.length} Timesheet${missing.length > 1 ? 's' : ''} Overdue`;
-    const bodyText  = isFirst
-      ? `Hi ${user.name},\n\nFriendly reminder — the following timesheet${missing.length > 1 ? 's have' : ' has'} not been submitted:\n\n${weekListText}\n\nPlease log in and submit as soon as possible.`
-      : `Hi ${user.name},\n\nYou still have ${missing.length} outstanding timesheet${missing.length > 1 ? 's' : ''} that need to be submitted:\n\n${weekListText}\n\nPlease log in and submit immediately.`;
-    const bodyHtml  = wrapHtml(
+    const TIMESHEET_EMAIL = 'timesheets@mysynergie.net';
+    const HELPDESK_EMAIL  = 'helpdesk@synergietechsolutions.com';
+
+    const subject = isFirst
+      ? `Reminder: ${missing.length} Timesheet${missing.length > 1 ? 's' : ''} Pending`
+      : `URGENT: ${missing.length} Timesheet${missing.length > 1 ? 's' : ''} Overdue`;
+
+    const helpdeskLine = isFirst
+      ? `First time logging in? Contact ${HELPDESK_EMAIL} for your account password.`
+      : `For account access issues, contact ${HELPDESK_EMAIL}.`;
+
+    const bodyText = isFirst
+      ? `Hi ${user.name},\n\nJust a heads-up — we're missing your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nYou have a few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}`
+      : `Hi ${user.name},\n\nWe still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nPlease submit as soon as possible:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}`;
+
+    const submitOptionsHtml = `
+      <p style="color:#374151;font-weight:600;margin-top:20px">${isFirst ? 'You have a few ways to submit:' : 'Please submit as soon as possible:'}</p>
+      <ol style="color:#374151;line-height:2.2;padding-left:20px;margin:0">
+        <li>Use the button below to log into the app</li>
+        <li>Reply to this email with your timesheet file attached</li>
+        <li>Email your timesheet directly to <a href="mailto:${TIMESHEET_EMAIL}" style="color:#4f46e5">${TIMESHEET_EMAIL}</a></li>
+      </ol>
+      <p style="color:#6b7280;font-size:13px;margin-top:16px;border-top:1px solid #e5e7eb;padding-top:16px">
+        ${isFirst
+          ? `First time logging in? Contact <a href="mailto:${HELPDESK_EMAIL}" style="color:#4f46e5">${HELPDESK_EMAIL}</a> for your account password.`
+          : `For account access issues, contact <a href="mailto:${HELPDESK_EMAIL}" style="color:#4f46e5">${HELPDESK_EMAIL}</a>.`
+        }
+      </p>`;
+
+    const bodyHtml = wrapHtml(
       isFirst ? '#4f46e5' : '#dc2626',
       isFirst ? '\u23f1 Timesheet Reminder' : '\u26a0\ufe0f Timesheets Overdue',
       `<p style="color:#374151">Hi ${user.name},</p>
-       <p style="color:#374151">${isFirst ? `Friendly reminder \u2014 the following timesheet${missing.length > 1 ? 's have' : ' has'} not been submitted:` : `You still have <strong>${missing.length} outstanding timesheet${missing.length > 1 ? 's' : ''}</strong> that need to be submitted:`}</p>
-       <ul style="color:#374151;line-height:1.8;padding-left:20px">${weekListHtml}</ul>`,
+       <p style="color:#374151">${isFirst ? `Just a heads-up \u2014 we're missing your timesheet${missing.length > 1 ? 's' : ''} for:` : `We still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:`}</p>
+       <ul style="color:#374151;line-height:1.8;padding-left:20px">${weekListHtml}</ul>
+       ${submitOptionsHtml}`,
       APP_URL,
+      'Submit via App →',
     );
 
     const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, user.email as string, user.name as string, subject, bodyText, bodyHtml);

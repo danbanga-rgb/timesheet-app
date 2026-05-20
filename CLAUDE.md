@@ -42,7 +42,7 @@ Authentication uses Supabase Auth. The client is initialized in `src/supabaseCli
 **`ingest-timesheet/index.ts`** (Deno) — Called by the email poller. Handles:
 - Auth via `x-ingest-secret` header (JWT verification disabled)
 - User find-or-create (auto-provisions accounts for new contractors)
-- Timesheet upsert with correction rules: `source='direct'` records are never overwritten; `source='imported'` records get reset to pending
+- Timesheet upsert with correction rules: `source='direct'` records are never overwritten; `source='imported'` records are updated and kept `approved`; new imports are always created as `approved` (auto-approved on import)
 - Import deduplication via `email_import_log` table
 
 **`send-reminder/index.ts`** (Deno) — Sends reminder emails via Brevo API. Handles timesheet reminders (Friday 5pm first, then daily Mon–Fri 9am), manager approval reminders, accountant invoice reminders, and welcome emails.
