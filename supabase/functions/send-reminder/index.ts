@@ -507,9 +507,11 @@ These links are valid for 7 days and are single-use.`;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // 3. ACCOUNTANT REMINDERS — pending invoices + weekly timesheet summary with CSV
+  // 3. ACCOUNTANT REMINDERS — disabled for now; covered by send-timesheet-report
   // ══════════════════════════════════════════════════════════════════════════
   for (const accountant of accountants) {
+    results.push({ role: 'accountant', user: accountant.name, action: 'skipped (disabled)' });
+    continue;
     const lt   = getUserLocalTime(accountant.country as string, accountant.region as string);
     const dow  = lt.getDay();
     const hour = lt.getHours();
