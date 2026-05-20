@@ -1,11 +1,14 @@
 // Supabase Edge Function: send-timesheet-report
 //
-// Generates a CSV of all contractors vs last week's timesheets and emails it
-// to accounting@synergietechsolutions.com via Brevo.
+// Generates a per-week timesheet summary and emails it to
+// accounting@synergietechsolutions.com via Brevo after each poller run.
+//
+// Covers all completed weeks since 2026-04-27 (the cutoff).
+// Only includes weeks where at least one eligible contractor is missing.
+// Attaches a separate CSV for each such week.
 //
 // Auth: x-ingest-secret header (same secret as ingest-timesheet)
 // Request: POST with empty body — everything computed server-side.
-// Response: { ok, week, submitted, total, missing, recipient }
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -18,17 +21,13 @@ const corsHeaders = {
 const ACCOUNTING_EMAIL = 'accounting@synergietechsolutions.com';
 const FROM_EMAIL       = 'timesheets@mysynergie.net';
 const FROM_NAME        = 'Synergie Timesheet System';
+const CUTOFF           = '2026-04-27';
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
-function lastWeekMonday(): string {
-  const now   = new Date();
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const dow   = today.getUTCDay();                    // 0=Sun … 6=Sat
-  const daysToThisMonday = dow === 0 ? 6 : dow - 1;
-  const lastMonday = new Date(today);
-  lastMonday.setUTCDate(today.getUTCDate() - daysToThisMonday - 7);
-  return lastMonday.toISOString().slice(0, 10);
+function todayUtc(): Date {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
 function addDays(dateStr: string, n: number): string {
@@ -36,25 +35,49 @@ function addDays(dateStr: string, n: number): string {
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 
-function formatWeekRange(weekStart: string): { label: string; filename: string } {
+function lastCompletedMonday(): string {
+  const today = todayUtc();
+  const dow   = today.getUTCDay();                    // 0=Sun … 6=Sat
+  const daysToThisMonday = dow === 0 ? 6 : dow - 1;
+  const lastMonday = new Date(today);
+  lastMonday.setUTCDate(today.getUTCDate() - daysToThisMonday - 7);
+  return lastMonday.toISOString().slice(0, 10);
+}
+
+function completedWeeksSince(cutoff: string): string[] {
+  const weeks: string[] = [];
+  let cur = cutoff;
+  const end = lastCompletedMonday();
+  while (cur <= end) {
+    weeks.push(cur);
+    cur = addDays(cur, 7);
+  }
+  return weeks;
+}
+
+function weekLabel(weekStart: string): string {
   const weekEnd      = addDays(weekStart, 6);
   const [sy, sm, sd] = weekStart.split('-').map(Number);
   const [,  em, ed]  = weekEnd.split('-').map(Number);
   const months       = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const rangeStr     = sm === em
+  return sm === em
     ? `${months[sm - 1]} ${sd}–${ed}, ${sy}`
     : `${months[sm - 1]} ${sd} – ${months[em - 1]} ${ed}, ${sy}`;
-  return {
-    label:    rangeStr,
-    filename: `Timesheet Report - ${months[sm - 1]} ${sd}-${ed} ${sy}.csv`,
-  };
+}
+
+function csvFilename(weekStart: string): string {
+  const weekEnd      = addDays(weekStart, 6);
+  const [sy, sm, sd] = weekStart.split('-').map(Number);
+  const [,   , ed]   = weekEnd.split('-').map(Number);
+  const months       = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `Timesheet Report - ${months[sm - 1]} ${sd}-${ed} ${sy}.csv`;
 }
 
 // ─── Data helpers ─────────────────────────────────────────────────────────────
 
 function isTestAccount(name: string): boolean {
   const lower = (name || '').toLowerCase().trim();
-  return lower === 'test' || /\b(hotmail|yahoo|gmail|outlook)\b/.test(lower);
+  return lower === 'test' || /\b(hotmail|yahoo)\b/.test(lower);
 }
 
 function getHours(entry: unknown): number {
@@ -69,11 +92,10 @@ function getHours(entry: unknown): number {
 }
 
 function fmtHours(h: number): string {
-  if (h <= 0) return '';
-  return h % 1 === 0 ? String(h) : String(h);
+  return h > 0 ? String(h) : '';
 }
 
-// ─── CSV builder (handles quoting; prepends UTF-8 BOM for Excel) ──────────────
+// ─── CSV builder (UTF-8 BOM for Excel) ───────────────────────────────────────
 
 function buildCsv(rows: string[][]): string {
   const lines = rows.map(row =>
@@ -83,6 +105,13 @@ function buildCsv(rows: string[][]): string {
     }).join(',')
   );
   return '﻿' + lines.join('\r\n');
+}
+
+function toBase64(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  bytes.forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin);
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -109,26 +138,20 @@ serve(async (req) => {
 
   const db = createClient(SUPABASE_URL, SERVICE_KEY);
 
-  // ─── Compute week ────────────────────────────────────────────────────────────
+  // ─── Weeks to cover ───────────────────────────────────────────────────────────
 
-  const weekStart                    = lastWeekMonday();
-  const { label: weekLabel, filename: csvFilename } = formatWeekRange(weekStart);
-
-  const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const dayKeys: string[]   = [];
-  const dayLabels: string[] = [];
-  for (let i = 0; i < 7; i++) {
-    const dk     = addDays(weekStart, i);
-    const [, mm, dd] = dk.split('-');
-    dayKeys.push(dk);
-    dayLabels.push(`${DAY_NAMES[i]} ${mm}/${dd}`);
+  const weeks = completedWeeksSince(CUTOFF);
+  if (weeks.length === 0) {
+    return new Response(JSON.stringify({ ok: true, message: 'No completed weeks yet' }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
   }
 
   // ─── Fetch profiles ───────────────────────────────────────────────────────────
 
   const { data: allProfiles, error: profErr } = await db
     .from('profiles')
-    .select('id, name, role')
+    .select('id, name, start_date, role')
     .in('role', ['timesheetuser', 'vendormanager'])
     .order('name');
 
@@ -138,8 +161,9 @@ serve(async (req) => {
     });
   }
 
+  // Deduplicate by name, exclude test accounts
   const seenNames = new Set<string>();
-  const profiles  = (allProfiles ?? []).filter(p => {
+  const profiles = (allProfiles ?? []).filter(p => {
     if (isTestAccount(p.name)) return false;
     const key = (p.name || '').toLowerCase().trim();
     if (seenNames.has(key)) return false;
@@ -147,12 +171,13 @@ serve(async (req) => {
     return true;
   });
 
-  // ─── Fetch last week's timesheets ─────────────────────────────────────────────
+  // ─── Fetch all non-rejected timesheets for all covered weeks ─────────────────
 
-  const { data: timesheets, error: tsErr } = await db
+  const { data: allTimesheets, error: tsErr } = await db
     .from('timesheets')
-    .select('user_id, entries')
-    .eq('week_start', weekStart);
+    .select('user_id, week_start, entries')
+    .in('week_start', weeks)
+    .neq('status', 'rejected');
 
   if (tsErr) {
     return new Response(JSON.stringify({ error: `Timesheet query: ${tsErr.message}` }), {
@@ -160,76 +185,178 @@ serve(async (req) => {
     });
   }
 
-  const tsMap = new Map((timesheets ?? []).map(t => [t.user_id, t.entries ?? {}]));
-
-  // ─── Build CSV ────────────────────────────────────────────────────────────────
-
-  const csvRows: string[][] = [['Contractor', ...dayLabels, 'Total Hours']];
-  const missing: string[]   = [];
-  let submitted = 0;
-
-  for (const p of profiles) {
-    const entries = tsMap.get(p.id);
-    if (entries !== undefined) {
-      submitted++;
-      const dayHours = dayKeys.map(dk => fmtHours(getHours(entries[dk])));
-      const total    = dayKeys.reduce((sum, dk) => sum + getHours(entries[dk]), 0);
-      csvRows.push([p.name, ...dayHours, fmtHours(total)]);
-    } else {
-      missing.push(p.name);
-      csvRows.push([p.name, ...Array(7).fill(''), '']);
-    }
+  // Index: weekStart → userId → entries
+  const tsByWeek = new Map<string, Map<string, Record<string, unknown>>>();
+  for (const ts of (allTimesheets ?? [])) {
+    const wk = ts.week_start.slice(0, 10);
+    if (!tsByWeek.has(wk)) tsByWeek.set(wk, new Map());
+    tsByWeek.get(wk)!.set(ts.user_id, ts.entries ?? {});
   }
 
-  // ─── Encode CSV as base64 ─────────────────────────────────────────────────────
+  // ─── Build per-week report sections ──────────────────────────────────────────
 
-  const csvContent = buildCsv(csvRows);
-  const bytes      = new TextEncoder().encode(csvContent);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  const base64Csv = btoa(binary);
+  const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  type WeekReport = {
+    weekStart: string;
+    label: string;
+    submitted: number;
+    total: number;
+    missingNames: string[];
+    htmlSection: string;
+    csvContent: string;
+    csvName: string;
+  };
+
+  const weekReports: WeekReport[] = [];
+
+  for (const weekStart of weeks) {
+    const dayKeys: string[]   = [];
+    const dayLabels: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const dk      = addDays(weekStart, i);
+      const [, mm, dd] = dk.split('-');
+      dayKeys.push(dk);
+      dayLabels.push(`${DAY_NAMES[i]} ${mm}/${dd}`);
+    }
+
+    const tsMap = tsByWeek.get(weekStart) ?? new Map();
+
+    // Eligible: contractors whose start_date is on or before this week
+    const eligible = profiles.filter(p => p.start_date && p.start_date <= weekStart);
+    if (eligible.length === 0) continue;
+
+    const missingNames: string[] = [];
+    let submitted = 0;
+
+    const csvRows: string[][] = [['Contractor', ...dayLabels, 'Total Hours']];
+    const htmlRows: string[] = [];
+
+    for (const p of eligible) {
+      const entries = tsMap.get(p.id);
+      if (entries !== undefined) {
+        submitted++;
+        const dayHours = dayKeys.map(dk => fmtHours(getHours(entries[dk])));
+        const total    = dayKeys.reduce((sum, dk) => sum + getHours(entries[dk]), 0);
+        csvRows.push([p.name, ...dayHours, fmtHours(total)]);
+        htmlRows.push(`<tr style="background:white">
+          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;font-weight:600">${p.name}</td>
+          ${dayHours.map(h => `<td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:13px">${h}</td>`).join('')}
+          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:700">${fmtHours(total)}</td>
+        </tr>`);
+      } else {
+        missingNames.push(p.name);
+        csvRows.push([p.name, ...Array(7).fill(''), '']);
+        htmlRows.push(`<tr style="background:#fef2f2">
+          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;color:#991b1b;font-weight:600">${p.name}</td>
+          ${Array(7).fill('<td style="padding:5px 10px;border-bottom:1px solid #f3f4f6"></td>').join('')}
+          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;text-align:center;color:#dc2626;font-size:12px">Missing</td>
+        </tr>`);
+      }
+    }
+
+    // Skip weeks where everyone submitted
+    if (missingNames.length === 0) continue;
+
+    const label = weekLabel(weekStart);
+    const total = eligible.length;
+
+    const dayHeaderCells = dayLabels.map(l =>
+      `<th style="padding:6px 10px;font-size:11px;color:#6b7280;font-weight:600;text-align:center;white-space:nowrap">${l}</th>`
+    ).join('');
+
+    const htmlSection = `
+      <div style="margin-top:24px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+        <div style="background:#1e40af;color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
+          <strong>Week ending ${label.split('–')[1]?.trim() ?? label}</strong>
+          <span style="font-size:12px;opacity:.85">${submitted}/${total} submitted · <span style="color:#fca5a5">${missingNames.length} missing</span></span>
+        </div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="background:#f9fafb">
+              <th style="padding:6px 10px;font-size:11px;color:#6b7280;font-weight:600;text-align:left">Contractor</th>
+              ${dayHeaderCells}
+              <th style="padding:6px 10px;font-size:11px;color:#6b7280;font-weight:600;text-align:center">Total</th>
+            </tr></thead>
+            <tbody>${htmlRows.join('')}</tbody>
+          </table>
+        </div>
+      </div>`;
+
+    weekReports.push({
+      weekStart, label, submitted, total,
+      missingNames,
+      htmlSection,
+      csvContent: buildCsv(csvRows),
+      csvName: csvFilename(weekStart),
+    });
+  }
 
   // ─── Compose email ────────────────────────────────────────────────────────────
 
-  const total = profiles.length;
+  const totalMissingWeeks = weekReports.length;
 
-  const missingItemsHtml = missing
-    .map(n => `<li style="padding:2px 0">${n}</li>`)
-    .join('');
+  let bodyHtml: string;
+  let bodyText: string;
+  let subject: string;
 
-  const bodyHtml = `
-<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px">
-  <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
-    <h2 style="margin:0">Timesheet Report — ${weekLabel}</h2>
-  </div>
-  <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
-    <p style="margin-top:0">Please find the weekly timesheet summary attached.</p>
-    <table style="border-collapse:collapse;margin:12px 0">
-      <tr><td style="padding:4px 16px 4px 0;color:#6b7280">Week</td><td><strong>${weekLabel}</strong></td></tr>
-      <tr><td style="padding:4px 16px 4px 0;color:#6b7280">Submitted</td><td><strong>${submitted} of ${total}</strong></td></tr>
-      <tr><td style="padding:4px 16px 4px 0;color:#6b7280">Missing</td><td><strong style="color:${missing.length ? '#dc2626' : 'inherit'}">${missing.length}</strong></td></tr>
-    </table>
-    ${missing.length ? `
-    <p style="margin-top:20px;margin-bottom:6px;font-weight:bold;color:#dc2626">Missing timesheets (${missing.length}):</p>
-    <ul style="margin:0;padding-left:20px;columns:2;column-gap:32px">${missingItemsHtml}</ul>` : `
-    <p style="color:#16a34a;font-weight:bold">✓ All contractors submitted.</p>`}
-    <p style="margin-top:24px;font-size:12px;color:#9ca3af">Automated report from the Synergie Timesheet System.</p>
-  </div>
-</div>`;
+  if (totalMissingWeeks === 0) {
+    subject  = `Timesheet Report — All Weeks Submitted ✓`;
+    bodyText = `All contractors have submitted their timesheets for all weeks since ${CUTOFF}. Nothing outstanding.`;
+    bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px">
+      <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
+        <h2 style="margin:0">Timesheet Report</h2>
+      </div>
+      <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
+        <p style="color:#16a34a;font-weight:bold;font-size:16px">✓ All contractors are up to date.</p>
+        <p style="color:#6b7280;font-size:13px">No outstanding timesheets for any week since ${CUTOFF}.</p>
+      </div>
+    </div>`;
+  } else {
+    const totalMissing = weekReports.reduce((s, r) => s + r.missingNames.length, 0);
+    subject = `Timesheet Report — ${totalMissingWeeks} Week${totalMissingWeeks > 1 ? 's' : ''} Outstanding`;
 
-  const missingListText = missing.length
-    ? `\nMissing contractors:\n${missing.map(n => `  • ${n}`).join('\n')}`
-    : '\nAll contractors submitted.';
+    const summaryRows = weekReports.map(r =>
+      `<tr>
+        <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;font-weight:600">${r.label}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center">${r.submitted}/${r.total}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center;color:#dc2626;font-weight:700">${r.missingNames.length}</td>
+      </tr>`
+    ).join('');
 
-  const bodyText =
-    `Timesheet Report — ${weekLabel}\n\n` +
-    `Week:      ${weekLabel}\n` +
-    `Submitted: ${submitted} of ${total}\n` +
-    `Missing:   ${missing.length}` +
-    missingListText +
-    '\n\nSee attached CSV for full details.';
+    bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto;padding:20px">
+      <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
+        <h2 style="margin:0">Timesheet Report</h2>
+        <p style="margin:6px 0 0;opacity:.85;font-size:14px">${totalMissingWeeks} week${totalMissingWeeks > 1 ? 's' : ''} with outstanding timesheets · ${totalMissing} missing in total</p>
+      </div>
+      <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
+        <p style="color:#374151;margin-top:0">Summary of all weeks with missing timesheets. CSV files attached for each week.</p>
+        <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;margin-bottom:8px">
+          <thead><tr style="background:#1e40af;color:white">
+            <th style="padding:8px 12px;text-align:left">Week</th>
+            <th style="padding:8px 12px;text-align:center">Submitted</th>
+            <th style="padding:8px 12px;text-align:center">Missing</th>
+          </tr></thead>
+          <tbody>${summaryRows}</tbody>
+        </table>
+        ${weekReports.map(r => r.htmlSection).join('')}
+        <p style="margin-top:24px;font-size:12px;color:#9ca3af">Automated report from the Synergie Timesheet System. CSV files for each week are attached.</p>
+      </div>
+    </div>`;
+
+    bodyText = [
+      `Timesheet Report — ${totalMissingWeeks} week${totalMissingWeeks > 1 ? 's' : ''} outstanding\n`,
+      ...weekReports.map(r =>
+        `${r.label}: ${r.submitted}/${r.total} submitted, ${r.missingNames.length} missing\n` +
+        r.missingNames.map(n => `  • ${n}`).join('\n')
+      ),
+      '\nCSV files attached for each week.',
+    ].join('\n');
+  }
 
   // ─── Send via Brevo ───────────────────────────────────────────────────────────
+
+  const attachments = weekReports.map(r => ({ content: toBase64(r.csvContent), name: r.csvName }));
 
   const emailRes = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
@@ -237,10 +364,10 @@ serve(async (req) => {
     body: JSON.stringify({
       sender:      { name: FROM_NAME, email: FROM_EMAIL },
       to:          [{ email: ACCOUNTING_EMAIL, name: 'Accounting' }],
-      subject:     `Timesheet Report — Week of ${weekLabel}`,
+      subject,
       textContent: bodyText,
       htmlContent: bodyHtml,
-      attachment:  [{ content: base64Csv, name: csvFilename }],
+      ...(attachments.length > 0 ? { attachment: attachments } : {}),
     }),
   });
 
@@ -251,7 +378,17 @@ serve(async (req) => {
     });
   }
 
-  return new Response(JSON.stringify({ ok: true, week: weekStart, submitted, total, missing: missing.length, recipient: ACCOUNTING_EMAIL }), {
+  const totalSubmitted = weekReports.reduce((s, r) => s + r.submitted, 0);
+  const totalMissing   = weekReports.reduce((s, r) => s + r.missingNames.length, 0);
+
+  return new Response(JSON.stringify({
+    ok: true,
+    weeksChecked:  weeks.length,
+    weeksReported: totalMissingWeeks,
+    submitted:     totalSubmitted,
+    missing:       totalMissing,
+    recipient:     ACCOUNTING_EMAIL,
+  }), {
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 });
