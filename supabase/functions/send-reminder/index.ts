@@ -73,15 +73,18 @@ function getMissingWeeks(startDate: string, submittedWeeks: Set<string>, localTi
 async function sendEmail(
   apiKey: string, fromEmail: string, fromName: string,
   to: string, toName: string, subject: string, bodyText: string, bodyHtml: string,
+  attachments?: Array<{ content: string; name: string }>,
 ): Promise<{ ok: boolean; error?: string }> {
+  const body: Record<string, unknown> = {
+    sender: { name: fromName, email: fromEmail },
+    to: [{ email: to, name: toName }],
+    subject, textContent: bodyText, htmlContent: bodyHtml,
+  };
+  if (attachments && attachments.length > 0) body.attachment = attachments;
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: { 'api-key': apiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sender: { name: fromName, email: fromEmail },
-      to: [{ email: to, name: toName }],
-      subject, textContent: bodyText, htmlContent: bodyHtml,
-    }),
+    body: JSON.stringify(body),
   });
   const data = await res.json();
   return res.ok ? { ok: true } : { ok: false, error: JSON.stringify(data) };
@@ -504,7 +507,7 @@ These links are valid for 7 days and are single-use.`;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // 3. ACCOUNTANT REMINDERS — pending invoice approvals only
+  // 3. ACCOUNTANT REMINDERS — pending invoices + weekly timesheet summary with CSV
   // ══════════════════════════════════════════════════════════════════════════
   for (const accountant of accountants) {
     const lt   = getUserLocalTime(accountant.country as string, accountant.region as string);
@@ -516,66 +519,210 @@ These links are valid for 7 days and are single-use.`;
       continue;
     }
 
-    const { data: pending } = await supabase
+    // ── Pending invoices ───────────────────────────────────────────────────
+    const { data: pendingInvoices } = await supabase
       .from('invoices')
       .select('id, invoice_number, user_name, period_start, period_end, total_hours, total_amount, currency, submitted_at')
       .eq('status', 'submitted')
       .order('submitted_at', { ascending: true });
+    const invCount = pendingInvoices?.length ?? 0;
 
-    if (!pending || pending.length === 0) { results.push({ role: 'accountant', user: accountant.name, action: 'no pending invoices' }); continue; }
+    // ── Completed weeks since reminder cutoff ──────────────────────────────
+    const CUTOFF_W = '2026-04-27';
+    const lastCompMon = (() => {
+      const d = new Date(lt); d.setHours(0, 0, 0, 0);
+      const day = d.getDay();
+      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1) - 7);
+      return formatDate(d);
+    })();
+    const completedWeeks: string[] = [];
+    const wCur = parseLocalDate(CUTOFF_W);
+    const wEnd = parseLocalDate(lastCompMon);
+    while (wCur <= wEnd) {
+      completedWeeks.push(formatDate(wCur));
+      wCur.setDate(wCur.getDate() + 7);
+    }
 
-    const count = pending.length;
-    const totalAmount = pending.reduce((s: number, inv: Record<string,unknown>) => s + Number(inv.total_amount), 0);
-    const subject = `Action Required: ${count} Invoice${count > 1 ? 's' : ''} Awaiting Your Review`;
+    // ── Timesheets for completed weeks (non-rejected) ──────────────────────
+    let weekTimesheets: Record<string, unknown>[] = [];
+    if (completedWeeks.length > 0) {
+      const { data: wts } = await supabase
+        .from('timesheets')
+        .select('id, user_id, user_name, week_start, status, entries, project_id')
+        .in('week_start', completedWeeks)
+        .neq('status', 'rejected')
+        .order('user_name');
+      weekTimesheets = wts || [];
+    }
 
-    const rowsText = pending.map((inv: Record<string,unknown>) => {
-      const start = parseLocalDate((inv.period_start as string).split('T')[0]);
-      const end   = parseLocalDate((inv.period_end   as string).split('T')[0]);
-      const sym   = currSym(inv.currency as string);
-      const sub   = inv.submitted_at ? new Date(inv.submitted_at as string).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
-      return `  \u2022 ${inv.invoice_number} | ${inv.user_name} | ${start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}\u2013${end.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} | ${sym}${Number(inv.total_amount).toFixed(2)} | Submitted ${sub}`;
-    }).join('\n');
+    const { data: projRows } = await supabase.from('projects').select('id, code');
+    const projMap: Record<number, string> = {};
+    (projRows || []).forEach((p: { id: number; code: string }) => { projMap[p.id] = p.code; });
 
-    const rowsHtml = pending.map((inv: Record<string,unknown>) => {
-      const start = parseLocalDate((inv.period_start as string).split('T')[0]);
-      const end   = parseLocalDate((inv.period_end   as string).split('T')[0]);
-      const sym   = currSym(inv.currency as string);
-      const sub   = inv.submitted_at ? new Date(inv.submitted_at as string).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
-      return `<tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-family:monospace;font-size:13px;color:#374151">${inv.invoice_number}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#111827">${inv.user_name}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#374151;font-size:13px">${start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} \u2013 ${end.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#059669">${sym}${Number(inv.total_amount).toFixed(2)}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#9ca3af;font-size:12px">${sub}</td>
-      </tr>`;
-    }).join('');
+    const emailById: Record<string, string> = {};
+    allProfiles.forEach((p: Record<string, unknown>) => { emailById[p.id as string] = p.email as string; });
 
-    const bodyText = `Hi ${accountant.name},\n\nYou have ${count} invoice${count > 1 ? 's' : ''} awaiting your review (total: $${totalAmount.toFixed(2)}):\n\n${rowsText}\n\nPlease log in to approve or reject them.`;
+    // ── Build per-week sections (only weeks with pending/submitted timesheets) ─
+    type WeekSection = { label: string; html: string; text: string; csv: string; csvName: string };
+    const weekSections: WeekSection[] = [];
+
+    for (const weekStart of completedWeeks) {
+      const weekTs = weekTimesheets.filter(
+        (t: Record<string, unknown>) => (t.week_start as string).slice(0, 10) === weekStart
+      );
+      const hasPending = weekTs.some(
+        (t: Record<string, unknown>) => ['pending', 'submitted'].includes(t.status as string)
+      );
+      if (!hasPending) continue;
+
+      const monDate = parseLocalDate(weekStart);
+      const sunDate = new Date(monDate); sunDate.setDate(monDate.getDate() + 6);
+      const label = `Week ending ${sunDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
+
+      // Day columns Mon–Sun
+      const dayDates: Date[] = [];
+      for (let i = 0; i < 7; i++) { const d = new Date(monDate); d.setDate(monDate.getDate() + i); dayDates.push(d); }
+      const dayKeys   = dayDates.map(d => formatDate(d));
+      const dayLabels = dayDates.map(d => d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }));
+
+      const approvedCount = weekTs.filter((t: Record<string, unknown>) => t.status === 'approved').length;
+      const pendingCount  = weekTs.filter((t: Record<string, unknown>) => ['pending', 'submitted'].includes(t.status as string)).length;
+
+      const csvLines = [`Name,Email,Project,${dayLabels.join(',')},Total,Status`];
+      const htmlRows: string[] = [];
+      const textRows: string[] = [];
+
+      const sorted = [...weekTs].sort((a, b) => (a.user_name as string).localeCompare(b.user_name as string));
+      for (const ts of sorted) {
+        const proj = ts.project_id ? (projMap[ts.project_id as number] || '') : '';
+        const raw  = ts.entries;
+        const entries: Record<string, { hours?: string | number }> =
+          typeof raw === 'string' ? JSON.parse(raw as string) : ((raw as Record<string, { hours?: string | number }>) || {});
+        const dayHours = dayKeys.map(k => parseFloat(String(entries[k]?.hours || 0)) || 0);
+        const total    = dayHours.reduce((s, h) => s + h, 0);
+        const email    = emailById[ts.user_id as string] || '';
+
+        csvLines.push(`"${ts.user_name}","${email}","${proj}",${dayHours.map(h => h || '').join(',')},${total.toFixed(1)},"${ts.status}"`);
+
+        const statusLabel = ts.status === 'approved' ? '✅ Approved' : ts.status === 'submitted' ? '⏳ Submitted' : '🕐 Pending';
+        const statusColor = ts.status === 'approved' ? '#16a34a'        : ts.status === 'submitted' ? '#2563eb'          : '#f59e0b';
+        htmlRows.push(`<tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;font-weight:600;color:#111827">${ts.user_name}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;color:#4f46e5;font-size:13px">${proj}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:right;font-weight:600">${total.toFixed(1)}h</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;color:${statusColor};font-size:12px;white-space:nowrap">${statusLabel}</td>
+        </tr>`);
+        textRows.push(`  ${(ts.user_name as string).padEnd(28)}${proj.padEnd(10)}${total.toFixed(1).padStart(6)}h  ${ts.status}`);
+      }
+
+      const sunTag = sunDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        .replace(',', '').replace(/ /g, '_');
+      weekSections.push({
+        label,
+        html: `<div style="margin-top:20px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+          <div style="background:#374151;color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
+            <strong>${label}</strong>
+            <span style="font-size:12px;opacity:.8">${approvedCount} approved &middot; ${pendingCount} pending</span>
+          </div>
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:#f9fafb">
+              <th style="padding:7px 10px;text-align:left;font-size:12px;color:#6b7280">Employee</th>
+              <th style="padding:7px 10px;text-align:left;font-size:12px;color:#6b7280">Project</th>
+              <th style="padding:7px 10px;text-align:right;font-size:12px;color:#6b7280">Hours</th>
+              <th style="padding:7px 10px;text-align:left;font-size:12px;color:#6b7280">Status</th>
+            </tr></thead>
+            <tbody>${htmlRows.join('')}</tbody>
+          </table>
+        </div>`,
+        text: `${label}:\n${textRows.join('\n')}`,
+        csv: csvLines.join('\n'),
+        csvName: `timesheets_WE_${sunTag}.csv`,
+      });
+    }
+
+    if (invCount === 0 && weekSections.length === 0) {
+      results.push({ role: 'accountant', user: accountant.name, action: 'nothing to report' });
+      continue;
+    }
+
+    // ── Assemble invoice HTML/text block ──────────────────────────────────
+    let invHtml = '';
+    let invText = '';
+    if (invCount > 0) {
+      const totalAmount = (pendingInvoices || []).reduce((s: number, inv: Record<string, unknown>) => s + Number(inv.total_amount), 0);
+      const invRowsHtml = (pendingInvoices || []).map((inv: Record<string, unknown>) => {
+        const start = parseLocalDate((inv.period_start as string).split('T')[0]);
+        const end   = parseLocalDate((inv.period_end   as string).split('T')[0]);
+        const sym   = currSym(inv.currency as string);
+        const sub   = inv.submitted_at ? new Date(inv.submitted_at as string).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
+        return `<tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-family:monospace;font-size:13px">${inv.invoice_number}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600">${inv.user_name}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px">${start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#059669">${sym}${Number(inv.total_amount).toFixed(2)}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#9ca3af;font-size:12px">${sub}</td>
+        </tr>`;
+      }).join('');
+      invHtml = `<p style="color:#374151;font-weight:600;margin-bottom:8px">Invoices Awaiting Review (${invCount})</p>
+        <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb">
+          <thead><tr style="background:#059669;color:white">
+            <th style="padding:10px 12px;text-align:left">Invoice #</th>
+            <th style="padding:10px 12px;text-align:left">Employee</th>
+            <th style="padding:10px 12px;text-align:left">Period</th>
+            <th style="padding:10px 12px;text-align:left">Amount</th>
+            <th style="padding:10px 12px;text-align:left">Submitted</th>
+          </tr></thead>
+          <tbody>${invRowsHtml}</tbody>
+          <tfoot><tr style="background:#f0fdf4">
+            <td colspan="3" style="padding:10px 12px;font-weight:700">Total (${invCount} invoice${invCount > 1 ? 's' : ''})</td>
+            <td style="padding:10px 12px;font-weight:700;color:#059669">$${totalAmount.toFixed(2)}</td><td></td>
+          </tr></tfoot>
+        </table>`;
+      invText = (pendingInvoices || []).map((inv: Record<string, unknown>) => {
+        const start = parseLocalDate((inv.period_start as string).split('T')[0]);
+        const end   = parseLocalDate((inv.period_end   as string).split('T')[0]);
+        const sym   = currSym(inv.currency as string);
+        const sub   = inv.submitted_at ? new Date(inv.submitted_at as string).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
+        return `  • ${inv.invoice_number} | ${inv.user_name} | ${start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}–${end.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} | ${sym}${Number(inv.total_amount).toFixed(2)} | Submitted ${sub}`;
+      }).join('\n');
+    }
+
+    const subjectParts = [
+      invCount > 0            ? `${invCount} Invoice${invCount > 1 ? 's' : ''} Awaiting Review`                             : '',
+      weekSections.length > 0 ? `${weekSections.length} Week${weekSections.length > 1 ? 's' : ''} Pending Timesheets` : '',
+    ].filter(Boolean);
+
+    const bodyText = [
+      `Hi ${accountant.name},`,
+      invCount > 0 ? `INVOICES AWAITING REVIEW (${invCount}):\n${invText}` : '',
+      weekSections.length > 0 ? `TIMESHEET SUMMARY BY WEEK:\n\n${weekSections.map(s => s.text).join('\n\n')}\n\n(CSV files attached for each week with pending timesheets)` : '',
+    ].filter(Boolean).join('\n\n');
+
     const bodyHtml = wrapHtml(
-      '#059669', '\ud83e\uddfe Invoices Awaiting Review',
+      '#059669', '📄 Timesheet & Invoice Report',
       `<p style="color:#374151">Hi ${accountant.name},</p>
-       <p style="color:#374151">You have <strong>${count} invoice${count > 1 ? 's' : ''}</strong> awaiting your review:</p>
-       <table style="width:100%;border-collapse:collapse;margin:16px 0;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb">
-         <thead><tr style="background:#059669;color:white">
-           <th style="padding:10px 12px;text-align:left">Invoice #</th>
-           <th style="padding:10px 12px;text-align:left">Employee</th>
-           <th style="padding:10px 12px;text-align:left">Period</th>
-           <th style="padding:10px 12px;text-align:left">Amount</th>
-           <th style="padding:10px 12px;text-align:left">Submitted</th>
-         </tr></thead>
-         <tbody>${rowsHtml}</tbody>
-         <tfoot><tr style="background:#f0fdf4">
-           <td colspan="3" style="padding:10px 12px;font-weight:700;color:#374151">Total (${count} invoice${count > 1 ? 's' : ''})</td>
-           <td style="padding:10px 12px;font-weight:700;color:#059669">$${totalAmount.toFixed(2)}</td>
-           <td></td>
-         </tr></tfoot>
-       </table>
-       <p style="color:#374151">Please log in to approve or reject them.</p>`,
+       ${invHtml}
+       ${weekSections.length > 0 ? `
+         <p style="color:#374151;font-weight:600;margin-top:${invCount > 0 ? '32px' : '0'};margin-bottom:4px">Timesheet Summary by Week</p>
+         <p style="color:#6b7280;font-size:13px;margin-top:0">CSV files for each week with pending timesheets are attached.</p>
+         ${weekSections.map(s => s.html).join('')}
+       ` : ''}`,
       APP_URL,
     );
 
-    const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, accountant.email as string, accountant.name as string, subject, bodyText, bodyHtml);
-    results.push({ role: 'accountant', user: accountant.name, action: r.ok ? 'email sent' : 'email failed', pending: count, ...(r.error && { error: r.error }) });
+    const attachments = weekSections.map(s => {
+      const bytes = new TextEncoder().encode(s.csv);
+      let bin = ''; bytes.forEach(b => { bin += String.fromCharCode(b); });
+      return { content: btoa(bin), name: s.csvName };
+    });
+
+    const r = await sendEmail(
+      BREVO_API_KEY, FROM_EMAIL, FROM_NAME,
+      accountant.email as string, accountant.name as string,
+      subjectParts.join(' · '), bodyText, bodyHtml,
+      attachments.length > 0 ? attachments : undefined,
+    );
+    results.push({ role: 'accountant', user: accountant.name, action: r.ok ? 'email sent' : 'email failed', pendingInvoices: invCount, weekSections: weekSections.length, ...(r.error && { error: r.error }) });
   }
 
   return new Response(JSON.stringify({ results }), {
