@@ -134,19 +134,33 @@ const MONTH_ABBR = {
 };
 
 function parsePeriodFromFilename(filename) {
-  // Matches "Apr'26", "April'26", "Apr'2026", "Aprr'26" (typo), "Apr 2026", "Apr-2026"
-  const m = filename.match(
-    /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr{1,2}(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)['\s\-](\d{2,4})\b/i
+  // Three failure modes in the original regex, all fixed here:
+  //   1. \b fails when an underscore precedes the month name (_February) — use [^a-zA-Z] instead.
+  //   2. Partial/variant month names ("Februar", "Aprr") — extend feb/apr patterns + slice(0,3) lookup.
+  //   3. Month-only filenames with no year ("Invoice-April.pdf") — second pass extracts year elsewhere.
+
+  const MONTH_RE = /(?:^|[^a-zA-Z])(jan(?:uary)?|feb(?:r(?:uary?)?)?|mar(?:ch)?|apr{1,2}(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)/i;
+
+  // Pass 1: month + separator + explicit year (e.g. "Apr'26", "_February_26", "April 2026")
+  let m = filename.match(
+    /(?:^|[^a-zA-Z])(jan(?:uary)?|feb(?:r(?:uary?)?)?|mar(?:ch)?|apr{1,2}(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)['\s\-_.]*(\d{2,4})\b/i
   );
-  if (!m) return null;
+  let year;
+  if (m) {
+    year = parseInt(m[2], 10);
+  } else {
+    // Pass 2: month name alone — find year elsewhere in filename
+    m = filename.match(MONTH_RE);
+    if (!m) return null;
+    const yearM = filename.match(/\b(20\d{2})\b/);
+    year = yearM ? parseInt(yearM[1], 10) : new Date().getFullYear();
+  }
 
-  const month = MONTH_ABBR[m[1].toLowerCase().replace(/r+/, 'r')]; // normalise "aprr" → "apr"
+  const raw = m[1].toLowerCase().replace(/r+/, 'r'); // normalise "aprr" → "apr"
+  const month = MONTH_ABBR[raw] ?? MONTH_ABBR[raw.slice(0, 3)];
   if (!month) return null;
-
-  let year = parseInt(m[2], 10);
   if (year < 100) year += 2000;
-
-  const lastDay = new Date(year, month, 0).getDate(); // day 0 of next month = last of this
+  const lastDay = new Date(year, month, 0).getDate();
   return {
     periodStart: `${year}-${String(month).padStart(2, '0')}-01`,
     periodEnd:   `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
