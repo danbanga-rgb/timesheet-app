@@ -362,8 +362,8 @@ These links are valid for 7 days and are single-use.`;
     const dow  = lt.getDay();
     const hour = lt.getHours();
 
-    const isFriday5pm  = dow === 5 && hour === 17;
-    const isWeekday9am = dow >= 1 && dow <= 5 && hour === 9;
+    const isFriday5pm  = dow === 5 && hour >= 17 && hour <= 18;
+    const isWeekday9am = dow >= 1 && dow <= 5 && hour >= 9 && hour <= 10;
     if (!force && !isFriday5pm && !isWeekday9am) {
       results.push({ role: 'timesheetuser', user: user.name, action: `skipped (dow=${dow} hour=${hour})` });
       continue;
@@ -443,7 +443,7 @@ These links are valid for 7 days and are single-use.`;
     const dow  = lt.getDay();
     const hour = lt.getHours();
 
-    if (!force && !(dow >= 1 && dow <= 5 && hour === 9)) {
+    if (!force && !(dow >= 1 && dow <= 5 && hour >= 9 && hour <= 10)) {
       results.push({ role: 'manager', user: manager.name, action: `skipped (dow=${dow} hour=${hour}, tz=${(manager.country as string) || 'unknown'}-${(manager.region as string) || 'unknown'})` });
       continue;
     }
