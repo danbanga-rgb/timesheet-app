@@ -1,0 +1,57 @@
+name: Mark Emails Unseen (one-shot recovery)
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours_back:
+        description: 'Mark emails from last N hours as unseen'
+        required: true
+        default: '4'
+
+jobs:
+  mark-unseen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install imap
+        run: cd scripts/poller && npm install imap
+      - name: Mark recent emails unseen
+        env:
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASS: ${{ secrets.IMAP_PASS }}
+          HOURS_BACK: ${{ github.event.inputs.hours_back }}
+        run: |
+          node -e "
+          const Imap = require('./scripts/poller/node_modules/imap');
+          const hoursBack = parseInt(process.env.HOURS_BACK || '4');
+          const since = new Date(Date.now() - hoursBack * 60 * 60 * 1000);
+          const imap = new Imap({
+            user: process.env.IMAP_USER || 'timesheets@mysynergie.net',
+            password: process.env.IMAP_PASS,
+            host: 'imap.ionos.com', port: 993, tls: true,
+            tlsOptions: { rejectUnauthorized: false },
+          });
+          imap.once('ready', () => {
+            imap.openBox('INBOX', false, (err) => {
+              if (err) { console.error(err); imap.end(); return; }
+              imap.search([['SINCE', since]], (err, uids) => {
+                if (err || !uids || uids.length === 0) {
+                  console.log('No emails found in window');
+                  imap.end(); return;
+                }
+                console.log('Marking unseen:', uids.length, 'emails');
+                imap.delFlags(uids, ['\\Seen'], (err) => {
+                  if (err) console.error('delFlags error:', err.message);
+                  else console.log('Done — emails will be reprocessed on next poller run');
+                  imap.end();
+                });
+              });
+            });
+          });
+          imap.once('error', e => { console.error(e); process.exit(1); });
+          imap.connect();
+          "
