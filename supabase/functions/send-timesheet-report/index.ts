@@ -379,6 +379,7 @@ serve(async (req) => {
   }
 
   const totalSubmitted = weekReports.reduce((s, r) => s + r.submitted, 0);
+  const totalEligible  = weekReports.reduce((s, r) => s + r.total, 0);
   const totalMissing   = weekReports.reduce((s, r) => s + r.missingNames.length, 0);
 
   return new Response(JSON.stringify({
@@ -386,6 +387,7 @@ serve(async (req) => {
     weeksChecked:  weeks.length,
     weeksReported: totalMissingWeeks,
     submitted:     totalSubmitted,
+    total:         totalEligible,
     missing:       totalMissing,
     recipient:     ACCOUNTING_EMAIL,
   }), {
