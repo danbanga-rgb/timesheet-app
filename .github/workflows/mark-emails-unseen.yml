@@ -1,10 +1,10 @@
-name: Mark Emails Unseen (one-shot recovery)
+name: Mark Emails Unseen
 
 on:
   workflow_dispatch:
     inputs:
       hours_back:
-        description: 'Mark emails from last N hours as unseen'
+        description: 'Mark emails received in the last N hours as unseen (so the poller reprocesses them)'
         required: true
         default: '4'
 
