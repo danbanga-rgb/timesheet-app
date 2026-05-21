@@ -1142,49 +1142,37 @@ const TimesheetSystem = () => {
         return;
       }
 
-      // Capture credentials before closing modal (state resets on close)
-      const createdEmail = userForm.email;
       const createdName = userForm.name;
-      const createdPassword = userForm.password;
 
       await fetchUsers();
       setShowUserModal(false);
       setShowQuickAddModal(false);
       setEditingUser(null);
 
-      // Send welcome email with credentials
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        const fnUrl = `${(supabase as any).supabaseUrl}/functions/v1/send-reminder`;
-        const fnRes = await fetch(fnUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${session?.access_token || (supabase as any).supabaseKey}`,
-            'apikey': (supabase as any).supabaseKey,
-          },
-          body: JSON.stringify({ action: 'welcome', toEmail: createdEmail, toName: createdName, password: createdPassword }),
-        });
-        const fnData = await fnRes.json();
-        if (!fnRes.ok) {
-          alert(`User "${createdName}" created! Welcome email failed:\n${JSON.stringify(fnData)}\n\nShare manually:\nEmail: ${createdEmail}\nPassword: ${createdPassword}`);
-        } else {
-          alert(`User "${createdName}" created! Welcome email sent to ${createdEmail}.`);
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : JSON.stringify(err);
-        alert(`User "${createdName}" created! Welcome email failed:\n${msg}\n\nShare manually:\nEmail: ${createdEmail}\nPassword: ${createdPassword}`);
-      }
+      alert(`User "${createdName}" created. Use Send Invite to email them portal access when ready.`);
     }
   };
 
-  const resetUserPassword = async (user: UserProfile) => {
-    if (!window.confirm(`Send a password reset email to ${user.email}?`)) return;
-    const { error } = await supabase.auth.resetPasswordForEmail(user.email, {
-      redirectTo: window.location.origin
-    });
-    if (error) { alert('Error sending reset email: ' + error.message); return; }
-    alert(`Password reset email sent to ${user.email}`);
+  const sendInvite = async (user: UserProfile) => {
+    if (!window.confirm(`Send a portal invite to ${user.name} (${user.email})?`)) return;
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const fnUrl = `${(supabase as any).supabaseUrl}/functions/v1/send-reminder`;
+      const res = await fetch(fnUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token || (supabase as any).supabaseKey}`,
+          'apikey': (supabase as any).supabaseKey,
+        },
+        body: JSON.stringify({ action: 'invite', toEmail: user.email, toName: user.name }),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(`Invite failed: ${JSON.stringify(data)}`); return; }
+      alert(`Invite sent to ${user.email}.`);
+    } catch (err: unknown) {
+      alert(`Invite failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   const deleteUser = async (userId: string) => {
@@ -2267,7 +2255,7 @@ const TimesheetSystem = () => {
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-2">
                             <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit"><Edit2 className="w-4 h-4" /></button>
-                            <button onClick={() => resetUserPassword(user)} className="p-1 text-amber-600 hover:text-amber-800" title="Reset Password"><Mail className="w-4 h-4" /></button>
+                            <button onClick={() => sendInvite(user)} className="p-1 text-indigo-400 hover:text-indigo-600" title="Send Portal Invite"><Mail className="w-4 h-4" /></button>
                             <button onClick={() => deleteUser(user.id)} className="p-1 text-red-600 hover:text-red-800" title="Delete"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         </td>
@@ -2628,17 +2616,17 @@ const TimesheetSystem = () => {
                             ↻ New
                           </button>
                         </div>
-                        <p className="text-xs text-indigo-600 mt-1">✉ This password will be emailed to the user automatically on save.</p>
+                        <p className="text-xs text-gray-400 mt-1">Password not sent on save — use Send Invite from the user list when ready.</p>
                       </div>
                     ) : (
-                      <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                        <p className="text-sm text-amber-800 font-medium mb-2">Password Reset</p>
-                        <p className="text-xs text-amber-700 mb-3">Send a password reset link to the user's email address.</p>
+                      <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+                        <p className="text-sm text-indigo-800 font-medium mb-2">Portal Access</p>
+                        <p className="text-xs text-indigo-700 mb-3">Send a set-password link so the user can access the portal for the first time (or regain access).</p>
                         <button
-                          onClick={() => { setShowUserModal(false); resetUserPassword(editingUser!); }}
-                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 text-sm"
+                          onClick={() => { setShowUserModal(false); sendInvite(editingUser!); }}
+                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
                         >
-                          <Mail className="w-4 h-4" /> Send Password Reset Email
+                          <Mail className="w-4 h-4" /> Send Portal Invite
                         </button>
                       </div>
                     )}

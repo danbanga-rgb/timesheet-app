@@ -6,7 +6,7 @@
 //   Accountants:      Daily Mon-Fri 9am — pending invoice approvals
 //   Skip if nothing pending. Never mix contexts.
 //
-// Also handles welcome emails (action: 'welcome')
+// Also handles invite emails (action: 'invite')
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -130,35 +130,46 @@ serve(async (req) => {
     });
   }
 
-  // ── WELCOME EMAIL ──────────────────────────────────────────────────────────
+  // ── INVITE EMAIL ───────────────────────────────────────────────────────────
   let reqBody: Record<string, string> = {};
   try { reqBody = await req.json(); } catch { /* no body */ }
 
-  if (reqBody.action === 'welcome') {
-    const { toEmail, toName, password } = reqBody;
-    if (!toEmail || !toName || !password) {
+  if (reqBody.action === 'invite') {
+    const { toEmail, toName } = reqBody;
+    if (!toEmail || !toName) {
       return new Response(JSON.stringify({ error: 'Missing fields' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
+    // Generate a password-recovery link server-side so no raw password is sent
+    const adminClient = createClient(SUPABASE_URL, SUPABASE_KEY);
+    const { data: linkData, error: linkErr } = await adminClient.auth.admin.generateLink({
+      type: 'recovery',
+      email: toEmail,
+      options: { redirectTo: APP_URL },
+    });
+    if (linkErr || !linkData?.properties?.action_link) {
+      return new Response(JSON.stringify({ error: linkErr?.message || 'Failed to generate invite link' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    const inviteLink = linkData.properties.action_link;
     const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <div style="background:#4f46e5;color:white;padding:20px;border-radius:8px 8px 0 0"><h2 style="margin:0">Welcome to the Timesheet System</h2></div>
+      <div style="background:#4f46e5;color:white;padding:20px;border-radius:8px 8px 0 0"><h2 style="margin:0">You're invited to the Timesheet Portal</h2></div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
         <p style="color:#374151">Hi ${toName},</p>
-        <p style="color:#374151">Your account has been created. Here are your login credentials:</p>
-        <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:16px;margin:16px 0">
-          <p style="margin:0;color:#374151"><strong>Email:</strong> ${toEmail}</p>
-          <p style="margin:8px 0 0;color:#374151"><strong>Password:</strong> <span style="font-family:monospace;font-size:1.1em">${password}</span></p>
-        </div>
-        <p style="color:#6b7280;font-size:14px">We recommend changing your password after your first login.</p>
-        <div style="margin-top:24px"><a href="${APP_URL}" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Log In Now →</a></div>
-        <p style="margin-top:24px;font-size:12px;color:#9ca3af">If you did not expect this email, please contact your administrator.</p>
+        <p style="color:#374151">Your account on the Synergie Timesheet Portal is ready. Click the button below to set your password and log in.</p>
+        <div style="margin-top:24px;margin-bottom:24px"><a href="${inviteLink}" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Set Password &amp; Log In →</a></div>
+        <p style="color:#6b7280;font-size:13px">This link expires in 24 hours. If you weren't expecting this, you can safely ignore it.</p>
+        <p style="margin-top:16px;font-size:12px;color:#9ca3af">Questions? Reply to this email or contact your administrator.</p>
       </div>
     </div>`;
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
       headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sender: { name: FROM_NAME, email: FROM_EMAIL }, to: [{ email: toEmail, name: toName }],
-        subject: `Your Timesheet System Account — ${FROM_NAME}`, htmlContent: html,
-        textContent: `Hi ${toName},\n\nEmail: ${toEmail}\nPassword: ${password}\n\nLog in at: ${APP_URL}` }),
+      body: JSON.stringify({
+        sender: { name: FROM_NAME, email: FROM_EMAIL },
+        to: [{ email: toEmail, name: toName }],
+        subject: `You're invited to the Synergie Timesheet Portal`,
+        htmlContent: html,
+        textContent: `Hi ${toName},\n\nYour Synergie Timesheet Portal account is ready. Set your password here:\n${inviteLink}\n\nThis link expires in 24 hours.`,
+      }),
     });
     const r = await res.json();
     if (!res.ok) return new Response(JSON.stringify({ error: r }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
