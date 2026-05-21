@@ -146,13 +146,19 @@ function isBlockedContractor(email) {
 async function isKnownContractor(email) {
   if (!SUPABASE_REST_URL || !email) return true;
   try {
+    // Use a SECURITY DEFINER RPC so the anon key can check existence
+    // without being blocked by RLS on the profiles table.
     const res = await fetch(
-      `${SUPABASE_REST_URL}/profiles?email=eq.${encodeURIComponent(email)}&select=id&limit=1`,
-      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
+      `${SUPABASE_REST_URL}/rpc/profile_email_exists`,
+      {
+        method: 'POST',
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_email: email }),
+      }
     );
-    if (!res.ok) return true;
+    if (!res.ok) return true; // fail open on API error
     const data = await res.json();
-    return Array.isArray(data) && data.length > 0;
+    return data === true;
   } catch {
     return true;
   }
