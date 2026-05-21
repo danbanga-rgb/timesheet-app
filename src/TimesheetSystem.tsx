@@ -473,6 +473,7 @@ const TimesheetSystem = () => {
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
+  const [showQuickAddModal, setShowQuickAddModal] = useState(false);
   const [showGeneratedPassword, setShowGeneratedPassword] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
@@ -1050,6 +1051,13 @@ const TimesheetSystem = () => {
     setShowUserModal(true);
   };
 
+  const openQuickAddModal = () => {
+    setEditingUser(null);
+    setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null });
+    setShowGeneratedPassword(true);
+    setShowQuickAddModal(true);
+  };
+
   const saveUser = async () => {
     if (!userForm.name || !userForm.email || !userForm.country) {
       alert('Please fill in all required fields'); return;
@@ -1141,6 +1149,7 @@ const TimesheetSystem = () => {
 
       await fetchUsers();
       setShowUserModal(false);
+      setShowQuickAddModal(false);
       setEditingUser(null);
 
       // Send welcome email with credentials
@@ -2189,7 +2198,10 @@ const TimesheetSystem = () => {
             <div className="bg-white rounded-lg shadow-md p-6">
               <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
                 <h2 className="text-xl font-bold text-gray-800">Users ({users.length})</h2>
-                <button onClick={() => openUserModal()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"><Plus className="w-4 h-4" /> Add User</button>
+                <div className="flex gap-2">
+                  <button onClick={openQuickAddModal} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm sm:text-base"><Plus className="w-4 h-4" /> Quick Add</button>
+                  <button onClick={() => openUserModal()} className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm sm:text-base">Full Form</button>
+                </div>
               </div>
               <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
                 <table className="w-full">
@@ -2485,6 +2497,90 @@ const TimesheetSystem = () => {
             );
           })()}
 
+
+          {/* Quick Add Modal */}
+          {showQuickAddModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
+              <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-sm">
+                <div className="p-6">
+                  <div className="flex justify-between items-center mb-5">
+                    <h3 className="text-xl font-bold text-gray-800">Quick Add User</h3>
+                    <button onClick={() => setShowQuickAddModal(false)} className="text-gray-500 hover:text-gray-700"><X className="w-6 h-6" /></button>
+                  </div>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
+                      <input
+                        type="text"
+                        value={userForm.name}
+                        onChange={e => setUserForm({...userForm, name: e.target.value})}
+                        className="w-full px-4 py-4 text-lg border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500"
+                        placeholder="Jane Doe"
+                        autoFocus
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Email *</label>
+                      <input
+                        type="email"
+                        value={userForm.email}
+                        onChange={e => setUserForm({...userForm, email: e.target.value})}
+                        className="w-full px-4 py-4 text-lg border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500"
+                        placeholder="jane@company.com"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>
+                      <select
+                        value={userForm.country}
+                        onChange={e => {
+                          const c = countries.find(x => x.code === e.target.value);
+                          const autoRegion = c && c.regions.length === 1 ? c.regions[0] : '';
+                          setUserForm({...userForm, country: e.target.value, region: autoRegion});
+                        }}
+                        className="w-full px-4 py-4 text-lg border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 bg-white"
+                      >
+                        {countries.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Start Date *</label>
+                      <input
+                        type="date"
+                        value={userForm.start_date}
+                        onChange={e => setUserForm({...userForm, start_date: e.target.value})}
+                        className="w-full px-4 py-4 text-lg border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 bg-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-6 space-y-3">
+                    <button
+                      onClick={saveUser}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-4 bg-indigo-600 text-white text-lg font-semibold rounded-xl hover:bg-indigo-700 active:bg-indigo-800"
+                    >
+                      <Plus className="w-5 h-5" /> Add User
+                    </button>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => { setShowQuickAddModal(false); setShowUserModal(true); }}
+                        className="flex-1 px-4 py-3 text-indigo-600 font-medium rounded-xl border border-indigo-200 hover:bg-indigo-50"
+                      >
+                        More Options →
+                      </button>
+                      <button
+                        onClick={() => setShowQuickAddModal(false)}
+                        className="px-4 py-3 text-gray-600 rounded-xl border border-gray-200 hover:bg-gray-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* User Modal */}
           {showUserModal && (
