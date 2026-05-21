@@ -474,7 +474,6 @@ const TimesheetSystem = () => {
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
   const [showQuickAddModal, setShowQuickAddModal] = useState(false);
-  const [showGeneratedPassword, setShowGeneratedPassword] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
     email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null
@@ -1047,14 +1046,12 @@ const TimesheetSystem = () => {
       const autoPassword = generatePassword();
       setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null });
     }
-    setShowGeneratedPassword(true);
     setShowUserModal(true);
   };
 
   const openQuickAddModal = () => {
     setEditingUser(null);
     setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null });
-    setShowGeneratedPassword(true);
     setShowQuickAddModal(true);
   };
 
@@ -2588,35 +2585,8 @@ const TimesheetSystem = () => {
                       <p className="text-xs text-gray-400 mt-1">Include country code, e.g. +1 555 123 4567</p>
                     </div>
                     {!editingUser ? (
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Generated Password</label>
-                        <div className="flex gap-2">
-                          <div className="relative flex-1">
-                            <input
-                              type={showGeneratedPassword ? 'text' : 'password'}
-                              value={userForm.password}
-                              onChange={e => setUserForm({...userForm, password: e.target.value})}
-                              className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm bg-indigo-50"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setShowGeneratedPassword(!showGeneratedPassword)}
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
-                              title={showGeneratedPassword ? 'Hide' : 'Show'}
-                            >
-                              {showGeneratedPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setUserForm({...userForm, password: generatePassword()})}
-                            className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm whitespace-nowrap"
-                            title="Generate new password"
-                          >
-                            ↻ New
-                          </button>
-                        </div>
-                        <p className="text-xs text-gray-400 mt-1">Password not sent on save — use Send Invite from the user list when ready.</p>
+                      <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                        <p className="text-xs text-gray-500">A secure password is auto-generated. Use <strong>Send Portal Invite</strong> from the user list when you're ready to give them access — they'll set their own password via a link.</p>
                       </div>
                     ) : (
                       <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
