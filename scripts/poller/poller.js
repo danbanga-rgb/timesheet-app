@@ -53,6 +53,13 @@ const DAY_ORDER = ['mon','tue','wed','thu','fri','sat','sun'];
 
 const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmaster@/i];
 
+const MAX_EMAILS_PER_RUN    = 20;        // layer 3: volume cap
+const MAX_ATTACHMENT_BYTES  = 10 * 1024 * 1024; // layer 4: 10 MB per attachment
+
+// Derived from ingestUrl — same Supabase project
+const SUPABASE_REST_URL  = (CONFIG.ingestUrl || '').replace(/\/functions\/v1\/.*$/, '/rest/v1');
+const SUPABASE_ANON_KEY  = 'sb_publishable_qYa4tmVYu2zsIZfUhvT7hg_UaGgAgKc';
+
 // Filenames that are never timesheets — filter silently so they don't appear as failures.
 // No outer \b wrappers — many patterns appear mid-word or before digits (e.g. "SOW002", "AUP.pdf").
 const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$/i;
@@ -131,6 +138,24 @@ function isBlockedContractor(email) {
   if (CONFIG.blockedContractorEmails.includes(lower)) return true;
   const domain = lower.split('@')[1] || '';
   return CONFIG.blockedContractorDomains.includes(domain);
+}
+
+// Layer 1: check if a resolved contractor email exists in profiles.
+// Fails open (returns true) on network errors so legitimate timesheets
+// are never silently dropped due to a transient Supabase hiccup.
+async function isKnownContractor(email) {
+  if (!SUPABASE_REST_URL || !email) return true;
+  try {
+    const res = await fetch(
+      `${SUPABASE_REST_URL}/profiles?email=eq.${encodeURIComponent(email)}&select=id&limit=1`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
+    );
+    if (!res.ok) return true;
+    const data = await res.json();
+    return Array.isArray(data) && data.length > 0;
+  } catch {
+    return true;
+  }
 }
 
 // Extract email + name from forwarded body headers
@@ -1614,6 +1639,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
   const attachments = (parsed.attachments || []).map(a => ({
     name:   a.filename || a.contentType?.split('/')[1] || 'unnamed',
     buffer: a.content,
+    size:   a.size || a.content?.length || 0,
     // Detect by contentType OR filename — covers inline attachments too
     isXlsx: !!(a.contentType?.includes('spreadsheet') || a.contentType?.includes('excel') ||
                (a.filename||'').match(/\.(xlsx|xls)$/i)),
@@ -1623,7 +1649,13 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
                (a.contentType?.includes('octet-stream') && (a.filename||'').match(/\.pdf$/i))),
     isEml:  !!(a.contentType?.includes('message/rfc822') || a.contentType?.includes('message/rfc') ||
                (a.filename||'').match(/\.eml$/i)),
-  }));
+  })).filter(a => {
+    if (a.size > MAX_ATTACHMENT_BYTES) {
+      console.warn(`  ⚠️  Attachment too large (${(a.size / 1024 / 1024).toFixed(1)}MB), skipping: ${a.name}`);
+      return false;
+    }
+    return true;
+  });
 
   const emlAtts = attachments.filter(a => a.isEml);
   const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isEml);
@@ -1657,13 +1689,20 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
         const innerAtts = (inner.attachments || []).map(a => {
           const fname = a.filename || a.name || '';
           const ctype = a.contentType || '';
+          const size  = a.size || a.content?.length || 0;
           // Also check related/alternative content parts that may contain PDFs
           const isXlsx = !!(ctype.includes('spreadsheet') || ctype.includes('excel') ||
                             fname.match(/\.(xlsx|xls)$/i));
           const isPdf  = !!(ctype.includes('pdf') ||
                             fname.match(/\.pdf$/i) ||
                             (ctype.includes('octet-stream') && fname.match(/\.pdf$/i)));
-          return { name: fname || ctype.split('/')[1] || 'unnamed', buffer: a.content, isXlsx, isPdf, isEml: false };
+          return { name: fname || ctype.split('/')[1] || 'unnamed', buffer: a.content, size, isXlsx, isPdf, isEml: false };
+        }).filter(a => {
+          if (a.size > MAX_ATTACHMENT_BYTES) {
+            console.warn(`  ⚠️  Inner attachment too large (${(a.size / 1024 / 1024).toFixed(1)}MB), skipping: ${a.name}`);
+            return false;
+          }
+          return true;
         });
 
         // Also check related parts (some email clients embed PDFs in related/alternative parts)
@@ -1716,6 +1755,14 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
           continue;
         }
 
+        // Layer 1: sender allowlist
+        if (!await isKnownContractor(contractor)) {
+          console.warn(`  ⚠️  Unknown contractor in ${emlAtt.name}: ${contractor} — skipping`);
+          results.push({ type: 'skipped', reason: `unknown_contractor: ${contractor}` });
+          summary.unknownContractors = (summary.unknownContractors || 0) + 1;
+          continue;
+        }
+
         console.log(`  📧 ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
         const { results: r, failedAttachments: fa } = await ingestContractor(
           contractor, contractorName, inner.subject || subject, innerBody, innerAtts, messageId
@@ -1761,6 +1808,15 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
     return;
   }
 
+  // Layer 1: sender allowlist — skip unknown contractors, forward to helpdesk
+  if (!await isKnownContractor(contractor)) {
+    console.warn(`  ⚠️  Unknown contractor: ${contractor} — skipping (not in profiles)`);
+    results.push({ type: 'skipped', subject, reason: `unknown_contractor: ${contractor}` });
+    await forwardToHelpdesk(subject, bodyText, fromEmail, `Unknown contractor email not in system: ${contractor}`);
+    summary.unknownContractors = (summary.unknownContractors || 0) + 1;
+    return;
+  }
+
   console.log(`\n📧 ${subject}`);
   console.log(`   Contractor: ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
   const { results: r, failedAttachments: fa } = await ingestContractor(
@@ -1794,6 +1850,10 @@ function fetchEmails() {
           if (err) return reject(err);
           if (!uids || uids.length === 0) { imap.end(); return resolve([]); }
 
+          if (uids.length > MAX_EMAILS_PER_RUN) {
+            console.warn(`⚠️  VOLUME CAP: ${uids.length} unseen emails — processing oldest ${MAX_EMAILS_PER_RUN} only. Possible flood.`);
+            uids = uids.slice(0, MAX_EMAILS_PER_RUN);
+          }
           console.log(`Found ${uids.length} unseen email(s)`);
           const messages = [];
           // markSeen: true — mark as seen on fetch so emails are never re-processed.
@@ -2092,12 +2152,19 @@ async function main() {
     const attachments = (parsed.attachments || []).map(a => ({
       name:   a.filename || a.name || (a.contentType?.split('/')[1]) || 'unnamed',
       buffer: a.content,
+      size:   a.size || a.content?.length || 0,
       isXlsx: !!(a.contentType?.includes('spreadsheet') || a.contentType?.includes('excel') ||
                  (a.filename||'').match(/\.(xlsx|xls)$/i)),
       isPdf:  !!(a.contentType?.includes('pdf') || (a.filename||'').match(/\.pdf$/i) ||
                  (a.contentType?.includes('octet-stream') && (a.filename||'').match(/\.pdf$/i))),
       isEml:  !!(a.contentType?.includes('message/rfc822') || (a.filename||'').match(/\.eml$/i)),
-    }));
+    })).filter(a => {
+      if (a.size > MAX_ATTACHMENT_BYTES) {
+        console.warn(`  ⚠️  Attachment too large (${(a.size / 1024 / 1024).toFixed(1)}MB), skipping: ${a.name}`);
+        return false;
+      }
+      return true;
+    });
 
     const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isEml);
 
@@ -2160,6 +2227,7 @@ async function main() {
   console.log(`  Emails found     : ${summary.total}`);
   console.log(`  DMARC deleted    : ${summary.dmarc}`);
   console.log(`  Forwarded        : ${summary.forwarded}`);
+  console.log(`  Unknown senders  : ${summary.unknownContractors || 0}`);
   console.log(`  Created          : ${summary.created}`);
   console.log(`  Duplicates       : ${summary.duplicates}`);
   console.log(`  Corrections      : ${summary.corrections}`);
