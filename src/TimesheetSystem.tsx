@@ -77,7 +77,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
 };
 
 import { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 
@@ -1172,6 +1172,27 @@ const TimesheetSystem = () => {
     }
   };
 
+  const loginAsUser = async (user: UserProfile) => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const fnUrl = `${(supabase as any).supabaseUrl}/functions/v1/impersonate-user`;
+      const res = await fetch(fnUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token || (supabase as any).supabaseKey}`,
+          'apikey': (supabase as any).supabaseKey,
+        },
+        body: JSON.stringify({ userId: user.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(`Could not impersonate user: ${data.error}`); return; }
+      window.open(data.url, '_blank');
+    } catch (err: unknown) {
+      alert(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const deleteUser = async (userId: string) => {
     if (userId === currentUser!.id) { alert('You cannot delete your own account.'); return; }
     if (!window.confirm('Are you sure you want to delete this user?')) return;
@@ -2253,6 +2274,9 @@ const TimesheetSystem = () => {
                           <div className="flex items-center justify-center gap-2">
                             <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit"><Edit2 className="w-4 h-4" /></button>
                             <button onClick={() => sendInvite(user)} className="p-1 text-indigo-400 hover:text-indigo-600" title="Send Portal Invite"><Mail className="w-4 h-4" /></button>
+                            {user.id !== currentUser?.id && (
+                              <button onClick={() => loginAsUser(user)} className="p-1 text-emerald-600 hover:text-emerald-800" title="Login as this user"><LogIn className="w-4 h-4" /></button>
+                            )}
                             <button onClick={() => deleteUser(user.id)} className="p-1 text-red-600 hover:text-red-800" title="Delete"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         </td>
