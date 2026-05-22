@@ -1095,55 +1095,40 @@ const TimesheetSystem = () => {
       setShowUserModal(false);
       setEditingUser(null);
     } else {
-      // Create new user via signUp — works with anon key
+      // Create new user via admin edge function (no public signups required)
       if (!userForm.password) { alert('Password is required for new users'); return; }
       if (userForm.password.length < 6) { alert('Password must be at least 6 characters'); return; }
 
-      // Pre-check: does a profile with this email already exist?
-      const { data: existingProfile } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('email', userForm.email)
-        .maybeSingle();
-
-      if (existingProfile) {
-        alert(`A user with email "${userForm.email}" already exists. Please use a different email.`);
-        return;
-      }
-
-      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email: userForm.email,
-        password: userForm.password,
-        options: {
-          data: { name: userForm.name }
-        }
+      const { data: { session } } = await supabase.auth.getSession();
+      const fnUrl = `${(supabase as any).supabaseUrl}/functions/v1/create-user`;
+      const res = await fetch(fnUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token}`,
+          'apikey': (supabase as any).supabaseKey,
+        },
+        body: JSON.stringify({
+          email: userForm.email,
+          password: userForm.password,
+          name: userForm.name,
+          role: userForm.role,
+          country: userForm.country,
+          region: userForm.region,
+          manager_id: userForm.manager_id,
+          project_id: userForm.project_id,
+          start_date: userForm.start_date || null,
+          end_date: userForm.end_date || null,
+          phone: userForm.phone || null,
+          email_approvals_enabled: userForm.email_approvals_enabled,
+          invoice_enabled: userForm.invoice_enabled,
+          reminders_enabled: userForm.reminders_enabled,
+          vendor_manager_id: userForm.vendor_manager_id || null,
+        }),
       });
-
-      if (signUpError) { alert('Error creating user: ' + signUpError.message); return; }
-      if (!signUpData.user) { alert('User creation failed — no user returned.'); return; }
-
-      // Insert profile row
-      const { error: profileError } = await supabase.from('profiles').insert({
-        id: signUpData.user.id,
-        username: userForm.email,
-        name: userForm.name,
-        role: userForm.role,
-        email: userForm.email,
-        country: userForm.country,
-        region: userForm.region,
-        manager_id: userForm.manager_id,
-        project_id: userForm.project_id,
-        start_date: userForm.start_date || null,
-        end_date: userForm.end_date || null,
-        phone: userForm.phone || null,
-        email_approvals_enabled: userForm.email_approvals_enabled,
-        invoice_enabled: userForm.invoice_enabled,
-        reminders_enabled: userForm.reminders_enabled,
-        vendor_manager_id: userForm.vendor_manager_id || null,
-      });
-
-      if (profileError) {
-        alert(`Profile creation failed: ${profileError.message}\n\nPlease go to Supabase → Authentication → Users, delete the entry for ${userForm.email}, then try again.`);
+      const result = await res.json();
+      if (!res.ok || result.error) {
+        alert('Error creating user: ' + (result.error || res.statusText));
         return;
       }
 

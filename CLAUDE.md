@@ -41,9 +41,11 @@ Authentication uses Supabase Auth. The client is initialized in `src/supabaseCli
 
 **`ingest-timesheet/index.ts`** (Deno) — Called by the email poller. Handles:
 - Auth via `x-ingest-secret` header (JWT verification disabled)
-- User find-or-create (auto-provisions accounts for new contractors)
+- User lookup only — **no auto-creation**. Unknown emails return `{ ok: false, error: 'unknown_contractor' }` and are logged to `email_import_log`. Users must be created by admin first.
 - Timesheet upsert with correction rules: `source='direct'` records are never overwritten; `source='imported'` records are updated and kept `approved`; new imports are always created as `approved` (auto-approved on import)
 - Import deduplication via `email_import_log` table
+
+**`create-user/index.ts`** (Deno) — Admin-only. Creates a new `auth.users` record + `profiles` row using the service role key. Required because public signups are disabled — the frontend's admin form calls this instead of `supabase.auth.signUp()`. Verifies caller is admin via JWT.
 
 **`send-reminder/index.ts`** (Deno) — Sends reminder emails via Brevo API. Triggered by pg_cron (not GitHub Actions — that workflow is disabled). Handles:
 - Timesheet reminders: Friday 5pm local first (friendly tone), then Mon–Fri 9am daily (urgent tone) while still missing
