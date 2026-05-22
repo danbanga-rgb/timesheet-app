@@ -210,13 +210,13 @@ serve(async (req) => {
     // Build week ending date
     const [y, m, d] = (weekStart as string).split('-').map(Number);
     const mon = new Date(y, m - 1, d);
-    const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
-    const weekEndingStr = fri.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    const weekEndingStr = sun.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
     const approveUrl = `${APP_URL}?email_action=approve&token=${token}`;
     const rejectUrl  = `${APP_URL}?email_action=reject&token=${token}`;
 
-    const subject = `Timesheet Pending Approval: ${timesheetUserName} — W/E ${fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+    const subject = `Timesheet Pending Approval: ${timesheetUserName} — W/E ${sun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
 
     const bodyText = `Hi ${managerName},
 
@@ -337,8 +337,8 @@ These links are valid for 7 days and are single-use.`;
 
     const [y, m, d] = (tsRow.week_start as string).split('T')[0].split('-').map(Number);
     const mon = new Date(y, m - 1, d);
-    const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
-    const weekStr = fri.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    const weekStr = sun.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
     return new Response(JSON.stringify({
       ok: true,
@@ -392,14 +392,14 @@ These links are valid for 7 days and are single-use.`;
 
     const isFirst = force ? true : isFriday5pm;
     const weekListText = missing.map(w => {
-      const mon = parseLocalDate(w); const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
+      const mon = parseLocalDate(w); const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
       const isCurrent = formatDate(mon) === formatDate(getWeekMonday(lt));
-      return `  \u2022 Week ending ${fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${isCurrent ? ' (current week)' : ''}`;
+      return `  \u2022 Week ending ${sun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${isCurrent ? ' (current week)' : ''}`;
     }).join('\n');
     const weekListHtml = missing.map(w => {
-      const mon = parseLocalDate(w); const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
+      const mon = parseLocalDate(w); const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
       const isCurrent = formatDate(mon) === formatDate(getWeekMonday(lt));
-      return `<li style="margin:6px 0">Week ending <strong>${fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</strong>${isCurrent ? ' <span style="color:#f59e0b;font-size:12px">(current week)</span>' : ''}</li>`;
+      return `<li style="margin:6px 0">Week ending <strong>${sun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</strong>${isCurrent ? ' <span style="color:#f59e0b;font-size:12px">(current week)</span>' : ''}</li>`;
     }).join('');
 
     const TIMESHEET_EMAIL = 'timesheets@mysynergie.net';
@@ -483,17 +483,17 @@ These links are valid for 7 days and are single-use.`;
 
     const rowsText = pending.map((t: Record<string,unknown>) => {
       const mon = parseLocalDate((t.week_start as string).split('T')[0]);
-      const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
-      return `  \u2022 ${t.user_name} | W/E ${fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} | ${t.project_id ? (projMap[t.project_id as number] || 'Unknown project') : 'No project'}`;
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+      return `  \u2022 ${t.user_name} | W/E ${sun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} | ${t.project_id ? (projMap[t.project_id as number] || 'Unknown project') : 'No project'}`;
     }).join('\n');
 
     const rowsHtml = pending.map((t: Record<string,unknown>) => {
       const mon = parseLocalDate((t.week_start as string).split('T')[0]);
-      const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
       const proj = t.project_id ? (projMap[t.project_id as number] || 'Unknown') : 'No project';
       return `<tr>
         <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#111827">${t.user_name}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#374151">W/E ${fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#374151">W/E ${sun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#6366f1;font-size:13px">${proj}</td>
       </tr>`;
     }).join('');
