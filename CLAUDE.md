@@ -31,7 +31,7 @@ A single-page React + TypeScript app (Vite). Virtually all UI logic lives in one
 **User roles and their views:**
 - `timesheetuser` — submit weekly timesheets, manage invoices, payment profiles
 - `manager` — approve/reject timesheets for their direct reports
-- `accountant` — consolidated view across all employees, invoice approvals, CSV export
+- `accountant` — consolidated view across all employees, invoice approvals, CSV export, QuickBooks XLSX import (client-side SheetJS parsing of Transaction Detail by Account exports)
 - `vendormanager` — manage vendor contractor timesheets and invoices
 - `admin` — user/project CRUD, reminder emails, import log
 
@@ -49,7 +49,10 @@ Authentication uses Supabase Auth. The client is initialized in `src/supabaseCli
 
 **`send-reminder/index.ts`** (Deno) — Sends reminder emails via Brevo API. Triggered by pg_cron (not GitHub Actions — that workflow is disabled). Handles:
 - Timesheet reminders: Friday 5pm local first (friendly tone), then Mon–Fri 9am daily (urgent tone) while still missing
-- Manager approval reminders and accountant invoice reminders
+- Manager approval reminders. **Accountant section is currently disabled** (skipped with `action: 'skipped (disabled)'`) — covered by `send-timesheet-report` instead.
+- Skips users where `profiles.reminders_enabled = false`
+- `REMINDER_CUTOFF = '2026-04-27'` — weeks before this date are never included in reminders
+- Reminder email body offers three submission options: app login, reply-to-email with attachment, direct email to `timesheets@mysynergie.net`. First-login note directs to `helpdesk@synergietechsolutions.com`.
 - `action: 'invite'` — generates a server-side magic link (auth.admin.generateLink) and sends a styled invite email; no raw password ever sent
 - `?force=true` query param bypasses time window checks and fires immediately for all missing users
 - Week ending date is always **Monday + 6 days = Sunday**. Variable named `sun`, not `fri`.
@@ -63,13 +66,13 @@ Authentication uses Supabase Auth. The client is initialized in `src/supabaseCli
 Node.js script that runs **hourly** via GitHub Actions (`cron: '30 * * * *'`). It:
 - Connects to IMAP (`imap.ionos.com`) and fetches UNSEEN emails
 - Parses XLSX and PDF timesheet attachments
-- Resolves the actual contractor email from forwarded messages (handles internal forwarders)
+- Resolves the actual contractor email from forwarded messages. **Internal forwarders** are listed in the `INTERNAL_FORWARDERS` env var in `poll-timesheets.yml` (not a secret — hardcoded in the workflow file). Current list: `contracts@synergietechsolutions.com`, `accounting@synergietechsolutions.com`, `lpinto@synergietechsolutions.com`, `helpdesk@synergietechsolutions.com`, `contracts@cheetah-it.com` (Bron Tamulis / Cheetah IT alternate address → resolves to `btamulis@hotmail.com`).
 - POSTs structured data to the `ingest-timesheet` edge function
 - Security guardrails: sender allowlist via `profile_email_exists` RPC (fail-open on errors), volume cap of 20 emails/run, 10MB attachment size limit
 - `mark-emails-unseen.yml` GitHub Actions workflow can reprocess emails by marking them unseen via IMAP
 
 ### Supabase Tables
-- `profiles` — user accounts (extends `auth.users`), includes `role`, `country`, `region`, `project_id`, `invoice_enabled`
+- `profiles` — user accounts (extends `auth.users`), includes `role`, `country`, `region`, `project_id`, `invoice_enabled`, `reminders_enabled` (bool, default true — admin can toggle per user)
 - `timesheets` — weekly timesheets; `entries` is a JSON object of `{dateKey: {hours, isHoliday, ...}}`; `source` is `'direct'` or `'imported'`; `week_start` is always Monday (ISO `YYYY-MM-DD`)
 - `invoices` — contractor invoices with `lines[]`, `payment_profile` snapshot, `attachment_path` (Supabase Storage bucket: `invoice-attachments`)
 - `payment_profiles` — bank/company details attached to invoices
