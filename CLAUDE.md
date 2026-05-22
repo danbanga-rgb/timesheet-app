@@ -45,7 +45,17 @@ Authentication uses Supabase Auth. The client is initialized in `src/supabaseCli
 - Timesheet upsert with correction rules: `source='direct'` records are never overwritten; `source='imported'` records are updated and kept `approved`; new imports are always created as `approved` (auto-approved on import)
 - Import deduplication via `email_import_log` table
 
-**`send-reminder/index.ts`** (Deno) — Sends reminder emails via Brevo API. Handles timesheet reminders (Friday 5pm first, then daily Mon–Fri 9am), manager approval reminders, accountant invoice reminders, and welcome emails.
+**`send-reminder/index.ts`** (Deno) — Sends reminder emails via Brevo API. Triggered by pg_cron (not GitHub Actions — that workflow is disabled). Handles:
+- Timesheet reminders: Friday 5pm local first (friendly tone), then Mon–Fri 9am daily (urgent tone) while still missing
+- Manager approval reminders and accountant invoice reminders
+- `action: 'invite'` — generates a server-side magic link (auth.admin.generateLink) and sends a styled invite email; no raw password ever sent
+- `?force=true` query param bypasses time window checks and fires immediately for all missing users
+- Week ending date is always **Monday + 6 days = Sunday**. Variable named `sun`, not `fri`.
+- Time windows use `hour >= 9 && hour <= 10` (not exact hour) to tolerate cron delays
+
+**`impersonate-user/index.ts`** (Deno) — Admin-only. Verifies caller is admin via JWT, generates a one-time magic link for the target user, returns the URL. Frontend opens it in a new tab; admin session is unaffected.
+
+**`send-timesheet-report/index.ts`** (Deno) — Called by the poller after each run. Emails a per-week missing-timesheet CSV report to accounting. Returns `{ submitted, total, missing }`.
 
 ### 3. Email Poller — `scripts/poller/poller.js`
 Node.js script that runs **hourly** via GitHub Actions (`cron: '30 * * * *'`). It:
@@ -53,6 +63,8 @@ Node.js script that runs **hourly** via GitHub Actions (`cron: '30 * * * *'`). I
 - Parses XLSX and PDF timesheet attachments
 - Resolves the actual contractor email from forwarded messages (handles internal forwarders)
 - POSTs structured data to the `ingest-timesheet` edge function
+- Security guardrails: sender allowlist via `profile_email_exists` RPC (fail-open on errors), volume cap of 20 emails/run, 10MB attachment size limit
+- `mark-emails-unseen.yml` GitHub Actions workflow can reprocess emails by marking them unseen via IMAP
 
 ### Supabase Tables
 - `profiles` — user accounts (extends `auth.users`), includes `role`, `country`, `region`, `project_id`, `invoice_enabled`
@@ -65,8 +77,19 @@ Node.js script that runs **hourly** via GitHub Actions (`cron: '30 * * * *'`). I
 ### Realtime
 The frontend subscribes to `timesheets` table changes via `supabase.channel('timesheets-realtime')` to keep the manager/accountant views live.
 
+### Reminder Scheduling — pg_cron
+Reminders are fired by a **Supabase pg_cron job** (not GitHub Actions). The `send-reminders.yml` workflow is disabled.
+- Schedule: `0 * * * *` (top of every hour)
+- To pause: `SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'send-reminders'`
+- To resume: `SELECT cron.schedule('send-reminders', '0 * * * *', $$SELECT net.http_post(...)$$)`
+- Use the Supabase Management API with PAT to run these queries: `POST /v1/projects/{ref}/database/query`
+- Edge function logs are queryable via `GET /v1/projects/{ref}/analytics/endpoints/logs.all` with PAT
+
 ### GitHub Actions
-- `.github/workflows/` contains the email poller workflow (runs `scripts/poller/poller.js`) and a daily `pg_dump` backup workflow.
+- `poll-timesheets.yml` — runs the email poller hourly (`cron: '30 * * * *'`)
+- `mark-emails-unseen.yml` — manual workflow to reprocess emails (marks them unseen via IMAP so the poller picks them up again)
+- `send-reminders.yml` — **disabled** (replaced by pg_cron)
+- `pg-dump-backup.yml` — daily database backup
 
 ## Environment Variables
 
