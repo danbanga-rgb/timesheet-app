@@ -66,7 +66,7 @@ Authentication uses Supabase Auth. The client is initialized in `src/supabaseCli
 Node.js script that runs **hourly** via GitHub Actions (`cron: '30 * * * *'`). It:
 - Connects to IMAP (`imap.ionos.com`) and fetches UNSEEN emails
 - Parses XLSX and PDF timesheet attachments
-- Resolves the actual contractor email from forwarded messages. **Internal forwarders** are listed in the `INTERNAL_FORWARDERS` env var in `poll-timesheets.yml` (not a secret — hardcoded in the workflow file). Current list: `contracts@synergietechsolutions.com`, `accounting@synergietechsolutions.com`, `lpinto@synergietechsolutions.com`, `helpdesk@synergietechsolutions.com`, `contracts@cheetah-it.com` (Bron Tamulis / Cheetah IT alternate address → resolves to `btamulis@hotmail.com`).
+- Resolves the actual contractor email from forwarded messages. **Internal forwarders** are listed in the `INTERNAL_FORWARDERS` env var in `poll-timesheets.yml` (not a secret — hardcoded in the workflow file). Current list: `contracts@synergietechsolutions.com`, `accounting@synergietechsolutions.com`, `lpinto@synergietechsolutions.com`, `helpdesk@synergietechsolutions.com`, `contracts@cheetah-it.com` (Cheetah IT — forwards contractor timesheets to the system inbox).
 - POSTs structured data to the `ingest-timesheet` edge function
 - Security guardrails: sender allowlist via `profile_email_exists` RPC (fail-open on errors), volume cap of 20 emails/run, 10MB attachment size limit
 - `mark-emails-unseen.yml` GitHub Actions workflow can reprocess emails by marking them unseen via IMAP
