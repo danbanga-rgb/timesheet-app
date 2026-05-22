@@ -99,6 +99,7 @@ interface UserProfile {
   invoiceEnabled: boolean;
   remindersEnabled: boolean;
   vendorManagerId: string | null;
+  lastLogin: string | null;
 }
 
 interface Project {
@@ -653,9 +654,15 @@ const TimesheetSystem = () => {
   }
 
   async function fetchUsers() {
-    const { data, error } = await supabase.from('profiles').select('*').order('name');
+    const [{ data, error }, { data: loginData }] = await Promise.all([
+      supabase.from('profiles').select('*').order('name'),
+      supabase.rpc('get_user_last_logins'),
+    ]);
     if (error) console.error('fetchUsers failed:', error.message);
-    if (data) setUsers(data.map(normaliseProfile));
+    if (data) {
+      const loginMap = new Map<string, string>((loginData ?? []).map((r: { id: string; last_sign_in_at: string }) => [r.id, r.last_sign_in_at]));
+      setUsers(data.map(p => ({ ...normaliseProfile(p), lastLogin: loginMap.get(p.id) ?? null })));
+    }
   }
 
   // Applies a single-field profile update with RLS-block detection and optimistic UI.
@@ -703,6 +710,7 @@ const TimesheetSystem = () => {
       invoiceEnabled: p.invoice_enabled === undefined ? true : !!(p.invoice_enabled as boolean),
       remindersEnabled: p.reminders_enabled === undefined ? true : !!(p.reminders_enabled as boolean),
       vendorManagerId: (p.vendor_manager_id as string) || null,
+      lastLogin: null,
     };
   }
 
@@ -2223,6 +2231,7 @@ const TimesheetSystem = () => {
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Manager</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Invoices</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Reminders</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Last Login</th>
                       <th className="px-4 py-3 text-center text-sm font-semibold text-gray-700">Actions</th>
                     </tr>
                   </thead>
@@ -2269,6 +2278,11 @@ const TimesheetSystem = () => {
                               <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${user.remindersEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
                             </button>
                           ) : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-600">
+                          {user.lastLogin
+                            ? <span title={new Date(user.lastLogin).toLocaleString()}>{new Date(user.lastLogin).toLocaleDateString()}</span>
+                            : <span className="text-gray-400 italic">Never</span>}
                         </td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-2">
