@@ -1867,7 +1867,7 @@ const TimesheetSystem = () => {
     return users.filter(u => u.role === 'timesheetuser').map(user => {
       const timesheet = weekTimesheets.find(t => t.userId === user.id);
       const entries = timesheet ? timesheet.entries : {};
-      const project = timesheet ? projects.find(p => p.id === timesheet.projectId) : null;
+      const project = projects.find(p => p.id === (timesheet?.projectId ?? user.projectId)) ?? null;
       const dailyHours = getWeekDates(reportWeek).map(date => parseFloat(entries[formatDate(date)]?.hours || '0'));
       return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
     });
