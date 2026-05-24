@@ -77,7 +77,7 @@ const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: 
 };
 
 import { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 
@@ -526,6 +526,11 @@ const TimesheetSystem = () => {
   const [invoicePhoneConfirm, setInvoicePhoneConfirm] = useState('');
   const [profileNewPassword, setProfileNewPassword] = useState('');
   const [profileConfirmPassword, setProfileConfirmPassword] = useState('');
+  const [bannerPhone, setBannerPhone] = useState('');
+  const [bannerRegion, setBannerRegion] = useState('');
+  const [bannerRegionOther, setBannerRegionOther] = useState('');
+  const [bannerSaving, setBannerSaving] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [profileShowNewPw, setProfileShowNewPw] = useState(false);
   const [profileShowConfirmPw, setProfileShowConfirmPw] = useState(false);
   const [profilePwLoading, setProfilePwLoading] = useState(false);
@@ -618,6 +623,10 @@ const TimesheetSystem = () => {
 
   // ─── Real-time: listen for timesheet changes (managers see live updates) ──
   useEffect(() => {
+    if (currentUser?.region) setBannerRegion(currentUser.region);
+  }, [currentUser?.id]);
+
+  useEffect(() => {
     if (!currentUser) return;
     const channel = supabase.channel('timesheets-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheets' }, () => {
@@ -672,6 +681,37 @@ const TimesheetSystem = () => {
     if (error) { alert('Error: ' + error.message); await fetchUsers(); return; }
     if (!updated || updated.length === 0) { alert('Update failed — your session may have expired. Please refresh the page.'); await fetchUsers(); return; }
     await fetchUsers();
+  }
+
+  function isBannerDismissed(): boolean {
+    if (bannerDismissed) return true;
+    if (!currentUser) return true;
+    const key = `profile_reminder_${currentUser.id}`;
+    const stored = localStorage.getItem(key);
+    if (!stored) return false;
+    const ts = parseInt(stored, 10);
+    return Date.now() - ts < 30 * 24 * 60 * 60 * 1000;
+  }
+
+  function dismissBanner() {
+    if (!currentUser) return;
+    localStorage.setItem(`profile_reminder_${currentUser.id}`, String(Date.now()));
+    setBannerDismissed(true);
+  }
+
+  async function saveBannerProfile() {
+    if (!currentUser) return;
+    setBannerSaving(true);
+    const resolvedRegion = bannerRegion === '__other__' ? bannerRegionOther.trim() : bannerRegion;
+    const updates: Record<string, string> = {};
+    if (bannerPhone.trim()) updates.phone = bannerPhone.trim();
+    if (resolvedRegion) updates.region = resolvedRegion;
+    if (Object.keys(updates).length === 0) { setBannerSaving(false); return; }
+    const { error } = await supabase.from('profiles').update(updates).eq('id', currentUser.id);
+    if (error) { alert('Save failed: ' + error.message); setBannerSaving(false); return; }
+    setCurrentUser(prev => prev ? { ...prev, ...{ phone: updates.phone ?? prev.phone, region: updates.region ?? prev.region } } : prev);
+    setBannerDismissed(true);
+    setBannerSaving(false);
   }
 
   async function fetchProjects() {
@@ -2235,7 +2275,15 @@ const TimesheetSystem = () => {
                             {user.role === 'timesheetuser' ? 'TimesheetUser' : user.role === 'vendormanager' ? 'Vendor Manager' : user.role.charAt(0).toUpperCase() + user.role.slice(1)}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-600"><div className="flex items-center gap-1"><MapPin className="w-3 h-3" />{countryName(user.country)}{user.region ? ', ' + user.region : ''}</div></td>
+                        <td className="px-4 py-3 text-sm text-gray-600">
+                          <div className="flex items-center gap-1">
+                            <MapPin className="w-3 h-3" />
+                            {countryName(user.country)}{user.region ? ', ' + user.region : ''}
+                            {!tzMap[user.country + '-' + user.region] && !tzMap[user.country + '-'] && (
+                              <span title="Timezone not mapped — add to tzMap" className="text-amber-500"><AlertTriangle className="w-3 h-3 inline" /></span>
+                            )}
+                          </div>
+                        </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
                         <td className="px-4 py-3 text-sm text-gray-600">
                           {user.endDate ? (
@@ -5018,6 +5066,79 @@ const TimesheetSystem = () => {
             </div>
           </div>
         )}
+
+        {/* Profile completion banner */}
+        {(() => {
+          if (currentUser?.role !== 'timesheetuser') return null;
+          const needsPhone = !currentUser.phone;
+          const multiRegionCountries = ['US', 'GB', 'CA'];
+          const isMultiRegion = multiRegionCountries.includes(currentUser.country);
+          if (!needsPhone && !isMultiRegion) return null;
+          if (isBannerDismissed()) return null;
+          const regionOptions = countries.find(c => c.code === currentUser.country)?.regions || [];
+          const resolvedRegion = bannerRegion === '__other__' ? bannerRegionOther.trim() : bannerRegion;
+          const canSave = !bannerSaving && (
+            (needsPhone && bannerPhone.trim()) ||
+            (isMultiRegion && resolvedRegion && resolvedRegion !== currentUser.region)
+          );
+          const label = needsPhone && !currentUser.region
+            ? 'Complete your profile — phone & region'
+            : needsPhone
+            ? 'Complete your profile — phone number missing'
+            : 'Verify your region is correct';
+          return (
+            <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0" />
+              <div className="flex-1 flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
+                <span className="text-sm text-amber-800 font-medium">{label}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {needsPhone && (
+                    <input
+                      type="tel"
+                      placeholder="Phone number"
+                      value={bannerPhone}
+                      onChange={e => setBannerPhone(e.target.value)}
+                      className="border border-amber-300 rounded px-2 py-1 text-sm w-36 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                    />
+                  )}
+                  {isMultiRegion && regionOptions.length > 0 && (
+                    <>
+                      <select
+                        value={bannerRegion}
+                        onChange={e => { setBannerRegion(e.target.value); if (e.target.value !== '__other__') setBannerRegionOther(''); }}
+                        className="border border-amber-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+                      >
+                        <option value="">— region —</option>
+                        {regionOptions.map(r => <option key={r} value={r}>{r}</option>)}
+                        <option value="__other__">Other (specify)…</option>
+                      </select>
+                      {bannerRegion === '__other__' && (
+                        <input
+                          type="text"
+                          placeholder="e.g. Oregon"
+                          value={bannerRegionOther}
+                          onChange={e => setBannerRegionOther(e.target.value)}
+                          className="border border-amber-300 rounded px-2 py-1 text-sm w-28 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                        />
+                      )}
+                    </>
+                  )}
+                  <button
+                    onClick={saveBannerProfile}
+                    disabled={!canSave}
+                    className="px-3 py-1 bg-amber-500 text-white rounded text-sm hover:bg-amber-600 disabled:opacity-50"
+                  >
+                    {bannerSaving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button onClick={() => setUserTab('profile')} className="text-sm text-amber-700 underline hover:text-amber-900">Full Profile →</button>
+                </div>
+              </div>
+              <button onClick={dismissBanner} className="self-start sm:self-auto text-amber-400 hover:text-amber-600" title="Remind me in 30 days">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Tab Navigation */}
         <div className="bg-white rounded-lg shadow-md mb-6">
