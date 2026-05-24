@@ -991,16 +991,16 @@ const TimesheetSystem = () => {
     }
     const weekKey = formatDate(selectedWeek);
     const now = new Date().toISOString();
+    const hasManager = !!currentUser!.managerId;
     const { error } = await supabase.from('timesheets').upsert({
       user_id: currentUser!.id,
       user_name: currentUser!.name,
       project_id: currentUser!.projectId,
       week_start: weekKey,
       entries: timeEntries,
-      status: 'approved',
+      status: hasManager ? 'pending' : 'approved',
       submitted_at: now,
-      approved_at: now,
-      approved_by: 'self-submit',
+      ...(hasManager ? {} : { approved_at: now, approved_by: 'self-submit' }),
     }, { onConflict: 'user_id,week_start' });
 
     if (error) { alert('Error submitting timesheet: ' + error.message); return; }
