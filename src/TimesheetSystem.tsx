@@ -5287,7 +5287,7 @@ const TimesheetSystem = () => {
                 {filteredUserTimesheets.length === 0 ? (
                   <tr><td colSpan={11} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
                 ) : filteredUserTimesheets.map((ts, idx) => {
-                  const project = projects.find(p => p.id === ts.projectId);
+                  const project = projects.find(p => p.id === (ts.projectId ?? currentUser!.projectId));
                   const wDates = getWeekDates(parseLocalDate(ts.weekStart));
                   const weekFri = wDates[4]; // W/E Friday label
                   const dailyHours = wDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
