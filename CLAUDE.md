@@ -5,9 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Session startup
 
 At the start of every session, immediately schedule a recurring memory-save cron using CronCreate:
-- **Schedule:** `17 9,11,13,15,17 * * 1-5` (every 2 hours, 9am–5pm, weekdays)
+- **Schedule:** `13 * * * 1-5` (every hour, weekdays)
 - **Prompt:** Review `git log --oneline -10`, compare against MEMORY.md, and save any non-obvious decisions or behavioral changes to the appropriate memory file. Update MEMORY.md index if new files added. Skip anything derivable from reading code or git history.
-- Also save memory proactively whenever the user says they are done for the day / signing out.
+
+## Memory save triggers — do not wait to be asked
+
+Save memory proactively in all of these situations:
+1. **Hourly cron fires** (above)
+2. **User signs out / says they're done for the day**
+3. **After any significant workstream completes** (new feature, bug fix, architectural decision) — save immediately, don't wait for the cron
+4. **When the conversation is getting long** — long context is a proxy for nearing the daily usage limit; save before it cuts off and the session is lost
 
 ## Commands
 
