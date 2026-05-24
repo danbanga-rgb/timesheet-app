@@ -548,7 +548,7 @@ const TimesheetSystem = () => {
   const [vmPhoneConfirm, setVmPhoneConfirm] = useState('');
   const [tsOnlyRange, setTsOnlyRange] = useState({ start: '', end: '' });
   const [tsOnlyApplied, setTsOnlyApplied] = useState({ start: '', end: '' });
-  const [tsOnlySelectedUsers, setTsOnlySelectedUsers] = useState<string[]>([]);
+  const [tsOnlySelectedUsers, setTsOnlySelectedUsers] = useState<string[] | null>(null);
   const [tsOnlySearch, setTsOnlySearch] = useState('');
   const [tsOnlyDropdownOpen, setTsOnlyDropdownOpen] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
@@ -4186,9 +4186,7 @@ const TimesheetSystem = () => {
             const tsOnlyUsers = users.filter(u => u.role === 'timesheetuser' && !u.invoiceEnabled);
 
             // Initialise selection to all users on first render
-            const effectiveSelected = tsOnlySelectedUsers.length > 0
-              ? tsOnlySelectedUsers
-              : tsOnlyUsers.map(u => u.id);
+            const effectiveSelected = tsOnlySelectedUsers ?? tsOnlyUsers.map(u => u.id);
 
             const filteredTs = (() => {
               let list = timesheets.filter(t => effectiveSelected.includes(t.userId));
@@ -4220,7 +4218,7 @@ const TimesheetSystem = () => {
               u.name.toLowerCase().includes(tsOnlySearch.toLowerCase())
             );
             const toggleUser = (id: string) => {
-              const current = tsOnlySelectedUsers.length > 0 ? tsOnlySelectedUsers : tsOnlyUsers.map(u => u.id);
+              const current = tsOnlySelectedUsers ?? tsOnlyUsers.map(u => u.id);
               setTsOnlySelectedUsers(current.includes(id) ? current.filter(x => x !== id) : [...current, id]);
             };
 
