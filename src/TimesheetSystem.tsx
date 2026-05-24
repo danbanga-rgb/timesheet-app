@@ -1892,7 +1892,8 @@ const TimesheetSystem = () => {
   const exportTimesheetList = (filtered: Timesheet[]) => {
     let csv = 'Employee Name,Week Start,Project,Mon,Tue,Wed,Thu,Fri,Sat,Sun,Total Hours,Status,Submitted Date\n';
     filtered.forEach(ts => {
-      const project = projects.find(p => p.id === ts.projectId);
+      const tsUser = users.find(u => u.id === ts.userId);
+      const project = projects.find(p => p.id === (ts.projectId ?? tsUser?.projectId));
       const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
       const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
       const total = dailyHours.reduce((s, h) => s + h, 0);
@@ -1938,8 +1939,8 @@ const TimesheetSystem = () => {
   // ─── SHARED TIMESHEET DETAIL MODAL ───────────────────────────────────────
   const TimesheetDetailModal = () => {
     if (!selectedTimesheetForView) return null;
-    const project = projects.find(p => p.id === selectedTimesheetForView.projectId);
     const user = users.find(u => u.id === selectedTimesheetForView.userId);
+    const project = projects.find(p => p.id === (selectedTimesheetForView.projectId ?? user?.projectId));
     const weekDates = getWeekDates(parseLocalDate(selectedTimesheetForView.weekStart));
     const dailyData = weekDates.map(date => {
       const dateKey = formatDate(date);
@@ -2795,7 +2796,8 @@ const TimesheetSystem = () => {
               ) : (
                 <div className="space-y-4">
                   {pendingTimesheets.filter(t => managedUsers.some(u => u.id === t.userId)).map(timesheet => {
-                    const project = projects.find(p => p.id === timesheet.projectId);
+                    const tsUser = managedUsers.find(u => u.id === timesheet.userId);
+                    const project = projects.find(p => p.id === (timesheet.projectId ?? tsUser?.projectId));
                     const totalHrs = Object.values(timesheet.entries).reduce((s, e) => s + (parseFloat((e as TimeEntry)?.hours || '0')), 0);
                     return (
                       <div key={timesheet.id} className="border border-gray-200 rounded-lg p-4">
@@ -2854,7 +2856,8 @@ const TimesheetSystem = () => {
                     {filteredTimesheets.length === 0 ? (
                       <tr><td colSpan={13} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
                     ) : filteredTimesheets.map((ts, idx) => {
-                      const project = projects.find(p => p.id === ts.projectId);
+                      const tsUser = managedUsers.find(u => u.id === ts.userId);
+                      const project = projects.find(p => p.id === (ts.projectId ?? tsUser?.projectId));
                       const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                       const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                       const total = dailyHours.reduce((s, h) => s + h, 0);
@@ -3222,7 +3225,8 @@ const TimesheetSystem = () => {
                           <tr><td colSpan={10} className="text-center py-6 text-gray-400">No timesheets submitted yet</td></tr>
                         ) : (
                           myTimesheets.sort((a, b) => b.weekStart.localeCompare(a.weekStart)).map((ts, idx) => {
-                            const project = projects.find(p => p.id === ts.projectId);
+                            const tsUser = users.find(u => u.id === ts.userId);
+                            const project = projects.find(p => p.id === (ts.projectId ?? tsUser?.projectId));
                             const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                             const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                             const total = dailyHours.reduce((s, h) => s + h, 0);
@@ -4138,7 +4142,7 @@ const TimesheetSystem = () => {
               let csv = 'Employee,Country,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Sat,Sun,Total Hours,Status,Submitted\n';
               filteredTs.forEach(ts => {
                 const user = users.find(u => u.id === ts.userId);
-                const project = projects.find(p => p.id === ts.projectId);
+                const project = projects.find(p => p.id === (ts.projectId ?? user?.projectId));
                 const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                 const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                 const total = dailyHours.reduce((s, h) => s + h, 0);
@@ -4331,7 +4335,7 @@ const TimesheetSystem = () => {
                             ) : (
                               filteredTs.map((ts, idx) => {
                                 const user = users.find(u => u.id === ts.userId);
-                                const project = projects.find(p => p.id === ts.projectId);
+                                const project = projects.find(p => p.id === (ts.projectId ?? user?.projectId));
                                 const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
                                 const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
                                 const total = dailyHours.reduce((s, h) => s + h, 0);
