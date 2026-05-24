@@ -990,14 +990,17 @@ const TimesheetSystem = () => {
       return;
     }
     const weekKey = formatDate(selectedWeek);
+    const now = new Date().toISOString();
     const { error } = await supabase.from('timesheets').upsert({
       user_id: currentUser!.id,
       user_name: currentUser!.name,
       project_id: currentUser!.projectId,
       week_start: weekKey,
       entries: timeEntries,
-      status: 'pending',
-      submitted_at: new Date().toISOString(),
+      status: 'approved',
+      submitted_at: now,
+      approved_at: now,
+      approved_by: 'self-submit',
     }, { onConflict: 'user_id,week_start' });
 
     if (error) { alert('Error submitting timesheet: ' + error.message); return; }
@@ -2003,7 +2006,7 @@ const TimesheetSystem = () => {
                 <div className="text-right"><div className="text-sm opacity-90">Standard Week</div><div className="text-2xl font-semibold mt-1">40h</div>{totalHours !== 40 && <div className="text-sm mt-1">{totalHours > 40 ? '+' : ''}{(totalHours - 40).toFixed(1)}h</div>}</div>
               </div>
             </div>
-            {currentUser?.role === 'manager' && selectedTimesheetForView.status !== 'rejected' && (
+            {(currentUser?.role === 'manager' || currentUser?.role === 'accountant') && selectedTimesheetForView.status !== 'rejected' && (
               <div className="mt-6 flex gap-3">
                 {selectedTimesheetForView.status === 'pending' && (
                   <button onClick={async () => { await handleApproval(selectedTimesheetForView.id, 'approved'); closeTimesheetModal(); alert('Timesheet approved!'); }} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium">
@@ -4341,7 +4344,7 @@ const TimesheetSystem = () => {
                                 const total = dailyHours.reduce((s, h) => s + h, 0);
                                 const fri = weekDates[4];
                                 return (
-                                  <tr key={ts.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                  <tr key={ts.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')} onClick={() => openTimesheetModal(ts)}>
                                     <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
                                     <td className="border border-gray-200 px-3 py-2 text-gray-500 text-xs">{user ? countryName(user.country) : ''}</td>
                                     <td className="border border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
@@ -4938,6 +4941,7 @@ const TimesheetSystem = () => {
           })()}
         </div>
         <style>{`@media print { body * { visibility: hidden; } .bg-white.rounded-lg.shadow-md.p-6, .bg-white.rounded-lg.shadow-md.p-6 * { visibility: visible; } .bg-white.rounded-lg.shadow-md.p-6 { position: absolute; left: 0; top: 0; width: 100%; } button { display: none !important; } }`}</style>
+        {showTimesheetModal && <TimesheetDetailModal />}
       </div>
     );
   }
