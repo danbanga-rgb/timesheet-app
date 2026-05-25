@@ -580,6 +580,8 @@ const TimesheetSystem = () => {
     // Restore existing Supabase session (so page refresh keeps you logged in)
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
+        if (session.user.id === loadedUserIdRef.current) return;
+        loadedUserIdRef.current = session.user.id;
         await loadProfileAndData(session.user.id);
       } else {
         setLoading(false);
