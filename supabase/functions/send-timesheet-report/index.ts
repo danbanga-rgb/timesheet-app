@@ -230,7 +230,6 @@ serve(async (req) => {
     let submitted = 0;
 
     const csvRows: string[][] = [['Contractor', ...dayLabels, 'Total Hours']];
-    const htmlRows: string[] = [];
 
     for (const p of eligible) {
       const entries = tsMap.get(p.id);
@@ -239,19 +238,9 @@ serve(async (req) => {
         const dayHours = dayKeys.map(dk => fmtHours(getHours(entries[dk])));
         const total    = dayKeys.reduce((sum, dk) => sum + getHours(entries[dk]), 0);
         csvRows.push([p.name, ...dayHours, fmtHours(total)]);
-        htmlRows.push(`<tr style="background:white">
-          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;font-weight:600">${p.name}</td>
-          ${dayHours.map(h => `<td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:13px">${h}</td>`).join('')}
-          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:700">${fmtHours(total)}</td>
-        </tr>`);
       } else {
         missingNames.push(p.name);
         csvRows.push([p.name, ...Array(7).fill(''), '']);
-        htmlRows.push(`<tr style="background:#fef2f2">
-          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;color:#991b1b;font-weight:600">${p.name}</td>
-          ${Array(7).fill('<td style="padding:5px 10px;border-bottom:1px solid #f3f4f6"></td>').join('')}
-          <td style="padding:5px 10px;border-bottom:1px solid #f3f4f6;text-align:center;color:#dc2626;font-size:12px">Missing</td>
-        </tr>`);
       }
     }
 
@@ -261,25 +250,18 @@ serve(async (req) => {
     const label = weekLabel(weekStart);
     const total = eligible.length;
 
-    const dayHeaderCells = dayLabels.map(l =>
-      `<th style="padding:6px 10px;font-size:11px;color:#6b7280;font-weight:600;text-align:center;white-space:nowrap">${l}</th>`
+    const missingChips = missingNames.map(n =>
+      `<span style="display:inline-block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;border-radius:4px;padding:3px 10px;margin:3px 4px 3px 0;font-size:13px;font-weight:600">${n}</span>`
     ).join('');
 
     const htmlSection = `
-      <div style="margin-top:24px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+      <div style="margin-top:20px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
         <div style="background:#1e40af;color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
           <strong>Week ending ${label.split('–')[1]?.trim() ?? label}</strong>
           <span style="font-size:12px;opacity:.85">${submitted}/${total} submitted · <span style="color:#fca5a5">${missingNames.length} missing</span></span>
         </div>
-        <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:13px">
-            <thead><tr style="background:#f9fafb">
-              <th style="padding:6px 10px;font-size:11px;color:#6b7280;font-weight:600;text-align:left">Contractor</th>
-              ${dayHeaderCells}
-              <th style="padding:6px 10px;font-size:11px;color:#6b7280;font-weight:600;text-align:center">Total</th>
-            </tr></thead>
-            <tbody>${htmlRows.join('')}</tbody>
-          </table>
+        <div style="padding:12px 16px">
+          ${missingChips}
         </div>
       </div>`;
 
