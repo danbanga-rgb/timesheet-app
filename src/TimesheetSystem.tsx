@@ -473,6 +473,8 @@ const TimesheetSystem = () => {
   const [showReminderLog, setShowReminderLog] = useState(false);
   const [reportWeek, setReportWeek] = useState(getCurrentWeekStart());
   const [adminView, setAdminView] = useState('users');
+  const [adminUserSearch, setAdminUserSearch] = useState('');
+  const [adminUserRoleFilter, setAdminUserRoleFilter] = useState('all');
   const [allocationsProjectFilter, setAllocationsProjectFilter] = useState<number | null>(null);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
@@ -2243,10 +2245,31 @@ const TimesheetSystem = () => {
 
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Quick Stats</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
               <div className="bg-blue-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Total Users</p><p className="text-2xl font-bold text-blue-600">{users.length}</p></div>
               <div className="bg-green-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Active Projects</p><p className="text-2xl font-bold text-green-600">{projects.filter(p => p.status === 'active').length}</p></div>
               <div className="bg-purple-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Timesheets Submitted</p><p className="text-2xl font-bold text-purple-600">{timesheets.length}</p></div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { role: 'timesheetuser', label: 'Contractors', color: 'bg-gray-100 text-gray-700' },
+                { role: 'manager',       label: 'Managers',    color: 'bg-blue-100 text-blue-700' },
+                { role: 'accountant',    label: 'Accountants', color: 'bg-green-100 text-green-700' },
+                { role: 'vendormanager', label: 'Vendor Mgrs', color: 'bg-teal-100 text-teal-700' },
+                { role: 'admin',         label: 'Admins',      color: 'bg-purple-100 text-purple-700' },
+              ].map(({ role, label, color }) => {
+                const count = users.filter(u => u.role === role).length;
+                if (count === 0) return null;
+                return (
+                  <button
+                    key={role}
+                    onClick={() => setAdminUserRoleFilter(adminUserRoleFilter === role ? 'all' : role)}
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium ${color} ${adminUserRoleFilter === role ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}
+                  >
+                    {label}: {count}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -2267,13 +2290,49 @@ const TimesheetSystem = () => {
 
           {adminView === 'users' && (
             <div className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
                 <h2 className="text-xl font-bold text-gray-800">Users ({users.length})</h2>
                 <div className="flex gap-2">
                   <button onClick={openQuickAddModal} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm sm:text-base"><Plus className="w-4 h-4" /> Quick Add</button>
                   <button onClick={() => openUserModal()} className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm sm:text-base">Full Form</button>
                 </div>
               </div>
+              {/* Search + role filter */}
+              <div className="flex flex-col sm:flex-row gap-2 mb-4">
+                <input
+                  type="text"
+                  placeholder="Search by name or email…"
+                  value={adminUserSearch}
+                  onChange={e => setAdminUserSearch(e.target.value)}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                />
+                <select
+                  value={adminUserRoleFilter}
+                  onChange={e => setAdminUserRoleFilter(e.target.value)}
+                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
+                >
+                  <option value="all">All roles</option>
+                  <option value="timesheetuser">Contractors</option>
+                  <option value="manager">Managers</option>
+                  <option value="accountant">Accountants</option>
+                  <option value="vendormanager">Vendor Managers</option>
+                  <option value="admin">Admins</option>
+                </select>
+                {(adminUserSearch || adminUserRoleFilter !== 'all') && (
+                  <button onClick={() => { setAdminUserSearch(''); setAdminUserRoleFilter('all'); }} className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50">Clear</button>
+                )}
+              </div>
+              {(() => {
+                const filteredUsers = users.filter(u => {
+                  const matchesSearch = !adminUserSearch ||
+                    u.name.toLowerCase().includes(adminUserSearch.toLowerCase()) ||
+                    u.email.toLowerCase().includes(adminUserSearch.toLowerCase());
+                  const matchesRole = adminUserRoleFilter === 'all' || u.role === adminUserRoleFilter;
+                  return matchesSearch && matchesRole;
+                });
+                const showingAll = filteredUsers.length === users.length;
+                return <>
+                  {!showingAll && <p className="text-sm text-gray-500 mb-3">Showing {filteredUsers.length} of {users.length} users</p>}
               <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
                 <table className="w-full">
                   <thead className="bg-gray-50">
@@ -2293,7 +2352,7 @@ const TimesheetSystem = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {users.map(user => (
+                    {filteredUsers.map(user => (
                       <tr key={user.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3 text-sm text-gray-800">{user.name}</td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.email}</td>
@@ -2364,6 +2423,7 @@ const TimesheetSystem = () => {
                   </tbody>
                 </table>
               </div>
+                </>; })()}
             </div>
           )}
 
