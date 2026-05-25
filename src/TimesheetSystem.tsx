@@ -447,6 +447,8 @@ const TimesheetSystem = () => {
     { code: 'BA', name: 'Bosnia and Herzegovina', regions: ['Bosnia and Herzegovina'] },
     { code: 'SI', name: 'Slovenia', regions: ['Slovenia'] },
     { code: 'MK', name: 'North Macedonia', regions: ['North Macedonia'] },
+    { code: 'IN', name: 'India', regions: ['India'] },
+    { code: 'NL', name: 'Netherlands', regions: ['Netherlands'] },
   ];
 
   const countryName = (code: string) => countries.find(c => c.code === code)?.name || code;
@@ -528,6 +530,7 @@ const TimesheetSystem = () => {
   const [profileNewPassword, setProfileNewPassword] = useState('');
   const [profileConfirmPassword, setProfileConfirmPassword] = useState('');
   const [bannerPhone, setBannerPhone] = useState('');
+  const [bannerCountry, setBannerCountry] = useState('');
   const [bannerRegion, setBannerRegion] = useState('');
   const [bannerRegionOther, setBannerRegionOther] = useState('');
   const [bannerSaving, setBannerSaving] = useState(false);
@@ -624,6 +627,7 @@ const TimesheetSystem = () => {
 
   // ─── Real-time: listen for timesheet changes (managers see live updates) ──
   useEffect(() => {
+    if (currentUser?.country) setBannerCountry(currentUser.country);
     if (currentUser?.region) setBannerRegion(currentUser.region);
   }, [currentUser?.id]);
 
@@ -700,17 +704,29 @@ const TimesheetSystem = () => {
     setBannerDismissed(true);
   }
 
+  function handleBannerCountryChange(newCountry: string) {
+    setBannerCountry(newCountry);
+    setBannerRegionOther('');
+    const countryData = countries.find(c => c.code === newCountry);
+    if (countryData && countryData.regions.length === 1) {
+      setBannerRegion(countryData.regions[0]); // auto-fill single-region countries
+    } else {
+      setBannerRegion(''); // reset so user picks a region
+    }
+  }
+
   async function saveBannerProfile() {
     if (!currentUser) return;
     setBannerSaving(true);
     const resolvedRegion = bannerRegion === '__other__' ? bannerRegionOther.trim() : bannerRegion;
     const updates: Record<string, string> = {};
     if (bannerPhone.trim()) updates.phone = bannerPhone.trim();
-    if (resolvedRegion) updates.region = resolvedRegion;
+    if (bannerCountry && bannerCountry !== currentUser.country) updates.country = bannerCountry;
+    if (resolvedRegion && resolvedRegion !== currentUser.region) updates.region = resolvedRegion;
     if (Object.keys(updates).length === 0) { setBannerSaving(false); return; }
     const { error } = await supabase.from('profiles').update(updates).eq('id', currentUser.id);
     if (error) { alert('Save failed: ' + error.message); setBannerSaving(false); return; }
-    setCurrentUser(prev => prev ? { ...prev, ...{ phone: updates.phone ?? prev.phone, region: updates.region ?? prev.region } } : prev);
+    setCurrentUser(prev => prev ? { ...prev, phone: updates.phone ?? prev.phone, country: updates.country ?? prev.country, region: updates.region ?? prev.region } : prev);
     setBannerDismissed(true);
     setBannerSaving(false);
   }
@@ -5089,17 +5105,23 @@ const TimesheetSystem = () => {
           const isMultiRegion = multiRegionCountries.includes(currentUser.country);
           if (!needsPhone && !isMultiRegion) return null;
           if (isBannerDismissed()) return null;
-          const regionOptions = countries.find(c => c.code === currentUser.country)?.regions || [];
+          // Use bannerCountry for all region logic so changing country updates region picker live
+          const selectedCountry = bannerCountry || currentUser.country;
+          const selectedIsMultiRegion = multiRegionCountries.includes(selectedCountry);
+          const regionOptions = countries.find(c => c.code === selectedCountry)?.regions || [];
           const resolvedRegion = bannerRegion === '__other__' ? bannerRegionOther.trim() : bannerRegion;
+          const countryChanged = bannerCountry && bannerCountry !== currentUser.country;
+          const regionChanged = resolvedRegion && resolvedRegion !== currentUser.region;
           const canSave = !bannerSaving && (
             (needsPhone && bannerPhone.trim()) ||
-            (isMultiRegion && resolvedRegion && resolvedRegion !== currentUser.region)
+            countryChanged ||
+            (selectedIsMultiRegion && regionChanged)
           );
           const label = needsPhone && !currentUser.region
-            ? 'Complete your profile — phone & region'
+            ? 'Complete your profile — phone & location'
             : needsPhone
             ? 'Complete your profile — phone number missing'
-            : 'Verify your region is correct';
+            : 'Verify your location is correct';
           return (
             <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0" />
@@ -5115,7 +5137,14 @@ const TimesheetSystem = () => {
                       className="border border-amber-300 rounded px-2 py-1 text-sm w-36 focus:outline-none focus:ring-1 focus:ring-amber-400"
                     />
                   )}
-                  {isMultiRegion && regionOptions.length > 0 && (
+                  <select
+                    value={selectedCountry}
+                    onChange={e => handleBannerCountryChange(e.target.value)}
+                    className="border border-amber-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  >
+                    {countries.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                  </select>
+                  {selectedIsMultiRegion && regionOptions.length > 0 && (
                     <>
                       <select
                         value={bannerRegion}
