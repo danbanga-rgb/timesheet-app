@@ -3088,7 +3088,8 @@ const TimesheetSystem = () => {
                     hours[we] = null; statuses[we] = 'n/a';
                   } else { hours[we] = null; statuses[we] = 'not submitted'; }
                 });
-                const project = projects.find(p => p.id === user.projectId);
+                const latestTs = inRange.filter(t => t.userId === user.id).sort((a, b) => b.weekStart.localeCompare(a.weekStart))[0];
+                const project = projects.find(p => p.id === (latestTs?.projectId ?? user.projectId));
                 return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
               });
               const colTotals: Record<string, number> = {};
@@ -3762,7 +3763,8 @@ const TimesheetSystem = () => {
             hours[we] = null; statuses[we] = 'n/a';
           } else { hours[we] = null; statuses[we] = 'not submitted'; }
         });
-        const project = projects.find(p => p.id === user.projectId);
+        const latestTs = inRange.filter(t => t.userId === user.id).sort((a, b) => b.weekStart.localeCompare(a.weekStart))[0];
+        const project = projects.find(p => p.id === (latestTs?.projectId ?? user.projectId));
         return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
       });
 
