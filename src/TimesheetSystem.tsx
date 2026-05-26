@@ -2245,43 +2245,49 @@ const TimesheetSystem = () => {
 
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Quick Stats</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-              <div className="bg-blue-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Total Users</p><p className="text-2xl font-bold text-blue-600">{users.length}</p></div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-blue-50 p-4 rounded-lg">
+                <p className="text-sm text-gray-600">Total Users</p>
+                <p className="text-2xl font-bold text-blue-600 mb-3">{users.length}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { role: 'timesheetuser', label: 'Contractors', color: 'bg-gray-100 text-gray-700' },
+                    { role: 'manager',       label: 'Managers',    color: 'bg-blue-100 text-blue-700' },
+                    { role: 'accountant',    label: 'Accountants', color: 'bg-green-100 text-green-700' },
+                    { role: 'vendormanager', label: 'Vendor Mgrs', color: 'bg-teal-100 text-teal-700' },
+                    { role: 'admin',         label: 'Admins',      color: 'bg-purple-100 text-purple-700' },
+                  ].map(({ role, label, color }) => {
+                    const count = users.filter(u => u.role === role).length;
+                    if (count === 0) return null;
+                    return (
+                      <button
+                        key={role}
+                        onClick={() => setAdminUserRoleFilter(adminUserRoleFilter === role ? 'all' : role)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-medium ${color} ${adminUserRoleFilter === role ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}
+                      >
+                        {label}: {count}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="bg-green-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Active Projects</p><p className="text-2xl font-bold text-green-600">{projects.filter(p => p.status === 'active').length}</p></div>
-              <div className="bg-purple-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Timesheets Submitted</p><p className="text-2xl font-bold text-purple-600">{timesheets.length}</p></div>
-            </div>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {[
-                { role: 'timesheetuser', label: 'Contractors', color: 'bg-gray-100 text-gray-700' },
-                { role: 'manager',       label: 'Managers',    color: 'bg-blue-100 text-blue-700' },
-                { role: 'accountant',    label: 'Accountants', color: 'bg-green-100 text-green-700' },
-                { role: 'vendormanager', label: 'Vendor Mgrs', color: 'bg-teal-100 text-teal-700' },
-                { role: 'admin',         label: 'Admins',      color: 'bg-purple-100 text-purple-700' },
-              ].map(({ role, label, color }) => {
-                const count = users.filter(u => u.role === role).length;
-                if (count === 0) return null;
-                return (
-                  <button
-                    key={role}
-                    onClick={() => setAdminUserRoleFilter(adminUserRoleFilter === role ? 'all' : role)}
-                    className={`px-3 py-1.5 rounded-full text-sm font-medium ${color} ${adminUserRoleFilter === role ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}
-                  >
-                    {label}: {count}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {(() => {
-                const portal   = timesheets.filter(t => t.source === 'direct').length;
-                const email    = timesheets.filter(t => t.source === 'imported').length;
-                const unknown  = timesheets.filter(t => !t.source).length;
-                return <>
-                  <span className="px-3 py-1.5 rounded-full text-sm font-medium bg-green-100 text-green-700">Portal: {portal}</span>
-                  <span className="px-3 py-1.5 rounded-full text-sm font-medium bg-indigo-100 text-indigo-700">Email: {email}</span>
-                  {unknown > 0 && <span className="px-3 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-500">Unknown: {unknown}</span>}
-                </>;
-              })()}
+              <div className="bg-purple-50 p-4 rounded-lg">
+                <p className="text-sm text-gray-600">Timesheets Submitted</p>
+                <p className="text-2xl font-bold text-purple-600 mb-3">{timesheets.length}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {(() => {
+                    const portal  = timesheets.filter(t => t.source === 'direct').length;
+                    const email   = timesheets.filter(t => t.source === 'imported').length;
+                    const unknown = timesheets.filter(t => !t.source).length;
+                    return <>
+                      <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">Portal: {portal}</span>
+                      <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">Email: {email}</span>
+                      {unknown > 0 && <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-500">Unknown: {unknown}</span>}
+                    </>;
+                  })()}
+                </div>
+              </div>
             </div>
           </div>
 
