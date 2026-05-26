@@ -1936,7 +1936,7 @@ const TimesheetSystem = () => {
   const generateReport = () => {
     const weekKey = formatDate(reportWeek);
     const weekTimesheets = timesheets.filter(t => t.weekStart === weekKey);
-    return users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekKey).map(user => {
+    return users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekKey && (!u.endDate || u.endDate >= weekKey)).map(user => {
       const timesheet = weekTimesheets.find(t => t.userId === user.id);
       const entries = timesheet ? timesheet.entries : {};
       const project = projects.find(p => p.id === (timesheet?.projectId ?? user.projectId)) ?? null;
@@ -3084,7 +3084,7 @@ const TimesheetSystem = () => {
                       if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
                     });
                     hours[we] = h; statuses[we] = ts.status; rowTotal += h;
-                  } else if (!user.startDate || user.startDate > we) {
+                  } else if (!user.startDate || user.startDate > we || (user.endDate && user.endDate < we)) {
                     hours[we] = null; statuses[we] = 'n/a';
                   } else { hours[we] = null; statuses[we] = 'not submitted'; }
                 });
@@ -3758,7 +3758,7 @@ const TimesheetSystem = () => {
               if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
             });
             hours[we] = h; statuses[we] = ts.status; rowTotal += h;
-          } else if (!user.startDate || user.startDate > we) {
+          } else if (!user.startDate || user.startDate > we || (user.endDate && user.endDate < we)) {
             hours[we] = null; statuses[we] = 'n/a';
           } else { hours[we] = null; statuses[we] = 'not submitted'; }
         });
