@@ -5551,11 +5551,12 @@ const TimesheetSystem = () => {
                   {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d => <th key={d} className="border border-indigo-700 px-4 py-3 text-center">{d}</th>)}
                   <th className="border border-indigo-700 px-4 py-3 text-center">Total</th>
                   <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
+                  <th className="border border-indigo-700 px-4 py-3 text-center whitespace-nowrap">Submitted</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredUserTimesheets.length === 0 ? (
-                  <tr><td colSpan={11} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
+                  <tr><td colSpan={12} className="text-center py-8 text-gray-500">No timesheets found</td></tr>
                 ) : filteredUserTimesheets.map((ts, idx) => {
                   const project = projects.find(p => p.id === (ts.projectId ?? currentUser!.projectId));
                   const wDates = getWeekDates(parseLocalDate(ts.weekStart));
@@ -5570,6 +5571,9 @@ const TimesheetSystem = () => {
                       <td className="border border-gray-300 px-4 py-2 text-center font-bold text-indigo-600">{total.toFixed(1)}</td>
                       <td className="border border-gray-300 px-4 py-2 text-center">
                         <span className={'px-2 py-1 rounded-full text-xs font-medium ' + (ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800')}>{ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}</span>
+                      </td>
+                      <td className="border border-gray-300 px-4 py-2 text-center text-xs text-gray-500 whitespace-nowrap">
+                        {ts.submittedAt ? new Date(ts.submittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}
                       </td>
                     </tr>
                   );
