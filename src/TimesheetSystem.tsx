@@ -3831,6 +3831,10 @@ const TimesheetSystem = () => {
                 <div className="text-center">
                   <h3 className="text-lg font-semibold text-gray-800">Week of {reportWeek.toLocaleDateString()}</h3>
                   <p className="text-sm text-gray-600">{weekDates[0].toLocaleDateString()} – {weekDates[6].toLocaleDateString()}</p>
+                  <div className="flex justify-center gap-2 mt-2">
+                    <button onClick={() => setReportWeek(getCurrentWeekStart())} className="px-3 py-1 text-xs bg-indigo-100 text-indigo-700 rounded-full hover:bg-indigo-200 font-medium">This Week</button>
+                    <button onClick={() => { const d = getCurrentWeekStart(); d.setDate(d.getDate() - 7); setReportWeek(d); }} className="px-3 py-1 text-xs bg-indigo-100 text-indigo-700 rounded-full hover:bg-indigo-200 font-medium">Last Week</button>
+                  </div>
                 </div>
                 <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next →</button>
               </div>
