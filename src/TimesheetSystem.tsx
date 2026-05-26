@@ -3831,10 +3831,6 @@ const TimesheetSystem = () => {
                 <div className="text-center">
                   <h3 className="text-lg font-semibold text-gray-800">Week of {reportWeek.toLocaleDateString()}</h3>
                   <p className="text-sm text-gray-600">{weekDates[0].toLocaleDateString()} – {weekDates[6].toLocaleDateString()}</p>
-                  <div className="flex justify-center gap-2 mt-2">
-                    <button onClick={() => setReportWeek(getCurrentWeekStart())} className="px-3 py-1 text-xs bg-indigo-100 text-indigo-700 rounded-full hover:bg-indigo-200 font-medium">This Week</button>
-                    <button onClick={() => { const d = getCurrentWeekStart(); d.setDate(d.getDate() - 7); setReportWeek(d); }} className="px-3 py-1 text-xs bg-indigo-100 text-indigo-700 rounded-full hover:bg-indigo-200 font-medium">Last Week</button>
-                  </div>
                 </div>
                 <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next →</button>
               </div>
@@ -4442,15 +4438,24 @@ const TimesheetSystem = () => {
                         const biWeekEnd = new Date(todayMon); biWeekEnd.setDate(biWeekEnd.getDate() - 1);
                         const biWeekStart = new Date(todayMon); biWeekStart.setDate(biWeekStart.getDate() - 14);
                         const biWeekLabel = `${biWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${biWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+                        const lastWeekStart = new Date(todayMon); lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+                        const lastWeekEnd = new Date(todayMon); lastWeekEnd.setDate(lastWeekEnd.getDate() - 1);
+                        const lastWeekLabel = `${lastWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${lastWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
                         const isActive = (s: string, e: string) => tsOnlyApplied.start === s && tsOnlyApplied.end === e;
                         return (
                           <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4 space-y-4">
                             <div>
                               <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Bi-Weekly</label>
-                              <button
-                                onClick={() => { const s = formatDate(biWeekStart); const e = formatDate(biWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
-                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(biWeekStart), formatDate(biWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
-                              >Last 2 Weeks ({biWeekLabel})</button>
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  onClick={() => { const s = formatDate(lastWeekStart); const e = formatDate(lastWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
+                                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(lastWeekStart), formatDate(lastWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
+                                >Last Week ({lastWeekLabel})</button>
+                                <button
+                                  onClick={() => { const s = formatDate(biWeekStart); const e = formatDate(biWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
+                                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(biWeekStart), formatDate(biWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
+                                >Last 2 Weeks ({biWeekLabel})</button>
+                              </div>
                             </div>
                             <div>
                               <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Month</label>
