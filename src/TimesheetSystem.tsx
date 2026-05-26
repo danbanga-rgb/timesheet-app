@@ -2250,7 +2250,7 @@ const TimesheetSystem = () => {
               <div className="bg-green-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Active Projects</p><p className="text-2xl font-bold text-green-600">{projects.filter(p => p.status === 'active').length}</p></div>
               <div className="bg-purple-50 p-4 rounded-lg"><p className="text-sm text-gray-600">Timesheets Submitted</p><p className="text-2xl font-bold text-purple-600">{timesheets.length}</p></div>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 mb-2">
               {[
                 { role: 'timesheetuser', label: 'Contractors', color: 'bg-gray-100 text-gray-700' },
                 { role: 'manager',       label: 'Managers',    color: 'bg-blue-100 text-blue-700' },
@@ -2270,6 +2270,18 @@ const TimesheetSystem = () => {
                   </button>
                 );
               })}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(() => {
+                const portal   = timesheets.filter(t => t.source === 'direct').length;
+                const email    = timesheets.filter(t => t.source === 'imported').length;
+                const unknown  = timesheets.filter(t => !t.source).length;
+                return <>
+                  <span className="px-3 py-1.5 rounded-full text-sm font-medium bg-green-100 text-green-700">Portal: {portal}</span>
+                  <span className="px-3 py-1.5 rounded-full text-sm font-medium bg-indigo-100 text-indigo-700">Email: {email}</span>
+                  {unknown > 0 && <span className="px-3 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-500">Unknown: {unknown}</span>}
+                </>;
+              })()}
             </div>
           </div>
 
