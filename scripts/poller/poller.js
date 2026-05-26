@@ -794,6 +794,22 @@ function parseSynergiePdfText(text, filename) {
     }
   }
 
+  // If task-log dates weren't available, prefer column header dates over the
+  // Week Ending Date field — the header columns are explicit day-by-day dates
+  // and are more reliable than a single "Week Ending Date" field that users
+  // frequently fill in incorrectly (e.g. Mek's PDF: header says 5/17 but
+  // columns are 5/18–5/24).
+  if (!taskLogWeekStart && chosenSection?.headerDates?.length > 0) {
+    const sorted = [...chosenSection.headerDates].sort((a, b) => a - b);
+    const headerWeekStart = getMondayOf(sorted[0]).toISOString().split('T')[0];
+    if (!weekStart) {
+      weekStart = headerWeekStart;
+    } else {
+      const drift = Math.abs(new Date(headerWeekStart) - new Date(weekStart)) / 86400000;
+      if (drift <= 21) weekStart = headerWeekStart;
+    }
+  }
+
   // Fallback week from filename if not found in text
   if (!weekStart) weekStart = weekFromFilename(filename);
 
