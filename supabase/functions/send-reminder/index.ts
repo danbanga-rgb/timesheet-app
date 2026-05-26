@@ -52,16 +52,21 @@ function getWeekMonday(date: Date): Date {
   return d;
 }
 
-function getMissingWeeks(startDate: string, submittedWeeks: Set<string>, localTime: Date, includeCurrentWeek = false): string[] {
+function getMissingWeeks(startDate: string, submittedWeeks: Set<string>, localTime: Date, includeCurrentWeek = false, endDate?: string | null): string[] {
   const start = getWeekMonday(parseLocalDate(startDate));
   const thisWeekMonday = getWeekMonday(localTime);
   // On Mon-Thu 9am reminders: only flag weeks fully in the past (stop before this week)
   // On Friday 5pm reminder: also include current week
-  const limit = includeCurrentWeek ? thisWeekMonday : (() => {
+  let limit = includeCurrentWeek ? thisWeekMonday : (() => {
     const prev = new Date(thisWeekMonday);
     prev.setDate(prev.getDate() - 7);
     return prev;
   })();
+  // Cap at end_date: never flag weeks after the contractor's contract ended
+  if (endDate) {
+    const endWeekMon = getWeekMonday(parseLocalDate(endDate));
+    if (endWeekMon < limit) limit = endWeekMon;
+  }
   const missing: string[] = [];
   const cursor = new Date(start);
   while (cursor <= limit) {
@@ -354,7 +359,7 @@ These links are valid for 7 days and are single-use.`;
   // Fetch all profiles once
   const { data: allProfiles } = await supabase
     .from('profiles')
-    .select('id, name, email, role, country, region, start_date, manager_id, reminders_enabled');
+    .select('id, name, email, role, country, region, start_date, end_date, manager_id, reminders_enabled');
   if (!allProfiles) return new Response(JSON.stringify({ error: 'Failed to fetch profiles' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   // Only remind timesheetusers who have a start_date and have reminders enabled.
@@ -382,7 +387,7 @@ These links are valid for 7 days and are single-use.`;
 
     const { data: ts } = await supabase.from('timesheets').select('week_start').eq('user_id', user.id).neq('status', 'rejected');
     const submitted = new Set((ts || []).map((t: { week_start: string }) => t.week_start.split('T')[0]));
-    const allMissing = getMissingWeeks(user.start_date as string, submitted, lt, isFriday5pm);
+    const allMissing = getMissingWeeks(user.start_date as string, submitted, lt, isFriday5pm, user.end_date as string | null);
     // Only remind for weeks on or after 2026-04-27 (the Monday containing 2026-05-01).
     // Pre-May weeks are backfill and should not generate automated reminders.
     const REMINDER_CUTOFF = '2026-04-27';
