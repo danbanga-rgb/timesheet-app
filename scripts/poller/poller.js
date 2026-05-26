@@ -53,7 +53,7 @@ const DAY_ORDER = ['mon','tue','wed','thu','fri','sat','sun'];
 
 const DMARC_PATTERNS = [/dmarc/i, /noreply@.*dmarc/i, /dmarcreport@/i, /postmaster@/i];
 
-const MAX_EMAILS_PER_RUN    = 20;        // layer 3: volume cap
+const MAX_EMAILS_PER_RUN    = 30;        // layer 3: volume cap
 const MAX_ATTACHMENT_BYTES  = 10 * 1024 * 1024; // layer 4: 10 MB per attachment
 
 // Derived from ingestUrl — same Supabase project
