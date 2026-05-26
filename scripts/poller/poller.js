@@ -2136,7 +2136,6 @@ async function main() {
       parsed = await simpleParser(raw.buffer);
     } catch (e) {
       console.error(`Parse error uid=${uid}: ${e.message}`);
-      failedUids.push(uid);
       summary.failures.push({ contractor: '?', attachment: null, error: `Parse error: ${e.message}`, attemptCount: 1 });
       continue;
     }
@@ -2180,7 +2179,6 @@ async function main() {
         ? 'Internal sender with no timesheet attachments'
         : 'No timesheet attachments — possible human reply or notification';
       await forwardToHelpdesk(subject, bodyText, fromEmail, reason);
-      successUids.push(uid);
       summary.forwarded++;
       continue;
     }
