@@ -801,7 +801,7 @@ function parseSynergiePdfText(text, filename) {
   // columns are 5/18–5/24).
   if (!taskLogWeekStart && chosenSection?.headerDates?.length > 0) {
     const sorted = [...chosenSection.headerDates].sort((a, b) => a - b);
-    const headerWeekStart = getMondayOf(sorted[0]).toISOString().split('T')[0];
+    const headerWeekStart = getMondayOf(sorted[0]);
     if (!weekStart) {
       weekStart = headerWeekStart;
     } else {
