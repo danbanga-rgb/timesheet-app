@@ -413,7 +413,7 @@ These links are valid for 7 days and are single-use.`;
       ? `First time logging in? Contact ${HELPDESK_EMAIL} for your account password.`
       : `For account access issues, contact ${HELPDESK_EMAIL}.`;
 
-    const delayNote = `\nIf you have recently submitted your timesheet — especially by email — please ignore this reminder. Email submissions can take up to an hour to process.`;
+    const delayNote = `\nIf you have recently submitted your timesheet — especially by email — please ignore this reminder. Email submissions can take a few hours to process.`;
 
     const bodyText = isFirst
       ? `Hi ${user.name},\n\nJust a heads-up — we're missing your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nYou have a few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`
@@ -432,7 +432,7 @@ These links are valid for 7 days and are single-use.`;
           : `For account access issues, contact <a href="mailto:${HELPDESK_EMAIL}" style="color:#4f46e5">${HELPDESK_EMAIL}</a>.`
         }
       </p>
-      <p style="color:#9ca3af;font-size:12px;margin-top:12px;font-style:italic">If you have recently submitted your timesheet — especially by email — please ignore this reminder. Email submissions can take up to an hour to process.</p>`;
+      <p style="color:#9ca3af;font-size:12px;margin-top:12px;font-style:italic">If you have recently submitted your timesheet — especially by email — please ignore this reminder. Email submissions can take a few hours to process.</p>`;
 
     const bodyHtml = wrapHtml(
       isFirst ? '#4f46e5' : '#dc2626',
