@@ -25,3 +25,25 @@ dist-ssr
 
 # Supabase
 supabase/.temp/
+supabase/functions/send-reminder/config.toml
+
+# Env files
+.env
+.env.*
+scripts/poller/.env
+scripts/invoice-parser/.env
+
+# Claude local settings (may contain secrets)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Personal notes
+*.rtf
+
+# Poller supabase temp
+scripts/poller/supabase/
+
+# Invoice sample PDFs (real contractor data)
+scripts/invoice-parser/samples/*.pdf
+scripts/invoice-parser/samples/*.docx
+scripts/invoice-parser/samples/*.msg

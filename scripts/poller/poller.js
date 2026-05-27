@@ -6,9 +6,10 @@
 
 'use strict';
 
-const Imap             = require('imap');
-const { simpleParser } = require('mailparser');
-const XLSX             = require('xlsx');
+const Imap               = require('imap');
+const { simpleParser }   = require('mailparser');
+const XLSX               = require('xlsx');
+const { randomUUID }     = require('crypto');
 const https            = require('https');
 const http             = require('http');
 
@@ -1455,7 +1456,7 @@ function postToIngest(payload, targetUrl) {
 
 // ─── Process one contractor's attachments ─────────────────────────────────────
 
-async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId) {
+async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId, runId = null) {
   // Strip non-timesheet documents silently — agreements, AUPs, SOWs, etc.
   const nonTimesheetAtts = attachments.filter(a => (a.isPdf || a.isXlsx) && NON_TIMESHEET_DOC_RE.test(a.name));
   if (nonTimesheetAtts.length) {
@@ -1587,6 +1588,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         attachmentType:  ts.attachmentType,
         parseNotes:      ts.notes || '',
         source:          'imported',
+        run_id:          runId,
       });
       const action = res.body?.action || res.status;
       results.push({ contractor: contractorEmail, week: ts.weekStart, status: res.status, action });
@@ -1651,7 +1653,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
 // ─── Process one parsed email ─────────────────────────────────────────────────
 
-async function processEmail(parsed, messageId, results, failedAtts, summary) {
+async function processEmail(parsed, messageId, results, failedAtts, summary, runId = null) {
   const fromAddr  = parsed.from?.value?.[0];
   const fromEmail = (fromAddr?.address || '').toLowerCase();
   const fromName  = fromAddr?.name || null;
@@ -1787,7 +1789,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
 
         console.log(`  📧 ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
         const { results: r, failedAttachments: fa } = await ingestContractor(
-          contractor, contractorName, inner.subject || subject, innerBody, innerAtts, messageId
+          contractor, contractorName, inner.subject || subject, innerBody, innerAtts, messageId, runId
         );
         results.push(...r);
         fa.forEach(a => failedAtts.push({ ...a, contractor }));
@@ -1843,7 +1845,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary) {
   console.log(`   Contractor: ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
   const { results: r, failedAttachments: fa } = await ingestContractor(
     contractor, contractorName, subject, bodyText,
-    attachments.filter(a => !a.isEml), messageId
+    attachments.filter(a => !a.isEml), messageId, runId
   );
   results.push(...r);
   fa.forEach(a => failedAtts.push({ ...a, contractor }));
@@ -1963,7 +1965,7 @@ function markEmailsSeen(uids) {
 
 // ─── Trigger weekly timesheet report ─────────────────────────────────────────
 
-async function writePollerHeartbeat() {
+async function writePollerHeartbeat(data) {
   if (!SUPABASE_REST_URL || !SUPABASE_ANON_KEY) return;
   try {
     await fetch(`${SUPABASE_REST_URL}/system_settings`, {
@@ -1974,9 +1976,9 @@ async function writePollerHeartbeat() {
         Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
         Prefer: 'resolution=merge-duplicates',
       },
-      body: JSON.stringify({ key: 'poller_last_run', value: new Date().toISOString() }),
+      body: JSON.stringify({ key: 'poller_last_run', value: JSON.stringify(data) }),
     });
-    console.log('  💓 Heartbeat written');
+    console.log(`  💓 Heartbeat written (run_id=${data.run_id})`);
   } catch (e) {
     console.warn(`Heartbeat write failed: ${e.message}`);
   }
@@ -2150,10 +2152,12 @@ async function main() {
   console.log(`   IMAP: ${CONFIG.imapUser}@${CONFIG.imapHost}`);
   console.log(`   Ingest: ${CONFIG.ingestUrl}\n`);
 
+  const RUN_ID = randomUUID();
+
   const rawMessages = await fetchEmails();
-  await writePollerHeartbeat();
   if (!rawMessages || rawMessages.length === 0) {
     console.log('No unseen emails. Done.');
+    await writePollerHeartbeat({ ran_at: new Date().toISOString(), run_id: RUN_ID, created: 0, duplicates: 0, corrections: 0, failures: 0, forwarded: 0, invoices: 0 });
     return;
   }
 
@@ -2222,7 +2226,7 @@ async function main() {
     // Process email — collect results and failed attachments
     const emailResults = [];
     const emailFailedAtts = [];
-    await processEmail(parsed, messageId, emailResults, emailFailedAtts, summary);
+    await processEmail(parsed, messageId, emailResults, emailFailedAtts, summary, RUN_ID);
 
     // Accumulate summary counts
     emailResults.forEach(r => {
@@ -2273,6 +2277,17 @@ async function main() {
   console.log(`  Corrections      : ${summary.corrections}`);
   console.log(`  Invoices parsed  : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? '' : ' (dry-run)'}`);
   console.log(`  Failures         : ${summary.failures.length}`);
+
+  await writePollerHeartbeat({
+    ran_at:      new Date().toISOString(),
+    run_id:      RUN_ID,
+    created:     summary.created,
+    duplicates:  summary.duplicates,
+    corrections: summary.corrections,
+    failures:    summary.failures.length,
+    forwarded:   summary.forwarded,
+    invoices:    summary.invoiceReports.length,
+  });
 
   // Summary email — only if something actionable happened
   const actionable = summary.created + summary.duplicates + summary.corrections +

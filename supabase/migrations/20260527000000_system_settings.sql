@@ -15,3 +15,5 @@ CREATE POLICY "anon_insert_poller_heartbeat" ON system_settings
 
 CREATE POLICY "anon_update_poller_heartbeat" ON system_settings
   FOR UPDATE TO anon USING (key = 'poller_last_run');
+
+ALTER TABLE email_import_log ADD COLUMN IF NOT EXISTS run_id TEXT;

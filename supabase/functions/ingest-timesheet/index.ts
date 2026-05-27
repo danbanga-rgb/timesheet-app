@@ -187,6 +187,7 @@ serve(async (req) => {
     attachmentName,
     attachmentType,
     parseNotes,
+    run_id,
   } = body as Record<string, unknown>;
 
   if (!messageId || !contractorEmail || !weekStart) {
@@ -248,6 +249,7 @@ serve(async (req) => {
         parse_status:    'failed',
         parse_notes:     'Unknown contractor — not in profiles. Add user via admin panel first.',
         attempt_count:   attemptCount,
+        run_id:          run_id || null,
       });
       return new Response(JSON.stringify({ ok: false, error: 'unknown_contractor' }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -263,6 +265,7 @@ serve(async (req) => {
       attachment_name: attachmentName || null,
       parse_status:    'failed',
       parse_notes:     `User lookup error: ${String(e)}`,
+      run_id:          run_id || null,
     });
     return new Response(JSON.stringify({ ok: false, error: String(e) }), {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -315,6 +318,7 @@ serve(async (req) => {
       ? (typeof entries === 'string' ? JSON.parse(entries as string) : entries)
       : null,
     attempt_count:   attemptCount,
+    run_id:          run_id || null,
   });
 
   return new Response(JSON.stringify({

@@ -193,7 +193,13 @@ serve(async (req) => {
       .eq('key', 'poller_last_run')
       .single();
     if (hb?.value) {
-      pollerAgeMinutes = Math.floor((Date.now() - new Date(hb.value).getTime()) / 60000);
+      try {
+        const parsed = JSON.parse(hb.value);
+        pollerAgeMinutes = Math.floor((Date.now() - new Date(parsed.ran_at).getTime()) / 60000);
+      } catch {
+        // Legacy plain ISO string
+        pollerAgeMinutes = Math.floor((Date.now() - new Date(hb.value).getTime()) / 60000);
+      }
     }
   }
 
