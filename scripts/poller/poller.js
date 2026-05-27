@@ -1963,6 +1963,25 @@ function markEmailsSeen(uids) {
 
 // ─── Trigger weekly timesheet report ─────────────────────────────────────────
 
+async function writePollerHeartbeat() {
+  if (!SUPABASE_REST_URL || !SUPABASE_ANON_KEY) return;
+  try {
+    await fetch(`${SUPABASE_REST_URL}/system_settings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        Prefer: 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify({ key: 'poller_last_run', value: new Date().toISOString() }),
+    });
+    console.log('  💓 Heartbeat written');
+  } catch (e) {
+    console.warn(`Heartbeat write failed: ${e.message}`);
+  }
+}
+
 async function triggerTimesheetReport() {
   if (!CONFIG.timesheetReportUrl || !CONFIG.ingestSecret) return;
   try {
@@ -2132,6 +2151,7 @@ async function main() {
   console.log(`   Ingest: ${CONFIG.ingestUrl}\n`);
 
   const rawMessages = await fetchEmails();
+  await writePollerHeartbeat();
   if (!rawMessages || rawMessages.length === 0) {
     console.log('No unseen emails. Done.');
     return;

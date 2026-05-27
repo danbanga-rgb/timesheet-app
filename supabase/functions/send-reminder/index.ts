@@ -184,6 +184,19 @@ serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+  // ── POLLER HEARTBEAT — query once, reused in morning-window checks ──────────
+  let pollerAgeMinutes: number | null = null;
+  if (!force) {
+    const { data: hb } = await supabase
+      .from('system_settings')
+      .select('value')
+      .eq('key', 'poller_last_run')
+      .single();
+    if (hb?.value) {
+      pollerAgeMinutes = Math.floor((Date.now() - new Date(hb.value).getTime()) / 60000);
+    }
+  }
+
   // ── TIMESHEET SUBMITTED — send per-timesheet approval email to manager ──────
   if (reqBody.action === 'timesheet_submitted') {
     const { timesheetId, timesheetUserName, weekStart, totalHours, projectName, projectCode, managerId, managerName, managerEmail } = reqBody;
@@ -379,10 +392,18 @@ These links are valid for 7 days and are single-use.`;
     const hour = lt.getHours();
 
     const isFriday5pm  = dow === 5 && hour >= 17 && hour <= 18;
-    const isWeekday9am = dow >= 1 && dow <= 5 && hour >= 9 && hour <= 10;
+    // Extended to hour 11 — allows deferred runs (poller wasn't ready at 9am) to fire at 10am or 11am
+    const isWeekday9am = dow >= 1 && dow <= 5 && hour >= 9 && hour <= 11;
     if (!force && !isFriday5pm && !isWeekday9am) {
       results.push({ role: 'timesheetuser', user: user.name, action: `skipped (dow=${dow} hour=${hour})` });
       continue;
+    }
+    // Poller freshness check: defer if poller hasn't run within 45 min (morning window only, not Friday or hour 11 fallback)
+    if (!force && isWeekday9am && !isFriday5pm && hour < 11) {
+      if (pollerAgeMinutes === null || pollerAgeMinutes > 45) {
+        results.push({ role: 'timesheetuser', user: user.name, action: `deferred (poller_age=${pollerAgeMinutes ?? 'unknown'}m)` });
+        continue;
+      }
     }
 
     const { data: ts } = await supabase.from('timesheets').select('week_start').eq('user_id', user.id).neq('status', 'rejected');
@@ -462,8 +483,12 @@ These links are valid for 7 days and are single-use.`;
     const dow  = lt.getDay();
     const hour = lt.getHours();
 
-    if (!force && !(dow >= 1 && dow <= 5 && hour >= 9 && hour <= 10)) {
+    if (!force && !(dow >= 1 && dow <= 5 && hour >= 9 && hour <= 11)) {
       results.push({ role: 'manager', user: manager.name, action: `skipped (dow=${dow} hour=${hour}, tz=${(manager.country as string) || 'unknown'}-${(manager.region as string) || 'unknown'})` });
+      continue;
+    }
+    if (!force && hour < 11 && (pollerAgeMinutes === null || pollerAgeMinutes > 45)) {
+      results.push({ role: 'manager', user: manager.name, action: `deferred (poller_age=${pollerAgeMinutes ?? 'unknown'}m)` });
       continue;
     }
 
