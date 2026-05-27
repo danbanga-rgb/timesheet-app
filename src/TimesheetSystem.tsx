@@ -3874,6 +3874,9 @@ const TimesheetSystem = () => {
                 </table>
               </div>
               {(() => {
+                const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
+                const weekKey = formatDate(reportWeek);
+                const testAccounts = users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekKey && (!u.endDate || u.endDate >= weekKey) && isTestAccount(u.name));
                 const submitted = reportData.filter(r => r.status === 'approved').length;
                 const pending   = reportData.filter(r => r.status === 'pending').length;
                 const notSub    = reportData.filter(r => r.status === 'not submitted').length;
@@ -3889,6 +3892,16 @@ const TimesheetSystem = () => {
                         {notSub > 0    && <div className="flex justify-between"><span className="text-red-600">Not Submitted</span><span className="font-semibold text-red-600">{notSub}</span></div>}
                         {rejected > 0  && <div className="flex justify-between"><span className="text-gray-500">Rejected</span><span className="font-semibold text-gray-500">{rejected}</span></div>}
                       </div>
+                      {testAccounts.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <div className="text-xs text-gray-400 mb-1">Test (excluded)</div>
+                          <div className="flex flex-wrap gap-1">
+                            {testAccounts.map(u => (
+                              <span key={u.id} className="inline-block px-2 py-0.5 bg-gray-100 text-gray-400 text-xs rounded">{u.name}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <div className="bg-green-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Total Hours</div><div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div></div>
                     <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Avg Hours/Employee</div><div className="text-2xl font-bold text-purple-600">{reportData.length > 0 ? (grandTotal / reportData.length).toFixed(1) : 0}h</div></div>
