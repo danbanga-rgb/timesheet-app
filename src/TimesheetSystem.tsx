@@ -3,14 +3,39 @@
 // Phase 3 of the Production Deployment Guide
 // ============================================================
 
-const ConsolidatedTable = ({ report, parseLocalDate }: { report: { weekEndings: string[]; partialWeeks: Set<string>; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number }; parseLocalDate: (s: string) => Date }) => {
+const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { report: { weekEndings: string[]; partialWeeks: Set<string>; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number }; parseLocalDate: (s: string) => Date; testAccounts?: string[] }) => {
   const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal } = report;
+  const allStatuses = employeeRows.flatMap(r => Object.values(r.statuses));
+  const approvedCells  = allStatuses.filter(s => s === 'approved').length;
+  const pendingCells   = allStatuses.filter(s => s === 'pending').length;
+  const notSubCells    = allStatuses.filter(s => s === 'not submitted').length;
+  const rejectedCells  = allStatuses.filter(s => s === 'rejected').length;
   return (
     <div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <div className="bg-blue-50 p-4 rounded-lg"><div className="text-sm text-gray-600">Weeks</div><div className="text-2xl font-bold text-blue-600">{weekEndings.length}</div></div>
+        <div className="bg-blue-50 p-4 rounded-lg">
+          <div className="text-sm text-gray-600">Weeks</div>
+          <div className="text-2xl font-bold text-blue-600">{weekEndings.length}</div>
+        </div>
         <div className="bg-green-50 p-4 rounded-lg"><div className="text-sm text-gray-600">Total Hours</div><div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div></div>
-        <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600">Employees</div><div className="text-2xl font-bold text-purple-600">{employeeRows.length}</div></div>
+        <div className="bg-purple-50 p-4 rounded-lg">
+          <div className="text-sm text-gray-600 mb-1">Employees</div>
+          <div className="text-2xl font-bold text-purple-600 mb-2">{employeeRows.length}</div>
+          <div className="space-y-1 text-xs">
+            <div className="flex justify-between"><span className="text-green-700">Approved</span><span className="font-semibold text-green-700">{approvedCells}</span></div>
+            {pendingCells  > 0 && <div className="flex justify-between"><span className="text-yellow-700">Pending</span><span className="font-semibold text-yellow-700">{pendingCells}</span></div>}
+            {notSubCells   > 0 && <div className="flex justify-between"><span className="text-red-600">Not Submitted</span><span className="font-semibold text-red-600">{notSubCells}</span></div>}
+            {rejectedCells > 0 && <div className="flex justify-between"><span className="text-gray-500">Rejected</span><span className="font-semibold text-gray-500">{rejectedCells}</span></div>}
+          </div>
+          {testAccounts.length > 0 && (
+            <div className="mt-2 pt-2 border-t border-purple-200">
+              <div className="text-xs text-gray-400 mb-1">Test (excluded)</div>
+              <div className="flex flex-wrap gap-1">
+                {testAccounts.map(name => <span key={name} className="inline-block px-2 py-0.5 bg-gray-100 text-gray-400 text-xs rounded">{name}</span>)}
+              </div>
+            </div>
+          )}
+        </div>
         <div className="bg-amber-50 p-4 rounded-lg"><div className="text-sm text-gray-600">Avg Hrs/Employee</div><div className="text-2xl font-bold text-amber-600">{employeeRows.length > 0 ? (grandTotal / employeeRows.length).toFixed(1) : 0}h</div></div>
       </div>
       {partialWeeks.size > 0 && (
@@ -465,6 +490,7 @@ const TimesheetSystem = () => {
   const [appliedRange, setAppliedRange] = useState({ start: '', end: '' });
   const [consolidatedMonthPreset, setConsolidatedMonthPreset] = useState('');
   const [consolidatedProjectFilter, setConsolidatedProjectFilter] = useState('all');
+  const [excludeTestAccounts, setExcludeTestAccounts] = useState(true);
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [selectedWeek, setSelectedWeek] = useState(getCurrentWeekStart());
   const [timeEntries, setTimeEntries] = useState<Record<string, TimeEntry>>({});
@@ -3741,12 +3767,15 @@ const TimesheetSystem = () => {
         if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
       });
 
-      const timesheetUsers = users.filter(u => {
+      const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
+      const allTimesheetUsers = users.filter(u => {
         if (u.role !== 'timesheetuser') return false;
         if (consolidatedProjectFilter === 'all') return true;
         if (consolidatedProjectFilter === 'unassigned') return !u.projectId;
         return String(u.projectId) === consolidatedProjectFilter;
       });
+      const excludedTestNames = excludeTestAccounts ? allTimesheetUsers.filter(u => isTestAccount(u.name)).map(u => u.name) : [];
+      const timesheetUsers = excludeTestAccounts ? allTimesheetUsers.filter(u => !isTestAccount(u.name)) : allTimesheetUsers;
       const employeeRows = timesheetUsers.map(user => {
         const hours: Record<string, number | null> = {}, statuses: Record<string, string> = {};
         let rowTotal = 0;
@@ -3771,7 +3800,7 @@ const TimesheetSystem = () => {
 
       const colTotals: Record<string, number> = {};
       weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
-      return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0) };
+      return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0), excludedTestNames };
     };
 
     const consolidatedReport = generateConsolidatedReport();
@@ -3965,6 +3994,15 @@ const TimesheetSystem = () => {
                 <div className="flex justify-between items-center mb-5">
                   <h2 className="text-xl font-bold text-gray-800">Consolidated Report</h2>
                   <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={excludeTestAccounts}
+                        onChange={e => setExcludeTestAccounts(e.target.checked)}
+                        className="w-4 h-4 accent-indigo-600"
+                      />
+                      Exclude test accounts
+                    </label>
                     <select
                       value={consolidatedProjectFilter}
                       onChange={e => setConsolidatedProjectFilter(e.target.value)}
@@ -4077,7 +4115,7 @@ const TimesheetSystem = () => {
                 </div>
 
                 {consolidatedReport
-                  ? <ConsolidatedTable report={consolidatedReport} parseLocalDate={parseLocalDate} />
+                  ? <ConsolidatedTable report={consolidatedReport} parseLocalDate={parseLocalDate} testAccounts={consolidatedReport.excludedTestNames} />
                   : (
                     <div className="text-center py-12 text-gray-400">
                       <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
