@@ -3872,11 +3872,28 @@ const TimesheetSystem = () => {
                   </tbody>
                 </table>
               </div>
-              <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-blue-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Total Employees</div><div className="text-2xl font-bold text-blue-600">{reportData.length}</div></div>
-                <div className="bg-green-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Total Hours</div><div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div></div>
-                <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Avg Hours/Employee</div><div className="text-2xl font-bold text-purple-600">{reportData.length > 0 ? (grandTotal / reportData.length).toFixed(1) : 0}h</div></div>
-              </div>
+              {(() => {
+                const submitted = reportData.filter(r => r.status === 'approved').length;
+                const pending   = reportData.filter(r => r.status === 'pending').length;
+                const notSub    = reportData.filter(r => r.status === 'not submitted').length;
+                const rejected  = reportData.filter(r => r.status === 'rejected').length;
+                return (
+                  <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-blue-50 p-4 rounded-lg">
+                      <div className="text-sm text-gray-600 mb-1">Total Employees</div>
+                      <div className="text-2xl font-bold text-blue-600 mb-3">{reportData.length}</div>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex justify-between"><span className="text-green-700">Approved</span><span className="font-semibold text-green-700">{submitted}</span></div>
+                        {pending > 0   && <div className="flex justify-between"><span className="text-yellow-700">Pending</span><span className="font-semibold text-yellow-700">{pending}</span></div>}
+                        {notSub > 0    && <div className="flex justify-between"><span className="text-red-600">Not Submitted</span><span className="font-semibold text-red-600">{notSub}</span></div>}
+                        {rejected > 0  && <div className="flex justify-between"><span className="text-gray-500">Rejected</span><span className="font-semibold text-gray-500">{rejected}</span></div>}
+                      </div>
+                    </div>
+                    <div className="bg-green-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Total Hours</div><div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div></div>
+                    <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Avg Hours/Employee</div><div className="text-2xl font-bold text-purple-600">{reportData.length > 0 ? (grandTotal / reportData.length).toFixed(1) : 0}h</div></div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
