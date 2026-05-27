@@ -438,21 +438,23 @@ These links are valid for 7 days and are single-use.`;
     const HELPDESK_EMAIL  = 'helpdesk@synergietechsolutions.com';
 
     const subject = isFirst
-      ? `Reminder: ${missing.length} Timesheet${missing.length > 1 ? 's' : ''} Pending`
+      ? `Your timesheet${missing.length > 1 ? 's' : ''} for this week`
       : `URGENT: ${missing.length} Timesheet${missing.length > 1 ? 's' : ''} Overdue`;
 
     const helpdeskLine = isFirst
-      ? `First time logging in? Contact ${HELPDESK_EMAIL} for your account password.`
+      ? `Need help logging in? Contact ${HELPDESK_EMAIL} and they'll reset your password.`
       : `For account access issues, contact ${HELPDESK_EMAIL}.`;
 
-    const delayNote = `\nIf you have recently submitted your timesheet — especially by email — please ignore this reminder. Email submissions can take a few hours to process.`;
+    const delayNote = `\nIf you've already submitted — especially by email — please ignore this. Email submissions can take a few hours to process.`;
+
+    const multiWeekNote = missing.length > 1 ? `\n(If you have outstanding weeks from before, they're listed above too.)` : '';
 
     const bodyText = isFirst
-      ? `Hi ${user.name},\n\nJust a heads-up — we're missing your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nYou have a few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`
+      ? `Hi ${user.name},\n\nHope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:\n\n${weekListText}${multiWeekNote}\n\nA few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`
       : `Hi ${user.name},\n\nWe still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nPlease submit as soon as possible:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`;
 
     const submitOptionsHtml = `
-      <p style="color:#374151;font-weight:600;margin-top:20px">${isFirst ? 'You have a few ways to submit:' : 'Please submit as soon as possible:'}</p>
+      <p style="color:#374151;font-weight:600;margin-top:20px">${isFirst ? 'A few ways to submit:' : 'Please submit as soon as possible:'}</p>
       <ol style="color:#374151;line-height:2.2;padding-left:20px;margin:0">
         <li>Use the button below to log into the app</li>
         <li>Reply to this email with your timesheet file attached</li>
@@ -460,18 +462,19 @@ These links are valid for 7 days and are single-use.`;
       </ol>
       <p style="color:#6b7280;font-size:13px;margin-top:16px;border-top:1px solid #e5e7eb;padding-top:16px">
         ${isFirst
-          ? `First time logging in? Contact <a href="mailto:${HELPDESK_EMAIL}" style="color:#4f46e5">${HELPDESK_EMAIL}</a> for your account password.`
+          ? `Need help logging in? Contact <a href="mailto:${HELPDESK_EMAIL}" style="color:#4f46e5">${HELPDESK_EMAIL}</a> and they'll reset your password.`
           : `For account access issues, contact <a href="mailto:${HELPDESK_EMAIL}" style="color:#4f46e5">${HELPDESK_EMAIL}</a>.`
         }
       </p>
-      <p style="color:#9ca3af;font-size:12px;margin-top:12px;font-style:italic">If you have recently submitted your timesheet — especially by email — please ignore this reminder. Email submissions can take a few hours to process.</p>`;
+      <p style="color:#9ca3af;font-size:12px;margin-top:12px;font-style:italic">If you've already submitted — especially by email — please ignore this. Email submissions can take a few hours to process.</p>`;
 
     const bodyHtml = wrapHtml(
       isFirst ? '#4f46e5' : '#dc2626',
       isFirst ? '\u23f1 Timesheet Reminder' : '\u26a0\ufe0f Timesheets Overdue',
       `<p style="color:#374151">Hi ${user.name},</p>
-       <p style="color:#374151">${isFirst ? `Just a heads-up \u2014 we're missing your timesheet${missing.length > 1 ? 's' : ''} for:` : `We still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:`}</p>
+       <p style="color:#374151">${isFirst ? `Hope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:` : `We still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:`}</p>
        <ul style="color:#374151;line-height:1.8;padding-left:20px">${weekListHtml}</ul>
+       ${missing.length > 1 && isFirst ? `<p style="color:#6b7280;font-size:13px;font-style:italic">(If you have outstanding weeks from before, they're listed above too.)</p>` : ''}
        ${submitOptionsHtml}`,
       APP_URL,
       'Submit via App →',
