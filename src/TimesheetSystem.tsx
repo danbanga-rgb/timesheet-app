@@ -3856,6 +3856,41 @@ const TimesheetSystem = () => {
                   <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><Printer className="w-4 h-4" /> Print</button>
                 </div>
               </div>
+              {(() => {
+                const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
+                const weekKey = formatDate(reportWeek);
+                const testAccounts = users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekKey && (!u.endDate || u.endDate >= weekKey) && isTestAccount(u.name));
+                const submitted = reportData.filter(r => r.status === 'approved').length;
+                const pending   = reportData.filter(r => r.status === 'pending').length;
+                const notSub    = reportData.filter(r => r.status === 'not submitted').length;
+                const rejected  = reportData.filter(r => r.status === 'rejected').length;
+                return (
+                  <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-blue-50 p-4 rounded-lg">
+                      <div className="text-sm text-gray-600 mb-1">Total Employees</div>
+                      <div className="text-2xl font-bold text-blue-600 mb-3">{reportData.length}</div>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex justify-between"><span className="text-green-700">Approved</span><span className="font-semibold text-green-700">{submitted}</span></div>
+                        {pending > 0   && <div className="flex justify-between"><span className="text-yellow-700">Pending</span><span className="font-semibold text-yellow-700">{pending}</span></div>}
+                        {notSub > 0    && <div className="flex justify-between"><span className="text-red-600">Not Submitted</span><span className="font-semibold text-red-600">{notSub}</span></div>}
+                        {rejected > 0  && <div className="flex justify-between"><span className="text-gray-500">Rejected</span><span className="font-semibold text-gray-500">{rejected}</span></div>}
+                      </div>
+                      {testAccounts.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <div className="text-xs text-gray-400 mb-1">Test (excluded)</div>
+                          <div className="flex flex-wrap gap-1">
+                            {testAccounts.map(u => (
+                              <span key={u.id} className="inline-block px-2 py-0.5 bg-gray-100 text-gray-400 text-xs rounded">{u.name}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="bg-green-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Total Hours</div><div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div></div>
+                    <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Avg Hours/Employee</div><div className="text-2xl font-bold text-purple-600">{reportData.length > 0 ? (grandTotal / reportData.length).toFixed(1) : 0}h</div></div>
+                  </div>
+                );
+              })()}
               <div className="flex justify-between items-center mb-6 p-4 bg-gray-50 rounded-lg">
                 <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Prev</button>
                 <div className="text-center">
@@ -3902,41 +3937,6 @@ const TimesheetSystem = () => {
                   </tbody>
                 </table>
               </div>
-              {(() => {
-                const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
-                const weekKey = formatDate(reportWeek);
-                const testAccounts = users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekKey && (!u.endDate || u.endDate >= weekKey) && isTestAccount(u.name));
-                const submitted = reportData.filter(r => r.status === 'approved').length;
-                const pending   = reportData.filter(r => r.status === 'pending').length;
-                const notSub    = reportData.filter(r => r.status === 'not submitted').length;
-                const rejected  = reportData.filter(r => r.status === 'rejected').length;
-                return (
-                  <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-blue-50 p-4 rounded-lg">
-                      <div className="text-sm text-gray-600 mb-1">Total Employees</div>
-                      <div className="text-2xl font-bold text-blue-600 mb-3">{reportData.length}</div>
-                      <div className="space-y-1 text-sm">
-                        <div className="flex justify-between"><span className="text-green-700">Approved</span><span className="font-semibold text-green-700">{submitted}</span></div>
-                        {pending > 0   && <div className="flex justify-between"><span className="text-yellow-700">Pending</span><span className="font-semibold text-yellow-700">{pending}</span></div>}
-                        {notSub > 0    && <div className="flex justify-between"><span className="text-red-600">Not Submitted</span><span className="font-semibold text-red-600">{notSub}</span></div>}
-                        {rejected > 0  && <div className="flex justify-between"><span className="text-gray-500">Rejected</span><span className="font-semibold text-gray-500">{rejected}</span></div>}
-                      </div>
-                      {testAccounts.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-blue-200">
-                          <div className="text-xs text-gray-400 mb-1">Test (excluded)</div>
-                          <div className="flex flex-wrap gap-1">
-                            {testAccounts.map(u => (
-                              <span key={u.id} className="inline-block px-2 py-0.5 bg-gray-100 text-gray-400 text-xs rounded">{u.name}</span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    <div className="bg-green-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Total Hours</div><div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div></div>
-                    <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Avg Hours/Employee</div><div className="text-2xl font-bold text-purple-600">{reportData.length > 0 ? (grandTotal / reportData.length).toFixed(1) : 0}h</div></div>
-                  </div>
-                );
-              })()}
             </div>
           )}
 
