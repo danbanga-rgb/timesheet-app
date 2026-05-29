@@ -373,6 +373,25 @@ These links are valid for 7 days and are single-use.`;
       status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
+  // ── INVOCATION LOCK — one run per UTC hour, blocks concurrent duplicates ────
+  // Uses a PK INSERT (not upsert) as an atomic mutex. If pg_cron fires multiple
+  // concurrent invocations (catch-up burst), only the first INSERT succeeds.
+  // The others get a unique-violation and exit immediately — no emails sent.
+  // ?force=true bypasses this so manual admin triggers always work.
+  if (!force) {
+    const hourSlot = new Date().toISOString().slice(0, 13).replace(/[-T:]/g, ''); // YYYYMMDDHHH
+    const lockKey = `reminder_invocation_lock_${hourSlot}`;
+    const { error: lockError } = await supabase
+      .from('system_settings')
+      .insert({ key: lockKey, value: new Date().toISOString() });
+    if (lockError) {
+      // Another invocation already holds this hour's slot
+      return new Response(JSON.stringify({ skipped: 'duplicate_invocation', slot: lockKey }), {
+        status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
   const results: unknown[] = [];
 
   // Fetch all profiles once
