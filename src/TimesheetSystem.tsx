@@ -3104,6 +3104,7 @@ const TimesheetSystem = () => {
                 const statuses: Record<string, string> = {};
                 let rowTotal = 0;
                 weekEndings.forEach(we => {
+                  const weEnd = formatDate(new Date(parseLocalDate(we).getTime() + 6 * 86400000));
                   const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
                   if (ts) {
                     let h = 0;
@@ -3112,7 +3113,7 @@ const TimesheetSystem = () => {
                       if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
                     });
                     hours[we] = h; statuses[we] = ts.status; rowTotal += h;
-                  } else if (!user.startDate || user.startDate > we || (user.endDate && user.endDate < we)) {
+                  } else if (!user.startDate || user.startDate > weEnd || (user.endDate && user.endDate < we)) {
                     hours[we] = null; statuses[we] = 'n/a';
                   } else { hours[we] = null; statuses[we] = 'not submitted'; }
                 });
@@ -3781,6 +3782,7 @@ const TimesheetSystem = () => {
         const hours: Record<string, number | null> = {}, statuses: Record<string, string> = {};
         let rowTotal = 0;
         weekEndings.forEach(we => {
+          const weEnd = formatDate(new Date(parseLocalDate(we).getTime() + 6 * 86400000));
           const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
           if (ts) {
             // Sum only the days that fall within the applied range
@@ -3790,7 +3792,7 @@ const TimesheetSystem = () => {
               if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
             });
             hours[we] = h; statuses[we] = ts.status; rowTotal += h;
-          } else if (!user.startDate || user.startDate > we || (user.endDate && user.endDate < we)) {
+          } else if (!user.startDate || user.startDate > weEnd || (user.endDate && user.endDate < we)) {
             hours[we] = null; statuses[we] = 'n/a';
           } else { hours[we] = null; statuses[we] = 'not submitted'; }
         });
