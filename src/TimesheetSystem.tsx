@@ -3940,6 +3940,11 @@ const TimesheetSystem = () => {
                   </tbody>
                 </table>
               </div>
+              <div className="flex justify-between items-center mt-4 pt-4 border-t border-gray-200">
+                <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Prev</button>
+                <span className="text-sm text-gray-600">{weekDates[0].toLocaleDateString()} – {weekDates[6].toLocaleDateString()}</span>
+                <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next →</button>
+              </div>
             </div>
           )}
 
