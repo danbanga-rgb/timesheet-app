@@ -389,6 +389,26 @@ These links are valid for 7 days and are single-use.`;
   const managers       = allProfiles.filter((p: Record<string,unknown>) => p.role === 'manager');
   const accountants    = allProfiles.filter((p: Record<string,unknown>) => p.role === 'accountant');
 
+  // ── SPAM GUARDRAIL — per-user daily dedup + hard cap per invocation ─────────
+  // Tracks which user IDs have already been sent a reminder today (UTC date).
+  // Persisted to system_settings so concurrent invocations see the same list.
+  // Hard cap limits total emails fired per invocation regardless of dedup state.
+  const todayUTC = new Date().toISOString().slice(0, 10);
+  const sentTodayKey = `reminder_sent_${todayUTC.replace(/-/g, '')}`;
+  const { data: sentTodayData } = await supabase
+    .from('system_settings').select('value').eq('key', sentTodayKey).single();
+  const sentTodayIds = new Set<string>(
+    sentTodayData?.value ? JSON.parse(sentTodayData.value) : []
+  );
+  const INVOCATION_EMAIL_CAP = 80;
+  let invocationEmailCount = 0;
+
+  async function markSent(userId: string) {
+    sentTodayIds.add(userId);
+    invocationEmailCount++;
+    await supabase.from('system_settings').upsert({ key: sentTodayKey, value: JSON.stringify([...sentTodayIds]) });
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // 1. TIMESHEET USER REMINDERS
   // ══════════════════════════════════════════════════════════════════════════
@@ -421,6 +441,15 @@ These links are valid for 7 days and are single-use.`;
     const missing = allMissing.filter(w => w >= REMINDER_CUTOFF);
 
     if (missing.length === 0) { results.push({ role: 'timesheetuser', user: user.name, action: 'all submitted' }); continue; }
+
+    if (sentTodayIds.has(user.id as string)) {
+      results.push({ role: 'timesheetuser', user: user.name, action: 'skipped (already sent today)' });
+      continue;
+    }
+    if (invocationEmailCount >= INVOCATION_EMAIL_CAP) {
+      results.push({ role: 'timesheetuser', user: user.name, action: `skipped (invocation cap ${INVOCATION_EMAIL_CAP} reached)` });
+      continue;
+    }
 
     const isFirst = force ? true : isFriday5pm;
     const weekListText = missing.map(w => {
@@ -481,6 +510,7 @@ These links are valid for 7 days and are single-use.`;
     );
 
     const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, user.email as string, user.name as string, subject, bodyText, bodyHtml);
+    if (r.ok) await markSent(user.id as string);
     results.push({ role: 'timesheetuser', user: user.name, action: r.ok ? 'email sent' : 'email failed', missing: missing.length, ...(r.error && { error: r.error }) });
   }
 
@@ -515,6 +545,15 @@ These links are valid for 7 days and are single-use.`;
       .order('week_start', { ascending: true });
 
     if (!pending || pending.length === 0) { results.push({ role: 'manager', user: manager.name, action: 'no pending timesheets' }); continue; }
+
+    if (sentTodayIds.has(manager.id as string)) {
+      results.push({ role: 'manager', user: manager.name, action: 'skipped (already sent today)' });
+      continue;
+    }
+    if (invocationEmailCount >= INVOCATION_EMAIL_CAP) {
+      results.push({ role: 'manager', user: manager.name, action: `skipped (invocation cap ${INVOCATION_EMAIL_CAP} reached)` });
+      continue;
+    }
 
     const { data: projects } = await supabase.from('projects').select('id, name, code');
     const projMap: Record<number, string> = {};
@@ -558,6 +597,7 @@ These links are valid for 7 days and are single-use.`;
     );
 
     const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, manager.email as string, manager.name as string, subject, bodyText, bodyHtml);
+    if (r.ok) await markSent(manager.id as string);
     results.push({ role: 'manager', user: manager.name, action: r.ok ? 'email sent' : 'email failed', pending: count, ...(r.error && { error: r.error }) });
   }
 
