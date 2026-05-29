@@ -408,24 +408,20 @@ These links are valid for 7 days and are single-use.`;
   const managers       = allProfiles.filter((p: Record<string,unknown>) => p.role === 'manager');
   const accountants    = allProfiles.filter((p: Record<string,unknown>) => p.role === 'accountant');
 
-  // ── SPAM GUARDRAIL — per-user daily dedup + hard cap per invocation ─────────
-  // Tracks which user IDs have already been sent a reminder today (UTC date).
-  // Persisted to system_settings so concurrent invocations see the same list.
-  // Hard cap limits total emails fired per invocation regardless of dedup state.
-  const todayUTC = new Date().toISOString().slice(0, 10);
-  const sentTodayKey = `reminder_sent_${todayUTC.replace(/-/g, '')}`;
-  const { data: sentTodayData } = await supabase
-    .from('system_settings').select('value').eq('key', sentTodayKey).single();
-  const sentTodayIds = new Set<string>(
-    sentTodayData?.value ? JSON.parse(sentTodayData.value) : []
-  );
+  // ── SPAM GUARDRAIL — atomic per-user daily claim + hard cap per invocation ──
+  // Before each send, attempt an atomic INSERT for key reminder_user_{YYYYMMDD}_{userId}.
+  // PK unique-violation = already sent today → skip. No in-memory state, no race window.
+  // Claim is made BEFORE sending so a failed send still burns today's slot — that's
+  // intentional: never double-send, even on retry. ?force=true bypasses the claim.
+  const todayUTC = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const INVOCATION_EMAIL_CAP = 80;
   let invocationEmailCount = 0;
 
-  async function markSent(userId: string) {
-    sentTodayIds.add(userId);
-    invocationEmailCount++;
-    await supabase.from('system_settings').upsert({ key: sentTodayKey, value: JSON.stringify([...sentTodayIds]) });
+  async function claimSend(userId: string): Promise<boolean> {
+    const { error } = await supabase
+      .from('system_settings')
+      .insert({ key: `reminder_user_${todayUTC}_${userId}`, value: new Date().toISOString() });
+    return !error; // false = unique violation = already sent today
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -461,9 +457,12 @@ These links are valid for 7 days and are single-use.`;
 
     if (missing.length === 0) { results.push({ role: 'timesheetuser', user: user.name, action: 'all submitted' }); continue; }
 
-    if (sentTodayIds.has(user.id as string)) {
-      results.push({ role: 'timesheetuser', user: user.name, action: 'skipped (already sent today)' });
-      continue;
+    if (!force) {
+      const claimed = await claimSend(user.id as string);
+      if (!claimed) {
+        results.push({ role: 'timesheetuser', user: user.name, action: 'skipped (already sent today)' });
+        continue;
+      }
     }
     if (invocationEmailCount >= INVOCATION_EMAIL_CAP) {
       results.push({ role: 'timesheetuser', user: user.name, action: `skipped (invocation cap ${INVOCATION_EMAIL_CAP} reached)` });
@@ -529,7 +528,7 @@ These links are valid for 7 days and are single-use.`;
     );
 
     const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, user.email as string, user.name as string, subject, bodyText, bodyHtml);
-    if (r.ok) await markSent(user.id as string);
+    if (r.ok) invocationEmailCount++;
     results.push({ role: 'timesheetuser', user: user.name, action: r.ok ? 'email sent' : 'email failed', missing: missing.length, ...(r.error && { error: r.error }) });
   }
 
@@ -565,9 +564,12 @@ These links are valid for 7 days and are single-use.`;
 
     if (!pending || pending.length === 0) { results.push({ role: 'manager', user: manager.name, action: 'no pending timesheets' }); continue; }
 
-    if (sentTodayIds.has(manager.id as string)) {
-      results.push({ role: 'manager', user: manager.name, action: 'skipped (already sent today)' });
-      continue;
+    if (!force) {
+      const claimed = await claimSend(manager.id as string);
+      if (!claimed) {
+        results.push({ role: 'manager', user: manager.name, action: 'skipped (already sent today)' });
+        continue;
+      }
     }
     if (invocationEmailCount >= INVOCATION_EMAIL_CAP) {
       results.push({ role: 'manager', user: manager.name, action: `skipped (invocation cap ${INVOCATION_EMAIL_CAP} reached)` });
@@ -616,7 +618,7 @@ These links are valid for 7 days and are single-use.`;
     );
 
     const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, manager.email as string, manager.name as string, subject, bodyText, bodyHtml);
-    if (r.ok) await markSent(manager.id as string);
+    if (r.ok) invocationEmailCount++;
     results.push({ role: 'manager', user: manager.name, action: r.ok ? 'email sent' : 'email failed', pending: count, ...(r.error && { error: r.error }) });
   }
 
