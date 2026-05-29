@@ -398,14 +398,14 @@ These links are valid for 7 days and are single-use.`;
     const hour = lt.getHours();
 
     const isFriday5pm  = dow === 5 && hour >= 17 && hour <= 18;
-    // Extended to hour 11 — allows deferred runs (poller wasn't ready at 9am) to fire at 10am or 11am
-    const isWeekday9am = dow >= 1 && dow <= 5 && hour >= 9 && hour <= 11;
+    // Fire at 9am (defer if poller stale) or 11am (unconditional fallback). Never at 10am.
+    const isWeekday9am = dow >= 1 && dow <= 5 && (hour === 9 || hour === 11);
     if (!force && !isFriday5pm && !isWeekday9am) {
       results.push({ role: 'timesheetuser', user: user.name, action: `skipped (dow=${dow} hour=${hour})` });
       continue;
     }
-    // Poller freshness check: defer if poller hasn't run within 45 min (morning window only, not Friday or hour 11 fallback)
-    if (!force && isWeekday9am && !isFriday5pm && hour < 11) {
+    // Poller freshness check: defer at 9am only; hour 11 always fires
+    if (!force && isWeekday9am && !isFriday5pm && hour === 9) {
       if (pollerAgeMinutes === null || pollerAgeMinutes > 45) {
         results.push({ role: 'timesheetuser', user: user.name, action: `deferred (poller_age=${pollerAgeMinutes ?? 'unknown'}m)` });
         continue;
@@ -492,11 +492,11 @@ These links are valid for 7 days and are single-use.`;
     const dow  = lt.getDay();
     const hour = lt.getHours();
 
-    if (!force && !(dow >= 1 && dow <= 5 && hour >= 9 && hour <= 11)) {
+    if (!force && !(dow >= 1 && dow <= 5 && (hour === 9 || hour === 11))) {
       results.push({ role: 'manager', user: manager.name, action: `skipped (dow=${dow} hour=${hour}, tz=${(manager.country as string) || 'unknown'}-${(manager.region as string) || 'unknown'})` });
       continue;
     }
-    if (!force && hour < 11 && (pollerAgeMinutes === null || pollerAgeMinutes > 45)) {
+    if (!force && hour === 9 && (pollerAgeMinutes === null || pollerAgeMinutes > 45)) {
       results.push({ role: 'manager', user: manager.name, action: `deferred (poller_age=${pollerAgeMinutes ?? 'unknown'}m)` });
       continue;
     }
