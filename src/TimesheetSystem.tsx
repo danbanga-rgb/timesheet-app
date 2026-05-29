@@ -1963,7 +1963,8 @@ const TimesheetSystem = () => {
     const weekKey = formatDate(reportWeek);
     const weekTimesheets = timesheets.filter(t => t.weekStart === weekKey);
     const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
-    return users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekKey && (!u.endDate || u.endDate >= weekKey) && !isTestAccount(u.name)).map(user => {
+    const weekEndKey = formatDate(new Date(parseLocalDate(weekKey).getTime() + 6 * 86400000));
+    return users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekEndKey && (!u.endDate || u.endDate >= weekKey) && !isTestAccount(u.name)).map(user => {
       const timesheet = weekTimesheets.find(t => t.userId === user.id);
       const entries = timesheet ? timesheet.entries : {};
       const project = projects.find(p => p.id === (timesheet?.projectId ?? user.projectId)) ?? null;
