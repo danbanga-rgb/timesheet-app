@@ -2454,8 +2454,11 @@ async function main() {
                      summary.invoiceReports.length;
   if (actionable > 0) {
     await sendSummaryEmail(summary, 0);
-    await triggerTimesheetReport();
-    if (summary.invoiceReports.length > 0) {
+    if (summary.created + summary.corrections > 0) {
+      await triggerTimesheetReport();
+    }
+    const invoicesIngested = summary.invoiceReports.filter(r => r.ingestOk);
+    if (invoicesIngested.length > 0) {
       await sendInvoiceAccountingEmail(summary.invoiceReports);
     }
   }
