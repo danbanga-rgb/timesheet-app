@@ -29,7 +29,8 @@ const CONFIG = {
   internalForwarders: (process.env.INTERNAL_FORWARDERS ||
     'contracts@synergietechsolutions.com,accounting@synergietechsolutions.com,lpinto@synergietechsolutions.com,helpdesk@synergietechsolutions.com'
   ).split(',').map(s => s.trim().toLowerCase()),
-  fallbackEmail: process.env.IMPORT_FALLBACK_EMAIL || 'helpdesk@synergietechsolutions.com',
+  fallbackEmail:    process.env.IMPORT_FALLBACK_EMAIL || 'helpdesk@synergietechsolutions.com',
+  accountingEmail:  process.env.ACCOUNTING_EMAIL     || 'accounting@synergietechsolutions.com',
   brevoApiKey:   process.env.BREVO_API_KEY,
   fromEmail:     process.env.FROM_EMAIL || 'timesheets@mysynergie.net',
   fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
@@ -1648,9 +1649,19 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           rawExtracted:    parsed,
           forwardedBy:     forwardedBy || null,
         }, CONFIG.invoiceIngestUrl);
-        const action = res.body?.action || res.status;
+        const action = res.body?.action || res.body?.error || String(res.status);
         console.log(`     ✅ Ingested → ${action}`);
-        results.push({ contractor: contractorEmail, attachmentName: att.name, action: `invoice_${action}`, parsed });
+        results.push({
+          contractor:          contractorEmail,
+          attachmentName:      att.name,
+          action:              `invoice_${action}`,
+          ingestOk:            res.body?.ok === true,
+          invoiceNumber:       res.body?.invoiceNumber || null,
+          reconciliationStatus: res.body?.reconciliationStatus || null,
+          reconciliationDelta:  res.body?.reconciliationDelta ?? null,
+          ingestNotes:         res.body?.notes || null,
+          parsed,
+        });
       } catch (e) {
         console.error(`     ❌ Ingest failed: ${e.message}`);
         results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
@@ -2083,6 +2094,79 @@ ${(bodyText || '').slice(0, 2000)}`;
   console.log(`  📨 Forwarded to helpdesk: ${reason}`);
 }
 
+async function sendInvoiceAccountingEmail(invoiceReports) {
+  const ingested = invoiceReports.filter(r => r.ingestOk);
+  const failed   = invoiceReports.filter(r => !r.ingestOk && r.action !== 'invoice_reported');
+  const skipped  = invoiceReports.filter(r => r.action === 'invoice_duplicate' || r.action === 'invoice_reattached');
+
+  // Plain-English reason for each failure action code
+  function failReason(r) {
+    if (r.error) return `Processing error: ${r.error}`;
+    const a = r.action || '';
+    if (a.includes('unknown_contractor'))          return 'Contractor not in system — add via admin panel first';
+    if (a.includes('direct_invoice_not_accepted')) return 'Email not forwarded by accounting — direct submissions not accepted';
+    if (a.includes('partial'))                     return `Missing required fields — could not parse period or hours from PDF (${r.parsed?.parseNotes || 'no detail'})`;
+    if (a.includes('failed'))                      return `Processing error — check import log`;
+    return `Unexpected status: ${a}`;
+  }
+
+  function formatPeriod(start, end) {
+    if (!start || !end) return '—';
+    const fmt = d => { const [y,m,dy] = d.split('-'); return `${parseInt(dy)} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(m)-1]} ${y}`; };
+    return `${fmt(start)} – ${fmt(end)}`;
+  }
+
+  function reconBadge(status, delta) {
+    if (status === 'matched')      return '✓ Matched';
+    if (status === 'mismatch')     return `⚠ Mismatch (${delta != null ? (delta > 0 ? '+' : '') + delta + 'h' : '?'})`;
+    if (status === 'unverifiable') return '? No timesheets found for period';
+    return '—';
+  }
+
+  const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' });
+  const statusLine = `${ingested.length} ingested${failed.length > 0 ? `, ${failed.length} failed` : ''}${skipped.length > 0 ? `, ${skipped.length} skipped` : ''}`;
+  const subject = `[Invoice Report] ${statusLine} — ${now}`;
+
+  let body = `Invoice Report — ${now} ET\n${'='.repeat(52)}\n`;
+
+  if (ingested.length > 0) {
+    body += `\nINGESTED (${ingested.length})\n${'─'.repeat(40)}\n`;
+    for (const inv of ingested) {
+      const p = inv.parsed || {};
+      const sym = p.currency === 'USD' ? '$' : (p.currency || '');
+      body += `\n${inv.email}\n`;
+      body += `  Invoice  : ${inv.invoiceNumber || '—'}\n`;
+      body += `  File     : ${inv.filename}\n`;
+      body += `  Period   : ${formatPeriod(p.periodStart, p.periodEnd)}\n`;
+      body += `  Hours    : ${p.totalHours != null ? p.totalHours + 'h' : '—'}`;
+      if (p.rate)        body += `  |  Rate: ${sym}${p.rate}`;
+      if (p.totalAmount) body += `  |  Total: ${sym}${p.totalAmount} ${p.currency || 'USD'}`;
+      body += '\n';
+      body += `  Match    : ${reconBadge(inv.reconciliationStatus, inv.reconciliationDelta)}\n`;
+    }
+  }
+
+  if (skipped.length > 0) {
+    body += `\nSKIPPED — ALREADY ON FILE (${skipped.length})\n${'─'.repeat(40)}\n`;
+    for (const inv of skipped) {
+      body += `\n  ${inv.email}  |  ${inv.filename}  (${inv.action.replace('invoice_', '')})\n`;
+    }
+  }
+
+  if (failed.length > 0) {
+    body += `\nFAILED — ACTION NEEDED (${failed.length})\n${'─'.repeat(40)}\n`;
+    for (const inv of failed) {
+      body += `\n  ${inv.email}  |  ${inv.filename}\n`;
+      body += `  Reason   : ${failReason(inv)}\n`;
+    }
+  }
+
+  body += `\n${'='.repeat(52)}\nThis is an automated message from ${CONFIG.fromEmail}`;
+
+  await sendEmail(CONFIG.accountingEmail, subject, body);
+  console.log(`  📧 Invoice report sent to ${CONFIG.accountingEmail}`);
+}
+
 async function sendSummaryEmail(summary, leftUnseen) {
   const hasFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER).length > 0;
   const status = hasFailures ? '⚠️ PARTIAL' : '✅ OK';
@@ -2293,7 +2377,19 @@ async function main() {
       else if (r.action === 'correction_imported') summary.corrections++;
       else if (r.action === 'invoice_skipped') { /* no anthropic key — ignore */ }
       else if (r.action?.startsWith('invoice_')) {
-        summary.invoiceReports.push({ email: r.contractor, filename: r.attachmentName, parsed: r.parsed, action: r.action, parseMethod: r.parsed?.parseMethod || 'unknown' });
+        summary.invoiceReports.push({
+          email:               r.contractor,
+          filename:            r.attachmentName,
+          parsed:              r.parsed,
+          action:              r.action,
+          parseMethod:         r.parsed?.parseMethod || 'unknown',
+          ingestOk:            r.ingestOk,
+          invoiceNumber:       r.invoiceNumber || null,
+          reconciliationStatus: r.reconciliationStatus || null,
+          reconciliationDelta:  r.reconciliationDelta ?? null,
+          ingestNotes:         r.ingestNotes || null,
+          error:               r.error || null,
+        });
       }
       if (r.wasCreated && r.userName) {
         summary.newUsers.push({ name: r.userName, email: r.contractor });
@@ -2359,6 +2455,9 @@ async function main() {
   if (actionable > 0) {
     await sendSummaryEmail(summary, 0);
     await triggerTimesheetReport();
+    if (summary.invoiceReports.length > 0) {
+      await sendInvoiceAccountingEmail(summary.invoiceReports);
+    }
   }
 
   const reportableFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER);

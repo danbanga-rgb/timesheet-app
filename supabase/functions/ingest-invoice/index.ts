@@ -321,6 +321,9 @@ serve(async (req) => {
   let invoiceId: number | null = null;
   let parseStatus = 'success';
   let actionNotes = '';
+  let reconStatus: 'matched' | 'mismatch' | 'unverifiable' | null = null;
+  let reconDelta: number | null = null;
+  let resolvedInvoiceNumber: string | null = null;
 
   try {
     const parsedRate   = rate != null ? Number(rate) : 0;
@@ -329,6 +332,7 @@ serve(async (req) => {
     // Use parsed invoice number or generate one
     const finalInvoiceNumber = (invoiceNumber as string | null)
       || await generateInvoiceNumber(contractorEmail as string, parsedPeriodStart, supabase);
+    resolvedInvoiceNumber = finalInvoiceNumber;
 
     // Synthetic single line representing the full period
     const lines = [{
@@ -461,6 +465,8 @@ serve(async (req) => {
     }
 
     invoiceId = inserted.id;
+    reconStatus = recon.status;
+    reconDelta  = recon.delta;
     actionNotes = `Reconciliation: ${recon.notes}`;
 
     // ── Upload attachment to storage ──────────────────────────────────────
@@ -518,17 +524,20 @@ serve(async (req) => {
   });
 
   return new Response(JSON.stringify({
-    ok:          parseStatus === 'success',
-    action:      invoiceId ? 'created' : 'failed',
+    ok:                  parseStatus === 'success',
+    action:              invoiceId ? 'created' : 'failed',
     parseStatus,
     userId,
     userName,
     nameUpdated,
     invoiceId,
-    periodStart: parsedPeriodStart,
-    periodEnd:   parsedPeriodEnd,
-    forwardedBy: forwardedBy || null,
-    notes:       actionNotes,
+    invoiceNumber:       resolvedInvoiceNumber,
+    periodStart:         parsedPeriodStart,
+    periodEnd:           parsedPeriodEnd,
+    forwardedBy:         forwardedBy || null,
+    reconciliationStatus: reconStatus,
+    reconciliationDelta:  reconDelta,
+    notes:               actionNotes,
     attemptCount,
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });

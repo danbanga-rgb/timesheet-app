@@ -34,6 +34,7 @@ jobs:
           IMAP_PORT:             "993"
           INTERNAL_FORWARDERS:   contracts@synergietechsolutions.com,accounting@synergietechsolutions.com,lpinto@synergietechsolutions.com,helpdesk@synergietechsolutions.com,contracts@cheetah-it.com
           IMPORT_FALLBACK_EMAIL: helpdesk@synergietechsolutions.com
+          ACCOUNTING_EMAIL:      accounting@synergietechsolutions.com
           INGEST_URL:            ${{ secrets.INGEST_URL }}
           INGEST_SECRET:         ${{ secrets.INGEST_SECRET }}
           INVOICE_INGEST_URL:    ${{ secrets.INVOICE_INGEST_URL }}
