@@ -1301,7 +1301,9 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename) {
 
     if (hasPayment || !CONFIG.anthropicApiKey) {
       if (hasPayment) console.log(`  ✅ Regex: ${filename}`);
-      return postProcessInvoice(regexResult, pdfText);
+      const r = postProcessInvoice(regexResult, pdfText);
+      if (r) r.parseMethod = hasPayment ? 'regex' : 'regex_partial';
+      return r;
     }
 
     // ── Step 2b: regex has numbers, Claude fills payment details only ────────
@@ -1309,22 +1311,28 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename) {
     const paymentKeywords = /iban|swift|bic\b|account\s*(no|number|#)|sort\s*code|routing|bank\s*(name|details|transfer)/i;
     if (!paymentKeywords.test(pdfText)) {
       console.log(`  ✅ Regex (no payment section): ${filename}`);
-      return postProcessInvoice(regexResult, pdfText);
+      const r = postProcessInvoice(regexResult, pdfText);
+      if (r) r.parseMethod = 'regex_no_payment';
+      return r;
     }
 
     console.log(`  💳 Claude payment-only: ${filename}`);
     const claudePd = await claudeExtractPaymentOnly(
       pdfText ? prepareInvoiceText(pdfText) : null, pdfBuffer, isImagePdf
     );
-    return postProcessInvoice(
+    const r2b = postProcessInvoice(
       { ...regexResult, paymentDetails: claudePd ?? regexResult.paymentDetails },
       pdfText
     );
+    if (r2b) r2b.parseMethod = 'regex+claude_payment';
+    return r2b;
   }
 
   // ── Step 2c: regex insufficient — full Claude extract ─────────────────────
   if (!CONFIG.anthropicApiKey) {
-    return regexResult ? postProcessInvoice(regexResult, pdfText) : null;
+    const r = regexResult ? postProcessInvoice(regexResult, pdfText) : null;
+    if (r) r.parseMethod = 'regex_partial';
+    return r;
   }
 
   console.log(`  🤖 Claude: ${filename}`);
@@ -1332,10 +1340,16 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename) {
     pdfText ? prepareInvoiceText(pdfText) : null, pdfBuffer, isImagePdf, filename
   );
 
-  if (!claudeResult) return regexResult ? postProcessInvoice(regexResult, pdfText) : null;
+  if (!claudeResult) {
+    const r = regexResult ? postProcessInvoice(regexResult, pdfText) : null;
+    if (r) r.parseMethod = 'regex_partial';
+    return r;
+  }
 
   const merged = mergeInvoiceResults(regexResult, claudeResult);
-  return postProcessInvoice(applyFilenamePeriodFallback(merged, filename), pdfText);
+  const r2c = postProcessInvoice(applyFilenamePeriodFallback(merged, filename), pdfText);
+  if (r2c) r2c.parseMethod = isImagePdf && !pdfText ? 'claude_vision' : 'claude_full';
+  return r2c;
 }
 
 // Returns a multi-line string showing every field as PARSED, NOT FOUND, or ASSUMED.
@@ -1629,7 +1643,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           totalAmount:     parsed.totalAmount     || null,
           currency:        parsed.currency        || null,
           paymentDetails:  parsed.paymentDetails  || null,
-          parseNotes:      parsed.parseNotes      || '',
+          parseNotes:      `[${parsed.parseMethod || 'unknown'}] ` + (parsed.parseNotes || ''),
           pdfBase64:       att.buffer.toString('base64'),
           rawExtracted:    parsed,
           forwardedBy:     forwardedBy || null,
@@ -2123,9 +2137,22 @@ ${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ atte
   }
 
   if (summary.invoiceReports.length > 0) {
+    const methodCounts = {};
+    for (const inv of summary.invoiceReports) {
+      const m = inv.parseMethod || 'unknown';
+      methodCounts[m] = (methodCounts[m] || 0) + 1;
+    }
+    const claudeCalls = (methodCounts['regex+claude_payment'] || 0) + (methodCounts['claude_full'] || 0) + (methodCounts['claude_vision'] || 0);
+    const regexOnly   = (methodCounts['regex'] || 0) + (methodCounts['regex_no_payment'] || 0) + (methodCounts['regex_partial'] || 0);
+
     body += `
 INVOICE PARSE REPORTS (${summary.invoiceReports.length})${CONFIG.invoiceIngestEnabled ? '' : ' — DRY RUN, nothing written to DB'}
 ${'─'.repeat(50)}
+Parse method breakdown:
+  Regex-only          : ${regexOnly}  (0 Claude calls)
+  Regex + Claude pay  : ${methodCounts['regex+claude_payment'] || 0}  (payment details only, ~256 tokens each)
+  Claude full         : ${(methodCounts['claude_full'] || 0) + (methodCounts['claude_vision'] || 0)}  ${methodCounts['claude_vision'] ? `(${methodCounts['claude_vision']} vision)` : ''}
+  Claude calls total  : ${claudeCalls}
 `;
     for (const inv of summary.invoiceReports) {
       const p = inv.parsed;
@@ -2134,7 +2161,7 @@ ${'─'.repeat(50)}
       const tag = (val, assumed) => val != null && val !== '' ? `${val}` : (assumed ? `(assumed: ${assumed})` : '—');
 
       body += `
-  ${inv.email}  |  ${inv.filename}
+  ${inv.email}  |  ${inv.filename}  [${inv.parseMethod || '—'}]
   Invoice #  : ${tag(p?.invoiceNumber, 'auto-generated')}
   Period     : ${tag(p?.periodStart)} → ${tag(p?.periodEnd)}
   Hours      : ${tag(p?.totalHours)}   Rate: ${tag(p?.rate, '0')}   Amount: ${tag(p?.totalAmount, 'hours × rate')}   Currency: ${tag(p?.currency, 'USD')}
@@ -2266,7 +2293,7 @@ async function main() {
       else if (r.action === 'correction_imported') summary.corrections++;
       else if (r.action === 'invoice_skipped') { /* no anthropic key — ignore */ }
       else if (r.action?.startsWith('invoice_')) {
-        summary.invoiceReports.push({ email: r.contractor, filename: r.attachmentName, parsed: r.parsed, action: r.action });
+        summary.invoiceReports.push({ email: r.contractor, filename: r.attachmentName, parsed: r.parsed, action: r.action, parseMethod: r.parsed?.parseMethod || 'unknown' });
       }
       if (r.wasCreated && r.userName) {
         summary.newUsers.push({ name: r.userName, email: r.contractor });
@@ -2307,6 +2334,11 @@ async function main() {
   console.log(`  Duplicates       : ${summary.duplicates}`);
   console.log(`  Corrections      : ${summary.corrections}`);
   console.log(`  Invoices parsed  : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? '' : ' (dry-run)'}`);
+  if (summary.invoiceReports.length > 0) {
+    const mc = {};
+    for (const inv of summary.invoiceReports) { const m = inv.parseMethod || 'unknown'; mc[m] = (mc[m] || 0) + 1; }
+    for (const [m, n] of Object.entries(mc)) console.log(`    ${m.padEnd(24)}: ${n}`);
+  }
   console.log(`  Failures         : ${summary.failures.length}`);
 
   await writePollerHeartbeat({
