@@ -129,10 +129,9 @@ async function upsertTimesheet(
         notes: 'Native submission exists — emailed correction flagged for admin review',
       };
     }
-    // Internal forwarder — apply correction, bump source to reflect it came via email
-    const mergedEntries = mergeEntries(existing.entries as Record<string, number> || {}, entries);
+    // Internal forwarder — apply correction as authoritative (hours may go up or down)
     await supabase.from('timesheets').update({
-      entries:      mergedEntries,
+      entries,
       status:       'approved',
       approved_by:  'system-import',
       approved_at:  new Date().toISOString(),
