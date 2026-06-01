@@ -56,7 +56,11 @@ Authentication uses Supabase Auth. The client is initialized in `src/supabaseCli
 **`ingest-timesheet/index.ts`** (Deno) — Called by the email poller. Handles:
 - Auth via `x-ingest-secret` header (JWT verification disabled)
 - User lookup only — **no auto-creation**. Unknown emails return `{ ok: false, error: 'unknown_contractor' }` and are logged to `email_import_log`. Users must be created by admin first.
-- Timesheet upsert with correction rules: `source='direct'` records are never overwritten; `source='imported'` records are updated and kept `approved`; new imports are always created as `approved` (auto-approved on import)
+- Timesheet upsert with correction rules:
+  - `source='direct'` + `forwardedBy=null` (contractor self-correction) → `correction_pending`, never auto-applied
+  - `source='direct'` + `forwardedBy` set (internal forwarder) → entries replaced outright and auto-approved (accountant is authoritative; can reduce hours)
+  - `source='imported'` → merge with `max` per day (`mergeEntries()`), kept `approved` — handles month-end partial-week splits
+  - No existing record → create as `approved`, `source='imported'`
 - Import deduplication via `email_import_log` table
 
 **`create-user/index.ts`** (Deno) — Admin-only. Creates a new `auth.users` record + `profiles` row using the service role key. Required because public signups are disabled — the frontend's admin form calls this instead of `supabase.auth.signUp()`. Verifies caller is admin via JWT.
