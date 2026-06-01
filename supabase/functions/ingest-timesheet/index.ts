@@ -176,6 +176,31 @@ serve(async (req) => {
     });
   }
 
+  // ── Log-only mode — unsupported attachment types logged by poller ────────────
+  if (body.logOnly === true) {
+    const { messageId: lMsgId, contractorEmail: lEmail, attachmentName: lAtt, parseNotes: lNotes, subject: lSubject, run_id: lRunId } = body;
+    if (!lMsgId) {
+      return new Response(JSON.stringify({ error: 'Missing messageId' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    const { data: existing } = await supabase.from('email_import_log').select('id').eq('message_id', lMsgId as string).maybeSingle();
+    if (existing) {
+      return new Response(JSON.stringify({ ok: true, action: 'duplicate' }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    await supabase.from('email_import_log').insert({
+      message_id:      lMsgId,
+      from_email:      lEmail || null,
+      resolved_email:  lEmail || null,
+      subject:         lSubject || null,
+      attachment_name: lAtt || null,
+      parse_status:    'failed',
+      parse_notes:     lNotes || 'Unsupported file type',
+      run_id:          lRunId || null,
+    });
+    return new Response(JSON.stringify({ ok: true, action: 'logged_skip' }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  }
+
   const {
     messageId,
     contractorEmail,

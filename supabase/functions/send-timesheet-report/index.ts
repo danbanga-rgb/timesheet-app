@@ -44,6 +44,19 @@ function lastCompletedMonday(): string {
   return lastMonday.toISOString().slice(0, 10);
 }
 
+function currentMonday(): string {
+  const today = todayUtc();
+  const dow   = today.getUTCDay();
+  const daysToThisMonday = dow === 0 ? 6 : dow - 1;
+  const monday = new Date(today);
+  monday.setUTCDate(today.getUTCDate() - daysToThisMonday);
+  return monday.toISOString().slice(0, 10);
+}
+
+function isFridayUtc(): boolean {
+  return todayUtc().getUTCDay() === 5;
+}
+
 function completedWeeksSince(cutoff: string): string[] {
   const weeks: string[] = [];
   let cur = cutoff;
@@ -141,6 +154,12 @@ serve(async (req) => {
   // ─── Weeks to cover ───────────────────────────────────────────────────────────
 
   const weeks = completedWeeksSince(CUTOFF);
+  const includeCurrentWeek = isFridayUtc();
+  const currentWeekStart   = currentMonday();
+  if (includeCurrentWeek && !weeks.includes(currentWeekStart)) {
+    weeks.push(currentWeekStart);
+  }
+
   if (weeks.length === 0) {
     return new Response(JSON.stringify({ ok: true, message: 'No completed weeks yet' }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -206,6 +225,7 @@ serve(async (req) => {
     htmlSection: string;
     csvContent: string;
     csvName: string;
+    isCurrentWeek: boolean;
   };
 
   const weekReports: WeekReport[] = [];
@@ -247,6 +267,7 @@ serve(async (req) => {
     // Skip weeks where everyone submitted
     if (missingNames.length === 0) continue;
 
+    const isCurrentWeek = includeCurrentWeek && weekStart === currentWeekStart;
     const label = weekLabel(weekStart);
     const total = eligible.length;
 
@@ -254,10 +275,15 @@ serve(async (req) => {
       `<span style="display:inline-block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;border-radius:4px;padding:3px 10px;margin:3px 4px 3px 0;font-size:13px;font-weight:600">${n}</span>`
     ).join('');
 
+    const headerBg   = isCurrentWeek ? '#92400e' : '#1e40af';
+    const weekTitle  = isCurrentWeek
+      ? `${label} <span style="font-size:11px;font-weight:400;opacity:.85">(in progress — week not yet complete)</span>`
+      : `Week ending ${label.split('–')[1]?.trim() ?? label}`;
+
     const htmlSection = `
       <div style="margin-top:20px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
-        <div style="background:#1e40af;color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
-          <strong>Week ending ${label.split('–')[1]?.trim() ?? label}</strong>
+        <div style="background:${headerBg};color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
+          <strong>${weekTitle}</strong>
           <span style="font-size:12px;opacity:.85">${submitted}/${total} submitted · <span style="color:#fca5a5">${missingNames.length} missing</span></span>
         </div>
         <div style="padding:12px 16px">
@@ -271,6 +297,7 @@ serve(async (req) => {
       htmlSection,
       csvContent: buildCsv(csvRows),
       csvName: csvFilename(weekStart),
+      isCurrentWeek,
     });
   }
 
@@ -300,7 +327,7 @@ serve(async (req) => {
 
     const summaryRows = weekReports.map(r =>
       `<tr>
-        <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;font-weight:600">${r.label}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;font-weight:600">${r.label}${r.isCurrentWeek ? ' <span style="font-size:11px;font-weight:400;color:#92400e">(in progress)</span>' : ''}</td>
         <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center">${r.submitted}/${r.total}</td>
         <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center;color:#dc2626;font-weight:700">${r.missingNames.length}</td>
       </tr>`

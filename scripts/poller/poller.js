@@ -2215,6 +2215,27 @@ async function main() {
 
     // No timesheet content: forward to helpdesk, mark seen
     if (!hasTimesheetContent) {
+      // Log unsupported file types so they're visible in the import log
+      if (!isInternal(fromEmail) && attachments.length > 0) {
+        const unsupported = attachments.filter(a =>
+          a.name && a.name !== 'unnamed' &&
+          /\.\w+$/.test(a.name) &&
+          !a.name.match(/\.(jpg|jpeg|png|gif|bmp|tiff|heic|webp|txt|html|htm|ics|vcf)$/i)
+        );
+        for (const att of unsupported) {
+          const ext = (att.name.split('.').pop() || 'unknown').toLowerCase();
+          await postToIngest({
+            logOnly:         true,
+            messageId:       `${messageId}::${att.name}`,
+            contractorEmail: fromEmail,
+            attachmentName:  att.name,
+            subject,
+            parseNotes:      `Unsupported file type: .${ext} — please resubmit as XLSX or PDF`,
+            run_id:          RUN_ID,
+          });
+          console.log(`  ⚠️  Unsupported attachment logged: ${att.name} from ${fromEmail}`);
+        }
+      }
       const reason = isInternal(fromEmail)
         ? 'Internal sender with no timesheet attachments'
         : 'No timesheet attachments — possible human reply or notification';
