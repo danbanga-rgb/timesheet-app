@@ -141,6 +141,21 @@ function extractPeriod(text) {
   const D   = String.raw`(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Za-z]+ \d{1,2},? \d{4}|\d{1,2} [A-Za-z]+ \d{4})`;
   const SEP = String.raw`\s*(?:to|through|[-–—])\s*`;
 
+  // Croatian bilingual invoice: "CREATION & DELIVERY DATE DD/MM/YYYY" = period start,
+  // "DUE DATE DD/MM/YYYY" = period end. Only valid when span is 20–35 days (monthly billing).
+  const creationDate = text.match(/(?:creation\s*&?\s*delivery\s*date|datum\s+izrade\s+i\s+isporuke)[^\n]*?(\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4})/i);
+  const dueDate      = text.match(/(?:due\s*date|datum\s+dospije[ćc]a)[^\n]*?(\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4})/i);
+  if (creationDate && dueDate) {
+    const start = parseDate(creationDate[1]);
+    const end   = parseDate(dueDate[1]);
+    if (start && end) {
+      const span = (end - start) / 86400000;
+      if (span >= 20 && span <= 35) {
+        return { periodStart: fmtDate(start), periodEnd: fmtDate(end) };
+      }
+    }
+  }
+
   const rangePatterns = [
     // "billing period:", "for the period:", "services rendered from ... to ..." with full dates
     new RegExp(`(?:billing\\s+period|for\\s+(?:the\\s+)?period|services?\\s+rendered(?:\\s+for)?|period(?:\\s+of)?|from)[:\\s]+${D}${SEP}${D}`, 'i'),
@@ -278,6 +293,11 @@ function extractHours(text) {
     [/(\d+[\.,]?\d*)\s*work\s*hours?\b/i,                s => cleanHours(s)],
     // "144 sata" (Croatian for hours)
     [/(\d+[\.,]?\d*)\s*sata\b/i,                         s => cleanHours(s)],
+    // Croatian "SATI" or "HOURS" column header, value on next line in table row
+    // Matches: "SATI PRICE IZNOS\nHOURS PRICE AMOUNT\n1 168 €27.91"
+    [/\b(?:SATI|HOURS)\b[^\n]*\n(?:[^\n]*\n)?\s*\d+\s+(\d{2,3})\s/i, s => cleanHours(s)],
+    // Numbered table row: "1  168  €27.91  €4,689.11" (line-item rows in bilingual invoices)
+    [/^\s*\d\s+(\d{2,3})\s+[€$][\d,.]/m,               s => cleanHours(s)],
     // "160 hrs" abbreviation
     [/(\d+[\.,]?\d*)\s*hrs?\b/i,                         s => cleanHours(s)],
     // "176 HOURS30.00" — concatenated columns, no word boundary after HOURS
