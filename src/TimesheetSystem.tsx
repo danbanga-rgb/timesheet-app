@@ -1969,24 +1969,24 @@ const TimesheetSystem = () => {
       const entries = timesheet ? timesheet.entries : {};
       const project = projects.find(p => p.id === (timesheet?.projectId ?? user.projectId)) ?? null;
       const dailyHours = getWeekDates(reportWeek).map(date => parseFloat(entries[formatDate(date)]?.hours || '0'));
-      return { name: user.name, source: timesheet?.source ?? null, project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted' };
+      return { name: user.name, source: timesheet?.source ?? null, project: project ? `${project.name} (${project.code})` : 'Not Assigned', dailyHours, total: dailyHours.reduce((s, h) => s + h, 0), status: timesheet ? timesheet.status : 'not submitted', timesheetId: timesheet?.id ?? null };
     });
   };
 
   const downloadCSV = () => {
     const reportData = generateReport();
     const weekDates = getWeekDates(reportWeek);
-    let csv = 'Employee Name,Source,Project,';
+    let csv = 'ID,Employee Name,Source,Project,';
     weekDates.forEach(d => { csv += `"${d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}",`; });
     csv += 'Total Hours,Status\n';
     reportData.forEach(row => {
       const sourceLabel = row.source === 'imported' ? 'Email' : row.source === 'direct' ? 'Portal' : '';
-      csv += `"${row.name}","${sourceLabel}","${row.project}",`;
+      csv += `"${row.timesheetId ? '#' + row.timesheetId : ''}","${row.name}","${sourceLabel}","${row.project}",`;
       row.dailyHours.forEach(h => { csv += h + ','; });
       csv += `${row.total},"${row.status}"\n`;
     });
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
-    csv += `\n"Grand Total","","",`; weekDates.forEach(() => { csv += ','; }); csv += `${grandTotal},\n`;
+    csv += `\n"","Grand Total","","",`; weekDates.forEach(() => { csv += ','; }); csv += `${grandTotal},\n`;
     triggerDownload(csv, `timesheet_report_${formatDate(reportWeek)}.csv`);
   };
 
@@ -3906,6 +3906,7 @@ const TimesheetSystem = () => {
                 <table className="w-full border-collapse">
                   <thead>
                     <tr className="bg-indigo-600 text-white">
+                      <th className="border border-indigo-700 px-2 py-3 text-center text-xs">ID</th>
                       <th className="border border-indigo-700 px-4 py-3 text-left">Employee</th>
                       <th className="border border-indigo-700 px-4 py-3 text-left">Source</th>
                       <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
@@ -3917,6 +3918,7 @@ const TimesheetSystem = () => {
                   <tbody>
                     {reportData.map((row, idx) => (
                       <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                        <td className="border border-gray-300 px-2 py-3 text-center text-xs text-gray-400 whitespace-nowrap">{row.timesheetId ? `#${row.timesheetId}` : '—'}</td>
                         <td className="border border-gray-300 px-4 py-3 font-medium">{row.name}</td>
                         <td className="border border-gray-300 px-4 py-3">
                           {row.source === 'imported'
@@ -3932,7 +3934,7 @@ const TimesheetSystem = () => {
                       </tr>
                     ))}
                     <tr className="bg-indigo-50 font-bold">
-                      <td className="border border-gray-300 px-4 py-3 text-gray-800" colSpan={3}>TOTAL</td>
+                      <td className="border border-gray-300 px-4 py-3 text-gray-800" colSpan={4}>TOTAL</td>
                       {weekDates.map((_, i) => <td key={i} className="border border-gray-300 px-4 py-3 text-center">{reportData.reduce((s, r) => s + r.dailyHours[i], 0).toFixed(1)}</td>)}
                       <td className="border border-gray-300 px-4 py-3 text-center text-indigo-600 text-lg">{grandTotal.toFixed(1)}</td>
                       <td className="border border-gray-300 px-4 py-3"></td>
@@ -4383,7 +4385,7 @@ const TimesheetSystem = () => {
             })();
 
             const exportTsOnlyCSV = () => {
-              let csv = 'Employee,Source,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Sat,Sun,Total Hours,Status,Submitted\n';
+              let csv = 'ID,Employee,Source,Week Start,Week Ending,Project,Mon,Tue,Wed,Thu,Fri,Sat,Sun,Total Hours,Status,Submitted\n';
               filteredTs.forEach(ts => {
                 const user = users.find(u => u.id === ts.userId);
                 const project = projects.find(p => p.id === (ts.projectId ?? user?.projectId));
@@ -4392,7 +4394,7 @@ const TimesheetSystem = () => {
                 const total = dailyHours.reduce((s, h) => s + h, 0);
                 const fri = weekDates[4];
                 const sourceLabel = ts.source === 'imported' ? 'Email' : ts.source === 'direct' ? 'Portal' : '';
-                csv += `"${ts.userName}","${sourceLabel}","${ts.weekStart}","${formatDate(fri)}","${project ? project.name + ' (' + project.code + ')' : 'N/A'}",`;
+                csv += `"#${ts.id}","${ts.userName}","${sourceLabel}","${ts.weekStart}","${formatDate(fri)}","${project ? project.name + ' (' + project.code + ')' : 'N/A'}",`;
                 dailyHours.forEach(h => { csv += h + ','; });
                 csv += `${total.toFixed(1)},"${ts.status}","${ts.submittedAt ? new Date(ts.submittedAt).toLocaleDateString() : ''}"
 `;
@@ -4570,6 +4572,7 @@ const TimesheetSystem = () => {
                         <table className="w-full border-collapse text-sm">
                           <thead className="bg-indigo-600 text-white">
                             <tr>
+                              <th className="border border-indigo-700 px-2 py-2 text-center text-xs">ID</th>
                               <th className="border border-indigo-700 px-3 py-2 text-left">Employee</th>
                               <th className="border border-indigo-700 px-3 py-2 text-left">Source</th>
                               <th className="border border-indigo-700 px-3 py-2 text-left">Week Ending</th>
@@ -4585,7 +4588,7 @@ const TimesheetSystem = () => {
                           </thead>
                           <tbody>
                             {filteredTs.length === 0 ? (
-                              <tr><td colSpan={11} className="text-center py-6 text-gray-400">No timesheets found for selected range</td></tr>
+                              <tr><td colSpan={12} className="text-center py-6 text-gray-400">No timesheets found for selected range</td></tr>
                             ) : (
                               filteredTs.map((ts, idx) => {
                                 const user = users.find(u => u.id === ts.userId);
@@ -4596,6 +4599,7 @@ const TimesheetSystem = () => {
                                 const fri = weekDates[4];
                                 return (
                                   <tr key={ts.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')} onClick={() => openTimesheetModal(ts)}>
+                                    <td className="border border-gray-200 px-2 py-2 text-center text-xs text-gray-400 whitespace-nowrap">#{ts.id}</td>
                                     <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
                                     <td className="border border-gray-200 px-3 py-2">
                                       {ts.source === 'imported'
