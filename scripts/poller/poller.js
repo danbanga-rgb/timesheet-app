@@ -1625,6 +1625,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           parseNotes:      parsed.parseNotes      || '',
           pdfBase64:       att.buffer.toString('base64'),
           rawExtracted:    parsed,
+          forwardedBy:     forwardedBy || null,
         }, CONFIG.invoiceIngestUrl);
         const action = res.body?.action || res.status;
         console.log(`     ✅ Ingested → ${action}`);
