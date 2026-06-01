@@ -1305,6 +1305,13 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename) {
     }
 
     // ── Step 2b: regex has numbers, Claude fills payment details only ────────
+    // Skip if no payment-related keywords appear in the text — Claude would return all nulls.
+    const paymentKeywords = /iban|swift|bic\b|account\s*(no|number|#)|sort\s*code|routing|bank\s*(name|details|transfer)/i;
+    if (!paymentKeywords.test(pdfText)) {
+      console.log(`  ✅ Regex (no payment section): ${filename}`);
+      return postProcessInvoice(regexResult, pdfText);
+    }
+
     console.log(`  💳 Claude payment-only: ${filename}`);
     const claudePd = await claudeExtractPaymentOnly(
       pdfText ? prepareInvoiceText(pdfText) : null, pdfBuffer, isImagePdf
