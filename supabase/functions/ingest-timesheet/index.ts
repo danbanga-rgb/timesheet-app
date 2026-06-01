@@ -80,6 +80,22 @@ async function findUser(
   };
 }
 
+// ─── Entry merge ─────────────────────────────────────────────────────────────
+// When a contractor sends split timesheets for the same week (e.g. Apr 27-30 in
+// one email, May 1 in another), take the max hours per day so partial submissions
+// don't zero out days already recorded by an earlier email.
+function mergeEntries(
+  existing: Record<string, number>,
+  incoming: Record<string, number>,
+): Record<string, number> {
+  const merged: Record<string, number> = { ...existing };
+  for (const [day, hours] of Object.entries(incoming)) {
+    const h = Number(hours) || 0;
+    merged[day] = Math.max(Number(merged[day]) || 0, h);
+  }
+  return merged;
+}
+
 // ─── Timesheet upsert with correction logic ───────────────────────────────────
 
 async function upsertTimesheet(
@@ -88,7 +104,8 @@ async function upsertTimesheet(
   weekStart: string,
   entries: Record<string, number>,
   total: number,
-  supabase: ReturnType<typeof createClient>
+  supabase: ReturnType<typeof createClient>,
+  forwardedBy: string | null = null,
 ): Promise<{
   timesheetId: number | null;
   action: 'created' | 'updated' | 'correction_imported' | 'correction_pending';
@@ -96,24 +113,45 @@ async function upsertTimesheet(
 }> {
   const { data: existing } = await supabase
     .from('timesheets')
-    .select('id, source, status')
+    .select('id, source, status, entries')
     .eq('user_id', userId)
     .eq('week_start', weekStart)
     .maybeSingle();
 
-  // ── Rule 1: Native submission exists → never overwrite ────────────────────
+  // ── Rule 1: Native submission exists ─────────────────────────────────────
+  // Internal forwarders (accountants) have authority to override portal submissions.
+  // Only flag correction_pending when the email comes from the contractor themselves.
   if (existing?.source === 'direct') {
+    if (!forwardedBy) {
+      return {
+        timesheetId: existing.id,
+        action: 'correction_pending',
+        notes: 'Native submission exists — emailed correction flagged for admin review',
+      };
+    }
+    // Internal forwarder — apply correction, bump source to reflect it came via email
+    const mergedEntries = mergeEntries(existing.entries as Record<string, number> || {}, entries);
+    await supabase.from('timesheets').update({
+      entries:      mergedEntries,
+      status:       'approved',
+      approved_by:  'system-import',
+      approved_at:  new Date().toISOString(),
+      submitted_at: new Date().toISOString(),
+    }).eq('id', existing.id);
     return {
       timesheetId: existing.id,
-      action: 'correction_pending',
-      notes: 'Native submission exists — emailed correction flagged for admin review',
+      action: 'correction_imported',
+      notes: `Correction applied by internal forwarder (${forwardedBy}) — auto-approved`,
     };
   }
 
-  // ── Rule 2: Imported timesheet exists → update and keep auto-approved ──────
+  // ── Rule 2: Imported timesheet exists → merge and keep auto-approved ───────
+  // Merge entries (max per day) so partial-week submissions (e.g. month-end splits)
+  // don't zero out days already recorded by an earlier email for the same week.
   if (existing?.source === 'imported') {
+    const mergedEntries = mergeEntries(existing.entries as Record<string, number> || {}, entries);
     await supabase.from('timesheets').update({
-      entries,
+      entries:      mergedEntries,
       status:       'approved',
       approved_by:  'system-import',
       approved_at:  new Date().toISOString(),
@@ -213,6 +251,7 @@ serve(async (req) => {
     attachmentType,
     parseNotes,
     run_id,
+    forwardedBy,
   } = body as Record<string, unknown>;
 
   if (!messageId || !contractorEmail || !weekStart) {
@@ -309,7 +348,8 @@ serve(async (req) => {
       const parsedTotal   = Number(total) || 0;
       const result = await upsertTimesheet(
         userId, userName, weekStart as string,
-        parsedEntries as Record<string, number>, parsedTotal, supabase
+        parsedEntries as Record<string, number>, parsedTotal, supabase,
+        (forwardedBy as string) || null,
       );
       timesheetId  = result.timesheetId;
       action       = result.action;

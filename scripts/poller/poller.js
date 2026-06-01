@@ -1456,7 +1456,7 @@ function postToIngest(payload, targetUrl) {
 
 // ─── Process one contractor's attachments ─────────────────────────────────────
 
-async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId, runId = null) {
+async function ingestContractor(contractorEmail, displayName, subject, bodyText, attachments, messageId, runId = null, forwardedBy = null) {
   // Strip non-timesheet documents silently — agreements, AUPs, SOWs, etc.
   const nonTimesheetAtts = attachments.filter(a => (a.isPdf || a.isXlsx) && NON_TIMESHEET_DOC_RE.test(a.name));
   if (nonTimesheetAtts.length) {
@@ -1589,6 +1589,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         parseNotes:      ts.notes || '',
         source:          'imported',
         run_id:          runId,
+        forwardedBy:     forwardedBy || null,
       });
       const action = res.body?.action || res.status;
       results.push({ contractor: contractorEmail, week: ts.weekStart, status: res.status, action });
@@ -1789,7 +1790,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
 
         console.log(`  📧 ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
         const { results: r, failedAttachments: fa } = await ingestContractor(
-          contractor, contractorName, inner.subject || subject, innerBody, innerAtts, messageId, runId
+          contractor, contractorName, inner.subject || subject, innerBody, innerAtts, messageId, runId, fromEmail
         );
         results.push(...r);
         fa.forEach(a => failedAtts.push({ ...a, contractor }));
@@ -1843,9 +1844,10 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
 
   console.log(`\n📧 ${subject}`);
   console.log(`   Contractor: ${contractor}${contractorName ? ` (${contractorName})` : ''}`);
+  const forwardedBy = isInternal(fromEmail) ? fromEmail : null;
   const { results: r, failedAttachments: fa } = await ingestContractor(
     contractor, contractorName, subject, bodyText,
-    attachments.filter(a => !a.isEml), messageId, runId
+    attachments.filter(a => !a.isEml), messageId, runId, forwardedBy
   );
   results.push(...r);
   fa.forEach(a => failedAtts.push({ ...a, contractor }));
