@@ -127,6 +127,75 @@ function toBase64(str: string): string {
   return btoa(bin);
 }
 
+// ─── Timing section ───────────────────────────────────────────────────────────
+
+function buildTimingSection(
+  allTimesheets: Array<{ user_id: string; week_start: string; submitted_at: string | null; source: string }>,
+  profileIds: Set<string>,
+  completedWeeks: string[],
+): string {
+  const timingWeeks = completedWeeks.slice(-6);
+  if (timingWeeks.length === 0) return '';
+
+  type WeekStat = { total: number; portal: number; within1d: number; within3d: number; sumDays: number };
+  const stats = new Map<string, WeekStat>();
+  for (const wk of timingWeeks) stats.set(wk, { total: 0, portal: 0, within1d: 0, within3d: 0, sumDays: 0 });
+
+  for (const ts of allTimesheets) {
+    const wk = ts.week_start.slice(0, 10);
+    if (!stats.has(wk) || !profileIds.has(ts.user_id) || !ts.submitted_at) continue;
+    const [y, m, d]  = wk.split('-').map(Number);
+    const weekEndMs  = Date.UTC(y, m - 1, d + 6);
+    const daysAfter  = (new Date(ts.submitted_at).getTime() - weekEndMs) / 86400000;
+    const st         = stats.get(wk)!;
+    st.total++;
+    if (ts.source === 'direct') st.portal++;
+    if (daysAfter <= 1) st.within1d++;
+    if (daysAfter <= 3) st.within3d++;
+    st.sumDays += Math.max(daysAfter, 0);
+  }
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const rows = timingWeeks.map(wk => {
+    const st = stats.get(wk)!;
+    if (st.total === 0) return '';
+    const pct1d     = Math.round(100 * st.within1d / st.total);
+    const pct3d     = Math.round(100 * st.within3d / st.total);
+    const avg       = (st.sumDays / st.total).toFixed(1);
+    const portalPct = Math.round(100 * st.portal / st.total);
+    const [, em, ed] = addDays(wk, 6).split('-').map(Number);
+    const c1d = pct1d >= 50 ? '#15803d' : pct1d >= 25 ? '#b45309' : '#dc2626';
+    const c3d = pct3d >= 90 ? '#15803d' : pct3d >= 70 ? '#b45309' : '#dc2626';
+    return `<tr>
+      <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb">W/E ${MONTHS[em-1]} ${ed}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center">${st.total}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.portal} (${portalPct}%)</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c1d}">${pct1d}%</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c3d}">${pct3d}%</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center">${avg}d</td>
+    </tr>`;
+  }).filter(Boolean).join('');
+
+  if (!rows) return '';
+
+  return `
+    <div style="margin-bottom:24px">
+      <h3 style="margin:0 0 8px;color:#374151;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Submission Timeliness (last ${timingWeeks.length} weeks)</h3>
+      <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb">
+        <thead><tr style="background:#1e40af;color:white">
+          <th style="padding:8px 12px;text-align:left;font-weight:600">Week</th>
+          <th style="padding:8px 12px;text-align:center;font-weight:600">Submitted</th>
+          <th style="padding:8px 12px;text-align:center;font-weight:600">Portal</th>
+          <th style="padding:8px 12px;text-align:center;font-weight:600">≤1 day</th>
+          <th style="padding:8px 12px;text-align:center;font-weight:600">≤3 days</th>
+          <th style="padding:8px 12px;text-align:center;font-weight:600">Avg days</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="margin:6px 0 0;font-size:11px;color:#9ca3af">Days after Sunday week-end. ≤1 day = by Monday; ≤3 days = by Wednesday. Portal = submitted via web app.</p>
+    </div>`;
+}
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 serve(async (req) => {
@@ -153,9 +222,10 @@ serve(async (req) => {
 
   // ─── Weeks to cover ───────────────────────────────────────────────────────────
 
-  const weeks = completedWeeksSince(CUTOFF);
+  const completedWeeks     = completedWeeksSince(CUTOFF);
   const includeCurrentWeek = isFridayUtc();
   const currentWeekStart   = currentMonday();
+  const weeks              = [...completedWeeks];
   if (includeCurrentWeek && !weeks.includes(currentWeekStart)) {
     weeks.push(currentWeekStart);
   }
@@ -189,12 +259,13 @@ serve(async (req) => {
     seenNames.add(key);
     return true;
   });
+  const profileIds = new Set(profiles.map(p => p.id));
 
   // ─── Fetch all non-rejected timesheets for all covered weeks ─────────────────
 
   const { data: allTimesheets, error: tsErr } = await db
     .from('timesheets')
-    .select('user_id, week_start, entries')
+    .select('user_id, week_start, entries, submitted_at, source')
     .in('week_start', weeks)
     .neq('status', 'rejected');
 
@@ -304,6 +375,7 @@ serve(async (req) => {
   // ─── Compose email ────────────────────────────────────────────────────────────
 
   const totalMissingWeeks = weekReports.length;
+  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks);
 
   let bodyHtml: string;
   let bodyText: string;
@@ -312,13 +384,14 @@ serve(async (req) => {
   if (totalMissingWeeks === 0) {
     subject  = `Timesheet Report — All Weeks Submitted ✓`;
     bodyText = `All contractors have submitted their timesheets for all weeks since ${CUTOFF}. Nothing outstanding.`;
-    bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px">
+    bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto;padding:20px">
       <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
         <h2 style="margin:0">Timesheet Report</h2>
       </div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
         <p style="color:#16a34a;font-weight:bold;font-size:16px">✓ All contractors are up to date.</p>
-        <p style="color:#6b7280;font-size:13px">No outstanding timesheets for any week since ${CUTOFF}.</p>
+        <p style="color:#6b7280;font-size:13px;margin-bottom:20px">No outstanding timesheets for any week since ${CUTOFF}.</p>
+        ${timingHtml}
       </div>
     </div>`;
   } else {
@@ -339,6 +412,7 @@ serve(async (req) => {
         <p style="margin:6px 0 0;opacity:.85;font-size:14px">${totalMissingWeeks} week${totalMissingWeeks > 1 ? 's' : ''} with outstanding timesheets · ${totalMissing} missing in total</p>
       </div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
+        ${timingHtml}
         <p style="color:#374151;margin-top:0">Summary of all weeks with missing timesheets. CSV files attached for each week.</p>
         <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;margin-bottom:8px">
           <thead><tr style="background:#1e40af;color:white">
