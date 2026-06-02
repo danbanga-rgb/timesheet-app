@@ -96,6 +96,68 @@ function mergeEntries(
   return merged;
 }
 
+// ─── Week resolution ──────────────────────────────────────────────────────────
+// Picks the best week from content-derived and subject-derived candidates.
+// Decision order:
+//   1. Discard anything more than 7 days in the future (parser artefact).
+//   2. Single valid candidate → use it.
+//   3. Correction keyword in email → content week wins (intentional re-submission).
+//   4. One week is empty, the other occupied → prefer the empty week (new beats stale).
+//   5. Both empty or both occupied → content week (index 0) wins as tiebreak.
+
+async function resolveWeek(
+  weekCandidates: string[],
+  correctionHint: boolean,
+  userId: string,
+  supabase: ReturnType<typeof createClient>,
+): Promise<{ resolvedWeek: string; resolutionNote: string | null }> {
+  const now = Date.now();
+  const SEVEN_DAYS_MS = 7 * 86400000;
+
+  const valid = weekCandidates.filter(w => {
+    const t = new Date(w + 'T12:00:00Z').getTime();
+    return !isNaN(t) && t <= now + SEVEN_DAYS_MS;
+  });
+  const unique = [...new Set(valid)];
+
+  if (unique.length <= 1) {
+    const discarded = weekCandidates.length > unique.length;
+    return {
+      resolvedWeek: unique[0] ?? weekCandidates[0],
+      resolutionNote: discarded ? `future candidate discarded; using ${unique[0] ?? weekCandidates[0]}` : null,
+    };
+  }
+
+  const [weekA, weekB] = unique; // weekA = content, weekB = subject
+
+  if (correctionHint) {
+    return { resolvedWeek: weekA, resolutionNote: `correction keyword → content week ${weekA} (subject had ${weekB})` };
+  }
+
+  const { data: existing } = await supabase
+    .from('timesheets')
+    .select('week_start')
+    .eq('user_id', userId)
+    .in('week_start', unique);
+
+  const occupied = new Set((existing ?? []).map((r: { week_start: string }) => r.week_start));
+
+  if (!occupied.has(weekA) && occupied.has(weekB)) {
+    return { resolvedWeek: weekA, resolutionNote: `content week ${weekA} empty, subject ${weekB} occupied → new submission` };
+  }
+  if (occupied.has(weekA) && !occupied.has(weekB)) {
+    return { resolvedWeek: weekB, resolutionNote: `content week ${weekA} occupied, subject week ${weekB} empty → using subject week` };
+  }
+
+  const bothOccupied = occupied.has(weekA) && occupied.has(weekB);
+  return {
+    resolvedWeek: weekA,
+    resolutionNote: bothOccupied
+      ? `both weeks occupied → correction for content week ${weekA}`
+      : `both weeks empty → content week ${weekA}`,
+  };
+}
+
 // ─── Timesheet upsert with correction logic ───────────────────────────────────
 
 async function upsertTimesheet(
@@ -244,6 +306,8 @@ serve(async (req) => {
     contractorName,
     subject,
     weekStart,
+    weekCandidates,
+    correctionHint,
     entries,
     total,
     attachmentName,
@@ -335,18 +399,34 @@ serve(async (req) => {
     });
   }
 
+  // ── Resolve week from candidates ──────────────────────────────────────────
+  // weekCandidates[0] = content-derived, [1] = subject-derived (when they differ).
+  // Falls back to weekStart if candidates not supplied (older poller versions).
+  let resolvedWeek = weekStart as string;
+  let resolutionNote: string | null = null;
+  const candidates = Array.isArray(weekCandidates) && weekCandidates.length > 0
+    ? weekCandidates as string[]
+    : [weekStart as string].filter(Boolean);
+
+  if (candidates.length > 0 && entries) {
+    const resolved = await resolveWeek(candidates, !!correctionHint, userId, supabase);
+    resolvedWeek   = resolved.resolvedWeek;
+    resolutionNote = resolved.resolutionNote;
+    if (resolutionNote) console.log(`  🗓️  Week resolved: ${resolutionNote}`);
+  }
+
   // ── Upsert timesheet ──────────────────────────────────────────────────────
   let timesheetId: number | null = null;
   let action = 'none';
   let upsertNotes = '';
   let parseStatus = 'success';
 
-  if (entries && weekStart) {
+  if (entries && resolvedWeek) {
     try {
       const parsedEntries = typeof entries === 'string' ? JSON.parse(entries as string) : entries;
       const parsedTotal   = Number(total) || 0;
       const result = await upsertTimesheet(
-        userId, userName, weekStart as string,
+        userId, userName, resolvedWeek,
         parsedEntries as Record<string, number>, parsedTotal, supabase,
         (forwardedBy as string) || null,
       );
@@ -373,11 +453,11 @@ serve(async (req) => {
     subject:         subject || null,
     attachment_name: attachmentName || null,
     parse_status:    parseStatus,
-    parse_notes:     [parseNotes, upsertNotes].filter(Boolean).join(' | '),
+    parse_notes:     [parseNotes, upsertNotes, resolutionNote].filter(Boolean).join(' | '),
     user_id:         userId,
     user_created:    wasCreated,
     timesheet_id:    timesheetId,
-    week_start:      weekStart || null,
+    week_start:      resolvedWeek || weekStart || null,
     raw_hours:       entries
       ? (typeof entries === 'string' ? JSON.parse(entries as string) : entries)
       : null,
@@ -394,7 +474,7 @@ serve(async (req) => {
     wasCreated,
     nameUpdated,
     timesheetId,
-    weekStart,
+    weekStart:    resolvedWeek,
     notes:        upsertNotes,
     attemptCount,
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

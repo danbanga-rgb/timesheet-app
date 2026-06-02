@@ -82,6 +82,8 @@ const WEEK_PATTERNS = [
   /client\s+billable\s+hours\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/gi,
 ];
 
+const CORRECTION_KEYWORDS = /\b(correction|corrected|correcting|re-?submit(?:ted)?|resubmit(?:ted)?|amended|amendment|revised|revision|replacing)\b/i;
+
 const HOURS_PATTERNS = [
   /(mon(?:day)?)[:\s\-]+(\d+\.?\d*)/gi,
   /(tue(?:sday)?)[:\s\-]+(\d+\.?\d*)/gi,
@@ -352,6 +354,26 @@ function detectWeek(subject, body, xlsxNames) {
     if (w) return { week: w, by: `filename(${name})` };
   }
   return { week: getMondayOf(new Date()), by: 'fallback' };
+}
+
+// Extract a week-start date from the email subject only (no body, no filename).
+// Returns an ISO Monday string or null. Used as the second candidate in week resolution.
+function parseWeekFromSubject(subject) {
+  if (!subject) return null;
+  for (const pat of WEEK_PATTERNS) {
+    pat.lastIndex = 0;
+    const m = pat.exec(subject);
+    if (m) {
+      try {
+        const raw = expandTwoDigitYear(normaliseDate(m[1]));
+        for (const ds of [`${raw} ${new Date().getFullYear()}`, raw]) {
+          const d = new Date(ds);
+          if (!isNaN(d.getTime())) return getMondayOf(d);
+        }
+      } catch {}
+    }
+  }
+  return null;
 }
 
 // ─── XLSX parser ──────────────────────────────────────────────────────────────
@@ -1609,9 +1631,16 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     });
   }
 
+  // Week resolution candidates: content-derived week (from attachment/body) is always
+  // first. Subject-derived week is the second candidate for the edge function to compare.
+  const weekFromSubject = parseWeekFromSubject(subject);
+  const correctionHint  = CORRECTION_KEYWORDS.test(subject || '') ||
+                          CORRECTION_KEYWORDS.test((bodyText || '').slice(0, 500));
+
   const results = [];
   for (const ts of timesheets) {
     if (ts.claudeAttempted || ts.xlsxParseFailed) continue; // sentinels — don't post, don't retry
+    const weekCandidates = [...new Set([ts.weekStart, weekFromSubject].filter(Boolean))];
     try {
       const res = await postToIngest({
         messageId:       `${messageId}::${ts.attachmentName || 'body'}`,
@@ -1619,6 +1648,8 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         contractorName:  ts.resolvedName,
         subject,
         weekStart:       ts.weekStart,
+        weekCandidates,
+        correctionHint,
         entries:         ts.entries,
         total:           ts.total,
         attachmentName:  ts.attachmentName,

@@ -48,5 +48,7 @@ scripts/invoice-parser/samples/*.pdf
 scripts/invoice-parser/samples/*.docx
 scripts/invoice-parser/samples/*.msg
 
-# Convera beneficiary export (contains contractor banking details)
+# Convera data (contains contractor banking details)
 scripts/poller/convera-beneficiaries.json
+scripts/poller/convera-transactions.json
+scripts/poller/convera-contractor-map.json
