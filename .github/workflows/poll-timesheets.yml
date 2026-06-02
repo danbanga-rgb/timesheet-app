@@ -1,8 +1,8 @@
 name: Timesheet Email Poller
 
 on:
-  schedule:
-    - cron: '30 * * * *'
+  # Schedule disabled — pg_cron fires trigger-poller edge function at :28 every hour,
+  # which calls workflow_dispatch. GitHub's own cron lagged 3-28h on this low-activity repo.
   workflow_dispatch:
 
 jobs:
