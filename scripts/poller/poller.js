@@ -326,9 +326,11 @@ function weekFromFilename(name) {
 }
 
 function detectWeek(subject, body, xlsxNames) {
+  // Content (body) is checked before subject — subject lines are often stale
+  // copy-paste artefacts from forwarded threads. If both have a date, body wins.
   const sources = [
-    { text: subject, src: 'subject' },
     { text: (body || '').slice(0, 2000), src: 'body' },
+    { text: subject, src: 'subject' },
   ];
   for (const { text, src } of sources) {
     for (const pat of WEEK_PATTERNS) {
@@ -809,6 +811,19 @@ function parseSynergiePdfText(text, filename) {
     } else {
       const drift = Math.abs(new Date(headerWeekStart) - new Date(weekStart)) / 86400000;
       if (drift <= 21) weekStart = headerWeekStart;
+    }
+  }
+
+  // Stale template check: if the parsed week is more than 90 days old, the PDF
+  // is likely a copy of an old template. Fall back to filename date if available.
+  if (weekStart) {
+    const weekAge = (Date.now() - new Date(weekStart).getTime()) / 86400000;
+    if (weekAge > 90) {
+      const filenameWeek = weekFromFilename(filename);
+      if (filenameWeek) {
+        console.warn(`PDF: stale template date (${weekStart}), using filename date: ${filenameWeek}`);
+        weekStart = filenameWeek;
+      }
     }
   }
 
