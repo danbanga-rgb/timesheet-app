@@ -146,7 +146,14 @@ async function resolveWeek(
     return { resolvedWeek: weekA, resolutionNote: `content week ${weekA} empty, subject ${weekB} occupied → new submission` };
   }
   if (occupied.has(weekA) && !occupied.has(weekB)) {
-    return { resolvedWeek: weekB, resolutionNote: `content week ${weekA} occupied, subject week ${weekB} empty → using subject week` };
+    // Only switch to the subject week if it is MORE RECENT than the content week.
+    // If the subject is older (stale forwarding chain), content wins even though it is occupied.
+    const dateA = new Date(weekA + 'T12:00:00Z').getTime();
+    const dateB = new Date(weekB + 'T12:00:00Z').getTime();
+    if (dateB > dateA) {
+      return { resolvedWeek: weekB, resolutionNote: `content week ${weekA} occupied, subject week ${weekB} is newer and empty → new submission` };
+    }
+    return { resolvedWeek: weekA, resolutionNote: `content week ${weekA} occupied, subject week ${weekB} is older → correction for content week` };
   }
 
   const bothOccupied = occupied.has(weekA) && occupied.has(weekB);
