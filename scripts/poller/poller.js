@@ -1114,6 +1114,23 @@ function parsePeriodFromFilename(filename) {
   };
 }
 
+// Parses billing month from email subjects like "[Invoice 05/26]" or "[Invoice 05/2026]".
+// This is the highest-priority period signal — forwarder explicitly labels the month.
+function parsePeriodFromSubject(subject) {
+  if (!subject) return null;
+  const m = subject.match(/\[Invoice\s+(\d{1,2})\/(\d{2,4})\]/i);
+  if (!m) return null;
+  let month = parseInt(m[1], 10);
+  let year  = parseInt(m[2], 10);
+  if (year < 100) year += 2000;
+  if (month < 1 || month > 12) return null;
+  const lastDay = new Date(year, month, 0).getDate();
+  return {
+    periodStart: `${year}-${String(month).padStart(2, '0')}-01`,
+    periodEnd:   `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+  };
+}
+
 function applyFilenamePeriodFallback(parsed, filename) {
   const { periodStart, periodEnd } = parsed;
   const fallback = parsePeriodFromFilename(filename);
@@ -1671,6 +1688,20 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   for (const att of invoiceAtts) {
     console.log(`  🧾 Invoice attachment: ${att.name}`);
     const parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name);
+    // Subject hint overrides extracted period — e.g. "[Invoice 05/26]" beats a June date
+    // parsed from the PDF when the contractor invoices for the previous month.
+    if (parsed) {
+      const subjectPeriod = parsePeriodFromSubject(subject);
+      if (subjectPeriod) {
+        const extractedYM = parsed.periodStart?.slice(0, 7);
+        const subjectYM   = subjectPeriod.periodStart.slice(0, 7);
+        if (extractedYM !== subjectYM) {
+          console.warn(`  📧 Period override from subject: ${extractedYM} → ${subjectYM} (${subject})`);
+          parsed.periodStart = subjectPeriod.periodStart;
+          parsed.periodEnd   = subjectPeriod.periodEnd;
+        }
+      }
+    }
     console.log(formatInvoiceReport(att.name, contractorEmail, parsed));
     const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
 
