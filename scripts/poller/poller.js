@@ -960,7 +960,7 @@ Required JSON shape:
 Rules:
 - isMultiContractor: set to true if the invoice lists multiple contractors/consultants with individual line items; false for a single contractor invoice.
 - periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
-- totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h" or "hrs" suffix.
+- totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h", "hrs", "hours" suffix. If the quantity is expressed as "pcs", "pieces", or "units" in a service/consulting invoice, treat it as hours worked (contractors sometimes invoice in units rather than hours).
 - rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols. If the invoice shows rates in multiple currencies (e.g. both EUR and USD columns), extract the USD rate.
 - totalAmount: total invoice amount as a plain number. Ignore currency symbols. If the invoice shows amounts in multiple currencies, extract the USD amount.
 - currency: 3-letter ISO code (USD, EUR, GBP, etc.). Set to the currency of the amounts you extracted — if you found USD amounts, set "USD".
@@ -977,7 +977,8 @@ Rules:
   * If the document uses a routing number (US ABA), or amounts are clearly in USD with no IBAN → use MM/DD/YYYY.
   * When truly ambiguous (both components ≤ 12 and no country signal), prefer DD/MM/YYYY as most contractors are European.
   * Cross-check: these are monthly billing periods. If periodEnd is in month M, periodStart must also be in month M. If they differ wildly, you have the date format wrong — flip DD and MM and re-derive.
-- If no explicit billing period is stated but an invoice date is present: determine whether this is an invoice for the PREVIOUS month's work. Contractors routinely invoice in the first days of month N for work completed in month N-1. Use the PREVIOUS calendar month when EITHER condition holds: (a) the invoice date is on or before the 10th of the month, OR (b) the total hours claimed are implausibly high for the days elapsed since the start of the invoice month (e.g. 176h on May 7 — only 7 working days elapsed, impossible). Otherwise use the invoice date's own calendar month. Examples: invoice date 07 May 2026, 176h → previous month → periodStart: 2026-04-01, periodEnd: 2026-04-30. Invoice date 25 May 2026, 160h → same month → periodStart: 2026-05-01, periodEnd: 2026-05-31.
+- If no explicit billing period is stated but an invoice date is present: determine whether this is an invoice for the PREVIOUS month's work. Contractors routinely invoice in the first days of month N for work completed in month N-1. Use the PREVIOUS calendar month when EITHER condition holds: (a) the invoice date is on or before the 10th of the month, OR (b) the total hours claimed are implausibly high for the days elapsed since the start of the invoice month (e.g. 176h on May 7 — only 7 working days elapsed, impossible). Otherwise use the invoice date's own calendar month. Examples: invoice date 07 May 2026, 176h → previous month → periodStart: 2026-04-01, periodEnd: 2026-04-30. Invoice date 01 Jun 2026, 160h → condition (a) met → previous month → periodStart: 2026-05-01, periodEnd: 2026-05-31. Invoice date 25 May 2026, 160h → same month → periodStart: 2026-05-01, periodEnd: 2026-05-31.
+- IMPORTANT: Do NOT use the PDF filename to infer the billing period. Filenames like "6-1-1.pdf" or "5-2-3.pdf" are invoice sequence numbers, not dates.
 - parseNotes: one sentence summarising what was found and what was missing.`;
 
 const CLAUDE_TIMESHEET_SYSTEM = `You are a timesheet data extractor. Extract the weekly timesheet from the document.
@@ -1746,7 +1747,8 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     } else {
       const reason = !CONFIG.invoiceIngestEnabled ? 'dry-run mode' : !canIngest ? 'missing fields' : 'no INVOICE_INGEST_URL';
       console.log(`     ℹ️  Not ingested (${reason})`);
-      results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_reported', parsed });
+      const reportAction = !canIngest ? 'invoice_partial' : 'invoice_reported';
+      results.push({ contractor: contractorEmail, attachmentName: att.name, action: reportAction, parsed });
     }
   }
 
