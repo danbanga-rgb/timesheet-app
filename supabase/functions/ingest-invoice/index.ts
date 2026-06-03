@@ -207,6 +207,8 @@ serve(async (req) => {
     parseNotes,
     // Raw PDF for storage upload (base64-encoded, optional)
     pdfBase64,
+    // Multi-contractor grouping key (set for grouped invoices; null for single)
+    groupKey,
   } = body as Record<string, unknown>;
 
   if (!messageId || !contractorEmail) {
@@ -456,6 +458,7 @@ serve(async (req) => {
         reconciliation_status:    recon.status,
         reconciliation_delta:     recon.delta,
         reconciliation_notes:     recon.notes,
+        group_key:                (groupKey as string | null) || null,
       })
       .select('id')
       .single();

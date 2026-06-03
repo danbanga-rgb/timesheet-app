@@ -212,6 +212,7 @@ interface Invoice {
   reconciliationStatus: 'matched' | 'mismatch' | 'unverifiable' | null;
   reconciliationDelta: number | null;
   reconciliationNotes: string | null;
+  groupKey: string | null;  // shared key for multi-contractor invoices from same attachment
 }
 
 interface ConveraPaymentRow {
@@ -1392,6 +1393,7 @@ const TimesheetSystem = () => {
       reconciliationStatus: (r.reconciliation_status as 'matched' | 'mismatch' | 'unverifiable') || null,
       reconciliationDelta: r.reconciliation_delta != null ? Number(r.reconciliation_delta) : null,
       reconciliationNotes: (r.reconciliation_notes as string) || null,
+      groupKey: (r.group_key as string) || null,
     };
   }
 
@@ -4283,10 +4285,12 @@ const TimesheetSystem = () => {
                         </thead>
                         <tbody>
                           {(() => {
-                            // Group by invoice_number + period_start
+                            // Group by explicit group_key (multi-contractor invoices from same PDF).
+                            // Solo invoices (null group_key) are never grouped — avoids false grouping
+                            // when unrelated contractors happen to use the same invoice number scheme.
                             const groupMap = new Map<string, Invoice[]>();
                             for (const inv of filtered) {
-                              const key = `${inv.invoiceNumber}|${inv.periodStart}`;
+                              const key = inv.groupKey ? `grp:${inv.groupKey}` : `solo:${inv.id}`;
                               if (!groupMap.has(key)) groupMap.set(key, []);
                               groupMap.get(key)!.push(inv);
                             }

@@ -168,6 +168,27 @@ async function isKnownContractor(email) {
   }
 }
 
+// Look up a contractor profile by name via SECURITY DEFINER RPC (bypasses RLS).
+// Returns { id, email, name } or null if not found.
+async function findProfileByName(name) {
+  if (!SUPABASE_REST_URL || !name) return null;
+  try {
+    const res = await fetch(
+      `${SUPABASE_REST_URL}/rpc/find_profile_by_name`,
+      {
+        method: 'POST',
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_name: name }),
+      }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 // Extract email + name from forwarded body headers
 // Returns { email, name } — name may be null
 function extractSenderFromBody(text) {
@@ -945,6 +966,9 @@ Required JSON shape:
   "totalAmount": number | null,
   "currency": "USD" | "EUR" | "GBP" | "CAD" | "AUD" | "CHF" | string | null,
   "isMultiContractor": boolean,
+  "contractors": [
+    { "name": string, "hours": number, "rate": number | null, "amount": number | null }
+  ] | null,
   "paymentDetails": {
     "iban": string | null,
     "swift": string | null,
@@ -959,6 +983,7 @@ Required JSON shape:
 
 Rules:
 - isMultiContractor: set to true if the invoice lists multiple contractors/consultants with individual line items; false for a single contractor invoice.
+- contractors: when isMultiContractor is true, populate this array with one entry per contractor line. Each entry: name (full name as printed on the invoice), hours (their individual hours), rate (their hourly rate or null), amount (their line-item total or null). Set to null when isMultiContractor is false.
 - periodStart / periodEnd: the BILLING PERIOD (dates the work was performed), not the invoice issue date and not dates embedded in the invoice number. If only a month is given (e.g. "April 2026"), use the first and last day of that month. IMPORTANT: invoice numbers often contain date-like components (e.g. "002/05/2026", "2026-04-0007") — do NOT use these as the period; look for explicit "period", "billing period", "services rendered", or a clear date range in the description.
 - totalHours: hours worked — a number (e.g. 160, 144.5). Ignore text like "h", "hrs", "hours" suffix. If the quantity is expressed as "pcs", "pieces", or "units" in a service/consulting invoice, treat it as hours worked (contractors sometimes invoice in units rather than hours).
 - rate: hourly rate as a plain number (e.g. 40, 35.50). Ignore currency symbols. If the invoice shows rates in multiple currencies (e.g. both EUR and USD columns), extract the USD rate.
@@ -1201,11 +1226,18 @@ function postProcessInvoice(result, pdfText) {
 
 // Merge regex and Claude results: regex wins on every field it found (deterministic);
 // Claude fills in whatever regex missed.
+// Exception: currency — if Claude says USD but regex says EUR, trust Claude (EUR templates
+// with USD billing are common; regex sees the symbol, Claude understands context).
 function mergeInvoiceResults(regex, claude) {
   const merged = { ...claude, paymentDetails: { ...(claude.paymentDetails || {}) } };
   if (!regex) return merged;
-  for (const f of ['invoiceNumber', 'periodStart', 'periodEnd', 'totalHours', 'rate', 'totalAmount', 'currency']) {
+  for (const f of ['invoiceNumber', 'periodStart', 'periodEnd', 'totalHours', 'rate', 'totalAmount']) {
     if (regex[f] != null) merged[f] = regex[f];
+  }
+  // Currency: regex wins only when Claude has no opinion, or both agree.
+  if (regex.currency != null) {
+    if (claude?.currency == null || claude.currency === regex.currency) merged.currency = regex.currency;
+    // else: keep Claude's value (already set from the spread above)
   }
   for (const f of ['iban', 'swift', 'accountNumber', 'sortCode', 'routingNumber', 'bankName', 'companyName']) {
     if (regex.paymentDetails?.[f] != null) merged.paymentDetails[f] = regex.paymentDetails[f];
@@ -1704,6 +1736,67 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       }
     }
     console.log(formatInvoiceReport(att.name, contractorEmail, parsed));
+
+    // ── Multi-contractor invoice (e.g. Teal Crossroads) ──────────────────────
+    if (CONFIG.invoiceIngestEnabled && CONFIG.invoiceIngestUrl &&
+        parsed?.isMultiContractor && Array.isArray(parsed?.contractors) && parsed.contractors.length > 0) {
+      const groupKey = `${messageId}::${att.name}`;
+      console.log(`  🔀 Multi-contractor (${parsed.contractors.length} lines): splitting`);
+      for (let ci = 0; ci < parsed.contractors.length; ci++) {
+        const line = parsed.contractors[ci];
+        const profile = await findProfileByName(line.name);
+        if (!profile) {
+          console.warn(`    ⚠️  No profile for "${line.name}" — skipping`);
+          results.push({
+            contractor:    line.name,
+            attachmentName: att.name,
+            action:        'invoice_partial',
+            error:         `No profile found for: "${line.name}"`,
+            parsed,
+          });
+          continue;
+        }
+        try {
+          const res = await postToIngest({
+            messageId:      `${messageId}::${att.name}::${ci}`,
+            contractorEmail: profile.email,
+            contractorName:  profile.name,
+            subject,
+            attachmentName:  att.name,
+            invoiceNumber:   parsed.invoiceNumber  || null,
+            periodStart:     parsed.periodStart,
+            periodEnd:       parsed.periodEnd,
+            totalHours:      line.hours,
+            rate:            line.rate             || null,
+            totalAmount:     line.amount           || null,
+            currency:        parsed.currency       || null,
+            paymentDetails:  parsed.paymentDetails || null,
+            parseNotes:      `[multi-contractor ${ci+1}/${parsed.contractors.length}: ${line.name}] [${parsed.parseMethod || 'unknown'}]`,
+            pdfBase64:       att.buffer.toString('base64'),
+            rawExtracted:    parsed,
+            forwardedBy:     forwardedBy || null,
+            groupKey,
+          }, CONFIG.invoiceIngestUrl);
+          const action = res.body?.action || res.body?.error || String(res.status);
+          console.log(`    [${ci+1}] ${profile.name} → ${action}`);
+          results.push({
+            contractor:           profile.email,
+            attachmentName:       att.name,
+            action:               `invoice_${action}`,
+            ingestOk:             res.body?.ok === true,
+            invoiceNumber:        res.body?.invoiceNumber || null,
+            reconciliationStatus: res.body?.reconciliationStatus || null,
+            reconciliationDelta:  res.body?.reconciliationDelta ?? null,
+            parsed: { ...parsed, totalHours: line.hours, rate: line.rate, totalAmount: line.amount },
+          });
+        } catch (e) {
+          console.error(`    ❌ Ingest failed for ${profile.name}: ${e.message}`);
+          results.push({ contractor: profile.email, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
+        }
+      }
+      continue; // skip single-contractor path
+    }
+
     const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
 
     if (CONFIG.invoiceIngestEnabled && CONFIG.invoiceIngestUrl && canIngest) {
@@ -1726,6 +1819,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           pdfBase64:       att.buffer.toString('base64'),
           rawExtracted:    parsed,
           forwardedBy:     forwardedBy || null,
+          groupKey:        null,
         }, CONFIG.invoiceIngestUrl);
         const action = res.body?.action || res.body?.error || String(res.status);
         console.log(`     ✅ Ingested → ${action}`);
