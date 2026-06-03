@@ -170,6 +170,7 @@ interface PaymentProfile {
   swift: string;
   paymentEmail: string;
   isDefault: boolean;
+  combinePayments: boolean | null; // null = not yet decided; true = combine wires for this IBAN
 }
 
 interface InvoiceLine {
@@ -593,7 +594,7 @@ const TimesheetSystem = () => {
   const [editingProfile, setEditingProfile] = useState<PaymentProfile | null>(null);
   const emptyProfileForm = (): Omit<PaymentProfile, 'id' | 'userId'> => ({
     profileName: '', companyName: '', companyAddress: '', country: '', bankName: '',
-    bankAddress: '', bankBranch: '', accountNumber: '', iban: '', swift: '', paymentEmail: '', isDefault: false,
+    bankAddress: '', bankBranch: '', accountNumber: '', iban: '', swift: '', paymentEmail: '', isDefault: false, combinePayments: null,
   });
   const [profileForm, setProfileForm] = useState(emptyProfileForm());
   const [passwordResetMode, setPasswordResetMode] = useState(false);
@@ -1357,6 +1358,7 @@ const TimesheetSystem = () => {
       swift: (r.swift as string) || '',
       paymentEmail: (r.payment_email as string) || '',
       isDefault: !!(r.is_default as boolean),
+      combinePayments: r.combine_payments != null ? !!(r.combine_payments as boolean) : null,
     };
   }
 
@@ -1530,6 +1532,18 @@ const TimesheetSystem = () => {
     setPendingPaidDate('');
     setPendingPaymentMethod('');
     setPendingUsdRate('');
+  };
+
+  const toggleCombinePayments = async (profileId: number, current: boolean | null) => {
+    const next = current === true ? false : true;
+    const { error } = await supabase.from('payment_profiles').update({ combine_payments: next }).eq('id', profileId);
+    if (error) { alert('Error updating profile: ' + error.message); return; }
+    setPaymentProfiles(prev => prev.map(p => p.id === profileId ? { ...p, combinePayments: next } : p));
+    setInvoices(prev => prev.map(inv =>
+      inv.paymentProfile?.id === profileId
+        ? { ...inv, paymentProfile: { ...inv.paymentProfile!, combinePayments: next } }
+        : inv
+    ));
   };
 
   // Save approval status and/or pay on date without closing modal
@@ -3658,7 +3672,7 @@ const TimesheetSystem = () => {
                         </div>
                         <div className="flex gap-2">
                           {p.isDefault && <span className="px-2 py-0.5 bg-teal-100 text-teal-700 text-xs rounded-full">Default</span>}
-                          <button onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault }); setShowProfileModal(true); }}
+                          <button onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments }); setShowProfileModal(true); }}
                             className="p-1 text-indigo-600 hover:text-indigo-800"><Edit2 className="w-4 h-4" /></button>
                         </div>
                       </div>
@@ -4268,89 +4282,270 @@ const TimesheetSystem = () => {
                           </tr>
                         </thead>
                         <tbody>
-                          {filtered.map((inv, idx) => {
-                            const project = projects.find(p => p.id === inv.projectId);
-                            const sym = currencySymbols[inv.currency] || '$';
-                            return (
-                              <tr key={inv.id} className={'cursor-pointer ' + (idx % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50')} onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
-                                <td className="border border-gray-200 px-4 py-3 font-mono text-xs text-gray-700">{inv.invoiceNumber}</td>
-                                <td className="border border-gray-200 px-4 py-3 font-medium text-gray-800">{inv.userName}</td>
-                                <td className="border border-gray-200 px-4 py-3 whitespace-nowrap">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
-                                <td className="border border-gray-200 px-4 py-3 text-indigo-600 text-xs">{project?.name || '—'}</td>
-                                <td className="border border-gray-200 px-4 py-3 text-center">{inv.totalHours.toFixed(2)}</td>
-                                <td className="border border-gray-200 px-4 py-3 text-center text-gray-500">{sym}{inv.rate.toFixed(2)}</td>
-                                <td className="border border-gray-200 px-4 py-3 text-right font-bold text-gray-800">
-                                  {sym}{inv.totalAmount.toFixed(2)}
-                                  {inv.source === 'imported' && inv.currency !== 'USD' && (
-                                    <span className="ml-1 text-amber-500 text-xs font-semibold" title={`Extracted in ${inv.currency} — set USD rate in invoice detail`}>⚠ {inv.currency}</span>
-                                  )}
-                                </td>
-                                <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
-                                  {inv.payOnDate
-                                    ? <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">{new Date(inv.payOnDate).toLocaleDateString()}</span>
-                                    : <span className="text-gray-300 text-xs">—</span>}
-                                </td>
-                                <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
-                                  {inv.paymentProfile
-                                    ? <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethod(inv) === 'Intuit' ? 'bg-green-50 text-green-700' : 'bg-purple-50 text-purple-700'}`}>{paymentMethod(inv)}</span>
-                                    : <span className="text-gray-300 text-xs">—</span>}
-                                </td>
-                                <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
-                                  {inv.paidDate
-                                    ? <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs font-medium">{new Date(inv.paidDate).toLocaleDateString()}</span>
-                                    : <span className="text-gray-300 text-xs">—</span>}
-                                </td>
-                                <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
-                                <td className="border border-gray-200 px-4 py-3 text-center">
-                                  {inv.source === 'imported' ? (() => {
-                                    const recon = reconcileInvoiceLive(inv, timesheets);
-                                    const tooltip = recon.timesheetHours == null
-                                      ? 'No timesheets found for period'
-                                      : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
-                                    return (
-                                      <div className="flex flex-col items-center gap-0.5" title={tooltip}>
-                                        {recon.status === 'matched' ? (
-                                          <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Matched</span>
-                                        ) : recon.status === 'mismatch' ? (
-                                          <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-medium">
-                                            ⚠ {recon.delta != null ? (recon.delta > 0 ? '+' : '') + recon.delta + 'h' : 'Mismatch'}
-                                          </span>
-                                        ) : (
-                                          <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
+                          {(() => {
+                            // Group by invoice_number + period_start
+                            const groupMap = new Map<string, Invoice[]>();
+                            for (const inv of filtered) {
+                              const key = `${inv.invoiceNumber}|${inv.periodStart}`;
+                              if (!groupMap.has(key)) groupMap.set(key, []);
+                              groupMap.get(key)!.push(inv);
+                            }
+                            const displayGroups = Array.from(groupMap.values());
+
+                            let rowIdx = 0;
+                            return displayGroups.map((group) => {
+                              const isGroup = group.length > 1;
+
+                              if (!isGroup) {
+                                const inv = group[0];
+                                const project = projects.find(p => p.id === inv.projectId);
+                                const sym = currencySymbols[inv.currency] || '$';
+                                const rowClass = rowIdx++ % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50';
+                                return (
+                                  <tr key={inv.id} className={'cursor-pointer ' + rowClass} onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                                    <td className="border border-gray-200 px-4 py-3 font-mono text-xs text-gray-700">{inv.invoiceNumber}</td>
+                                    <td className="border border-gray-200 px-4 py-3 font-medium text-gray-800">{inv.userName}</td>
+                                    <td className="border border-gray-200 px-4 py-3 whitespace-nowrap">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
+                                    <td className="border border-gray-200 px-4 py-3 text-indigo-600 text-xs">{project?.name || '—'}</td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center">{inv.totalHours.toFixed(2)}</td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center text-gray-500">{sym}{inv.rate.toFixed(2)}</td>
+                                    <td className="border border-gray-200 px-4 py-3 text-right font-bold text-gray-800">
+                                      {sym}{inv.totalAmount.toFixed(2)}
+                                      {inv.source === 'imported' && inv.currency !== 'USD' && (
+                                        <span className="ml-1 text-amber-500 text-xs font-semibold" title={`Extracted in ${inv.currency} — set USD rate in invoice detail`}>⚠ {inv.currency}</span>
+                                      )}
+                                    </td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
+                                      {inv.payOnDate
+                                        ? <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">{new Date(inv.payOnDate).toLocaleDateString()}</span>
+                                        : <span className="text-gray-300 text-xs">—</span>}
+                                    </td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
+                                      {inv.paymentProfile
+                                        ? <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethod(inv) === 'Intuit' ? 'bg-green-50 text-green-700' : 'bg-purple-50 text-purple-700'}`}>{paymentMethod(inv)}</span>
+                                        : <span className="text-gray-300 text-xs">—</span>}
+                                    </td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
+                                      {inv.paidDate
+                                        ? <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs font-medium">{new Date(inv.paidDate).toLocaleDateString()}</span>
+                                        : <span className="text-gray-300 text-xs">—</span>}
+                                    </td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center">
+                                      {inv.source === 'imported' ? (() => {
+                                        const recon = reconcileInvoiceLive(inv, timesheets);
+                                        const tooltip = recon.timesheetHours == null
+                                          ? 'No timesheets found for period'
+                                          : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
+                                        return (
+                                          <div className="flex flex-col items-center gap-0.5" title={tooltip}>
+                                            {recon.status === 'matched' ? (
+                                              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Matched</span>
+                                            ) : recon.status === 'mismatch' ? (
+                                              <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-medium">
+                                                ⚠ {recon.delta != null ? (recon.delta > 0 ? '+' : '') + recon.delta + 'h' : 'Mismatch'}
+                                              </span>
+                                            ) : (
+                                              <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
+                                            )}
+                                            {recon.timesheetHours != null && (
+                                              <span className="text-gray-400 text-xs">TS: {recon.timesheetHours}h</span>
+                                            )}
+                                          </div>
+                                        );
+                                      })() : <span className="text-gray-300 text-xs">—</span>}
+                                    </td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
+                                      {inv.attachmentPath ? (
+                                        <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs font-medium">
+                                          <Paperclip className="w-3 h-3" /> PDF
+                                        </button>
+                                      ) : (
+                                        <span className="text-gray-300 text-xs">—</span>
+                                      )}
+                                    </td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
+                                      <div className="flex items-center justify-center gap-1">
+                                        {inv.status === 'submitted' && (
+                                          <>
+                                            <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">Approve</button>
+                                            <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Reject</button>
+                                          </>
                                         )}
-                                        {recon.timesheetHours != null && (
-                                          <span className="text-gray-400 text-xs">TS: {recon.timesheetHours}h</span>
+                                        {inv.status === 'approved' && (
+                                          <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
                                         )}
+                                        {(inv.status === 'paid' || inv.status === 'rejected') && <span className="text-gray-400 text-xs">—</span>}
                                       </div>
-                                    );
-                                  })() : <span className="text-gray-300 text-xs">—</span>}
-                                </td>
-                                <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
-                                  {inv.attachmentPath ? (
-                                    <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs font-medium">
-                                      <Paperclip className="w-3 h-3" /> PDF
-                                    </button>
-                                  ) : (
-                                    <span className="text-gray-300 text-xs">—</span>
-                                  )}
-                                </td>
-                                <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
-                                  <div className="flex items-center justify-center gap-1">
-                                    {inv.status === 'submitted' && (
-                                      <>
-                                        <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">Approve</button>
-                                        <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Reject</button>
-                                      </>
+                                    </td>
+                                  </tr>
+                                );
+                              }
+
+                              // ── Multi-invoice group (e.g. Teal Crossroads) ──
+                              rowIdx++;
+                              const groupKey = group[0].invoiceNumber;
+                              const groupPeriod = parseLocalDate(group[0].periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+                              const groupTotalHours = group.reduce((s, i) => s + i.totalHours, 0);
+                              const groupTotalAmount = group.reduce((s, i) => s + i.totalAmount, 0);
+                              const groupSym = currencySymbols[group[0].currency] || '$';
+                              const submittedInGroup = group.filter(i => i.status === 'submitted');
+                              const anyAttachment = group.find(i => i.attachmentPath);
+                              const sharedProfile = group[0].paymentProfile;
+                              const allShareProfile = sharedProfile && group.every(i => i.paymentProfile?.id === sharedProfile.id);
+                              const groupStatuses = [...new Set(group.map(i => i.status))];
+                              const groupFirstPayOn = group.find(i => i.payOnDate)?.payOnDate;
+
+                              return [
+                                // Group header row
+                                <tr key={`grp-hdr-${groupKey}`} className="bg-indigo-50 border-l-4 border-l-indigo-500 font-semibold">
+                                  <td className="border border-indigo-200 px-4 py-2.5">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-mono text-xs text-indigo-800 font-bold">{groupKey}</span>
+                                      <span className="px-1.5 py-0.5 bg-indigo-200 text-indigo-700 rounded text-xs">Group · {group.length}</span>
+                                    </div>
+                                  </td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-xs text-indigo-700">
+                                    {group.map(i => i.userName).join(', ')}
+                                  </td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-xs whitespace-nowrap text-indigo-700">{groupPeriod}</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-xs text-gray-400">—</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center text-indigo-800">{groupTotalHours.toFixed(2)}</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center text-gray-400 text-xs">—</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-right text-indigo-900 font-bold">{groupSym}{groupTotalAmount.toFixed(2)}</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center whitespace-nowrap">
+                                    {groupFirstPayOn
+                                      ? <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">{new Date(groupFirstPayOn).toLocaleDateString()}</span>
+                                      : <span className="text-gray-300 text-xs">—</span>}
+                                  </td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                                    {allShareProfile && sharedProfile ? (
+                                      <div className="flex flex-col items-center gap-1">
+                                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${paymentMethod(group[0]) === 'Intuit' ? 'bg-green-50 text-green-700' : 'bg-purple-50 text-purple-700'}`}>
+                                          {paymentMethod(group[0])}
+                                        </span>
+                                        <button
+                                          onClick={() => toggleCombinePayments(sharedProfile.id, sharedProfile.combinePayments)}
+                                          className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border transition-colors ${sharedProfile.combinePayments ? 'bg-teal-100 text-teal-700 border-teal-300 hover:bg-teal-200' : 'bg-gray-100 text-gray-500 border-gray-300 hover:bg-gray-200'}`}
+                                          title="Toggle whether all invoices to this payee are combined into one wire"
+                                        >
+                                          {sharedProfile.combinePayments ? '⊕ Combined' : '○ Separate'}
+                                        </button>
+                                      </div>
+                                    ) : <span className="text-gray-300 text-xs">—</span>}
+                                  </td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center text-gray-400 text-xs">—</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center">
+                                    <div className="flex flex-wrap justify-center gap-0.5">
+                                      {groupStatuses.map(s => (
+                                        <span key={s} className={`px-1.5 py-0.5 rounded-full text-xs font-medium ${statusColors[s]}`}>
+                                          {group.filter(i => i.status === s).length} {s}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center text-gray-400 text-xs">—</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                                    {anyAttachment ? (
+                                      <button onClick={() => openAttachment(anyAttachment)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-100 text-indigo-700 border border-indigo-300 rounded hover:bg-indigo-200 text-xs font-medium">
+                                        <Paperclip className="w-3 h-3" /> PDF
+                                      </button>
+                                    ) : <span className="text-gray-300 text-xs">—</span>}
+                                  </td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                                    {submittedInGroup.length > 0 && (
+                                      <button
+                                        onClick={async () => { for (const inv of submittedInGroup) await handleInvoiceAction(inv.id, 'approved'); }}
+                                        className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium whitespace-nowrap"
+                                      >
+                                        Approve all ({submittedInGroup.length})
+                                      </button>
                                     )}
-                                    {inv.status === 'approved' && (
-                                      <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
-                                    )}
-                                    {(inv.status === 'paid' || inv.status === 'rejected') && <span className="text-gray-400 text-xs">—</span>}
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
+                                    {submittedInGroup.length === 0 && <span className="text-gray-400 text-xs">—</span>}
+                                  </td>
+                                </tr>,
+                                // Individual contractor rows within the group
+                                ...group.map((inv) => {
+                                  const project = projects.find(p => p.id === inv.projectId);
+                                  const sym = currencySymbols[inv.currency] || '$';
+                                  return (
+                                    <tr key={inv.id} className="bg-white border-l-4 border-l-indigo-200 hover:bg-indigo-50 cursor-pointer" onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                                      <td className="border border-gray-200 px-4 py-2 text-gray-400 text-xs pl-6">↳</td>
+                                      <td className="border border-gray-200 px-4 py-2 font-medium text-gray-800 text-sm">{inv.userName}</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-gray-400 text-xs">—</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-indigo-600 text-xs">{project?.name || '—'}</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center text-sm">{inv.totalHours.toFixed(2)}</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center text-gray-500 text-sm">{sym}{inv.rate.toFixed(2)}</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-right font-semibold text-gray-800 text-sm">
+                                        {sym}{inv.totalAmount.toFixed(2)}
+                                        {inv.source === 'imported' && inv.currency !== 'USD' && (
+                                          <span className="ml-1 text-amber-500 text-xs" title={`Extracted in ${inv.currency}`}>⚠ {inv.currency}</span>
+                                        )}
+                                      </td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center whitespace-nowrap">
+                                        {inv.payOnDate
+                                          ? <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs">{new Date(inv.payOnDate).toLocaleDateString()}</span>
+                                          : <span className="text-gray-300 text-xs">—</span>}
+                                      </td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center text-gray-400 text-xs">—</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center whitespace-nowrap">
+                                        {inv.paidDate
+                                          ? <span className="px-2 py-0.5 bg-green-50 text-green-700 rounded text-xs">{new Date(inv.paidDate).toLocaleDateString()}</span>
+                                          : <span className="text-gray-300 text-xs">—</span>}
+                                      </td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center">
+                                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>
+                                          {inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}
+                                        </span>
+                                      </td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center">
+                                        {inv.source === 'imported' ? (() => {
+                                          const recon = reconcileInvoiceLive(inv, timesheets);
+                                          const tooltip = recon.timesheetHours == null
+                                            ? 'No timesheets found for period'
+                                            : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
+                                          return (
+                                            <div className="flex flex-col items-center gap-0.5" title={tooltip}>
+                                              {recon.status === 'matched' ? (
+                                                <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs">✓ Match</span>
+                                              ) : recon.status === 'mismatch' ? (
+                                                <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs">
+                                                  ⚠ {recon.delta != null ? (recon.delta > 0 ? '+' : '') + recon.delta + 'h' : '?'}
+                                                </span>
+                                              ) : (
+                                                <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">? —</span>
+                                              )}
+                                            </div>
+                                          );
+                                        })() : <span className="text-gray-300 text-xs">—</span>}
+                                      </td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center" onClick={e => e.stopPropagation()}>
+                                        {inv.attachmentPath ? (
+                                          <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs">
+                                            <Paperclip className="w-3 h-3" /> PDF
+                                          </button>
+                                        ) : <span className="text-gray-300 text-xs">—</span>}
+                                      </td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center" onClick={e => e.stopPropagation()}>
+                                        <div className="flex items-center justify-center gap-1">
+                                          {inv.status === 'submitted' && (
+                                            <>
+                                              <button onClick={() => handleInvoiceAction(inv.id, 'approved')} className="px-2 py-0.5 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">✓</button>
+                                              <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="px-2 py-0.5 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">✕</button>
+                                            </>
+                                          )}
+                                          {inv.status === 'approved' && (
+                                            <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Paid</button>
+                                          )}
+                                          {(inv.status === 'paid' || inv.status === 'rejected') && <span className="text-gray-400 text-xs">—</span>}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  );
+                                }),
+                              ];
+                            });
+                          })()}
                         </tbody>
                         <tfoot className="bg-gray-100 font-semibold">
                           <tr>
@@ -5849,7 +6044,7 @@ const TimesheetSystem = () => {
                               <div className="text-xs text-gray-500 truncate">{p.companyName} · {p.bankName}{p.accountNumber ? ' · Acct: ' + p.accountNumber : ''}</div>
                             </div>
                             <button
-                              onClick={e => { e.preventDefault(); setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault }); setShowProfileModal(true); }}
+                              onClick={e => { e.preventDefault(); setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments }); setShowProfileModal(true); }}
                               className="p-1 text-gray-400 hover:text-indigo-600"
                             ><Edit2 className="w-3.5 h-3.5" /></button>
                           </label>
@@ -6078,7 +6273,7 @@ const TimesheetSystem = () => {
                         </div>
                         <div className="flex gap-2">
                           <button
-                            onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault }); setShowProfileModal(true); }}
+                            onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments }); setShowProfileModal(true); }}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 text-sm"
                           ><Edit2 className="w-3.5 h-3.5" /> Edit</button>
                           <button onClick={() => deletePaymentProfile(p.id)} className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 text-sm"><Trash2 className="w-3.5 h-3.5" /> Delete</button>
