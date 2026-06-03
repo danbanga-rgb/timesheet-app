@@ -80,6 +80,26 @@ async function findUser(
   };
 }
 
+// ─── Entry comparison ─────────────────────────────────────────────────────────
+// Normalises both stored format ({hours:'8',...}) and plain-number format to
+// compare whether two sets of entries represent identical hours per day.
+function entriesAreIdentical(
+  existing: Record<string, unknown>,
+  incoming: Record<string, number>,
+): boolean {
+  const normalize = (v: unknown): number => {
+    if (typeof v === 'object' && v !== null && 'hours' in v) {
+      return Number((v as { hours: unknown }).hours) || 0;
+    }
+    return Number(v) || 0;
+  };
+  const allDays = new Set([...Object.keys(existing), ...Object.keys(incoming)]);
+  for (const day of allDays) {
+    if (normalize(existing[day]) !== normalize(incoming[day] ?? 0)) return false;
+  }
+  return true;
+}
+
 // ─── Entry merge ─────────────────────────────────────────────────────────────
 // When a contractor sends split timesheets for the same week (e.g. Apr 27-30 in
 // one email, May 1 in another), take the max hours per day so partial submissions
@@ -177,7 +197,7 @@ async function upsertTimesheet(
   forwardedBy: string | null = null,
 ): Promise<{
   timesheetId: number | null;
-  action: 'created' | 'updated' | 'correction_imported' | 'correction_pending';
+  action: 'created' | 'updated' | 'correction_imported' | 'correction_pending' | 'duplicate';
   notes: string;
 }> {
   const { data: existing } = await supabase
@@ -192,6 +212,13 @@ async function upsertTimesheet(
   // Only flag correction_pending when the email comes from the contractor themselves.
   if (existing?.source === 'direct') {
     if (!forwardedBy) {
+      if (entriesAreIdentical(existing.entries as Record<string, unknown>, entries)) {
+        return {
+          timesheetId: existing.id,
+          action: 'duplicate',
+          notes: 'Identical hours to portal submission — redundant email, no changes needed',
+        };
+      }
       return {
         timesheetId: existing.id,
         action: 'correction_pending',
@@ -443,6 +470,7 @@ serve(async (req) => {
 
       if (action === 'correction_pending') parseStatus = 'correction_pending';
       else if (action === 'correction_imported') parseStatus = 'correction';
+      else if (action === 'duplicate') parseStatus = 'duplicate';
     } catch (e) {
       parseStatus = 'failed';
       upsertNotes = `Upsert error: ${String(e)}`;
