@@ -2039,8 +2039,11 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
     return;
   }
 
-  // Layer 1: sender allowlist — skip unknown contractors, forward to helpdesk
-  if (!await isKnownContractor(contractor)) {
+  // Layer 1: sender allowlist — only enforce for DIRECT emails (not forwarded by internal staff).
+  // When an accountant forwards an invoice, the extracted contractor email may belong to an
+  // agency/umbrella (e.g. Teal Crossroads) not in profiles; the multi-contractor pipeline
+  // resolves each line by name, and ingest-invoice's forwardedBy gate provides security.
+  if (!isInternal(fromEmail) && !await isKnownContractor(contractor)) {
     console.warn(`  ⚠️  Unknown contractor: ${contractor} — skipping (not in profiles)`);
     results.push({ type: 'skipped', subject, reason: `unknown_contractor: ${contractor}` });
     await forwardToHelpdesk(subject, bodyText, fromEmail, `Unknown contractor email not in system: ${contractor}`);
