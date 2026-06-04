@@ -4436,11 +4436,30 @@ const TimesheetSystem = () => {
                               const groupStatuses = [...new Set(group.map(i => i.status))];
                               const groupFirstPayOn = group.find(i => i.payOnDate)?.payOnDate;
 
+                              const sortedGroup = [...group].sort((a, b) => a.userName.localeCompare(b.userName));
                               const companyName = group[0].paymentProfile?.companyName || group.map(i => i.userName).join(', ');
                               const groupRecons = group.filter(i => i.source === 'imported').map(i => reconcileInvoiceLive(i, timesheets));
                               const groupTsHours = groupRecons.every(r => r.timesheetHours != null)
                                 ? groupRecons.reduce((s, r) => s + (r.timesheetHours ?? 0), 0) : null;
-                              const groupMissingWeeks = groupRecons.reduce((s, r) => s + (r.missingWeeks ?? 0), 0);
+                              // Missing weeks at group level: weeks where no member has any hours
+                              const groupMissingWeeks = (() => {
+                                const inv0 = group.find(i => i.source === 'imported');
+                                if (!inv0) return 0;
+                                const { periodStart, periodEnd } = inv0;
+                                const firstDay = new Date(periodStart + 'T12:00:00');
+                                const firstDow = firstDay.getDay();
+                                firstDay.setDate(firstDay.getDate() - (firstDow === 0 ? 6 : firstDow - 1));
+                                const weeks: string[] = [];
+                                const cur = new Date(firstDay.getTime());
+                                while (cur.toISOString().slice(0, 10) <= periodEnd) {
+                                  weeks.push(cur.toISOString().slice(0, 10));
+                                  cur.setDate(cur.getDate() + 7);
+                                }
+                                const weeksWithAnyHours = new Set(
+                                  groupRecons.flatMap(r => r.rows.filter(row => row.hoursInPeriod > 0).map(row => row.ts.weekStart))
+                                );
+                                return weeks.filter(w => !weeksWithAnyHours.has(w)).length;
+                              })();
                               const groupReconDelta = groupTsHours != null ? Math.round((groupTotalHours - groupTsHours) * 100) / 100 : null;
                               const groupReconStatus = groupTsHours == null ? 'unknown'
                                 : Math.abs(groupReconDelta!) < 0.01 ? 'matched' : 'mismatch';
@@ -4529,8 +4548,8 @@ const TimesheetSystem = () => {
                                     {submittedInGroup.length === 0 && <span className="text-gray-400 text-xs">—</span>}
                                   </td>
                                 </tr>,
-                                // Individual contractor rows within the group
-                                ...group.map((inv) => {
+                                // Individual contractor rows within the group — sorted by name
+                                ...sortedGroup.map((inv) => {
                                   const project = projects.find(p => p.id === inv.projectId);
                                   const sym = currencySymbols[inv.currency] || '$';
                                   return (
