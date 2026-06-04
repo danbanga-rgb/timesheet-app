@@ -367,12 +367,12 @@ serve(async (req) => {
       isDefault:      false,
     } : null;
 
-    // ── Check for existing invoice for same user + period (re-attach case) ──
-    // If one exists with no attachment_path, just upload the PDF and return.
-    // This handles re-ingestion from samples without creating duplicates.
+    // ── Check for existing invoice for same user + period ────────────────────
+    // True duplicate → reattach PDF only, no data changes.
+    // Correction (fields differ) → update data, reset to submitted, mark corrected.
     const { data: existingInvoice } = await supabase
       .from('invoices')
-      .select('id, attachment_path')
+      .select('id, attachment_path, total_hours, rate, total_amount, status')
       .eq('user_id', userId)
       .eq('period_start', parsedPeriodStart)
       .eq('period_end', parsedPeriodEnd)
@@ -380,7 +380,70 @@ serve(async (req) => {
       .maybeSingle();
 
     if (existingInvoice) {
-      invoiceId  = existingInvoice.id;
+      invoiceId = existingInvoice.id;
+
+      const existingHours  = existingInvoice.total_hours  != null ? Number(existingInvoice.total_hours)  : null;
+      const existingRate   = existingInvoice.rate          != null ? Number(existingInvoice.rate)          : null;
+      const existingAmount = existingInvoice.total_amount  != null ? Number(existingInvoice.total_amount)  : null;
+      const isDuplicate    = existingHours === parsedHours
+                          && existingRate  === parsedRate
+                          && Math.abs((existingAmount ?? 0) - computedAmount) < 0.01;
+
+      if (!isDuplicate) {
+        // Correction: update invoice data and reset status for re-approval
+        const updatePayload: Record<string, unknown> = {
+          total_hours:   parsedHours,
+          rate:          parsedRate,
+          total_amount:  computedAmount,
+          lines,
+          corrected:     true,
+          status:        'submitted',
+          reviewed_at:   null,
+          reviewed_by:   null,
+        };
+        if (paymentProfileSnapshot) updatePayload.payment_profile = paymentProfileSnapshot;
+
+        await supabase.from('invoices').update(updatePayload).eq('id', invoiceId);
+
+        // Upload replacement PDF if provided
+        if (pdfBase64 && typeof pdfBase64 === 'string') {
+          try {
+            const attName2  = (attachmentName as string) || '';
+            const extM2     = attName2.match(/\.([a-zA-Z0-9]+)$/);
+            const ext2      = extM2 ? extM2[1].toLowerCase() : 'pdf';
+            const mimeMap2: Record<string, string> = { pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', doc: 'application/msword' };
+            const sp2 = `${invoiceId}/original.${ext2}`;
+            const { error: upErr2 } = await supabase.storage
+              .from('invoice-attachments')
+              .upload(sp2, Uint8Array.from(atob(pdfBase64 as string), c => c.charCodeAt(0)),
+                { contentType: mimeMap2[ext2] || 'application/octet-stream', upsert: true });
+            if (!upErr2) await supabase.from('invoices').update({ attachment_path: sp2 }).eq('id', invoiceId);
+          } catch {}
+        }
+
+        actionNotes = `Corrected invoice (id=${invoiceId}): hours ${existingHours}→${parsedHours}, rate ${existingRate}→${parsedRate}, amount ${existingAmount}→${computedAmount}`;
+        await supabase.from('email_invoice_log').insert({
+          message_id:      messageId,
+          from_email:      contractorEmail,
+          subject:         subject || null,
+          attachment_name: attachmentName || null,
+          parse_status:    'success',
+          parse_notes:     [parseNotes, actionNotes].filter(Boolean).join(' | '),
+          user_id:         userId,
+          invoice_id:      invoiceId,
+          period_start:    parsedPeriodStart,
+          period_end:      parsedPeriodEnd,
+          raw_extracted:   body.rawExtracted ?? null,
+          attempt_count:   attemptCount,
+        });
+        return new Response(JSON.stringify({
+          ok: true, action: 'corrected', parseStatus: 'success',
+          userId, userName, invoiceId, invoiceNumber: resolvedInvoiceNumber,
+          periodStart: parsedPeriodStart, periodEnd: parsedPeriodEnd, notes: actionNotes,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // True duplicate — reattach PDF only
       actionNotes = existingInvoice.attachment_path
         ? `Invoice already exists (id=${invoiceId}) with attachment — skipped`
         : `Invoice already exists (id=${invoiceId}) — attaching PDF only`;
@@ -389,12 +452,7 @@ serve(async (req) => {
         const attName2 = (attachmentName as string) || '';
         const extM2    = attName2.match(/\.([a-zA-Z0-9]+)$/);
         const ext2     = extM2 ? extM2[1].toLowerCase() : 'pdf';
-        const mimeMap2: Record<string, string> = {
-          pdf:  'application/pdf',
-          docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          doc:  'application/msword',
-          msg:  'application/vnd.ms-outlook',
-        };
+        const mimeMap2: Record<string, string> = { pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', doc: 'application/msword', msg: 'application/vnd.ms-outlook' };
         const sp2 = `${invoiceId}/original.${ext2}`;
         const { error: upErr } = await supabase.storage
           .from('invoice-attachments')
@@ -409,17 +467,17 @@ serve(async (req) => {
       }
 
       await supabase.from('email_invoice_log').insert({
-        message_id:     messageId,
-        from_email:     contractorEmail,
-        subject:        subject || null,
+        message_id:      messageId,
+        from_email:      contractorEmail,
+        subject:         subject || null,
         attachment_name: attachmentName || null,
-        parse_status:   'duplicate',
-        parse_notes:    actionNotes,
-        user_id:        userId,
-        invoice_id:     invoiceId,
-        period_start:   parsedPeriodStart,
-        period_end:     parsedPeriodEnd,
-        attempt_count:  attemptCount,
+        parse_status:    'duplicate',
+        parse_notes:     actionNotes,
+        user_id:         userId,
+        invoice_id:      invoiceId,
+        period_start:    parsedPeriodStart,
+        period_end:      parsedPeriodEnd,
+        attempt_count:   attemptCount,
       });
 
       return new Response(JSON.stringify({

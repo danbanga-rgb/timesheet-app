@@ -1396,6 +1396,22 @@ async function claudeFullExtractInvoice(text, pdfBuffer, isImagePdf, filename, e
   }
 }
 
+// Extract total hours from email body prose (e.g. "amounting to 192h" or "total is 192h").
+// Used to supplement PDF parsing when the invoice spans two months but PDF only captured one.
+function extractTotalHoursFromBodyProse(text) {
+  const patterns = [
+    /amounting\s+to[^.\n,]{0,30}?(\d+(?:\.\d+)?)\s*h\b/i,
+    /total\s+(?:is\s+)?[^.\n,]{0,20}?(\d+(?:\.\d+)?)\s*h\b/i,
+    /(\d+(?:\.\d+)?)\s*h(?:ours?)?\s+total/i,
+    /total[:\s]+(\d+(?:\.\d+)?)\s*h(?:ours?)?/i,
+  ];
+  for (const pat of patterns) {
+    const m = pat.exec(text);
+    if (m) return parseFloat(m[1]);
+  }
+  return null;
+}
+
 // ─── Main invoice orchestrator ────────────────────────────────────────────────
 // 1. Regex (free, always runs on text PDFs) via parser.js
 // 2a. Regex has period + hours + payment → done, zero Claude calls
@@ -1756,8 +1772,11 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     console.log(`  🧾 Invoice attachment: ${att.name}`);
     let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name, bodyText || '');
     if (parsed) parsed = applyEarlyMonthPeriodFix(parsed);
-    // Supplement missing invoice fields from email body (fill-in only, never overrides PDF values)
-    if (parsed && bodyText && (parsed.totalHours == null || parsed.rate == null || parsed.totalAmount == null)) {
+    // Supplement/extend from email body:
+    // - fills missing fields (totalHours, rate, totalAmount)
+    // - extends period if body shows a wider date range than the PDF extracted
+    // - takes body prose total hours when larger than PDF (invoice spanning two months)
+    if (parsed && bodyText) {
       try {
         const { parseInvoice } = require('../invoice-parser/parser.js');
         const bodyResult = parseInvoice(bodyText.slice(0, 3000), 'email-body');
@@ -1765,6 +1784,25 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         if (parsed.totalHours == null && bodyResult?.totalHours != null) { parsed.totalHours = bodyResult.totalHours; changed.push(`hours→${bodyResult.totalHours}`); }
         if (parsed.rate == null && bodyResult?.rate != null) { parsed.rate = bodyResult.rate; changed.push(`rate→${bodyResult.rate}`); }
         if (parsed.totalAmount == null && bodyResult?.totalAmount != null) { parsed.totalAmount = bodyResult.totalAmount; changed.push(`amount→${bodyResult.totalAmount}`); }
+        // Extend period if body has wider range (e.g. invoice spans two months but PDF only extracted one)
+        if (bodyResult?.periodStart && parsed.periodStart && bodyResult.periodStart < parsed.periodStart) {
+          parsed.periodStart = bodyResult.periodStart; changed.push(`periodStart→${bodyResult.periodStart}`);
+        }
+        if (bodyResult?.periodEnd && parsed.periodEnd && bodyResult.periodEnd > parsed.periodEnd) {
+          parsed.periodEnd = bodyResult.periodEnd; changed.push(`periodEnd→${bodyResult.periodEnd}`);
+        }
+        // Body prose total: "amounting to 192h" — overrides PDF hours when body total is larger
+        // and re-derives rate from amount / newHours so the numbers stay consistent
+        const proseHours = extractTotalHoursFromBodyProse(bodyText);
+        if (proseHours != null && proseHours > (parsed.totalHours ?? 0)) {
+          const oldHours = parsed.totalHours;
+          parsed.totalHours = proseHours;
+          changed.push(`hours ${oldHours}→${proseHours} (prose)`);
+          if (parsed.totalAmount != null) {
+            const derivedRate = Math.round((parsed.totalAmount / proseHours) * 100) / 100;
+            if (derivedRate >= 1 && derivedRate < 10000) { parsed.rate = derivedRate; changed.push(`rate re-derived→${derivedRate}`); }
+          }
+        }
         if (changed.length) {
           console.log(`  📧 Body supplement for ${att.name}: ${changed.join(', ')}`);
           parsed.parseMethod = (parsed.parseMethod || 'unknown') + '+body';
@@ -2322,9 +2360,10 @@ ${(bodyText || '').slice(0, 2000)}`;
 }
 
 async function sendInvoiceAccountingEmail(invoiceReports) {
-  const ingested = invoiceReports.filter(r => r.ingestOk);
-  const failed   = invoiceReports.filter(r => !r.ingestOk && r.action !== 'invoice_reported');
-  const skipped  = invoiceReports.filter(r => r.action === 'invoice_duplicate' || r.action === 'invoice_reattached');
+  const ingested   = invoiceReports.filter(r => r.ingestOk && r.action !== 'invoice_corrected');
+  const corrected  = invoiceReports.filter(r => r.action === 'invoice_corrected');
+  const failed     = invoiceReports.filter(r => !r.ingestOk && r.action !== 'invoice_reported');
+  const skipped    = invoiceReports.filter(r => r.action === 'invoice_duplicate' || r.action === 'invoice_reattached');
 
   // Plain-English reason for each failure action code
   function failReason(r) {
@@ -2351,25 +2390,30 @@ async function sendInvoiceAccountingEmail(invoiceReports) {
   }
 
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' });
-  const statusLine = `${ingested.length} ingested${failed.length > 0 ? `, ${failed.length} failed` : ''}${skipped.length > 0 ? `, ${skipped.length} skipped` : ''}`;
+  const totalIngested = ingested.length + corrected.length;
+  const statusLine = `${totalIngested} ingested${corrected.length > 0 ? ` (${corrected.length} corrected)` : ''}${failed.length > 0 ? `, ${failed.length} failed` : ''}${skipped.length > 0 ? `, ${skipped.length} skipped` : ''}`;
   const subject = `[Invoice Report] ${statusLine} — ${now}`;
 
   let body = `Invoice Report — ${now} ET\n${'='.repeat(52)}\n`;
 
-  if (ingested.length > 0) {
-    body += `\nINGESTED (${ingested.length})\n${'─'.repeat(40)}\n`;
-    for (const inv of ingested) {
-      const p = inv.parsed || {};
-      const sym = p.currency === 'USD' ? '$' : (p.currency || '');
-      body += `\n${inv.email}\n`;
-      body += `  Invoice  : ${inv.invoiceNumber || '—'}\n`;
-      body += `  File     : ${inv.filename}\n`;
-      body += `  Period   : ${formatPeriod(p.periodStart, p.periodEnd)}\n`;
-      body += `  Hours    : ${p.totalHours != null ? p.totalHours + 'h' : '—'}`;
-      if (p.rate)        body += `  |  Rate: ${sym}${p.rate}`;
-      if (p.totalAmount) body += `  |  Total: ${sym}${p.totalAmount} ${p.currency || 'USD'}`;
-      body += '\n';
-    }
+  function formatInvoiceBlock(inv, label) {
+    const p = inv.parsed || {};
+    const sym = p.currency === 'USD' ? '$' : (p.currency || '');
+    let s = `\n${inv.email}${label ? '  ✎ ' + label : ''}\n`;
+    s += `  Invoice  : ${inv.invoiceNumber || '—'}\n`;
+    s += `  File     : ${inv.filename}\n`;
+    s += `  Period   : ${formatPeriod(p.periodStart, p.periodEnd)}\n`;
+    s += `  Hours    : ${p.totalHours != null ? p.totalHours + 'h' : '—'}`;
+    if (p.rate)        s += `  |  Rate: ${sym}${p.rate}`;
+    if (p.totalAmount) s += `  |  Total: ${sym}${p.totalAmount} ${p.currency || 'USD'}`;
+    s += '\n';
+    return s;
+  }
+
+  if (ingested.length > 0 || corrected.length > 0) {
+    body += `\nINGESTED (${totalIngested})\n${'─'.repeat(40)}\n`;
+    for (const inv of ingested)   body += formatInvoiceBlock(inv, null);
+    for (const inv of corrected)  body += formatInvoiceBlock(inv, 'CORRECTED — awaiting re-approval');
   }
 
   if (skipped.length > 0) {

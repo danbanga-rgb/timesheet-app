@@ -213,6 +213,7 @@ interface Invoice {
   reconciliationDelta: number | null;
   reconciliationNotes: string | null;
   groupKey: string | null;  // shared key for multi-contractor invoices from same attachment
+  corrected: boolean;        // re-submitted with different values; reset to submitted for re-approval
 }
 
 interface ConveraPaymentRow {
@@ -1395,6 +1396,7 @@ const TimesheetSystem = () => {
       reconciliationDelta: r.reconciliation_delta != null ? Number(r.reconciliation_delta) : null,
       reconciliationNotes: (r.reconciliation_notes as string) || null,
       groupKey: (r.group_key as string) || null,
+      corrected: !!(r.corrected as boolean),
     };
   }
 
@@ -3632,6 +3634,7 @@ const TimesheetSystem = () => {
                             <div className="flex items-center gap-2 flex-wrap mb-1">
                               <span className="font-mono text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded">{inv.invoiceNumber}</span>
                               <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
+                              {inv.corrected && <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">Corrected</span>}
                             </div>
                             <p className="text-sm text-gray-600">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} – {parseLocalDate(inv.periodEnd).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
                             <p className="text-xs text-gray-500 mt-1">{inv.lines.length} line{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours != null ? inv.totalHours.toFixed(1) + ' hrs' : '—'} · {employees.join(', ')}</p>
@@ -4335,7 +4338,10 @@ const TimesheetSystem = () => {
                                         ? <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs font-medium">{new Date(inv.paidDate).toLocaleDateString()}</span>
                                         : <span className="text-gray-300 text-xs">—</span>}
                                     </td>
-                                    <td className="border border-gray-200 px-4 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span></td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center">
+                                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
+                                      {inv.corrected && <span className="ml-1 px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">Corrected</span>}
+                                    </td>
                                     <td className="border border-gray-200 px-4 py-3 text-center">
                                       {inv.source === 'imported' ? (() => {
                                         const recon = reconcileInvoiceLive(inv, timesheets);
