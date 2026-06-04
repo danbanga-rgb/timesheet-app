@@ -591,6 +591,7 @@ const TimesheetSystem = () => {
   const [converaError, setConveraError] = useState('');
   // Convera beneficiaries
   const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
+  const [converaLastPaymentDates, setConveraLastPaymentDates] = useState<Map<number, string>>(new Map());
   const [beneficiaryImportFile, setBeneficiaryImportFile] = useState<File | null>(null);
   const [beneficiaryImporting, setBeneficiaryImporting] = useState(false);
   const [beneficiaryImportResult, setBeneficiaryImportResult] = useState<{
@@ -1412,6 +1413,22 @@ const TimesheetSystem = () => {
     if (converaBeneficiaries.length > 0) return;
     const { data } = await supabase.from('convera_beneficiaries').select('*').order('short_name');
     if (data) setConveraBeneficiaries(data.map(normaliseConveraBeneficiary));
+  }
+
+  async function loadConveraLastPaymentDates() {
+    if (converaLastPaymentDates.size > 0) return;
+    const { data } = await supabase
+      .from('convera_transactions')
+      .select('convera_beneficiary_id, date_of_order')
+      .not('convera_beneficiary_id', 'is', null);
+    if (!data) return;
+    const map = new Map<number, string>();
+    for (const row of data) {
+      const bid = row.convera_beneficiary_id as number;
+      const d = (row.date_of_order as string).slice(0, 10);
+      if (!map.has(bid) || d > map.get(bid)!) map.set(bid, d);
+    }
+    setConveraLastPaymentDates(map);
   }
 
   function normBenefName(s: string): string {
@@ -4482,7 +4499,7 @@ const TimesheetSystem = () => {
                     </div>
                     <div className="flex justify-end gap-2">
                       <button onClick={() => { setShowConveraModal(true); loadConveraBeneficiaries(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><UploadCloud className="w-4 h-4" /> Import Convera PDF</button>
-                      <button onClick={() => { setShowConveraMatchingModal(true); loadConveraBeneficiaries(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 text-sm"><Users className="w-4 h-4" /> Convera Matching</button>
+                      <button onClick={() => { setShowConveraMatchingModal(true); loadConveraBeneficiaries(); loadConveraLastPaymentDates(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 text-sm"><Users className="w-4 h-4" /> Convera Matching</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                     </div>
                   </div>
@@ -5114,24 +5131,17 @@ const TimesheetSystem = () => {
 
           {/* Convera Matching Modal */}
           {showConveraMatchingModal && (() => {
-            // Compute last-used date per profile.id from invoices
-            const lastUsedByProfileId = new Map<number, string>();
-            for (const inv of invoices) {
-              const pid = inv.paymentProfile?.id;
-              if (pid == null) continue;
-              const date = inv.submittedAt || inv.periodEnd || '';
-              const existing = lastUsedByProfileId.get(pid) || '';
-              if (date > existing) lastUsedByProfileId.set(pid, date);
-            }
-
-            // Build contractor groups
+            // Build contractor groups; last payment date from convera_transactions via converaLastPaymentDates
             type ProfileRow = { profile: PaymentProfile; benef: ConveraBeneficiary | undefined; lastUsed: string | undefined };
             const groupMap = new Map<string, { userName: string; rows: ProfileRow[] }>();
             for (const p of paymentProfiles) {
               const user = users.find(u => u.id === p.userId);
               const userName = user?.name || '(unknown)';
               const benef = converaBeneficiaries.find(b => b.id === p.converaBeneficiaryId);
-              const lastUsed = lastUsedByProfileId.get(p.id) ? lastUsedByProfileId.get(p.id)! : undefined;
+              // Last payment date = most recent Convera transaction date for this profile's beneficiary
+              const lastUsed = p.converaBeneficiaryId != null
+                ? converaLastPaymentDates.get(p.converaBeneficiaryId)
+                : undefined;
               if (!groupMap.has(p.userId)) groupMap.set(p.userId, { userName, rows: [] });
               groupMap.get(p.userId)!.rows.push({ profile: p, benef, lastUsed });
             }
