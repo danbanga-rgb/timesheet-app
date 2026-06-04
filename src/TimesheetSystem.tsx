@@ -171,6 +171,22 @@ interface PaymentProfile {
   paymentEmail: string;
   isDefault: boolean;
   combinePayments: boolean | null; // null = not yet decided; true = combine wires for this IBAN
+  converaBeneficiaryId: number | null;
+  converaMatchOverride: boolean;
+}
+
+interface ConveraBeneficiary {
+  id: number;
+  beneficiaryId: string;
+  shortName: string;
+  beneficiaryName: string;
+  beneficiaryCountry: string | null;
+  currency: string;
+  defaultPaymentMethod: string;
+  bankName: string | null;
+  bankCountry: string | null;
+  bankAccount: string;
+  ibanUnique: boolean;
 }
 
 interface InvoiceLine {
@@ -562,7 +578,7 @@ const TimesheetSystem = () => {
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
   // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
   const [showConveraModal, setShowConveraModal] = useState(false);
-  const [converaTab, setConveraTab] = useState<'convera' | 'quickbooks' | 'intuit'>('quickbooks');
+  const [converaTab, setConveraTab] = useState<'convera' | 'quickbooks' | 'intuit' | 'beneficiaries'>('quickbooks');
   const [converaFile, setConveraFile] = useState<File | null>(null);
   const [qbFile, setQbFile] = useState<File | null>(null);
   const [intuitText, setIntuitText] = useState('');
@@ -571,6 +587,16 @@ const TimesheetSystem = () => {
   const [converaApplying, setConveraApplying] = useState(false);
   const [converaPaidDate, setConveraPaidDate] = useState('');
   const [converaError, setConveraError] = useState('');
+  // Convera beneficiaries
+  const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
+  const [beneficiaryImportFile, setBeneficiaryImportFile] = useState<File | null>(null);
+  const [beneficiaryImporting, setBeneficiaryImporting] = useState(false);
+  const [beneficiaryImportResult, setBeneficiaryImportResult] = useState<{
+    imported: number; matched: number;
+    unmatched: { profileId: number; userId: string; userName: string }[];
+  } | null>(null);
+  const [beneficiaryOverrideProfileId, setBeneficiaryOverrideProfileId] = useState<number | null>(null);
+  const [beneficiaryOverrideSearch, setBeneficiaryOverrideSearch] = useState('');
   // PDF attachment
   const [invoiceAttachmentFile, setInvoiceAttachmentFile] = useState<File | null>(null);
   const [invoicePhoneConfirm, setInvoicePhoneConfirm] = useState('');
@@ -616,6 +642,7 @@ const TimesheetSystem = () => {
   const emptyProfileForm = (): Omit<PaymentProfile, 'id' | 'userId'> => ({
     profileName: '', companyName: '', companyAddress: '', country: '', bankName: '',
     bankAddress: '', bankBranch: '', accountNumber: '', iban: '', swift: '', paymentEmail: '', isDefault: false, combinePayments: null,
+    converaBeneficiaryId: null, converaMatchOverride: false,
   });
   const [profileForm, setProfileForm] = useState(emptyProfileForm());
   const [passwordResetMode, setPasswordResetMode] = useState(false);
@@ -1363,6 +1390,109 @@ const TimesheetSystem = () => {
     if (data) setPaymentProfiles(data.map(normalisePaymentProfile));
   }
 
+  function normaliseConveraBeneficiary(r: Record<string, unknown>): ConveraBeneficiary {
+    return {
+      id: r.id as number,
+      beneficiaryId: r.beneficiary_id as string,
+      shortName: r.short_name as string,
+      beneficiaryName: r.beneficiary_name as string,
+      beneficiaryCountry: r.beneficiary_country as string | null ?? null,
+      currency: (r.currency as string) || '',
+      defaultPaymentMethod: (r.default_payment_method as string) || '',
+      bankName: r.bank_name as string | null ?? null,
+      bankCountry: r.bank_country as string | null ?? null,
+      bankAccount: (r.bank_account as string) || '',
+      ibanUnique: !!(r.iban_unique as boolean),
+    };
+  }
+
+  async function loadConveraBeneficiaries() {
+    if (converaBeneficiaries.length > 0) return;
+    const { data } = await supabase.from('convera_beneficiaries').select('*').order('short_name');
+    if (data) setConveraBeneficiaries(data.map(normaliseConveraBeneficiary));
+  }
+
+  function normBenefName(s: string): string {
+    return s.toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function autoMatchBeneficiary(contractorName: string, profileIban: string, beneficiaries: ConveraBeneficiary[]): ConveraBeneficiary | null {
+    if (!contractorName) return null;
+    // 1. Unique IBAN match
+    if (profileIban) {
+      const ibanMatches = beneficiaries.filter(b => b.bankAccount === profileIban);
+      if (ibanMatches.length === 1 && ibanMatches[0].ibanUnique) return ibanMatches[0];
+    }
+    // 2. Short name prefix match
+    const normName = normBenefName(contractorName);
+    return beneficiaries.find(b => normBenefName(b.shortName).startsWith(normName)) ?? null;
+  }
+
+  async function importConveraBeneficiaries(file: File) {
+    setBeneficiaryImporting(true);
+    setBeneficiaryImportResult(null);
+    try {
+      const text = await file.text();
+      const raw = JSON.parse(text) as Record<string, unknown>[];
+      const rows = raw.map(r => ({
+        beneficiary_id: String(r['Beneficiary ID'] || ''),
+        short_name: String(r['Short Name'] || ''),
+        beneficiary_name: String(r['Beneficiary Name'] || ''),
+        beneficiary_country: r['Beneficiary Country'] ? String(r['Beneficiary Country']) : null,
+        currency: r['Currency'] ? String(r['Currency']) : null,
+        default_payment_method: r['Default Payment Method'] ? String(r['Default Payment Method']) : null,
+        vendor_id: r['Vendor ID'] ? String(r['Vendor ID']) : null,
+        bank_name: r['Bank Name'] ? String(r['Bank Name']) : null,
+        bank_country: r['Bank Country'] ? String(r['Bank Country']) : null,
+        bank_account: r['Bank Account'] ? String(r['Bank Account']) : null,
+        iban_unique: r['iban_unique'] !== false,
+        updated_by: r['Updated By'] ? String(r['Updated By']) : null,
+        updated_date: r['Updated Date'] ? String(r['Updated Date']) : null,
+      })).filter(r => r.beneficiary_id);
+      // Upsert in batches of 50
+      for (let i = 0; i < rows.length; i += 50) {
+        await supabase.from('convera_beneficiaries').upsert(rows.slice(i, i + 50), { onConflict: 'beneficiary_id' });
+      }
+      // Reload beneficiaries
+      const { data: benefs } = await supabase.from('convera_beneficiaries').select('*').order('short_name');
+      const normBenefs = (benefs || []).map(normaliseConveraBeneficiary);
+      setConveraBeneficiaries(normBenefs);
+      // Auto-match payment profiles (skip manual overrides)
+      const { data: profiles } = await supabase.from('payment_profiles').select('id, user_id, iban, convera_match_override');
+      const unmatched: { profileId: number; userId: string; userName: string }[] = [];
+      let matchedCount = 0;
+      for (const profile of profiles || []) {
+        if (profile.convera_match_override) continue;
+        const user = users.find(u => u.id === profile.user_id);
+        const match = autoMatchBeneficiary(user?.name || '', profile.iban || '', normBenefs);
+        if (match) {
+          await supabase.from('payment_profiles').update({ convera_beneficiary_id: match.id }).eq('id', profile.id);
+          matchedCount++;
+        } else {
+          unmatched.push({ profileId: profile.id, userId: profile.user_id, userName: user?.name || profile.user_id });
+        }
+      }
+      await fetchPaymentProfiles();
+      setBeneficiaryImportResult({ imported: rows.length, matched: matchedCount, unmatched });
+    } catch (e) {
+      console.error('Beneficiary import error:', e);
+    } finally {
+      setBeneficiaryImporting(false);
+    }
+  }
+
+  async function setConveraOverride(profileId: number, beneficiaryId: number | null) {
+    await supabase.from('payment_profiles').update({
+      convera_beneficiary_id: beneficiaryId,
+      convera_match_override: beneficiaryId !== null,
+    }).eq('id', profileId);
+    await fetchPaymentProfiles();
+    setBeneficiaryOverrideProfileId(null);
+    setBeneficiaryOverrideSearch('');
+  }
+
   function normalisePaymentProfile(r: Record<string, unknown>): PaymentProfile {
     return {
       id: r.id as number,
@@ -1380,6 +1510,8 @@ const TimesheetSystem = () => {
       paymentEmail: (r.payment_email as string) || '',
       isDefault: !!(r.is_default as boolean),
       combinePayments: r.combine_payments != null ? !!(r.combine_payments as boolean) : null,
+      converaBeneficiaryId: r.convera_beneficiary_id as number | null ?? null,
+      converaMatchOverride: !!(r.convera_match_override as boolean),
     };
   }
 
@@ -1908,12 +2040,16 @@ const TimesheetSystem = () => {
       'Total Hours','Rate','Total Amount','Currency','Status','Submitted','Pay On Date','Paid Date','Payment Method',
       'Company Name','Company Address','Country',
       'Bank Name','Bank Address','Bank Branch',
-      'Account Number','IBAN','SWIFT/BIC','Payment Email'
+      'Account Number','IBAN','SWIFT/BIC','Payment Email','Convera Short Name'
     ];
     let csv = headers.join(',') + '\n';
     list.forEach(inv => {
       const project = projects.find(p => p.id === inv.projectId);
       const pp = inv.paymentProfile;
+      const profile = pp ? paymentProfiles.find(p => p.id === pp.id) : null;
+      const converaShortName = profile?.converaBeneficiaryId
+        ? (converaBeneficiaries.find(b => b.id === profile.converaBeneficiaryId)?.shortName || '')
+        : '';
       const row = [
         `"${inv.invoiceNumber}"`,
         `"${inv.userName}"`,
@@ -1939,6 +2075,7 @@ const TimesheetSystem = () => {
         `"${pp?.iban || ''}"`,
         `"${pp?.swift || ''}"`,
         `"${pp?.paymentEmail || ''}"`,
+        `"${converaShortName}"`,
       ];
       csv += row.join(',') + '\n';
     });
@@ -3696,7 +3833,7 @@ const TimesheetSystem = () => {
                         </div>
                         <div className="flex gap-2">
                           {p.isDefault && <span className="px-2 py-0.5 bg-teal-100 text-teal-700 text-xs rounded-full">Default</span>}
-                          <button onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments }); setShowProfileModal(true); }}
+                          <button onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride }); setShowProfileModal(true); }}
                             className="p-1 text-indigo-600 hover:text-indigo-800"><Edit2 className="w-4 h-4" /></button>
                         </div>
                       </div>
@@ -4342,7 +4479,7 @@ const TimesheetSystem = () => {
                       </div>
                     </div>
                     <div className="flex justify-end gap-2">
-                      <button onClick={() => setShowConveraModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><UploadCloud className="w-4 h-4" /> Import Convera PDF</button>
+                      <button onClick={() => { setShowConveraModal(true); loadConveraBeneficiaries(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><UploadCloud className="w-4 h-4" /> Import Convera PDF</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                     </div>
                   </div>
@@ -4988,6 +5125,7 @@ const TimesheetSystem = () => {
                       <button onClick={() => { setConveraTab('quickbooks'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'quickbooks' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>QuickBooks Export</button>
                       <button onClick={() => { setConveraTab('convera'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'convera' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera PDF</button>
                       <button onClick={() => { setConveraTab('intuit'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Intuit Emails</button>
+                      <button onClick={() => { setConveraTab('beneficiaries'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'beneficiaries' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera Beneficiaries</button>
                     </div>
                   )}
 
@@ -5064,6 +5202,92 @@ const TimesheetSystem = () => {
                       <div className="flex justify-end mt-3">
                         <button onClick={parseIntuitEmails} disabled={!intuitText.trim()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
                           <FileText className="w-4 h-4" /> Parse Emails
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Convera Beneficiaries import */}
+                  {converaRows.length === 0 && converaTab === 'beneficiaries' && (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-1">Upload the Convera beneficiaries JSON export. Beneficiaries will be upserted and automatically matched to contractor payment profiles by IBAN (unique) or name prefix.</p>
+                      <p className="text-xs text-gray-400 mb-4">In Convera: Beneficiaries &rarr; Export &rarr; JSON format. Re-import anytime to refresh.</p>
+                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
+                        {beneficiaryImportFile ? (
+                          <div className="flex items-center justify-center gap-2 text-indigo-700">
+                            <FileText className="w-5 h-5" />
+                            <span className="text-sm font-medium">{beneficiaryImportFile.name}</span>
+                            <button onClick={() => setBeneficiaryImportFile(null)} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                          </div>
+                        ) : (
+                          <label className="cursor-pointer">
+                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
+                            <p className="text-sm text-gray-600">Click to select beneficiaries JSON</p>
+                            <input type="file" accept=".json" className="hidden" onChange={e => { setBeneficiaryImportFile(e.target.files?.[0] ?? null); setBeneficiaryImportResult(null); }} />
+                          </label>
+                        )}
+                      </div>
+                      {beneficiaryImportResult && (
+                        <div className="mb-4">
+                          <div className="flex gap-4 mb-3">
+                            <span className="px-3 py-1 bg-green-100 text-green-800 rounded text-sm font-medium">{beneficiaryImportResult.imported} imported</span>
+                            <span className="px-3 py-1 bg-indigo-100 text-indigo-800 rounded text-sm font-medium">{beneficiaryImportResult.matched} profiles matched</span>
+                            {beneficiaryImportResult.unmatched.length > 0 && (
+                              <span className="px-3 py-1 bg-amber-100 text-amber-800 rounded text-sm font-medium">{beneficiaryImportResult.unmatched.length} unmatched</span>
+                            )}
+                          </div>
+                          {beneficiaryImportResult.unmatched.length > 0 && (
+                            <div className="border border-amber-200 rounded-lg divide-y divide-amber-100 max-h-60 overflow-y-auto">
+                              {beneficiaryImportResult.unmatched.map(u => (
+                                <div key={u.profileId} className="flex items-center justify-between px-3 py-2 bg-amber-50">
+                                  <span className="text-sm text-gray-700">{u.userName}</span>
+                                  <button
+                                    onClick={() => setBeneficiaryOverrideProfileId(u.profileId)}
+                                    className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+                                  >Link manually</button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {/* Manual override picker */}
+                          {beneficiaryOverrideProfileId && (() => {
+                            const unmatchedEntry = beneficiaryImportResult.unmatched.find(u => u.profileId === beneficiaryOverrideProfileId);
+                            const filtered = converaBeneficiaries.filter(b =>
+                              beneficiaryOverrideSearch === '' ||
+                              b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) ||
+                              b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase())
+                            );
+                            return (
+                              <div className="mt-3 border border-indigo-200 rounded-lg p-3 bg-indigo-50">
+                                <p className="text-sm font-medium text-indigo-800 mb-2">Link <strong>{unmatchedEntry?.userName}</strong> to a Convera beneficiary:</p>
+                                <input
+                                  type="text" value={beneficiaryOverrideSearch}
+                                  onChange={e => setBeneficiaryOverrideSearch(e.target.value)}
+                                  placeholder="Search by name..." autoFocus
+                                  className="w-full px-3 py-1.5 border border-indigo-200 rounded text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                />
+                                <div className="max-h-40 overflow-y-auto divide-y divide-indigo-100">
+                                  {filtered.slice(0, 20).map(b => (
+                                    <button key={b.id} onClick={() => setConveraOverride(beneficiaryOverrideProfileId, b.id)}
+                                      className="w-full text-left px-2 py-1.5 hover:bg-indigo-100 text-sm">
+                                      <span className="font-mono text-xs text-indigo-600 mr-2">{b.shortName}</span>
+                                      <span className="text-gray-600 text-xs">{b.bankAccount}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                                <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="mt-2 text-xs text-gray-500 hover:underline">Cancel</button>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+                      <div className="flex justify-end">
+                        <button
+                          onClick={() => beneficiaryImportFile && importConveraBeneficiaries(beneficiaryImportFile)}
+                          disabled={!beneficiaryImportFile || beneficiaryImporting}
+                          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm"
+                        >
+                          {beneficiaryImporting ? <><Clock className="w-4 h-4 animate-spin" /> Importing&hellip;</> : <><UploadCloud className="w-4 h-4" /> Import &amp; Match</>}
                         </button>
                       </div>
                     </div>
@@ -5237,6 +5461,62 @@ const TimesheetSystem = () => {
                             <div key={label as string}><span className="text-gray-500">{label}: </span><span className="font-medium text-gray-800 font-mono">{value}</span></div>
                           ))}
                         </div>
+                        {/* Convera match */}
+                        {(() => {
+                          const profile = paymentProfiles.find(p => p.id === inv.paymentProfile?.id);
+                          if (!profile) return null;
+                          const benef = converaBeneficiaries.find(b => b.id === profile.converaBeneficiaryId);
+                          return (
+                            <div className="px-4 pb-4">
+                              <div className="mt-3 pt-3 border-t border-gray-100">
+                                <div className="flex items-center justify-between">
+                                  <div>
+                                    <p className="text-xs font-medium text-gray-500 mb-0.5">Convera Beneficiary</p>
+                                    {benef ? (
+                                      <div>
+                                        <p className="text-sm font-medium text-gray-800">{benef.shortName}</p>
+                                        <p className="text-xs text-gray-500">{benef.beneficiaryName}</p>
+                                        {profile.converaMatchOverride && <span className="text-xs text-amber-600">&#9889; Manual override</span>}
+                                      </div>
+                                    ) : (
+                                      <p className="text-sm text-amber-600">Not matched</p>
+                                    )}
+                                  </div>
+                                  <button
+                                    onClick={() => { setBeneficiaryOverrideProfileId(profile.id); loadConveraBeneficiaries(); }}
+                                    className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 text-gray-600"
+                                  >Change</button>
+                                </div>
+                                {beneficiaryOverrideProfileId === profile.id && (
+                                  <div className="mt-2 border border-indigo-200 rounded-lg p-2 bg-indigo-50">
+                                    <input
+                                      type="text" value={beneficiaryOverrideSearch}
+                                      onChange={e => setBeneficiaryOverrideSearch(e.target.value)}
+                                      placeholder="Search beneficiary..." autoFocus
+                                      className="w-full px-2 py-1 border border-indigo-200 rounded text-sm mb-2 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                                    />
+                                    <div className="max-h-36 overflow-y-auto divide-y divide-indigo-100">
+                                      {converaBeneficiaries
+                                        .filter(b => !beneficiaryOverrideSearch || b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) || b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()))
+                                        .slice(0, 15)
+                                        .map(b => (
+                                          <button key={b.id} onClick={() => setConveraOverride(profile.id, b.id)}
+                                            className="w-full text-left px-2 py-1 hover:bg-indigo-100 text-xs">
+                                            <span className="font-mono text-indigo-600 mr-2">{b.shortName}</span>
+                                            <span className="text-gray-500">{b.bankAccount}</span>
+                                          </button>
+                                        ))}
+                                    </div>
+                                    <div className="flex gap-2 mt-1">
+                                      {benef && <button onClick={() => setConveraOverride(profile.id, null)} className="text-xs text-red-500 hover:underline">Clear match</button>}
+                                      <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="text-xs text-gray-500 hover:underline ml-auto">Cancel</button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                     {inv.notes && <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700 mb-4"><span className="font-medium">Notes: </span>{inv.notes}</div>}
@@ -6188,7 +6468,7 @@ const TimesheetSystem = () => {
                               <div className="text-xs text-gray-500 truncate">{p.companyName} · {p.bankName}{p.accountNumber ? ' · Acct: ' + p.accountNumber : ''}</div>
                             </div>
                             <button
-                              onClick={e => { e.preventDefault(); setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments }); setShowProfileModal(true); }}
+                              onClick={e => { e.preventDefault(); setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride }); setShowProfileModal(true); }}
                               className="p-1 text-gray-400 hover:text-indigo-600"
                             ><Edit2 className="w-3.5 h-3.5" /></button>
                           </label>
@@ -6417,7 +6697,7 @@ const TimesheetSystem = () => {
                         </div>
                         <div className="flex gap-2">
                           <button
-                            onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments }); setShowProfileModal(true); }}
+                            onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride }); setShowProfileModal(true); }}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 text-sm"
                           ><Edit2 className="w-3.5 h-3.5" /> Edit</button>
                           <button onClick={() => deletePaymentProfile(p.id)} className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 text-sm"><Trash2 className="w-3.5 h-3.5" /> Delete</button>
