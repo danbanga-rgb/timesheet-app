@@ -1330,14 +1330,17 @@ async function claudeExtractPaymentOnly(text, pdfBuffer, isImagePdf) {
 }
 
 // Claude: full invoice extraction — only called when regex lacks period or hours.
-async function claudeFullExtractInvoice(text, pdfBuffer, isImagePdf, filename) {
+async function claudeFullExtractInvoice(text, pdfBuffer, isImagePdf, filename, emailBodyText = '') {
   if (!CONFIG.anthropicApiKey) return null;
   try {
     const Anthropic = require('@anthropic-ai/sdk');
     const client    = new Anthropic({ apiKey: CONFIG.anthropicApiKey });
     let userContent;
     if (text) {
-      userContent = `Extract invoice data from this document:\n\n${text}`;
+      const bodyPrefix = emailBodyText
+        ? `Email body (may contain invoice breakdown):\n${emailBodyText.slice(0, 1000)}\n\n`
+        : '';
+      userContent = `${bodyPrefix}Extract invoice data from this document:\n\n${text}`;
     } else if (isImagePdf && pdfBuffer) {
       console.log(`  📄 ${filename}: image PDF — using vision (costs more)`);
       userContent = [
@@ -1398,7 +1401,7 @@ async function claudeFullExtractInvoice(text, pdfBuffer, isImagePdf, filename) {
 // 2a. Regex has period + hours + payment → done, zero Claude calls
 // 2b. Regex has period + hours, missing payment → Claude for payment details only
 // 2c. Regex missing period or hours → full Claude extract, merge regex on top
-async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename) {
+async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '') {
   // ── Step 1: regex parser ───────────────────────────────────────────────────
   let regexResult = null;
   if (pdfText && pdfText.length > 30) {
@@ -1456,7 +1459,7 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename) {
 
   console.log(`  🤖 Claude: ${filename}`);
   const claudeResult = await claudeFullExtractInvoice(
-    pdfText ? prepareInvoiceText(pdfText) : null, pdfBuffer, isImagePdf, filename
+    pdfText ? prepareInvoiceText(pdfText) : null, pdfBuffer, isImagePdf, filename, emailBodyText
   );
 
   if (!claudeResult) {
@@ -1751,8 +1754,23 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   // ── Invoice PDFs — parse and report (ingest if enabled) ──────────────────
   for (const att of invoiceAtts) {
     console.log(`  🧾 Invoice attachment: ${att.name}`);
-    let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name);
+    let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name, bodyText || '');
     if (parsed) parsed = applyEarlyMonthPeriodFix(parsed);
+    // Supplement missing invoice fields from email body (fill-in only, never overrides PDF values)
+    if (parsed && bodyText && (parsed.totalHours == null || parsed.rate == null || parsed.totalAmount == null)) {
+      try {
+        const { parseInvoice } = require('../invoice-parser/parser.js');
+        const bodyResult = parseInvoice(bodyText.slice(0, 3000), 'email-body');
+        const changed = [];
+        if (parsed.totalHours == null && bodyResult?.totalHours != null) { parsed.totalHours = bodyResult.totalHours; changed.push(`hours→${bodyResult.totalHours}`); }
+        if (parsed.rate == null && bodyResult?.rate != null) { parsed.rate = bodyResult.rate; changed.push(`rate→${bodyResult.rate}`); }
+        if (parsed.totalAmount == null && bodyResult?.totalAmount != null) { parsed.totalAmount = bodyResult.totalAmount; changed.push(`amount→${bodyResult.totalAmount}`); }
+        if (changed.length) {
+          console.log(`  📧 Body supplement for ${att.name}: ${changed.join(', ')}`);
+          parsed.parseMethod = (parsed.parseMethod || 'unknown') + '+body';
+        }
+      } catch {}
+    }
     // Subject hint overrides extracted period — e.g. "[Invoice 05/26]" beats a June date
     // parsed from the PDF when the contractor invoices for the previous month.
     if (parsed) {
