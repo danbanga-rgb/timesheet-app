@@ -337,12 +337,13 @@ function reconcileInvoiceLive(
     ts.userId === userId && ts.weekStart >= rangeStartStr && ts.weekStart <= periodEnd
   );
 
-  // All Mondays whose week overlaps the invoice period (to detect missing weeks)
+  // All Mondays whose week overlaps the invoice period (to detect missing weeks).
+  // Start from Monday of periodStart (not rangeStart) — weeks before periodStart don't count.
   const expectedWeeks: string[] = [];
-  const cur = new Date(rangeStart.getTime());
-  // Align to the Monday on/before rangeStart
-  const dow = cur.getDay();
-  cur.setDate(cur.getDate() - (dow === 0 ? 6 : dow - 1));
+  const firstDay = new Date(periodStart + 'T12:00:00');
+  const firstDow = firstDay.getDay();
+  firstDay.setDate(firstDay.getDate() - (firstDow === 0 ? 6 : firstDow - 1));
+  const cur = new Date(firstDay.getTime());
   while (cur.toISOString().slice(0, 10) <= periodEnd) {
     expectedWeeks.push(cur.toISOString().slice(0, 10));
     cur.setDate(cur.getDate() + 7);
