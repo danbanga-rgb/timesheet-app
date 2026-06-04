@@ -1777,10 +1777,22 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     // - extends period if body shows a wider date range than the PDF extracted
     // - takes body prose total hours when larger than PDF (invoice spanning two months)
     if (parsed && bodyText) {
+      const changed = [];
+      // Prose total hours runs first, outside require try/catch — no external dependency
+      const proseHours = extractTotalHoursFromBodyProse(bodyText);
+      if (proseHours != null && proseHours > (parsed.totalHours ?? 0)) {
+        const oldHours = parsed.totalHours;
+        parsed.totalHours = proseHours;
+        changed.push(`hours ${oldHours}→${proseHours} (prose)`);
+        if (parsed.totalAmount != null) {
+          const derivedRate = Math.round((parsed.totalAmount / proseHours) * 100) / 100;
+          if (derivedRate >= 1 && derivedRate < 10000) { parsed.rate = derivedRate; changed.push(`rate re-derived→${derivedRate}`); }
+        }
+      }
+      // Regex parser for period extension and missing structured fields
       try {
         const { parseInvoice } = require('../invoice-parser/parser.js');
         const bodyResult = parseInvoice(bodyText.slice(0, 3000), 'email-body');
-        const changed = [];
         if (parsed.totalHours == null && bodyResult?.totalHours != null) { parsed.totalHours = bodyResult.totalHours; changed.push(`hours→${bodyResult.totalHours}`); }
         if (parsed.rate == null && bodyResult?.rate != null) { parsed.rate = bodyResult.rate; changed.push(`rate→${bodyResult.rate}`); }
         if (parsed.totalAmount == null && bodyResult?.totalAmount != null) { parsed.totalAmount = bodyResult.totalAmount; changed.push(`amount→${bodyResult.totalAmount}`); }
@@ -1791,23 +1803,11 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         if (bodyResult?.periodEnd && parsed.periodEnd && bodyResult.periodEnd > parsed.periodEnd) {
           parsed.periodEnd = bodyResult.periodEnd; changed.push(`periodEnd→${bodyResult.periodEnd}`);
         }
-        // Body prose total: "amounting to 192h" — overrides PDF hours when body total is larger
-        // and re-derives rate from amount / newHours so the numbers stay consistent
-        const proseHours = extractTotalHoursFromBodyProse(bodyText);
-        if (proseHours != null && proseHours > (parsed.totalHours ?? 0)) {
-          const oldHours = parsed.totalHours;
-          parsed.totalHours = proseHours;
-          changed.push(`hours ${oldHours}→${proseHours} (prose)`);
-          if (parsed.totalAmount != null) {
-            const derivedRate = Math.round((parsed.totalAmount / proseHours) * 100) / 100;
-            if (derivedRate >= 1 && derivedRate < 10000) { parsed.rate = derivedRate; changed.push(`rate re-derived→${derivedRate}`); }
-          }
-        }
-        if (changed.length) {
-          console.log(`  📧 Body supplement for ${att.name}: ${changed.join(', ')}`);
-          parsed.parseMethod = (parsed.parseMethod || 'unknown') + '+body';
-        }
       } catch {}
+      if (changed.length) {
+        console.log(`  📧 Body supplement for ${att.name}: ${changed.join(', ')}`);
+        parsed.parseMethod = (parsed.parseMethod || 'unknown') + '+body';
+      }
     }
     // Subject hint overrides extracted period — e.g. "[Invoice 05/26]" beats a June date
     // parsed from the PDF when the contractor invoices for the previous month.
@@ -2360,7 +2360,7 @@ ${(bodyText || '').slice(0, 2000)}`;
 }
 
 async function sendInvoiceAccountingEmail(invoiceReports) {
-  const ingested   = invoiceReports.filter(r => r.ingestOk && r.action !== 'invoice_corrected');
+  const ingested   = invoiceReports.filter(r => r.ingestOk && r.action !== 'invoice_corrected' && r.action !== 'invoice_duplicate' && r.action !== 'invoice_reattached');
   const corrected  = invoiceReports.filter(r => r.action === 'invoice_corrected');
   const failed     = invoiceReports.filter(r => !r.ingestOk && r.action !== 'invoice_reported');
   const skipped    = invoiceReports.filter(r => r.action === 'invoice_duplicate' || r.action === 'invoice_reattached');
