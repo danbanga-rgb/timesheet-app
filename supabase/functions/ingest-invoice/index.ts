@@ -302,8 +302,8 @@ serve(async (req) => {
   const parsedHours       = totalHours  != null ? Number(totalHours) : null;
   const parsedAmount      = totalAmount != null ? Number(totalAmount) : null;
 
-  if (!parsedPeriodStart || !parsedPeriodEnd || parsedHours === null) {
-    const notes = [parseNotes, 'Insufficient data: missing period or hours'].filter(Boolean).join(' | ');
+  if (!parsedPeriodStart || !parsedPeriodEnd) {
+    const notes = [parseNotes, 'Insufficient data: billing period not found'].filter(Boolean).join(' | ');
     await supabase.from('email_invoice_log').insert({
       message_id:     messageId,
       from_email:     contractorEmail,
@@ -328,7 +328,7 @@ serve(async (req) => {
   let resolvedInvoiceNumber: string | null = null;
 
   try {
-    const parsedRate   = rate != null ? Number(rate) : 0;
+    const parsedRate     = rate != null ? Number(rate) : null;
     const parsedCurrency = (currency as string) || 'USD';
 
     // Use parsed invoice number or generate one
@@ -336,13 +336,16 @@ serve(async (req) => {
       || await generateInvoiceNumber(contractorEmail as string, parsedPeriodStart, supabase);
     resolvedInvoiceNumber = finalInvoiceNumber;
 
-    // Synthetic single line representing the full period
+    // Synthetic single line representing the full period.
+    // hours/rate may be null for amount-only invoices (no hourly breakdown).
+    const computedAmount = parsedAmount
+      ?? (parsedHours != null && parsedRate != null ? parsedHours * parsedRate : 0);
     const lines = [{
-      weekStart:    parsedPeriodStart,
+      weekStart:     parsedPeriodStart,
       weekEndingFri: parsedPeriodEnd,
-      hours:        parsedHours,
-      rate:         parsedRate,
-      amount:       parsedAmount ?? parsedHours * parsedRate,
+      hours:         parsedHours,
+      rate:          parsedRate,
+      amount:        computedAmount,
     }];
 
     // Build payment profile snapshot from parsed bank details (if any)
@@ -425,8 +428,10 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    // ── Reconcile against approved timesheets ─────────────────────────────
-    const recon = await reconcile(userId, parsedPeriodStart, parsedPeriodEnd, parsedHours, supabase);
+    // ── Reconcile against approved timesheets (skip for amount-only invoices) ──
+    const recon = parsedHours != null
+      ? await reconcile(userId, parsedPeriodStart, parsedPeriodEnd, parsedHours, supabase)
+      : { status: 'unverifiable' as const, delta: null, notes: 'No hours on invoice — amount-only, cannot reconcile' };
 
     // ── Insert invoice ────────────────────────────────────────────────────
     const { data: inserted, error: insertErr } = await supabase
@@ -441,7 +446,7 @@ serve(async (req) => {
         lines,
         total_hours:              parsedHours,
         rate:                     parsedRate,
-        total_amount:             parsedAmount ?? parsedHours * parsedRate,
+        total_amount:             computedAmount,
         currency:                 parsedCurrency,
         status:                   'submitted',
         submitted_at:             new Date().toISOString(),

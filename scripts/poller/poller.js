@@ -1187,7 +1187,37 @@ function prepareInvoiceText(text) {
   return text.replace(/[ \t]{3,}/g, '  ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 3000);
 }
 
-// Shared post-processing: EUR→USD override + rate cross-validation.
+// Deterministic period correction for early-month invoices.
+// When a full calendar-month period lands in the current month and we're in the
+// first 10 days, assume it's for the PREVIOUS month — contractors frequently
+// label their June invoice "June 2026" even when billing for May work.
+// This is a hard post-parse override; it does NOT rely on Claude heuristics.
+function applyEarlyMonthPeriodFix(result) {
+  if (!result?.periodStart || !result?.periodEnd) return result;
+  const today = new Date();
+  if (today.getUTCDate() > 10) return result;
+
+  // Only applies to full calendar months (1st → last day of same month)
+  const [py, pm] = result.periodStart.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(py, pm, 0)).getUTCDate();
+  const isFullMonth = result.periodStart.endsWith('-01')
+    && result.periodEnd === `${py}-${String(pm).padStart(2, '0')}-${lastDay}`;
+  if (!isFullMonth) return result;
+
+  // Only applies when the period is the CURRENT month
+  const todayYM = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}`;
+  if (result.periodStart.slice(0, 7) !== todayYM) return result;
+
+  // Shift back one month
+  const prevStart = new Date(Date.UTC(py, pm - 2, 1));
+  const prevEnd   = new Date(Date.UTC(py, pm - 1, 0));
+  const newStart  = prevStart.toISOString().slice(0, 10);
+  const newEnd    = prevEnd.toISOString().slice(0, 10);
+  console.warn(`  📅 Early-month period fix: ${result.periodStart}–${result.periodEnd} → ${newStart}–${newEnd} (day ${today.getUTCDate()} of month)`);
+  return { ...result, periodStart: newStart, periodEnd: newEnd };
+}
+
+// Shared post-processing: EUR→USD override + rate/hours derivation.
 // Applied to both regex and Claude results before returning.
 function postProcessInvoice(result, pdfText) {
   if (!result) return result;
@@ -1211,13 +1241,14 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
-  // Rate cross-validation: rate × hours off from total by >10% → recompute from total ÷ hours.
+  // Derive missing rate or hours from the other two — but never override explicitly found values.
+  // If both rate and hours are found, trust them as-is even if rate × hours ≠ total.
   const h = result.totalHours, r = result.rate, t = result.totalAmount;
-  if (h != null && r != null && t != null && t > 0 && Math.abs(h * r - t) / t > 0.10) {
-    result = { ...result, rate: null };
-  }
-  if (result.totalHours != null && result.rate == null && result.totalAmount != null) {
-    const derived = result.totalAmount / result.totalHours;
+  if (h == null && r != null && r > 0 && t != null) {
+    const derived = t / r;
+    if (derived >= 1 && derived < 10000) result = { ...result, totalHours: Math.round(derived * 100) / 100 };
+  } else if (r == null && h != null && h > 0 && t != null) {
+    const derived = t / h;
     if (derived >= 1 && derived < 10000) result = { ...result, rate: Math.round(derived * 100) / 100 };
   }
 
@@ -1720,7 +1751,8 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   // ── Invoice PDFs — parse and report (ingest if enabled) ──────────────────
   for (const att of invoiceAtts) {
     console.log(`  🧾 Invoice attachment: ${att.name}`);
-    const parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name);
+    let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name);
+    if (parsed) parsed = applyEarlyMonthPeriodFix(parsed);
     // Subject hint overrides extracted period — e.g. "[Invoice 05/26]" beats a June date
     // parsed from the PDF when the contractor invoices for the previous month.
     if (parsed) {
@@ -1797,7 +1829,8 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       continue; // skip single-contractor path
     }
 
-    const canIngest = parsed?.periodStart && parsed?.periodEnd && parsed?.totalHours != null;
+    // Hours are optional — amount-only invoices (no hourly breakdown) are valid.
+    const canIngest = !!(parsed?.periodStart && parsed?.periodEnd);
 
     if (CONFIG.invoiceIngestEnabled && CONFIG.invoiceIngestUrl && canIngest) {
       try {
@@ -2281,7 +2314,7 @@ async function sendInvoiceAccountingEmail(invoiceReports) {
     const a = r.action || '';
     if (a.includes('unknown_contractor'))          return 'Contractor not in system — add via admin panel first';
     if (a.includes('direct_invoice_not_accepted')) return 'Email not forwarded by accounting — direct submissions not accepted';
-    if (a.includes('partial'))                     return `Missing required fields — could not parse period or hours from PDF (${r.parsed?.parseNotes || 'no detail'})`;
+    if (a.includes('partial'))                     return `Missing required fields — could not parse billing period from PDF (${r.parsed?.parseNotes || 'no detail'})`;
     if (a.includes('failed'))                      return `Processing error — check import log`;
     return `Unexpected status: ${a}`;
   }
@@ -2318,7 +2351,6 @@ async function sendInvoiceAccountingEmail(invoiceReports) {
       if (p.rate)        body += `  |  Rate: ${sym}${p.rate}`;
       if (p.totalAmount) body += `  |  Total: ${sym}${p.totalAmount} ${p.currency || 'USD'}`;
       body += '\n';
-      body += `  Match    : ${reconBadge(inv.reconciliationStatus, inv.reconciliationDelta)}\n`;
     }
   }
 
@@ -2417,7 +2449,7 @@ Parse method breakdown:
     for (const inv of summary.invoiceReports) {
       const p = inv.parsed;
       const pd = p?.paymentDetails || {};
-      const canIngest = p?.periodStart && p?.periodEnd && p?.totalHours != null;
+      const canIngest = p?.periodStart && p?.periodEnd;
       const tag = (val, assumed) => val != null && val !== '' ? `${val}` : (assumed ? `(assumed: ${assumed})` : '—');
 
       body += `
@@ -2429,7 +2461,7 @@ Parse method breakdown:
   Bank       : ${tag(pd.bankName)}   Account: ${tag(pd.accountNumber)}   IBAN: ${tag(pd.iban)}
   SWIFT      : ${tag(pd.swift)}   Sort Code: ${tag(pd.sortCode)}   Routing: ${tag(pd.routingNumber)}
   ${p?.parseNotes ? `Notes: ${p.parseNotes}` : ''}
-  ${canIngest ? '>> OK to ingest' : '>> MISSING required fields (period or hours)'}
+  ${canIngest ? '>> OK to ingest' : '>> MISSING required fields (billing period not found)'}
 `;
     }
   }

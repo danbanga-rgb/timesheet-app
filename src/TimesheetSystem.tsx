@@ -176,8 +176,8 @@ interface PaymentProfile {
 interface InvoiceLine {
   weekStart: string;
   weekEndingFri: string;
-  hours: number;
-  rate: number;
+  hours: number | null;
+  rate: number | null;
   amount: number;
   userId?: string;
   userName?: string;
@@ -192,8 +192,8 @@ interface Invoice {
   periodStart: string;
   periodEnd: string;
   lines: InvoiceLine[];
-  totalHours: number;
-  rate: number;
+  totalHours: number | null;
+  rate: number | null;
   totalAmount: number;
   currency: string;
   status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'paid';
@@ -325,6 +325,7 @@ function reconcileInvoiceLive(
   allTimesheets: Timesheet[]
 ): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null; rows: ReconTimesheetRow[] } {
   const { userId, periodStart, periodEnd, totalHours } = invoice;
+  if (totalHours == null) return { status: 'unverifiable', delta: null, timesheetHours: null, rows: [] };
 
   // Week range: week_start can be up to 6 days before periodStart and still contain period days
   const rangeStart = new Date(periodStart + 'T12:00:00');
@@ -1373,8 +1374,8 @@ const TimesheetSystem = () => {
       periodStart: (r.period_start as string)?.split('T')[0],
       periodEnd: (r.period_end as string)?.split('T')[0],
       lines: (r.lines as InvoiceLine[]) || [],
-      totalHours: r.total_hours as number,
-      rate: r.rate as number,
+      totalHours: r.total_hours != null ? (r.total_hours as number) : null,
+      rate: r.rate != null ? (r.rate as number) : null,
       totalAmount: r.total_amount as number,
       currency: (r.currency as string) || 'USD',
       status: r.status as Invoice['status'],
@@ -1444,7 +1445,7 @@ const TimesheetSystem = () => {
     const lines = buildInvoiceLines(currentUser!.id, invoiceMonth.start, invoiceMonth.end, rate);
     if (lines.length === 0) { alert('No approved timesheets found in this period.'); return; }
 
-    const totalHours = lines.reduce((s, l) => s + l.hours, 0);
+    const totalHours = lines.reduce((s, l) => s + (l.hours ?? 0), 0);
     const totalAmount = lines.reduce((s, l) => s + l.amount, 0);
 
     // Attach selected payment profile snapshot
@@ -1507,8 +1508,8 @@ const TimesheetSystem = () => {
   };
 
   const applyUsdRate = async (inv: Invoice, usdRate: number) => {
-    const totalAmount = Math.round(inv.totalHours * usdRate * 100) / 100;
-    const newLines = inv.lines.map(l => ({ ...l, rate: usdRate, amount: Math.round(l.hours * usdRate * 100) / 100 }));
+    const totalAmount = Math.round((inv.totalHours ?? 0) * usdRate * 100) / 100;
+    const newLines = inv.lines.map(l => ({ ...l, rate: usdRate, amount: Math.round((l.hours ?? 0) * usdRate * 100) / 100 }));
     const { error } = await supabase.from('invoices').update({
       rate: usdRate, total_amount: totalAmount, currency: 'USD', lines: newLines,
     }).eq('id', inv.id);
@@ -1899,8 +1900,8 @@ const TimesheetSystem = () => {
         `"${project?.name || 'N/A'}"`,
         `"${inv.periodStart}"`,
         `"${inv.periodEnd}"`,
-        inv.totalHours.toFixed(2),
-        inv.rate,
+        inv.totalHours != null ? inv.totalHours.toFixed(2) : '',
+        inv.rate ?? '',
         inv.totalAmount.toFixed(2),
         `"${inv.currency}"`,
         `"${inv.status}"`,
@@ -3310,7 +3311,7 @@ const TimesheetSystem = () => {
       const lines = allVmLines;
       if (lines.length === 0) { alert('No approved timesheets found for any user in this period.'); return; }
 
-      const totalHours = lines.reduce((s, l) => s + l.hours, 0);
+      const totalHours = lines.reduce((s, l) => s + (l.hours ?? 0), 0);
       const totalAmount = lines.reduce((s, l) => s + l.amount, 0);
 
       // Save phone if changed
@@ -3523,7 +3524,7 @@ const TimesheetSystem = () => {
                         </div>
                         {rate > 0 && lines.length > 0 && (
                           <div className="text-right text-xs text-teal-700 font-medium whitespace-nowrap">
-                            {lines.reduce((s,l) => s+l.hours,0).toFixed(1)}h = {sym}{total.toFixed(2)}
+                            {lines.reduce((s,l) => s+(l.hours ?? 0),0).toFixed(1)}h = {sym}{total.toFixed(2)}
                           </div>
                         )}
                         {rate > 0 && lines.length === 0 && vmPeriod.start && (
@@ -3584,7 +3585,7 @@ const TimesheetSystem = () => {
                   <div className="flex justify-between items-center">
                     <div>
                       <div className="text-sm opacity-90">Total Hours</div>
-                      <div className="text-2xl font-bold">{allVmLines.reduce((s,l) => s+l.hours, 0).toFixed(1)}h</div>
+                      <div className="text-2xl font-bold">{allVmLines.reduce((s,l) => s+(l.hours ?? 0), 0).toFixed(1)}h</div>
                     </div>
                     <div className="text-right">
                       <div className="text-sm opacity-90">Total Amount</div>
@@ -3594,7 +3595,7 @@ const TimesheetSystem = () => {
                   <div className="mt-3 text-sm opacity-80">
                     {[...new Set(allVmLines.map(l => l.userName))].map(name => {
                       const userLines = allVmLines.filter(l => l.userName === name);
-                      const hrs = userLines.reduce((s,l) => s+l.hours, 0);
+                      const hrs = userLines.reduce((s,l) => s+(l.hours ?? 0), 0);
                       const amt = userLines.reduce((s,l) => s+l.amount, 0);
                       return <div key={name}>{name}: {hrs.toFixed(1)}h = {sym}{amt.toFixed(2)}</div>;
                     })}
@@ -3633,7 +3634,7 @@ const TimesheetSystem = () => {
                               <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
                             </div>
                             <p className="text-sm text-gray-600">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} – {parseLocalDate(inv.periodEnd).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
-                            <p className="text-xs text-gray-500 mt-1">{inv.lines.length} line{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours.toFixed(1)} hrs · {employees.join(', ')}</p>
+                            <p className="text-xs text-gray-500 mt-1">{inv.lines.length} line{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours != null ? inv.totalHours.toFixed(1) + ' hrs' : '—'} · {employees.join(', ')}</p>
                             {inv.payOnDate && <p className="text-xs text-blue-600 mt-0.5 font-medium">📅 Expected payment: {new Date(inv.payOnDate).toLocaleDateString()}</p>}
                             {inv.paidDate && <p className="text-xs text-green-600 mt-0.5 font-medium">✅ Paid: {new Date(inv.paidDate).toLocaleDateString()}</p>}
                           </div>
@@ -4311,8 +4312,8 @@ const TimesheetSystem = () => {
                                     <td className="border border-gray-200 px-4 py-3 font-medium text-gray-800">{inv.userName}</td>
                                     <td className="border border-gray-200 px-4 py-3 whitespace-nowrap">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
                                     <td className="border border-gray-200 px-4 py-3 text-indigo-600 text-xs">{project?.name || '—'}</td>
-                                    <td className="border border-gray-200 px-4 py-3 text-center">{inv.totalHours.toFixed(2)}</td>
-                                    <td className="border border-gray-200 px-4 py-3 text-center text-gray-500">{sym}{inv.rate.toFixed(2)}</td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center">{inv.totalHours?.toFixed(2) ?? '—'}</td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center text-gray-500">{inv.rate != null ? `${sym}${inv.rate.toFixed(2)}` : '—'}</td>
                                     <td className="border border-gray-200 px-4 py-3 text-right font-bold text-gray-800">
                                       {sym}{inv.totalAmount.toFixed(2)}
                                       {inv.source === 'imported' && inv.currency !== 'USD' && (
@@ -4390,7 +4391,7 @@ const TimesheetSystem = () => {
                               rowIdx++;
                               const groupKey = group[0].invoiceNumber;
                               const groupPeriod = parseLocalDate(group[0].periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-                              const groupTotalHours = group.reduce((s, i) => s + i.totalHours, 0);
+                              const groupTotalHours = group.reduce((s, i) => s + (i.totalHours ?? 0), 0);
                               const groupTotalAmount = group.reduce((s, i) => s + i.totalAmount, 0);
                               const groupSym = currencySymbols[group[0].currency] || '$';
                               const submittedInGroup = group.filter(i => i.status === 'submitted');
@@ -4478,8 +4479,8 @@ const TimesheetSystem = () => {
                                       <td className="border border-gray-200 px-4 py-2 font-medium text-gray-800 text-sm">{inv.userName}</td>
                                       <td className="border border-gray-200 px-4 py-2 text-gray-400 text-xs">—</td>
                                       <td className="border border-gray-200 px-4 py-2 text-indigo-600 text-xs">{project?.name || '—'}</td>
-                                      <td className="border border-gray-200 px-4 py-2 text-center text-sm">{inv.totalHours.toFixed(2)}</td>
-                                      <td className="border border-gray-200 px-4 py-2 text-center text-gray-500 text-sm">{sym}{inv.rate.toFixed(2)}</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center text-sm">{inv.totalHours?.toFixed(2) ?? '—'}</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center text-gray-500 text-sm">{inv.rate != null ? `${sym}${inv.rate.toFixed(2)}` : '—'}</td>
                                       <td className="border border-gray-200 px-4 py-2 text-right font-semibold text-gray-800 text-sm">
                                         {sym}{inv.totalAmount.toFixed(2)}
                                         {inv.source === 'imported' && inv.currency !== 'USD' && (
@@ -4554,7 +4555,7 @@ const TimesheetSystem = () => {
                         <tfoot className="bg-gray-100 font-semibold">
                           <tr>
                             <td className="border border-gray-200 px-4 py-3 text-gray-700" colSpan={4}>Filtered Total ({filtered.length} invoices)</td>
-                            <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + i.totalHours, 0).toFixed(2)}</td>
+                            <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + (i.totalHours ?? 0), 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3" colSpan={5}></td>
@@ -5045,8 +5046,8 @@ const TimesheetSystem = () => {
                     </div>
                     <div className="grid grid-cols-2 gap-4 mb-5 text-sm">
                       <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Period</div><div className="font-medium">{parseLocalDate(inv.periodStart).toLocaleDateString()} – {parseLocalDate(inv.periodEnd).toLocaleDateString()}</div></div>
-                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Rate</div><div className="font-medium">{sym}{inv.rate.toFixed(2)} / hour ({inv.currency})</div></div>
-                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours.toFixed(2)}</div></div>
+                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Rate</div><div className="font-medium">{inv.rate != null ? `${sym}${inv.rate.toFixed(2)} / hour (${inv.currency})` : `— (${inv.currency})`}</div></div>
+                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours?.toFixed(2) ?? '—'}</div></div>
                       <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Submitted</div><div className="font-medium">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : '—'}</div></div>
                       {inv.payOnDate && (
                         <div className="bg-blue-50 rounded-lg p-3 border border-blue-200"><div className="text-blue-500 mb-0.5">Pay On Date</div><div className="font-medium text-blue-800">{new Date(inv.payOnDate).toLocaleDateString()}</div></div>
@@ -5074,8 +5075,8 @@ const TimesheetSystem = () => {
                         {inv.lines.map((line, i) => (
                           <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                             <td className="px-4 py-2 border border-gray-200">W/E {parseLocalDate(line.weekEndingFri).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
-                            <td className="px-4 py-2 border border-gray-200 text-center">{line.hours.toFixed(2)}</td>
-                            <td className="px-4 py-2 border border-gray-200 text-center text-gray-500">{sym}{line.rate.toFixed(2)}</td>
+                            <td className="px-4 py-2 border border-gray-200 text-center">{line.hours?.toFixed(2) ?? '—'}</td>
+                            <td className="px-4 py-2 border border-gray-200 text-center text-gray-500">{line.rate != null ? `${sym}${line.rate.toFixed(2)}` : '—'}</td>
                             <td className="px-4 py-2 border border-gray-200 text-right font-medium">{sym}{line.amount.toFixed(2)}</td>
                           </tr>
                         ))}
@@ -5083,7 +5084,7 @@ const TimesheetSystem = () => {
                       <tfoot className="bg-indigo-600 text-white font-bold">
                         <tr>
                           <td className="px-4 py-3 border border-indigo-700">Total</td>
-                          <td className="px-4 py-3 border border-indigo-700 text-center">{inv.totalHours.toFixed(2)} hrs</td>
+                          <td className="px-4 py-3 border border-indigo-700 text-center">{inv.totalHours != null ? `${inv.totalHours.toFixed(2)} hrs` : '—'}</td>
                           <td className="px-4 py-3 border border-indigo-700"></td>
                           <td className="px-4 py-3 border border-indigo-700 text-right text-lg">{sym}{inv.totalAmount.toFixed(2)}</td>
                         </tr>
@@ -5105,10 +5106,10 @@ const TimesheetSystem = () => {
                     {/* USD rate override — only for non-USD imported invoices */}
                     {inv.source === 'imported' && inv.currency !== 'USD' && (() => {
                       const historicalRate = invoices
-                        .filter(i => i.userId === inv.userId && i.currency === 'USD' && i.rate > 0 && i.id !== inv.id)
+                        .filter(i => i.userId === inv.userId && i.currency === 'USD' && (i.rate ?? 0) > 0 && i.id !== inv.id)
                         .sort((a, b) => b.periodStart.localeCompare(a.periodStart))[0]?.rate ?? null;
                       const rateVal = parseFloat(pendingUsdRate);
-                      const previewAmt = rateVal > 0 ? Math.round(inv.totalHours * rateVal * 100) / 100 : null;
+                      const previewAmt = rateVal > 0 ? Math.round((inv.totalHours ?? 0) * rateVal * 100) / 100 : null;
                       return (
                         <div className="mb-5 border border-amber-200 rounded-lg overflow-hidden">
                           <div className="bg-amber-50 px-4 py-2.5 border-b border-amber-200">
@@ -5116,7 +5117,7 @@ const TimesheetSystem = () => {
                           </div>
                           <div className="p-4 space-y-2">
                             <p className="text-sm text-gray-600">
-                              Parsed rate: {inv.currency === 'EUR' ? '€' : inv.currency}{inv.rate.toFixed(2)}/hr.
+                              Parsed rate: {inv.currency === 'EUR' ? '€' : inv.currency}{inv.rate?.toFixed(2) ?? '—'}/hr.
                               {historicalRate != null && <span className="ml-1 text-gray-500">Last known USD rate for this contractor: <strong>${historicalRate.toFixed(2)}/hr</strong>.</span>}
                             </p>
                             <div className="flex flex-wrap gap-2 items-center">
@@ -5203,7 +5204,7 @@ const TimesheetSystem = () => {
                             </span>
                             {recon.timesheetHours != null && (
                               <span className={`text-sm font-mono ${statusText[recon.status]}`}>
-                                Invoice {inv.totalHours.toFixed(2)} h · TS {recon.timesheetHours.toFixed(2)} h
+                                Invoice {inv.totalHours?.toFixed(2) ?? '—'} h · TS {recon.timesheetHours.toFixed(2)} h
                                 {recon.delta != null && recon.delta !== 0 && (
                                   <span className="ml-2 font-semibold">
                                     ({recon.delta > 0 ? '+' : ''}{recon.delta.toFixed(2)} h)
@@ -5895,7 +5896,7 @@ const TimesheetSystem = () => {
             ? buildInvoiceLines(currentUser!.id, invoiceMonth.start, invoiceMonth.end, parseFloat(invoiceRate))
             : [];
           const previewTotal = previewLines.reduce((s, l) => s + l.amount, 0);
-          const previewHours = previewLines.reduce((s, l) => s + l.hours, 0);
+          const previewHours = previewLines.reduce((s, l) => s + (l.hours ?? 0), 0);
 
           const currencies = ['USD', 'GBP', 'EUR', 'CAD', 'AUD'];
           const currencySymbols: Record<string, string> = { USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' };
@@ -6077,8 +6078,8 @@ const TimesheetSystem = () => {
                           {previewLines.map((line, i) => (
                             <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                               <td className="px-4 py-2 text-gray-700">W/E {parseLocalDate(line.weekEndingFri).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
-                              <td className="px-4 py-2 text-center font-medium">{line.hours.toFixed(2)}</td>
-                              <td className="px-4 py-2 text-center text-gray-500">{sym}{line.rate.toFixed(2)}/hr</td>
+                              <td className="px-4 py-2 text-center font-medium">{line.hours?.toFixed(2) ?? '—'}</td>
+                              <td className="px-4 py-2 text-center text-gray-500">{line.rate != null ? `${sym}${line.rate.toFixed(2)}/hr` : '—'}</td>
                               <td className="px-4 py-2 text-right font-semibold text-gray-800">{sym}{line.amount.toFixed(2)}</td>
                             </tr>
                           ))}
@@ -6182,7 +6183,7 @@ const TimesheetSystem = () => {
                                 <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
                               </div>
                               {project && <p className="text-sm text-indigo-600">{project.name} ({project.code})</p>}
-                              <p className="text-sm text-gray-500 mt-1">{inv.lines.length} week{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours.toFixed(1)} hrs · {sym2}{inv.rate}/hr</p>
+                              <p className="text-sm text-gray-500 mt-1">{inv.lines.length} week{inv.lines.length !== 1 ? 's' : ''} · {inv.totalHours != null ? `${inv.totalHours.toFixed(1)} hrs` : '—'} · {sym2}{inv.rate ?? '—'}/hr</p>
                               {inv.paymentProfile && <p className="text-xs text-gray-400 mt-0.5">💳 {inv.paymentProfile.profileName} — {inv.paymentProfile.bankName}</p>}
                               {inv.status === 'approved' && (
                                 inv.payOnDate
@@ -6326,8 +6327,8 @@ const TimesheetSystem = () => {
                   </div>
                   <div className="grid grid-cols-2 gap-4 mb-5 text-sm">
                     <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Period</div><div className="font-medium">{parseLocalDate(inv.periodStart).toLocaleDateString()} – {parseLocalDate(inv.periodEnd).toLocaleDateString()}</div></div>
-                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Rate</div><div className="font-medium">{sym}{inv.rate.toFixed(2)} / hour ({inv.currency})</div></div>
-                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours.toFixed(2)}</div></div>
+                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Rate</div><div className="font-medium">{inv.rate != null ? `${sym}${inv.rate.toFixed(2)} / hour (${inv.currency})` : `— (${inv.currency})`}</div></div>
+                    <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours?.toFixed(2) ?? '—'}</div></div>
                     <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Submitted</div><div className="font-medium">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : '—'}</div></div>
                     {inv.payOnDate && (
                       <div className="bg-blue-50 rounded-lg p-3 border border-blue-200"><div className="text-blue-500 mb-0.5">Pay On Date</div><div className="font-medium text-blue-800">{new Date(inv.payOnDate).toLocaleDateString()}</div></div>
@@ -6349,8 +6350,8 @@ const TimesheetSystem = () => {
                       {inv.lines.map((line, i) => (
                         <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                           <td className="px-4 py-2 border border-gray-200">W/E {parseLocalDate(line.weekEndingFri).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
-                          <td className="px-4 py-2 border border-gray-200 text-center">{line.hours.toFixed(2)}</td>
-                          <td className="px-4 py-2 border border-gray-200 text-center text-gray-500">{sym}{line.rate.toFixed(2)}</td>
+                          <td className="px-4 py-2 border border-gray-200 text-center">{line.hours?.toFixed(2) ?? '—'}</td>
+                          <td className="px-4 py-2 border border-gray-200 text-center text-gray-500">{line.rate != null ? `${sym}${line.rate.toFixed(2)}` : '—'}</td>
                           <td className="px-4 py-2 border border-gray-200 text-right font-medium">{sym}{line.amount.toFixed(2)}</td>
                         </tr>
                       ))}
@@ -6358,7 +6359,7 @@ const TimesheetSystem = () => {
                     <tfoot className="bg-indigo-600 text-white font-bold">
                       <tr>
                         <td className="px-4 py-3 border border-indigo-700">Total</td>
-                        <td className="px-4 py-3 border border-indigo-700 text-center">{inv.totalHours.toFixed(2)} hrs</td>
+                        <td className="px-4 py-3 border border-indigo-700 text-center">{inv.totalHours != null ? `${inv.totalHours.toFixed(2)} hrs` : '—'}</td>
                         <td className="px-4 py-3 border border-indigo-700"></td>
                         <td className="px-4 py-3 border border-indigo-700 text-right text-lg">{sym}{inv.totalAmount.toFixed(2)}</td>
                       </tr>
