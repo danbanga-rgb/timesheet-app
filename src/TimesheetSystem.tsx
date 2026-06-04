@@ -4304,7 +4304,7 @@ const TimesheetSystem = () => {
                           const tooltip = recon.timesheetHours == null
                             ? 'No timesheets found for period'
                             : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
-                          const missingNote = recon.missingWeeks > 0 && recon.timesheetHours != null
+                          const missingNote = recon.missingWeeks > 0 && recon.timesheetHours != null && recon.status !== 'matched'
                             ? `${recon.missingWeeks} week${recon.missingWeeks > 1 ? 's' : ''} with no TS` : null;
                           return (
                             <div className="flex flex-col items-center gap-0.5" title={tooltip}>
@@ -4504,7 +4504,7 @@ const TimesheetSystem = () => {
                                       {groupTsHours != null && (
                                         <span className="text-gray-400 text-xs">TS: {groupTsHours}h</span>
                                       )}
-                                      {groupMissingWeeks > 0 && groupTsHours != null && (
+                                      {groupMissingWeeks > 0 && groupTsHours != null && groupReconStatus !== 'matched' && (
                                         <span className="text-red-400 text-xs font-medium">{groupMissingWeeks} wk{groupMissingWeeks > 1 ? 's' : ''} missing</span>
                                       )}
                                     </div>
