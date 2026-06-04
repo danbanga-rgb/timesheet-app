@@ -324,9 +324,9 @@ interface ReconTimesheetRow {
 function reconcileInvoiceLive(
   invoice: Invoice,
   allTimesheets: Timesheet[]
-): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null; rows: ReconTimesheetRow[] } {
+): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null; rows: ReconTimesheetRow[]; missingWeeks: number } {
   const { userId, periodStart, periodEnd, totalHours } = invoice;
-  if (totalHours == null) return { status: 'unverifiable', delta: null, timesheetHours: null, rows: [] };
+  if (totalHours == null) return { status: 'unverifiable', delta: null, timesheetHours: null, rows: [], missingWeeks: 0 };
 
   // Week range: week_start can be up to 6 days before periodStart and still contain period days
   const rangeStart = new Date(periodStart + 'T12:00:00');
@@ -337,7 +337,18 @@ function reconcileInvoiceLive(
     ts.userId === userId && ts.weekStart >= rangeStartStr && ts.weekStart <= periodEnd
   );
 
-  if (!relevant.length) return { status: 'unverifiable', delta: null, timesheetHours: null, rows: [] };
+  // All Mondays whose week overlaps the invoice period (to detect missing weeks)
+  const expectedWeeks: string[] = [];
+  const cur = new Date(rangeStart.getTime());
+  // Align to the Monday on/before rangeStart
+  const dow = cur.getDay();
+  cur.setDate(cur.getDate() - (dow === 0 ? 6 : dow - 1));
+  while (cur.toISOString().slice(0, 10) <= periodEnd) {
+    expectedWeeks.push(cur.toISOString().slice(0, 10));
+    cur.setDate(cur.getDate() + 7);
+  }
+
+  if (!relevant.length) return { status: 'unverifiable', delta: null, timesheetHours: null, rows: [], missingWeeks: expectedWeeks.length };
 
   const rows: ReconTimesheetRow[] = [];
   let tsHours = 0;
@@ -357,11 +368,14 @@ function reconcileInvoiceLive(
   }
   tsHours = Math.round(tsHours * 100) / 100;
 
-  if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0, rows };
+  const weeksWithHours = new Set(rows.filter(r => r.hoursInPeriod > 0).map(r => r.ts.weekStart));
+  const missingWeeks = expectedWeeks.filter(w => !weeksWithHours.has(w)).length;
+
+  if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0, rows, missingWeeks };
 
   const delta = Math.round((totalHours - tsHours) * 100) / 100;
   const matched = Math.abs(delta) < 0.01;
-  return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours, rows };
+  return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours, rows, missingWeeks };
 }
 
 const TimesheetSystem = () => {
@@ -4268,11 +4282,56 @@ const TimesheetSystem = () => {
                     <div className="text-center py-12 text-gray-400"><Receipt className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No invoices match the current filter</p></div>
                   ) : (
                     <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
+                      {(() => {
+                        // Build display groups once — shared by tbody and tfoot
+                        const groupMap = new Map<string, Invoice[]>();
+                        for (const inv of filtered) {
+                          const key = inv.groupKey ? `grp:${inv.groupKey}` : `solo:${inv.id}`;
+                          if (!groupMap.has(key)) groupMap.set(key, []);
+                          groupMap.get(key)!.push(inv);
+                        }
+                        const displayGroups = Array.from(groupMap.values());
+                        // Sort by contractor name; groups use their payment profile company name
+                        displayGroups.sort((a, b) => {
+                          const nameA = (a.length > 1 ? (a[0].paymentProfile?.companyName || a[0].userName) : a[0].userName).toLowerCase();
+                          const nameB = (b.length > 1 ? (b[0].paymentProfile?.companyName || b[0].userName) : b[0].userName).toLowerCase();
+                          return nameA.localeCompare(nameB);
+                        });
+
+                        const reconCell = (inv: Invoice, compact?: boolean) => {
+                          if (inv.source !== 'imported') return <span className="text-gray-300 text-xs">—</span>;
+                          const recon = reconcileInvoiceLive(inv, timesheets);
+                          const tooltip = recon.timesheetHours == null
+                            ? 'No timesheets found for period'
+                            : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
+                          const missingNote = recon.missingWeeks > 0 && recon.timesheetHours != null
+                            ? `${recon.missingWeeks} week${recon.missingWeeks > 1 ? 's' : ''} with no TS` : null;
+                          return (
+                            <div className="flex flex-col items-center gap-0.5" title={tooltip}>
+                              {recon.status === 'matched' ? (
+                                <span className={`px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium`}>✓ Matched</span>
+                              ) : recon.status === 'mismatch' ? (
+                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${recon.delta != null && recon.delta > 0 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
+                                  {recon.delta != null ? (recon.delta > 0 ? '▲ +' : '▽ ') + recon.delta + 'h' : '⚠ Mismatch'}
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
+                              )}
+                              {!compact && recon.timesheetHours != null && (
+                                <span className="text-gray-400 text-xs">TS: {recon.timesheetHours}h</span>
+                              )}
+                              {missingNote && (
+                                <span className="text-red-400 text-xs font-medium">{missingNote}</span>
+                              )}
+                            </div>
+                          );
+                        };
+
+                        return (
                       <table className="w-full border-collapse text-sm">
                         <thead className="bg-indigo-600 text-white">
                           <tr>
-                            <th className="border border-indigo-700 px-4 py-3 text-left">Invoice No</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-left">Employee</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-left">Contractor</th>
                             <th className="border border-indigo-700 px-4 py-3 text-left">Period</th>
                             <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Hours</th>
@@ -4289,16 +4348,6 @@ const TimesheetSystem = () => {
                         </thead>
                         <tbody>
                           {(() => {
-                            // Group by explicit group_key (multi-contractor invoices from same PDF).
-                            // Solo invoices (null group_key) are never grouped — avoids false grouping
-                            // when unrelated contractors happen to use the same invoice number scheme.
-                            const groupMap = new Map<string, Invoice[]>();
-                            for (const inv of filtered) {
-                              const key = inv.groupKey ? `grp:${inv.groupKey}` : `solo:${inv.id}`;
-                              if (!groupMap.has(key)) groupMap.set(key, []);
-                              groupMap.get(key)!.push(inv);
-                            }
-                            const displayGroups = Array.from(groupMap.values());
 
                             let rowIdx = 0;
                             return displayGroups.map((group) => {
@@ -4311,8 +4360,10 @@ const TimesheetSystem = () => {
                                 const rowClass = rowIdx++ % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50';
                                 return (
                                   <tr key={inv.id} className={'cursor-pointer ' + rowClass} onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
-                                    <td className="border border-gray-200 px-4 py-3 font-mono text-xs text-gray-700">{inv.invoiceNumber}</td>
-                                    <td className="border border-gray-200 px-4 py-3 font-medium text-gray-800">{inv.userName}</td>
+                                    <td className="border border-gray-200 px-4 py-3">
+                                      <div className="font-medium text-gray-800">{inv.userName}</div>
+                                      <div className="font-mono text-xs text-gray-400 mt-0.5">#{inv.invoiceNumber}</div>
+                                    </td>
                                     <td className="border border-gray-200 px-4 py-3 whitespace-nowrap">{parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td>
                                     <td className="border border-gray-200 px-4 py-3 text-indigo-600 text-xs">{project?.name || '—'}</td>
                                     <td className="border border-gray-200 px-4 py-3 text-center">{inv.totalHours?.toFixed(2) ?? '—'}</td>
@@ -4342,30 +4393,7 @@ const TimesheetSystem = () => {
                                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
                                       {inv.corrected && <span className="ml-1 px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">Corrected</span>}
                                     </td>
-                                    <td className="border border-gray-200 px-4 py-3 text-center">
-                                      {inv.source === 'imported' ? (() => {
-                                        const recon = reconcileInvoiceLive(inv, timesheets);
-                                        const tooltip = recon.timesheetHours == null
-                                          ? 'No timesheets found for period'
-                                          : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
-                                        return (
-                                          <div className="flex flex-col items-center gap-0.5" title={tooltip}>
-                                            {recon.status === 'matched' ? (
-                                              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Matched</span>
-                                            ) : recon.status === 'mismatch' ? (
-                                              <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-medium">
-                                                ⚠ {recon.delta != null ? (recon.delta > 0 ? '+' : '') + recon.delta + 'h' : 'Mismatch'}
-                                              </span>
-                                            ) : (
-                                              <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
-                                            )}
-                                            {recon.timesheetHours != null && (
-                                              <span className="text-gray-400 text-xs">TS: {recon.timesheetHours}h</span>
-                                            )}
-                                          </div>
-                                        );
-                                      })() : <span className="text-gray-300 text-xs">—</span>}
-                                    </td>
+                                    <td className="border border-gray-200 px-4 py-3 text-center">{reconCell(inv)}</td>
                                     <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
                                       {inv.attachmentPath ? (
                                         <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs font-medium">
@@ -4407,17 +4435,24 @@ const TimesheetSystem = () => {
                               const groupStatuses = [...new Set(group.map(i => i.status))];
                               const groupFirstPayOn = group.find(i => i.payOnDate)?.payOnDate;
 
+                              const companyName = group[0].paymentProfile?.companyName || group.map(i => i.userName).join(', ');
+                              const groupRecons = group.filter(i => i.source === 'imported').map(i => reconcileInvoiceLive(i, timesheets));
+                              const groupTsHours = groupRecons.every(r => r.timesheetHours != null)
+                                ? groupRecons.reduce((s, r) => s + (r.timesheetHours ?? 0), 0) : null;
+                              const groupMissingWeeks = groupRecons.reduce((s, r) => s + (r.missingWeeks ?? 0), 0);
+                              const groupReconDelta = groupTsHours != null ? Math.round((groupTotalHours - groupTsHours) * 100) / 100 : null;
+                              const groupReconStatus = groupTsHours == null ? 'unknown'
+                                : Math.abs(groupReconDelta!) < 0.01 ? 'matched' : 'mismatch';
+
                               return [
                                 // Group header row
                                 <tr key={`grp-hdr-${groupKey}`} className="bg-indigo-50 border-l-4 border-l-indigo-500 font-semibold">
                                   <td className="border border-indigo-200 px-4 py-2.5">
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-mono text-xs text-indigo-800 font-bold">{groupKey}</span>
+                                    <div className="font-medium text-indigo-900">{companyName}</div>
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                      <span className="font-mono text-xs text-gray-400">#{groupKey}</span>
                                       <span className="px-1.5 py-0.5 bg-indigo-200 text-indigo-700 rounded text-xs">Group · {group.length}</span>
                                     </div>
-                                  </td>
-                                  <td className="border border-indigo-200 px-4 py-2.5 text-xs text-indigo-700">
-                                    {group.map(i => i.userName).join(', ')}
                                   </td>
                                   <td className="border border-indigo-200 px-4 py-2.5 text-xs whitespace-nowrap text-indigo-700">{groupPeriod}</td>
                                   <td className="border border-indigo-200 px-4 py-2.5 text-xs text-gray-400">—</td>
@@ -4455,7 +4490,25 @@ const TimesheetSystem = () => {
                                       ))}
                                     </div>
                                   </td>
-                                  <td className="border border-indigo-200 px-4 py-2.5 text-center text-gray-400 text-xs">—</td>
+                                  <td className="border border-indigo-200 px-4 py-2.5 text-center">
+                                    <div className="flex flex-col items-center gap-0.5">
+                                      {groupReconStatus === 'matched' ? (
+                                        <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">✓ Matched</span>
+                                      ) : groupReconStatus === 'mismatch' ? (
+                                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${groupReconDelta != null && groupReconDelta > 0 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
+                                          {groupReconDelta != null ? (groupReconDelta > 0 ? '▲ +' : '▽ ') + groupReconDelta + 'h' : '⚠ Mismatch'}
+                                        </span>
+                                      ) : (
+                                        <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs font-medium">? —</span>
+                                      )}
+                                      {groupTsHours != null && (
+                                        <span className="text-gray-400 text-xs">TS: {groupTsHours}h</span>
+                                      )}
+                                      {groupMissingWeeks > 0 && groupTsHours != null && (
+                                        <span className="text-red-400 text-xs font-medium">{groupMissingWeeks} wk{groupMissingWeeks > 1 ? 's' : ''} missing</span>
+                                      )}
+                                    </div>
+                                  </td>
                                   <td className="border border-indigo-200 px-4 py-2.5 text-center" onClick={e => e.stopPropagation()}>
                                     {anyAttachment ? (
                                       <button onClick={() => openAttachment(anyAttachment)} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-100 text-indigo-700 border border-indigo-300 rounded hover:bg-indigo-200 text-xs font-medium">
@@ -4481,8 +4534,13 @@ const TimesheetSystem = () => {
                                   const sym = currencySymbols[inv.currency] || '$';
                                   return (
                                     <tr key={inv.id} className="bg-white border-l-4 border-l-indigo-200 hover:bg-indigo-50 cursor-pointer" onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
-                                      <td className="border border-gray-200 px-4 py-2 text-gray-400 text-xs pl-6">↳</td>
-                                      <td className="border border-gray-200 px-4 py-2 font-medium text-gray-800 text-sm">{inv.userName}</td>
+                                      <td className="border border-gray-200 px-4 py-2 pl-7">
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="text-gray-300 text-xs">↳</span>
+                                          <span className="font-medium text-gray-800 text-sm">{inv.userName}</span>
+                                        </div>
+                                        {inv.invoiceNumber && <div className="font-mono text-xs text-gray-400 mt-0.5 ml-4">#{inv.invoiceNumber}</div>}
+                                      </td>
                                       <td className="border border-gray-200 px-4 py-2 text-gray-400 text-xs">—</td>
                                       <td className="border border-gray-200 px-4 py-2 text-indigo-600 text-xs">{project?.name || '—'}</td>
                                       <td className="border border-gray-200 px-4 py-2 text-center text-sm">{inv.totalHours?.toFixed(2) ?? '—'}</td>
@@ -4508,28 +4566,9 @@ const TimesheetSystem = () => {
                                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>
                                           {inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}
                                         </span>
+                                        {inv.corrected && <span className="ml-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">Corrected</span>}
                                       </td>
-                                      <td className="border border-gray-200 px-4 py-2 text-center">
-                                        {inv.source === 'imported' ? (() => {
-                                          const recon = reconcileInvoiceLive(inv, timesheets);
-                                          const tooltip = recon.timesheetHours == null
-                                            ? 'No timesheets found for period'
-                                            : `Timesheet: ${recon.timesheetHours}h · Invoice: ${inv.totalHours}h`;
-                                          return (
-                                            <div className="flex flex-col items-center gap-0.5" title={tooltip}>
-                                              {recon.status === 'matched' ? (
-                                                <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs">✓ Match</span>
-                                              ) : recon.status === 'mismatch' ? (
-                                                <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs">
-                                                  ⚠ {recon.delta != null ? (recon.delta > 0 ? '+' : '') + recon.delta + 'h' : '?'}
-                                                </span>
-                                              ) : (
-                                                <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">? —</span>
-                                              )}
-                                            </div>
-                                          );
-                                        })() : <span className="text-gray-300 text-xs">—</span>}
-                                      </td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center">{reconCell(inv, true)}</td>
                                       <td className="border border-gray-200 px-4 py-2 text-center" onClick={e => e.stopPropagation()}>
                                         {inv.attachmentPath ? (
                                           <button onClick={() => openAttachment(inv)} className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-100 text-xs">
@@ -4560,7 +4599,7 @@ const TimesheetSystem = () => {
                         </tbody>
                         <tfoot className="bg-gray-100 font-semibold">
                           <tr>
-                            <td className="border border-gray-200 px-4 py-3 text-gray-700" colSpan={4}>Filtered Total ({filtered.length} invoices)</td>
+                            <td className="border border-gray-200 px-4 py-3 text-gray-700" colSpan={4}>Filtered Total ({displayGroups.length} payee{displayGroups.length !== 1 ? 's' : ''}, {filtered.length} invoice{filtered.length !== 1 ? 's' : ''})</td>
                             <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + (i.totalHours ?? 0), 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
@@ -4568,6 +4607,8 @@ const TimesheetSystem = () => {
                           </tr>
                         </tfoot>
                       </table>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
