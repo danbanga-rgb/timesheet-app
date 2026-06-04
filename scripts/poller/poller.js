@@ -1780,6 +1780,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       const changed = [];
       // Prose total hours runs first, outside require try/catch — no external dependency
       const proseHours = extractTotalHoursFromBodyProse(bodyText);
+      console.log(`  🔍 Body supplement: bodyLen=${bodyText.length}, proseHours=${proseHours}, snippet=${JSON.stringify(bodyText.slice(0, 200))}`);
       if (proseHours != null && proseHours > (parsed.totalHours ?? 0)) {
         const oldHours = parsed.totalHours;
         parsed.totalHours = proseHours;
