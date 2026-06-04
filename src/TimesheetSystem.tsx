@@ -5114,21 +5114,61 @@ const TimesheetSystem = () => {
 
           {/* Convera Matching Modal */}
           {showConveraMatchingModal && (() => {
-            // One row per payment profile; group by contractor (user)
-            const rows = paymentProfiles.map(p => {
-              const user = users.find(u => u.id === p.userId);
-              const benef = converaBeneficiaries.find(b => b.id === p.converaBeneficiaryId);
-              return { profile: p, userName: user?.name || '(unknown)', benef };
-            }).filter(r => {
-              if (!converaMatchingSearch) return true;
-              const q = converaMatchingSearch.toLowerCase();
-              return r.userName.toLowerCase().includes(q)
-                || (r.benef?.shortName || '').toLowerCase().includes(q)
-                || (r.profile.iban || '').toLowerCase().includes(q);
-            }).sort((a, b) => a.userName.localeCompare(b.userName));
+            // Compute last-used date per profile.id from invoices
+            const lastUsedByProfileId = new Map<number, string>();
+            for (const inv of invoices) {
+              const pid = inv.paymentProfile?.id;
+              if (pid == null) continue;
+              const date = inv.submittedAt || inv.periodEnd || '';
+              const existing = lastUsedByProfileId.get(pid) || '';
+              if (date > existing) lastUsedByProfileId.set(pid, date);
+            }
 
-            const unmatched = rows.filter(r => !r.benef).length;
-            const overrides = rows.filter(r => r.profile.converaMatchOverride).length;
+            // Build contractor groups
+            type ProfileRow = { profile: PaymentProfile; benef: ConveraBeneficiary | undefined; lastUsed: string | undefined };
+            const groupMap = new Map<string, { userName: string; rows: ProfileRow[] }>();
+            for (const p of paymentProfiles) {
+              const user = users.find(u => u.id === p.userId);
+              const userName = user?.name || '(unknown)';
+              const benef = converaBeneficiaries.find(b => b.id === p.converaBeneficiaryId);
+              const lastUsed = lastUsedByProfileId.get(p.id) ? lastUsedByProfileId.get(p.id)! : undefined;
+              if (!groupMap.has(p.userId)) groupMap.set(p.userId, { userName, rows: [] });
+              groupMap.get(p.userId)!.rows.push({ profile: p, benef, lastUsed });
+            }
+
+            // Sort within each group: default first, then by last used desc
+            for (const g of groupMap.values()) {
+              g.rows.sort((a, b) => {
+                if (a.profile.isDefault !== b.profile.isDefault) return a.profile.isDefault ? -1 : 1;
+                const da = a.lastUsed || '';
+                const db = b.lastUsed || '';
+                return db.localeCompare(da);
+              });
+            }
+
+            // Filter and sort groups
+            const q = converaMatchingSearch.toLowerCase();
+            const groups = [...groupMap.values()]
+              .filter(g => {
+                if (!q) return true;
+                if (g.userName.toLowerCase().includes(q)) return true;
+                return g.rows.some(r =>
+                  (r.profile.iban || '').toLowerCase().includes(q) ||
+                  (r.benef?.shortName || '').toLowerCase().includes(q) ||
+                  (r.profile.profileName || '').toLowerCase().includes(q)
+                );
+              })
+              .sort((a, b) => a.userName.localeCompare(b.userName));
+
+            const totalProfiles = groups.reduce((n, g) => n + g.rows.length, 0);
+            const unmatchedProfiles = groups.reduce((n, g) => n + g.rows.filter(r => !r.benef).length, 0);
+            const overrideProfiles = groups.reduce((n, g) => n + g.rows.filter(r => r.profile.converaMatchOverride).length, 0);
+
+            const fmtDate = (d: string | undefined) => {
+              if (!d) return null;
+              const dt = new Date(d);
+              return isNaN(dt.getTime()) ? null : dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' });
+            };
 
             return (
               <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
@@ -5138,8 +5178,11 @@ const TimesheetSystem = () => {
                     <div>
                       <h2 className="text-xl font-bold text-gray-900">Convera Beneficiary Matching</h2>
                       <p className="text-sm text-gray-500 mt-0.5">
-                        {paymentProfiles.length} profiles · {unmatched > 0 ? <span className="text-amber-600 font-medium">{unmatched} unmatched</span> : <span className="text-green-600 font-medium">all matched</span>}
-                        {overrides > 0 && <span className="text-violet-600 font-medium ml-2">· {overrides} manual override{overrides > 1 ? 's' : ''}</span>}
+                        {groups.length} contractors · {totalProfiles} profiles
+                        {unmatchedProfiles > 0
+                          ? <span className="text-amber-600 font-medium ml-1">· {unmatchedProfiles} unmatched</span>
+                          : <span className="text-green-600 font-medium ml-1">· all matched</span>}
+                        {overrideProfiles > 0 && <span className="text-violet-600 font-medium ml-1">· {overrideProfiles} manual</span>}
                       </p>
                     </div>
                     <button onClick={() => { setShowConveraMatchingModal(false); setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); setConveraMatchingSearch(''); }}
@@ -5148,77 +5191,101 @@ const TimesheetSystem = () => {
 
                   <div className="px-6 py-3 border-b border-gray-100">
                     <input type="text" value={converaMatchingSearch} onChange={e => setConveraMatchingSearch(e.target.value)}
-                      placeholder="Search by contractor, short name, or IBAN…"
+                      placeholder="Search by contractor, profile name, short name, or IBAN…"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
                   </div>
 
                   <div className="overflow-y-auto flex-1">
                     <table className="w-full text-sm border-collapse">
-                      <thead className="bg-gray-50 sticky top-0">
+                      <thead className="bg-gray-50 sticky top-0 z-10">
                         <tr>
-                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200">Contractor</th>
-                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200">Profile / IBAN</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-48">Profile / IBAN</th>
                           <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200">Convera Short Name</th>
                           <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200">Beneficiary Name</th>
-                          <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200">Match</th>
-                          <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200">Actions</th>
+                          <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-20">Last Used</th>
+                          <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-20">Match</th>
+                          <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-24">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {rows.map(({ profile, userName, benef }) => (
-                          <tr key={profile.id} className={`border-b border-gray-100 ${!benef ? 'bg-amber-50' : 'hover:bg-gray-50'}`}>
-                            <td className="px-4 py-2.5">
-                              <div className="font-medium text-gray-800">{userName}</div>
-                              {profile.isDefault && <span className="text-xs text-indigo-500">default</span>}
-                            </td>
-                            <td className="px-4 py-2.5">
-                              <div className="text-xs text-gray-600">{profile.profileName}</div>
-                              <div className="font-mono text-xs text-gray-400">{profile.iban || profile.accountNumber || '—'}</div>
-                            </td>
-                            <td className="px-4 py-2.5">
-                              {benef
-                                ? <span className="font-mono text-xs text-gray-700">{benef.shortName}</span>
-                                : <span className="text-amber-600 text-xs font-medium">Not matched</span>}
-                            </td>
-                            <td className="px-4 py-2.5 text-xs text-gray-500">{benef?.beneficiaryName || '—'}</td>
-                            <td className="px-4 py-2.5 text-center">
-                              {!benef
-                                ? <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs">None</span>
-                                : profile.converaMatchOverride
-                                  ? <span className="px-1.5 py-0.5 bg-violet-100 text-violet-700 rounded text-xs">⚡ Manual</span>
-                                  : <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs">✓ Auto</span>}
-                            </td>
-                            <td className="px-4 py-2.5 text-center" onClick={e => e.stopPropagation()}>
-                              {beneficiaryOverrideProfileId === profile.id ? (
-                                <div className="text-left border border-indigo-200 rounded-lg p-2 bg-indigo-50 w-72">
-                                  <input type="text" value={beneficiaryOverrideSearch} onChange={e => setBeneficiaryOverrideSearch(e.target.value)}
-                                    placeholder="Search…" autoFocus
-                                    className="w-full px-2 py-1 border border-indigo-200 rounded text-xs mb-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
-                                  <div className="max-h-32 overflow-y-auto divide-y divide-indigo-100">
-                                    {converaBeneficiaries
-                                      .filter(b => !beneficiaryOverrideSearch || b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) || b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()))
-                                      .slice(0, 12)
-                                      .map(b => (
-                                        <button key={b.id} onClick={() => setConveraOverride(profile.id, b.id)}
-                                          className="w-full text-left px-2 py-1 hover:bg-indigo-100 text-xs">
-                                          <span className="font-mono text-indigo-700 block">{b.shortName}</span>
-                                          <span className="text-gray-400">{b.bankAccount}</span>
-                                        </button>
-                                      ))}
+                        {groups.map(({ userName, rows }) => (
+                          <>
+                            {/* Contractor group header */}
+                            <tr key={`hdr-${rows[0].profile.userId}`} className="bg-gray-100 border-t-2 border-gray-200">
+                              <td colSpan={6} className="px-4 py-2">
+                                <span className="font-semibold text-gray-800 text-sm">{userName}</span>
+                                {rows.length > 1 && (
+                                  <span className="ml-2 text-xs text-gray-400">{rows.length} profiles</span>
+                                )}
+                                {rows.some(r => !r.benef) && (
+                                  <span className="ml-2 px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs">
+                                    {rows.filter(r => !r.benef).length} unmatched
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                            {/* Profile sub-rows */}
+                            {rows.map(({ profile, benef, lastUsed }) => (
+                              <tr key={profile.id}
+                                className={`border-b border-gray-100 ${profile.isDefault ? 'bg-green-50 border-l-4 border-l-green-400' : 'hover:bg-gray-50'}`}>
+                                <td className="px-4 py-2.5 pl-8">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-xs text-gray-700">{profile.profileName || '—'}</span>
+                                    {profile.isDefault && (
+                                      <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">Default</span>
+                                    )}
                                   </div>
-                                  <div className="flex gap-2 mt-1.5 pt-1.5 border-t border-indigo-100">
-                                    {benef && <button onClick={() => setConveraOverride(profile.id, null)} className="text-xs text-red-500 hover:underline">Clear</button>}
-                                    <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="text-xs text-gray-500 hover:underline ml-auto">Cancel</button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <button onClick={() => { setBeneficiaryOverrideProfileId(profile.id); setBeneficiaryOverrideSearch(''); }}
-                                  className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-100 text-gray-600">
-                                  {benef ? 'Change' : 'Link'}
-                                </button>
-                              )}
-                            </td>
-                          </tr>
+                                  <div className="font-mono text-xs text-gray-400 mt-0.5">{profile.iban || profile.accountNumber || '—'}</div>
+                                </td>
+                                <td className="px-4 py-2.5">
+                                  {benef
+                                    ? <span className="font-mono text-xs text-gray-700">{benef.shortName}</span>
+                                    : <span className="text-amber-600 text-xs font-medium">Not matched</span>}
+                                </td>
+                                <td className="px-4 py-2.5 text-xs text-gray-500">{benef?.beneficiaryName || '—'}</td>
+                                <td className="px-4 py-2.5 text-center text-xs text-gray-400">
+                                  {fmtDate(lastUsed) || <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-4 py-2.5 text-center">
+                                  {!benef
+                                    ? <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs">None</span>
+                                    : profile.converaMatchOverride
+                                      ? <span className="px-1.5 py-0.5 bg-violet-100 text-violet-700 rounded text-xs">⚡ Manual</span>
+                                      : <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs">✓ Auto</span>}
+                                </td>
+                                <td className="px-4 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                                  {beneficiaryOverrideProfileId === profile.id ? (
+                                    <div className="text-left border border-indigo-200 rounded-lg p-2 bg-indigo-50 w-72 -ml-32">
+                                      <input type="text" value={beneficiaryOverrideSearch} onChange={e => setBeneficiaryOverrideSearch(e.target.value)}
+                                        placeholder="Search…" autoFocus
+                                        className="w-full px-2 py-1 border border-indigo-200 rounded text-xs mb-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+                                      <div className="max-h-32 overflow-y-auto divide-y divide-indigo-100">
+                                        {converaBeneficiaries
+                                          .filter(b => !beneficiaryOverrideSearch || b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) || b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()))
+                                          .slice(0, 12)
+                                          .map(b => (
+                                            <button key={b.id} onClick={() => setConveraOverride(profile.id, b.id)}
+                                              className="w-full text-left px-2 py-1 hover:bg-indigo-100 text-xs">
+                                              <span className="font-mono text-indigo-700 block">{b.shortName}</span>
+                                              <span className="text-gray-400">{b.bankAccount}</span>
+                                            </button>
+                                          ))}
+                                      </div>
+                                      <div className="flex gap-2 mt-1.5 pt-1.5 border-t border-indigo-100">
+                                        {benef && <button onClick={() => setConveraOverride(profile.id, null)} className="text-xs text-red-500 hover:underline">Clear</button>}
+                                        <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="text-xs text-gray-500 hover:underline ml-auto">Cancel</button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <button onClick={() => { setBeneficiaryOverrideProfileId(profile.id); setBeneficiaryOverrideSearch(''); }}
+                                      className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-100 text-gray-600">
+                                      {benef ? 'Change' : 'Link'}
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </>
                         ))}
                       </tbody>
                     </table>
