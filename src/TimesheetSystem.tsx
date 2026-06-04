@@ -602,6 +602,9 @@ const TimesheetSystem = () => {
   const [tsOnlySelectedUsers, setTsOnlySelectedUsers] = useState<string[] | null>(null);
   const [tsOnlySearch, setTsOnlySearch] = useState('');
   const [tsOnlyDropdownOpen, setTsOnlyDropdownOpen] = useState(false);
+  const [invoiceSelectedUsers, setInvoiceSelectedUsers] = useState<string[] | null>(null);
+  const [invoiceUserSearch, setInvoiceUserSearch] = useState('');
+  const [invoiceUserDropdownOpen, setInvoiceUserDropdownOpen] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   // Manager consolidated view
@@ -4176,7 +4179,19 @@ const TimesheetSystem = () => {
             const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
             const currencySymbols: Record<string, string> = { USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' };
 
+            // Distinct users who have at least one invoice — sorted by name
+            const invoiceUsers = [...new Map(invoices.map(i => [i.userId, { id: i.userId, name: i.userName }])).values()]
+              .sort((a, b) => a.name.localeCompare(b.name));
+            const effectiveInvoiceUsers = invoiceSelectedUsers ?? invoiceUsers.map(u => u.id);
+
+            // Full group sizes (before user filter) for "Filtered" badge
+            const fullGroupSizes = new Map<string, number>();
+            for (const inv of invoices) {
+              if (inv.groupKey) fullGroupSizes.set(inv.groupKey, (fullGroupSizes.get(inv.groupKey) || 0) + 1);
+            }
+
             let filtered = invoices;
+            if (invoiceSelectedUsers !== null) filtered = filtered.filter(i => invoiceSelectedUsers.includes(i.userId));
             if (accountantInvoiceFilter !== 'all') filtered = filtered.filter(i => i.status === accountantInvoiceFilter);
             if (invoiceDateRange.start && invoiceDateRange.end) {
               filtered = filtered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
@@ -4243,6 +4258,60 @@ const TimesheetSystem = () => {
                         </button>
                       ))}
                     </div>
+                    {/* Contractor picker */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setInvoiceUserDropdownOpen(o => !o)}
+                        className="w-full flex items-center justify-between px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm hover:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      >
+                        <span className="text-gray-700">
+                          {effectiveInvoiceUsers.length === invoiceUsers.length
+                            ? 'All contractors'
+                            : `${effectiveInvoiceUsers.length} of ${invoiceUsers.length} contractors`}
+                        </span>
+                        <svg className={`w-4 h-4 text-gray-500 transition-transform ${invoiceUserDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                      </button>
+                      {invoiceUserDropdownOpen && (
+                        <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg">
+                          <div className="p-2 border-b border-gray-100">
+                            <input
+                              type="text"
+                              value={invoiceUserSearch}
+                              onChange={e => setInvoiceUserSearch(e.target.value)}
+                              placeholder="Search contractors..."
+                              className="w-full px-3 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                              autoFocus
+                            />
+                          </div>
+                          <div className="flex gap-2 px-3 py-1.5 border-b border-gray-100 bg-gray-50">
+                            <button onClick={() => setInvoiceSelectedUsers(null)} className="text-xs text-indigo-600 hover:underline font-medium">Select all</button>
+                            <span className="text-gray-300">|</span>
+                            <button onClick={() => setInvoiceSelectedUsers([])} className="text-xs text-gray-500 hover:underline">Clear</button>
+                          </div>
+                          <div className="max-h-60 overflow-y-auto">
+                            {invoiceUsers.filter(u => u.name.toLowerCase().includes(invoiceUserSearch.toLowerCase())).length === 0 ? (
+                              <p className="text-sm text-gray-400 text-center py-4">No contractors match</p>
+                            ) : invoiceUsers.filter(u => u.name.toLowerCase().includes(invoiceUserSearch.toLowerCase())).map(u => (
+                              <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-indigo-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={effectiveInvoiceUsers.includes(u.id)}
+                                  onChange={() => {
+                                    const next = effectiveInvoiceUsers.includes(u.id)
+                                      ? effectiveInvoiceUsers.filter(x => x !== u.id)
+                                      : [...effectiveInvoiceUsers, u.id];
+                                    setInvoiceSelectedUsers(next.length === invoiceUsers.length ? null : next);
+                                  }}
+                                  className="rounded text-indigo-600"
+                                />
+                                <span className="text-sm text-gray-700">{u.name}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <div>
                         <span className="block text-xs font-medium text-gray-500 mb-1">Period</span>
@@ -4472,6 +4541,9 @@ const TimesheetSystem = () => {
                                     <div className="flex items-center gap-1.5 mt-0.5">
                                       <span className="font-mono text-xs text-gray-400">#{groupKey}</span>
                                       <span className="px-1.5 py-0.5 bg-indigo-200 text-indigo-700 rounded text-xs">Group · {group.length}</span>
+                                      {group[0].groupKey && group.length < (fullGroupSizes.get(group[0].groupKey) ?? group.length) && (
+                                        <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs">Filtered</span>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="border border-indigo-200 px-4 py-2.5 text-xs whitespace-nowrap text-indigo-700">{groupPeriod}</td>
