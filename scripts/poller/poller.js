@@ -9,6 +9,7 @@
 const Imap               = require('imap');
 const { simpleParser }   = require('mailparser');
 const XLSX               = require('xlsx');
+const AdmZip             = require('adm-zip');
 const { randomUUID }     = require('crypto');
 const https            = require('https');
 const http             = require('http');
@@ -186,6 +187,55 @@ async function findProfileByName(name) {
     return rows?.[0] || null;
   } catch {
     return null;
+  }
+}
+
+// Returns true for QuickBooks / Intuit automated notification senders.
+// These emails carry real attachments (timesheets + invoices) but are sent by
+// Intuit's notification infrastructure, not by the contractor directly. We
+// resolve the contractor from attachment filenames instead of the From header.
+function isIntuitNotification(email) {
+  const domain = (email || '').toLowerCase().split('@')[1] || '';
+  return domain === 'notification.intuit.com' || domain === 'intuit.com';
+}
+
+// Look up a contractor by first name. Returns { id, email, name } if exactly
+// one timesheetuser matches, null if zero or ambiguous.
+async function findProfileByFirstName(firstName) {
+  if (!SUPABASE_REST_URL || !firstName) return null;
+  try {
+    const res = await fetch(
+      `${SUPABASE_REST_URL}/rpc/find_profile_by_first_name`,
+      {
+        method: 'POST',
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_first_name: firstName }),
+      }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (!rows || rows.length !== 1) {
+      console.warn(`  ⚠️  First name '${firstName}' matched ${rows?.length ?? 0} profiles (need exactly 1)`);
+      return null;
+    }
+    return rows[0];
+  } catch {
+    return null;
+  }
+}
+
+// Extract text content from a DOCX buffer. DOCX files are ZIP archives;
+// word/document.xml holds the document body as XML.
+function extractDocxText(buffer) {
+  try {
+    const zip = new AdmZip(buffer);
+    const entry = zip.getEntry('word/document.xml');
+    if (!entry) return '';
+    const xml = entry.getData().toString('utf-8');
+    return xml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  } catch (e) {
+    console.warn(`  ⚠️  DOCX text extraction failed: ${e.message}`);
+    return '';
   }
 }
 
@@ -1625,8 +1675,10 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
   // Classify each PDF as timesheet / invoice / both / unknown via content scoring.
   // XLSX is always treated as a timesheet (no invoice XLSX path exists).
+  // DOCX is always treated as an invoice (contractors use Word for invoice templates).
   const xlsxAtts    = relevantAtts.filter(a => a.isXlsx);
   const pdfQueue    = relevantAtts.filter(a => a.isPdf);
+  const docxQueue   = relevantAtts.filter(a => a.isDocx);
 
   const invoiceAtts   = [];
   const timesheetPdfs = [];
@@ -1645,6 +1697,14 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     } else {
       timesheetPdfs.push(att); // 'timesheet'
     }
+  }
+
+  // DOCX attachments are treated as invoices — extract text from the ZIP/XML structure
+  for (const att of docxQueue) {
+    console.log(`  📄 DOCX invoice attachment: ${att.name}`);
+    att.pdfText    = extractDocxText(att.buffer);
+    att.isImagePdf = false;
+    invoiceAtts.push(att);
   }
 
   const pdfAtts = timesheetPdfs;
@@ -1968,6 +2028,8 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
                (a.filename||'').match(/\.pdf$/i) ||
                // Some clients send PDFs with generic octet-stream content type
                (a.contentType?.includes('octet-stream') && (a.filename||'').match(/\.pdf$/i))),
+    isDocx: !!(a.contentType?.includes('wordprocessingml') || a.contentType?.includes('msword') ||
+               (a.filename||'').match(/\.docx?$/i)),
     isEml:  !!(a.contentType?.includes('message/rfc822') || a.contentType?.includes('message/rfc') ||
                (a.filename||'').match(/\.eml$/i)),
   })).filter(a => {
@@ -1979,7 +2041,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   });
 
   const emlAtts = attachments.filter(a => a.isEml);
-  const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isEml);
+  const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isDocx || a.isEml);
 
   // ── No timesheet content — skip ────────────────────────────────────────────
   if (!hasTimesheetContent) {
@@ -2017,7 +2079,9 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
           const isPdf  = !!(ctype.includes('pdf') ||
                             fname.match(/\.pdf$/i) ||
                             (ctype.includes('octet-stream') && fname.match(/\.pdf$/i)));
-          return { name: fname || ctype.split('/')[1] || 'unnamed', buffer: a.content, size, isXlsx, isPdf, isEml: false };
+          const isDocx = !!(ctype.includes('wordprocessingml') || ctype.includes('msword') ||
+                            fname.match(/\.docx?$/i));
+          return { name: fname || ctype.split('/')[1] || 'unnamed', buffer: a.content, size, isXlsx, isPdf, isDocx, isEml: false };
         }).filter(a => {
           if (a.size > MAX_ATTACHMENT_BYTES) {
             console.warn(`  ⚠️  Inner attachment too large (${(a.size / 1024 / 1024).toFixed(1)}MB), skipping: ${a.name}`);
@@ -2117,6 +2181,27 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
       results.push({ type: 'forward', subject, action: 'skipped_internal' });
       return;
     }
+  } else if (isIntuitNotification(fromEmail)) {
+    // QuickBooks/Intuit payment notification — attachments are real but the sender is Intuit's
+    // infrastructure. Resolve the contractor from the first attachment filename (pattern: "{FirstName}_...").
+    const firstNameMatch = attachments
+      .map(a => a.name?.match(/^([A-Za-z]{3,})_/))
+      .find(m => m && m[1].toLowerCase() !== 'invoice');
+    if (!firstNameMatch) {
+      console.warn(`  ⚠️  Intuit notification — cannot extract contractor first name from attachments: ${subject}`);
+      results.push({ type: 'skipped', subject, reason: 'intuit_no_name_in_attachment' });
+      return;
+    }
+    const firstName = firstNameMatch[1];
+    const profile = await findProfileByFirstName(firstName);
+    if (!profile) {
+      console.warn(`  ⚠️  Intuit notification — no unique profile for first name '${firstName}': ${subject}`);
+      results.push({ type: 'skipped', subject, reason: `intuit_unresolved_contractor: ${firstName}` });
+      return;
+    }
+    contractor = profile.email;
+    contractorName = profile.name;
+    console.log(`  🔔 Intuit notification resolved to: ${contractor} (via first name '${firstName}')`);
   } else {
     // Direct email from contractor
     contractor = fromEmail;
@@ -2594,6 +2679,8 @@ async function main() {
                  (a.filename||'').match(/\.(xlsx|xls)$/i)),
       isPdf:  !!(a.contentType?.includes('pdf') || (a.filename||'').match(/\.pdf$/i) ||
                  (a.contentType?.includes('octet-stream') && (a.filename||'').match(/\.pdf$/i))),
+      isDocx: !!(a.contentType?.includes('wordprocessingml') || a.contentType?.includes('msword') ||
+                 (a.filename||'').match(/\.docx?$/i)),
       isEml:  !!(a.contentType?.includes('message/rfc822') || (a.filename||'').match(/\.eml$/i)),
     })).filter(a => {
       if (a.size > MAX_ATTACHMENT_BYTES) {
@@ -2603,7 +2690,7 @@ async function main() {
       return true;
     });
 
-    const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isEml);
+    const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isDocx || a.isEml);
 
     // No timesheet content: forward to helpdesk, mark seen
     if (!hasTimesheetContent) {
@@ -2622,7 +2709,7 @@ async function main() {
             contractorEmail: fromEmail,
             attachmentName:  att.name,
             subject,
-            parseNotes:      `Unsupported file type: .${ext} — please resubmit as XLSX or PDF`,
+            parseNotes:      `Unsupported file type: .${ext} — please resubmit as XLSX, PDF, or DOCX`,
             run_id:          RUN_ID,
           });
           console.log(`  ⚠️  Unsupported attachment logged: ${att.name} from ${fromEmail}`);

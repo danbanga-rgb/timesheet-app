@@ -9,6 +9,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@supabase/supabase-js": "^2.0.0",
+    "adm-zip": "^0.5.17",
     "canvas": "^3.2.3",
     "dotenv": "^16.0.0",
     "imap": "^0.8.19",
