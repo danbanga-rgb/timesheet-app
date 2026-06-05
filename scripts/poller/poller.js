@@ -2166,6 +2166,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   let contractor = null;
   let contractorName = null;
 
+  console.log(`  🔍 Resolving contractor: fromEmail=${fromEmail} internal=${isInternal(fromEmail)} intuit=${isIntuitNotification(fromEmail)}`);
   if (isInternal(fromEmail)) {
     // Extract contractor from forwarded body
     const extracted = extractSenderFromBody(bodyText);
