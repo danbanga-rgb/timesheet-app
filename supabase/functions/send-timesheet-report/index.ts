@@ -133,9 +133,13 @@ function buildTimingSection(
   allTimesheets: Array<{ user_id: string; week_start: string; submitted_at: string | null; source: string }>,
   profileIds: Set<string>,
   completedWeeks: string[],
+  profiles: Array<{ id: string; start_date: string | null }>,
 ): string {
   const timingWeeks = completedWeeks.slice(-6);
   if (timingWeeks.length === 0) return '';
+
+  const profileStartDate = new Map<string, string>();
+  for (const p of profiles) profileStartDate.set(p.id, p.start_date ?? '');
 
   type WeekStat = { total: number; portal: number; within1d: number; within3d: number; sumDays: number };
   const stats = new Map<string, WeekStat>();
@@ -144,6 +148,8 @@ function buildTimingSection(
   for (const ts of allTimesheets) {
     const wk = ts.week_start.slice(0, 10);
     if (!stats.has(wk) || !profileIds.has(ts.user_id) || !ts.submitted_at) continue;
+    const sd = profileStartDate.get(ts.user_id) ?? '';
+    if (sd && sd > wk) continue;
     const [y, m, d]  = wk.split('-').map(Number);
     const weekEndMs  = Date.UTC(y, m - 1, d + 6);
     const daysAfter  = (new Date(ts.submitted_at).getTime() - weekEndMs) / 86400000;
@@ -375,7 +381,7 @@ serve(async (req) => {
   // ─── Compose email ────────────────────────────────────────────────────────────
 
   const totalMissingWeeks = weekReports.length;
-  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks);
+  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles);
 
   let bodyHtml: string;
   let bodyText: string;
