@@ -1759,7 +1759,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         run_id:          runId,
         forwardedBy:     forwardedBy || null,
       });
-      const action = res.body?.action || res.status;
+      const action = res.body?.action || String(res.status);
       results.push({ contractor: contractorEmail, week: ts.weekStart, status: res.status, action });
       console.log(`  ✅ ${contractorEmail} | ${ts.weekStart} | ${ts.attachmentName || 'body'} → ${action}`);
     } catch (e) {
