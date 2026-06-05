@@ -232,7 +232,30 @@ function extractDocxText(buffer) {
     const entry = zip.getEntry('word/document.xml');
     if (!entry) return '';
     const xml = entry.getData().toString('utf-8');
-    return xml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+    // Concatenate <w:t> runs WITHOUT separators — legitimate spaces are explicit
+    // characters inside <w:t> content in DOCX. Only insert breaks at paragraph/cell
+    // boundaries. This prevents spaces being inserted within numbers and diacritics.
+    let text = xml
+      .replace(/<\/w:p>/gi, '\n')
+      .replace(/<\/w:tc>/gi, ' ')
+      .replace(/<w:t(?:[^>]*)?>([^<]*)<\/w:t>/gi, '$1')
+      .replace(/<[^>]+>/g, '')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    // Safety net: collapse any remaining spaces that split numbers across runs
+    // (covers cases where space characters are in <w:t> content itself).
+    let prev;
+    do { prev = text; text = text.replace(/(\d) (\d)/g, '$1$2'); } while (text !== prev);
+    text = text.replace(/(\d) ([,\.]) (\d)/g, '$1$2$3');
+    text = text.replace(/(\d) ([,\.])/g,      '$1$2');
+    text = text.replace(/([,\.]) (\d)/g,      '$1$2');
+    text = text.replace(/(\d) ([-\/])/g,      '$1$2');
+    text = text.replace(/([-\/]) (\d)/g,      '$1$2');
+
+    return text;
   } catch (e) {
     console.warn(`  ⚠️  DOCX text extraction failed: ${e.message}`);
     return '';

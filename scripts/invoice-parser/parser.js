@@ -116,7 +116,8 @@ function extractInvoiceNumber(text) {
     // [cčćéç¢g] covers OCR variants of č/ć (e.g. 'é', 'ç', '¢')
     /(?:broj|br\.?)\s*ra[cčćéç¢g]una?[:\s]+([A-Z0-9][\w\-\/]{1,25})/i,
     // "Racun BR." / "RACUN BR." (Bosnian/Serbian/Croatian, verb first order)
-    /ra[cčćéç¢g]un\s*(?:br\.?|broj)[:\s]+([A-Z0-9][\w\-\/]{1,25})/i,
+    // [:\s]* allows zero separator — e.g. "Račun br.6-1-1" (no space before number)
+    /ra[cčćéç¢g]un\s*(?:br\.?|broj)[:\s]*([A-Z0-9][\w\-\/]{1,25})/i,
     // "PR NO.: 177551992948" — payment request number (used as invoice ID)
     /\bPR\s*NO\.?\s*:\s*(\d[\d\-]{1,25})/i,
     // "Reference No: 177811194162" — reference number in payment request docs
@@ -289,6 +290,8 @@ function extractHours(text) {
     [/total\s+hours?[:\s]+(\d+[\.,]?\d*)/i,              s => cleanHours(s)],
     [/hours?\s+(?:worked|billed|rendered|approved)[:\s]+(\d+[\.,]?\d*)/i, s => cleanHours(s)],
     [/approved\s+hrs?[:\s]+(\d+[\.,]?\d*)/i,             s => cleanHours(s)],
+    // "per hour × 176" or "per h x 176" — rate-first formula (moved early: fires before broad HOURS)
+    [/per\s*h(?:our|r)?\s*[x×*]\s*(\d+[\.,]?\d*)/i,    s => cleanHours(s)],
     // "164.00 work hours"
     [/(\d+[\.,]?\d*)\s*work\s*hours?\b/i,                s => cleanHours(s)],
     // "144 sata" (Croatian for hours)
@@ -300,8 +303,8 @@ function extractHours(text) {
     [/^\s*\d\s+(\d{2,3})\s+[€$][\d,.]/m,               s => cleanHours(s)],
     // "160 hrs" abbreviation
     [/(\d+[\.,]?\d*)\s*hrs?\b/i,                         s => cleanHours(s)],
-    // "176 HOURS30.00" — concatenated columns, no word boundary after HOURS
-    [/(\d+[\.,]?\d*)\s*HOURS/i,                          s => cleanHours(s)],
+    // "176 HOURS30.00" — concatenated OCR columns; (?<!:) prevents matching "09:20 hours CET"
+    [/(?<!:)(\d+[\.,]?\d*)\s*HOURS/i,                   s => cleanHours(s)],
     // "160 h" or "160h" as standalone unit
     [/\b(\d+[\.,]?\d*)[ \t]*h\b/,                        s => cleanHours(s)],
     // "Quantity: 80" near "hour" context
@@ -315,8 +318,6 @@ function extractHours(text) {
     [/\bhours?[ \t]+(\d{2,3}[\.,]?\d*)\b/i,             s => cleanHours(s)],
     // "sat 176" / "sata 176" — Croatian/Bosnian word for hour(s) used as unit label
     [/\bsat[ai]?\s+(\d{2,3}[\.,]?\d*)\b/i,              s => cleanHours(s)],
-    // "per hour × 176" or "per h x 176" — rate-first formula where hours follows the multiplier
-    [/per\s*h(?:our|r)?\s*[x×*]\s*(\d+[\.,]?\d*)/i,    s => cleanHours(s)],
     // Table line with European-format quantity: service keyword + short unit + N,NNN or N.NNN
     // Handles templates where unit label (e.g. "Pon", "kom") precedes qty in European notation.
     // Only matches 2–3 digit numbers before the separator (rules out prices like "6,500").
@@ -419,7 +420,8 @@ function extractCurrency(text) {
 
 function extractIban(text) {
   // Labeled: "IBAN:", "IBAN/IFSC:", "IBAN/BIC:" — allow horizontal whitespace only (no newline crossing)
-  const labeled = text.match(/IBAN(?:\/[A-Z]+)?[:\s#]+([A-Z]{2}[ \t]*\d{2}(?:[ \t]*[A-Z0-9]){11,30})/i);
+  // Lookahead (?=...) stops greedy match before adjacent words (e.g. "Acc. No." after IBAN)
+  const labeled = text.match(/IBAN(?:\/[A-Z]+)?[:\s#]+([A-Z]{2}[ \t]*\d{2}(?:[ \t]*[A-Z0-9]){11,30})(?=[ \t\n\r]|[^A-Za-z0-9]|$)/i);
   if (labeled) {
     const candidate = labeled[1].replace(/[ \t]/g, '').toUpperCase();
     if (candidate.length >= 15 && candidate.length <= 34) return candidate;
