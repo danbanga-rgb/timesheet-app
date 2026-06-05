@@ -306,6 +306,11 @@ function extractHours(text) {
     [/\b(\d+[\.,]?\d*)[ \t]*h\b/,                        s => cleanHours(s)],
     // "Quantity: 80" near "hour" context
     [/quantity[:\s]+(\d+[\.,]?\d*)(?=[\s\S]{0,80}hour)/i, s => cleanHours(s)],
+    // QuickBooks/Intuit: "Qty 168" or "Qty: 168" column header/label
+    [/\bqty\.?[:\s]+(\d+[\.,]?\d*)/i,                     s => cleanHours(s)],
+    // QB table row: qty at line start, /hr rate on same line
+    // "168  Software Development  $70.00/hr  $11,760.00"
+    [/^[ \t]*(\d{2,3}[\.,]?\d*)[ \t]+\w[^\n]*\/hr\b/im,   s => cleanHours(s)],
     // "hour 176 30.00" — unit column precedes qty (table format where label comes first)
     [/\bhours?[ \t]+(\d{2,3}[\.,]?\d*)\b/i,             s => cleanHours(s)],
     // "sat 176" / "sata 176" — Croatian/Bosnian word for hour(s) used as unit label
