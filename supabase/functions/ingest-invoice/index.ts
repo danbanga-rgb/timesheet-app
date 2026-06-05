@@ -209,6 +209,8 @@ serve(async (req) => {
     pdfBase64,
     // Multi-contractor grouping key (set for grouped invoices; null for single)
     groupKey,
+    // True when subject/body contains correction keywords ("fixed", "revised", etc.)
+    correctionHint,
   } = body as Record<string, unknown>;
 
   if (!messageId || !contractorEmail) {
@@ -385,7 +387,8 @@ serve(async (req) => {
       const existingHours  = existingInvoice.total_hours  != null ? Number(existingInvoice.total_hours)  : null;
       const existingRate   = existingInvoice.rate          != null ? Number(existingInvoice.rate)          : null;
       const existingAmount = existingInvoice.total_amount  != null ? Number(existingInvoice.total_amount)  : null;
-      const isDuplicate    = existingHours === parsedHours
+      const isDuplicate    = !correctionHint
+                          && existingHours === parsedHours
                           && existingRate  === parsedRate
                           && Math.abs((existingAmount ?? 0) - computedAmount) < 0.01;
 

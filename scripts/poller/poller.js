@@ -82,7 +82,7 @@ const WEEK_PATTERNS = [
   /client\s+billable\s+hours\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/gi,
 ];
 
-const CORRECTION_KEYWORDS = /\b(correction|corrected|correcting|re-?submit(?:ted)?|resubmit(?:ted)?|amended|amendment|revised|revision|replacing)\b/i;
+const CORRECTION_KEYWORDS = /\b(correction|corrected|correcting|re-?submit(?:ted)?|resubmit(?:ted)?|amended|amendment|revised|revision|replacing|fixed)\b/i;
 
 const HOURS_PATTERNS = [
   /(mon(?:day)?)[:\s\-]+(\d+\.?\d*)/gi,
