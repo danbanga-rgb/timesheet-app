@@ -2166,7 +2166,6 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   let contractor = null;
   let contractorName = null;
 
-  console.log(`  🔍 Resolving contractor: fromEmail=${fromEmail} internal=${isInternal(fromEmail)} intuit=${isIntuitNotification(fromEmail)}`);
   if (isInternal(fromEmail)) {
     // Extract contractor from forwarded body
     const extracted = extractSenderFromBody(bodyText);
@@ -2181,6 +2180,29 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
       console.warn(`  ⚠️  Extracted contractor is internal address (${contractor}) — skipping: ${subject}`);
       results.push({ type: 'forward', subject, action: 'skipped_internal' });
       return;
+    }
+    // Internal forwarder forwarded a QuickBooks/Intuit notification — the extracted
+    // "contractor" is Intuit's sending address, not a real contractor. Resolve by
+    // attachment filename instead (same logic as direct Intuit emails).
+    if (isIntuitNotification(contractor)) {
+      const firstNameMatch = attachments
+        .map(a => a.name?.match(/^([A-Za-z]{3,})_/))
+        .find(m => m && m[1].toLowerCase() !== 'invoice');
+      if (!firstNameMatch) {
+        console.warn(`  ⚠️  Intuit notification (forwarded) — cannot extract first name from attachments: ${subject}`);
+        results.push({ type: 'skipped', subject, reason: 'intuit_no_name_in_attachment' });
+        return;
+      }
+      const firstName = firstNameMatch[1];
+      const profile = await findProfileByFirstName(firstName);
+      if (!profile) {
+        console.warn(`  ⚠️  Intuit notification (forwarded) — no unique profile for '${firstName}': ${subject}`);
+        results.push({ type: 'skipped', subject, reason: `intuit_unresolved_contractor: ${firstName}` });
+        return;
+      }
+      contractor = profile.email;
+      contractorName = profile.name;
+      console.log(`  🔔 Intuit notification (forwarded by ${fromEmail}) resolved to: ${contractor}`);
     }
   } else if (isIntuitNotification(fromEmail)) {
     // QuickBooks/Intuit payment notification — attachments are real but the sender is Intuit's
