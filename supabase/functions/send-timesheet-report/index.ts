@@ -134,7 +134,6 @@ function buildTimingSection(
   profileIds: Set<string>,
   completedWeeks: string[],
   profiles: Array<{ id: string; start_date: string | null }>,
-  importLogByTsId: Map<number, boolean>,
 ): string {
   const timingWeeks = completedWeeks.slice(-6);
   if (timingWeeks.length === 0) return '';
@@ -142,9 +141,9 @@ function buildTimingSection(
   const profileStartDate = new Map<string, string>();
   for (const p of profiles) profileStartDate.set(p.id, p.start_date ?? '');
 
-  type WeekStat = { total: number; portal: number; email: number; fwd: number; within1d: number; within3d: number; sumDays: number };
+  type WeekStat = { total: number; portal: number; email: number; within1d: number; within3d: number; sumDays: number };
   const stats = new Map<string, WeekStat>();
-  for (const wk of timingWeeks) stats.set(wk, { total: 0, portal: 0, email: 0, fwd: 0, within1d: 0, within3d: 0, sumDays: 0 });
+  for (const wk of timingWeeks) stats.set(wk, { total: 0, portal: 0, email: 0, within1d: 0, within3d: 0, sumDays: 0 });
 
   for (const ts of allTimesheets) {
     const wk = ts.week_start.slice(0, 10);
@@ -156,13 +155,7 @@ function buildTimingSection(
     const daysAfter  = (new Date(ts.submitted_at).getTime() - weekEndMs) / 86400000;
     const st         = stats.get(wk)!;
     st.total++;
-    if (ts.source === 'direct') {
-      st.portal++;
-    } else if (importLogByTsId.get(ts.id) === true) {
-      st.fwd++;
-    } else {
-      st.email++;
-    }
+    if (ts.source === 'direct') st.portal++; else st.email++;
     if (daysAfter <= 1) st.within1d++;
     if (daysAfter <= 3) st.within3d++;
     st.sumDays += Math.max(daysAfter, 0);
@@ -183,7 +176,6 @@ function buildTimingSection(
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center">${st.total}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.portal}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.email}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.fwd}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c1d}">${pct1d}%</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c3d}">${pct3d}%</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center">${avg}d</td>
@@ -201,14 +193,13 @@ function buildTimingSection(
           <th style="padding:8px 10px;text-align:center;font-weight:600">Submitted</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">Portal</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">Email</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Fwd</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">≤1 day</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">≤3 days</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">Avg days</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="margin:6px 0 0;font-size:11px;color:#9ca3af">Days after Sunday week-end. ≤1 day = by Monday; ≤3 days = by Wednesday. Portal = web app · Email = direct email · Fwd = forwarded by a third party.</p>
+      <p style="margin:6px 0 0;font-size:11px;color:#9ca3af">Days after Sunday week-end. ≤1 day = by Monday; ≤3 days = by Wednesday. Portal = web app · Email = submitted by email.</p>
     </div>`;
 }
 
@@ -297,30 +288,6 @@ serve(async (req) => {
     const wk = ts.week_start.slice(0, 10);
     if (!tsByWeek.has(wk)) tsByWeek.set(wk, new Map());
     tsByWeek.get(wk)!.set(ts.user_id, ts.entries ?? {});
-  }
-
-  // ─── Forwarding signal for the timing section ─────────────────────────────────
-  // Fetch email_import_log for timesheets in the 6 timing weeks only.
-  // from_email != resolved_email identifies forwarded submissions.
-  // Dedup by timesheet_id: keep the first (lowest id) log entry per timesheet.
-  const timingWeekSet = new Set(completedWeeks.slice(-6));
-  const timingTsIds = (allTimesheets ?? [])
-    .filter(ts => timingWeekSet.has(ts.week_start.slice(0, 10)) && ts.id)
-    .map(ts => ts.id as number);
-
-  const importLogByTsId = new Map<number, boolean>(); // tsId → forwarded
-  if (timingTsIds.length > 0) {
-    const { data: importLogs } = await db
-      .from('email_import_log')
-      .select('timesheet_id, from_email, resolved_email')
-      .in('timesheet_id', timingTsIds)
-      .order('id', { ascending: true });
-    for (const log of (importLogs ?? [])) {
-      const tid = log.timesheet_id as number;
-      if (tid != null && !importLogByTsId.has(tid)) {
-        importLogByTsId.set(tid, log.from_email !== log.resolved_email);
-      }
-    }
   }
 
   // ─── Build per-week report sections ──────────────────────────────────────────
@@ -415,7 +382,7 @@ serve(async (req) => {
   // ─── Compose email ────────────────────────────────────────────────────────────
 
   const totalMissingWeeks = weekReports.length;
-  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, importLogByTsId);
+  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles);
 
   let bodyHtml: string;
   let bodyText: string;
