@@ -306,6 +306,18 @@ serve(async (req) => {
   let   parsedHours       = totalHours  != null ? Number(totalHours) : null;
   const parsedAmount      = totalAmount != null ? Number(totalAmount) : null;
 
+  if (parsedPeriodEnd && new Date(parsedPeriodEnd + 'T12:00:00Z').getTime() > Date.now()) {
+    const notes = [parseNotes, `Billing period end ${parsedPeriodEnd} is in the future — likely parse error`].filter(Boolean).join(' | ');
+    await supabase.from('email_invoice_log').insert({
+      message_id: messageId, from_email: contractorEmail, subject,
+      attachment_name: attachmentName || null, parse_status: 'partial', parse_notes: notes,
+      user_id: userId, attempt_count: attemptCount,
+    });
+    return new Response(JSON.stringify({ ok: false, action: 'partial', notes }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+
   if (!parsedPeriodStart || !parsedPeriodEnd) {
     const notes = [parseNotes, 'Insufficient data: billing period not found'].filter(Boolean).join(' | ');
     await supabase.from('email_invoice_log').insert({

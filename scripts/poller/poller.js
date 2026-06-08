@@ -1419,6 +1419,29 @@ function postProcessInvoice(result, pdfText) {
     result = { ...result, rate: null, parseNotes: [capNote, result.parseNotes].filter(Boolean).join(' | ') };
   }
 
+  // Future period guard — invoices are always for past work.
+  // If periodEnd is in the future, attempt MM/DD↔DD/MM swap; null both dates if not recoverable.
+  if (result.periodEnd) {
+    const endMs = new Date(result.periodEnd + 'T12:00:00Z').getTime();
+    if (endMs > Date.now()) {
+      const [ey, em, ed] = result.periodEnd.split('-').map(Number);
+      const swappedEnd = em !== ed
+        ? new Date(Date.UTC(ey, ed - 1, em)).toISOString().slice(0, 10)
+        : null;
+      if (swappedEnd && new Date(swappedEnd + 'T12:00:00Z').getTime() <= Date.now()) {
+        // Swap periodStart too, applying the same month↔day exchange
+        const [sy, sm, sd] = (result.periodStart || result.periodEnd).split('-').map(Number);
+        const swappedStart = new Date(Date.UTC(sy, sd - 1, sm)).toISOString().slice(0, 10);
+        console.warn(`  📅 Invoice future period ${result.periodStart}–${result.periodEnd} → ${swappedStart}–${swappedEnd} (MM/DD↔DD/MM swap)`);
+        result = { ...result, periodStart: swappedStart, periodEnd: swappedEnd };
+      } else {
+        const note = `Period ${result.periodEnd} is in the future — likely parse error, period nulled`;
+        console.warn(`  ⚠️  ${note}`);
+        result = { ...result, periodStart: null, periodEnd: null, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+      }
+    }
+  }
+
   return result;
 }
 
