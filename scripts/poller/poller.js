@@ -10,7 +10,7 @@ const Imap               = require('imap');
 const { simpleParser }   = require('mailparser');
 const XLSX               = require('xlsx');
 const AdmZip             = require('adm-zip');
-const { randomUUID }     = require('crypto');
+const { randomUUID, createHash } = require('crypto');
 const https            = require('https');
 const http             = require('http');
 
@@ -221,6 +221,24 @@ async function findProfileByFirstName(firstName) {
     return rows[0];
   } catch {
     return null;
+  }
+}
+
+// Returns true if this invoice attachment was already successfully ingested.
+// Checked before calling extractInvoice() to avoid burning Claude credits on reruns.
+// Fail-open: returns false on any network/DB error so the invoice is still processed.
+async function invoiceAlreadyProcessed(messageIdPrefix) {
+  if (!SUPABASE_REST_URL || !SUPABASE_ANON_KEY) return false;
+  try {
+    const res = await fetch(`${SUPABASE_REST_URL}/rpc/check_invoice_already_processed`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_message_id_prefix: messageIdPrefix }),
+    });
+    if (!res.ok) return false;
+    return await res.json(); // boolean
+  } catch {
+    return false;
   }
 }
 
@@ -1902,6 +1920,13 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   // ── Invoice PDFs — parse and report (ingest if enabled) ──────────────────
   for (const att of invoiceAtts) {
     console.log(`  🧾 Invoice attachment: ${att.name}`);
+    const attHash   = createHash('sha256').update(att.buffer).digest('hex');
+    const attMsgKey = `${messageId}::${att.name}`;
+    if (await invoiceAlreadyProcessed(attMsgKey)) {
+      console.log(`  ⚡ Invoice skip — already processed: ${att.name}`);
+      results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_duplicate' });
+      continue;
+    }
     let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name, bodyText || '');
     if (parsed) parsed = applyEarlyMonthPeriodFix(parsed);
     // Supplement/extend from email body:
@@ -1997,6 +2022,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
             rawExtracted:    parsed,
             forwardedBy:     forwardedBy || null,
             groupKey,
+            attachmentHash:  attHash,
           }, CONFIG.invoiceIngestUrl);
           const action = res.body?.action || res.body?.error || String(res.status);
           console.log(`    [${ci+1}] ${profile.name} → ${action}`);
@@ -2042,6 +2068,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           rawExtracted:    parsed,
           forwardedBy:     forwardedBy || null,
           groupKey:        null,
+          attachmentHash:  attHash,
         }, CONFIG.invoiceIngestUrl);
         const action = res.body?.action || res.body?.error || String(res.status);
         console.log(`     ✅ Ingested → ${action}`);

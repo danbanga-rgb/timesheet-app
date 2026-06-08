@@ -211,6 +211,8 @@ serve(async (req) => {
     groupKey,
     // True when subject/body contains correction keywords ("fixed", "revised", etc.)
     correctionHint,
+    // SHA-256 hex digest of the attachment bytes (for dedup analytics)
+    attachmentHash,
   } = body as Record<string, unknown>;
 
   if (!messageId || !contractorEmail) {
@@ -438,6 +440,7 @@ serve(async (req) => {
           period_end:      parsedPeriodEnd,
           raw_extracted:   body.rawExtracted ?? null,
           attempt_count:   attemptCount,
+          attachment_hash: (attachmentHash as string) || null,
         });
         return new Response(JSON.stringify({
           ok: true, action: 'corrected', parseStatus: 'success',
@@ -481,6 +484,7 @@ serve(async (req) => {
         period_start:    parsedPeriodStart,
         period_end:      parsedPeriodEnd,
         attempt_count:   attemptCount,
+        attachment_hash: (attachmentHash as string) || null,
       });
 
       return new Response(JSON.stringify({
@@ -578,18 +582,19 @@ serve(async (req) => {
 
   // ── Log ───────────────────────────────────────────────────────────────────
   await supabase.from('email_invoice_log').insert({
-    message_id:     messageId,
-    from_email:     contractorEmail,
-    subject:        subject || null,
+    message_id:      messageId,
+    from_email:      contractorEmail,
+    subject:         subject || null,
     attachment_name: attachmentName || null,
-    parse_status:   parseStatus,
-    parse_notes:    [parseNotes, actionNotes].filter(Boolean).join(' | '),
-    user_id:        userId,
-    invoice_id:     invoiceId,
-    period_start:   parsedPeriodStart,
-    period_end:     parsedPeriodEnd,
-    raw_extracted:  body.rawExtracted ?? null,
-    attempt_count:  attemptCount,
+    parse_status:    parseStatus,
+    parse_notes:     [parseNotes, actionNotes].filter(Boolean).join(' | '),
+    user_id:         userId,
+    invoice_id:      invoiceId,
+    period_start:    parsedPeriodStart,
+    period_end:      parsedPeriodEnd,
+    raw_extracted:   body.rawExtracted ?? null,
+    attempt_count:   attemptCount,
+    attachment_hash: (attachmentHash as string) || null,
   });
 
   return new Response(JSON.stringify({
