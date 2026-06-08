@@ -505,13 +505,18 @@ function parseXlsx(buffer, filename) {
         for (let r = 1; r < json.length; r++) {
           const row = json[r] || [];
           if (row.every(c => !String(c).trim())) continue;
-          const weekRaw = String(row[weekIdx] || '').trim();
+          const weekCell = row[weekIdx];
           let weekStart = null;
-          const mdy = weekRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-          if (mdy) {
-            weekStart = getMondayOf(new Date(Date.UTC(+mdy[3], +mdy[1]-1, +mdy[2])));
-          } else if (/^\d{4}-\d{2}-\d{2}$/.test(weekRaw)) {
-            weekStart = getMondayOf(new Date(weekRaw + 'T12:00:00Z'));
+          if (weekCell instanceof Date && !isNaN(weekCell.getTime())) {
+            weekStart = getMondayOf(weekCell);
+          } else {
+            const weekRaw = String(weekCell || '').trim();
+            const mdy = weekRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (mdy) {
+              weekStart = getMondayOf(new Date(Date.UTC(+mdy[3], +mdy[1]-1, +mdy[2])));
+            } else if (/^\d{4}-\d{2}-\d{2}$/.test(weekRaw)) {
+              weekStart = getMondayOf(new Date(weekRaw + 'T12:00:00Z'));
+            }
           }
           if (!weekStart) continue;
           const base = new Date(weekStart + 'T12:00:00Z');
