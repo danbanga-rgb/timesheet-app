@@ -142,9 +142,17 @@ async function resolveWeek(
 
   if (unique.length <= 1) {
     const discarded = weekCandidates.length > unique.length;
+    // If all candidates were future-filtered, do NOT fall back to the bad date.
+    // Return the closest candidate clamped to today's week instead.
+    if (unique.length === 0) {
+      const todayMonday = new Date(now);
+      todayMonday.setUTCDate(todayMonday.getUTCDate() - ((todayMonday.getUTCDay() + 6) % 7));
+      const clamped = todayMonday.toISOString().slice(0, 10);
+      return { resolvedWeek: clamped, resolutionNote: `all candidates were future dates (${weekCandidates.join(', ')}) — clamped to current week ${clamped}` };
+    }
     return {
-      resolvedWeek: unique[0] ?? weekCandidates[0],
-      resolutionNote: discarded ? `future candidate discarded; using ${unique[0] ?? weekCandidates[0]}` : null,
+      resolvedWeek: unique[0],
+      resolutionNote: discarded ? `future candidate discarded; using ${unique[0]}` : null,
     };
   }
 

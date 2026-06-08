@@ -671,6 +671,25 @@ function parseXlsx(buffer, filename) {
             weekStartDate = filenameWeek;
           }
         }
+        // Future-date guard: > 14 days ahead = almost certainly a MM/DD↔DD/MM swap.
+        // Try swapping month and day; if the swapped date is plausible, use it.
+        if (weekStartDate) {
+          const daysAhead = (new Date(weekStartDate).getTime() - Date.now()) / 86400000;
+          if (daysAhead > 14) {
+            const [y, m, d] = weekStartDate.split('-').map(Number);
+            if (m !== d) { // only swap if month ≠ day (otherwise swapping changes nothing)
+              const swapped = getMondayOf(new Date(Date.UTC(y, d - 1, m)));
+              const swappedAge = (Date.now() - new Date(swapped).getTime()) / 86400000;
+              if (swappedAge >= -7 && swappedAge <= 180) {
+                console.warn(`XLSX: future date ${weekStartDate} looks like MM/DD↔DD/MM swap — using ${swapped}`);
+                weekStartDate = swapped;
+              } else {
+                console.warn(`XLSX: implausible future weekStart ${weekStartDate} — skipping sheet`);
+                weekStartDate = null;
+              }
+            }
+          }
+        }
       }
 
       // No date found anywhere in the sheet — try filename as last resort
