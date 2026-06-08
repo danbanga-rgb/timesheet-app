@@ -303,7 +303,7 @@ serve(async (req) => {
   // ── Validate we have enough data to create an invoice ────────────────────
   const parsedPeriodStart = periodStart as string | null;
   const parsedPeriodEnd   = periodEnd   as string | null;
-  const parsedHours       = totalHours  != null ? Number(totalHours) : null;
+  let   parsedHours       = totalHours  != null ? Number(totalHours) : null;
   const parsedAmount      = totalAmount != null ? Number(totalAmount) : null;
 
   if (!parsedPeriodStart || !parsedPeriodEnd) {
@@ -321,6 +321,35 @@ serve(async (req) => {
     return new Response(JSON.stringify({ ok: false, action: 'partial', notes }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
+  }
+
+  // ── Derive hours from timesheets if invoice has none ─────────────────────
+  let hoursSourceNote: string | null = null;
+  if (parsedHours == null) {
+    const rangeStart = new Date(parsedPeriodStart + 'T12:00:00');
+    rangeStart.setDate(rangeStart.getDate() - 6);
+    const { data: tss } = await supabase
+      .from('timesheets')
+      .select('entries')
+      .eq('user_id', userId)
+      .gte('week_start', rangeStart.toISOString().slice(0, 10))
+      .lte('week_start', parsedPeriodEnd);
+    if (tss && tss.length > 0) {
+      let tsHours = 0;
+      for (const ts of tss) {
+        const entries = ts.entries as Record<string, { hours: string | number }>;
+        for (const [date, entry] of Object.entries(entries)) {
+          if (date >= parsedPeriodStart && date <= parsedPeriodEnd) {
+            const h = parseFloat(String(entry.hours));
+            if (!isNaN(h) && h > 0) tsHours += h;
+          }
+        }
+      }
+      if (tsHours > 0) {
+        parsedHours = Math.round(tsHours * 100) / 100;
+        hoursSourceNote = `Hours derived from timesheets (${parsedHours}h) — not on invoice`;
+      }
+    }
   }
 
   // ── Build invoice record ──────────────────────────────────────────────────
@@ -433,7 +462,7 @@ serve(async (req) => {
           subject:         subject || null,
           attachment_name: attachmentName || null,
           parse_status:    'success',
-          parse_notes:     [parseNotes, actionNotes].filter(Boolean).join(' | '),
+          parse_notes:     [parseNotes, hoursSourceNote, actionNotes].filter(Boolean).join(' | '),
           user_id:         userId,
           invoice_id:      invoiceId,
           period_start:    parsedPeriodStart,
@@ -587,7 +616,7 @@ serve(async (req) => {
     subject:         subject || null,
     attachment_name: attachmentName || null,
     parse_status:    parseStatus,
-    parse_notes:     [parseNotes, actionNotes].filter(Boolean).join(' | '),
+    parse_notes:     [parseNotes, hoursSourceNote, actionNotes].filter(Boolean).join(' | '),
     user_id:         userId,
     invoice_id:      invoiceId,
     period_start:    parsedPeriodStart,

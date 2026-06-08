@@ -342,7 +342,6 @@ function reconcileInvoiceLive(
   allTimesheets: Timesheet[]
 ): { status: 'matched' | 'mismatch' | 'unverifiable'; delta: number | null; timesheetHours: number | null; rows: ReconTimesheetRow[]; missingWeeks: number } {
   const { userId, periodStart, periodEnd, totalHours } = invoice;
-  if (totalHours == null) return { status: 'unverifiable', delta: null, timesheetHours: null, rows: [], missingWeeks: 0 };
 
   // Week range: week_start can be up to 6 days before periodStart and still contain period days
   const rangeStart = new Date(periodStart + 'T12:00:00');
@@ -389,6 +388,7 @@ function reconcileInvoiceLive(
   const missingWeeks = expectedWeeks.filter(w => !weeksWithHours.has(w)).length;
 
   if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0, rows, missingWeeks };
+  if (totalHours == null) return { status: 'unverifiable', delta: null, timesheetHours: tsHours, rows, missingWeeks };
 
   const delta = Math.round((totalHours - tsHours) * 100) / 100;
   const matched = Math.abs(delta) < 0.01;
@@ -5587,6 +5587,7 @@ const TimesheetSystem = () => {
             const inv = selectedInvoice;
             const project = projects.find(p => p.id === inv.projectId);
             const sym = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' } as Record<string, string>)[inv.currency] || '$';
+            const recon = reconcileInvoiceLive(inv, timesheets);
             const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
             return (
               <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
@@ -5606,7 +5607,7 @@ const TimesheetSystem = () => {
                     <div className="grid grid-cols-2 gap-4 mb-5 text-sm">
                       <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Period</div><div className="font-medium">{parseLocalDate(inv.periodStart).toLocaleDateString()} – {parseLocalDate(inv.periodEnd).toLocaleDateString()}</div></div>
                       <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Rate</div><div className="font-medium">{inv.rate != null ? `${sym}${inv.rate.toFixed(2)} / hour (${inv.currency})` : `— (${inv.currency})`}</div></div>
-                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours?.toFixed(2) ?? '—'}</div></div>
+                      <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Total Hours</div><div className="font-medium">{inv.totalHours != null ? inv.totalHours.toFixed(2) : recon.timesheetHours != null ? <span>{recon.timesheetHours.toFixed(2)} <span className="text-xs text-gray-400 font-normal">from TS</span></span> : '—'}</div></div>
                       <div className="bg-gray-50 rounded-lg p-3"><div className="text-gray-500 mb-0.5">Submitted</div><div className="font-medium">{inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : '—'}</div></div>
                       {inv.payOnDate && (
                         <div className="bg-blue-50 rounded-lg p-3 border border-blue-200"><div className="text-blue-500 mb-0.5">Pay On Date</div><div className="font-medium text-blue-800">{new Date(inv.payOnDate).toLocaleDateString()}</div></div>
@@ -5795,7 +5796,6 @@ const TimesheetSystem = () => {
                     </div>
                     {/* ── Timesheet reconciliation section ── */}
                     {(() => {
-                      const recon = reconcileInvoiceLive(inv, timesheets);
                       const statusBg: Record<string, string> = {
                         matched:      'bg-green-50 border-green-200',
                         mismatch:     'bg-red-50 border-red-200',
@@ -5806,10 +5806,13 @@ const TimesheetSystem = () => {
                         mismatch:     'text-red-700',
                         unverifiable: 'text-gray-500',
                       };
+                      const unverifiableLabel = recon.timesheetHours != null && inv.totalHours == null
+                        ? '— Hours from timesheets'
+                        : '— No timesheets found';
                       const statusLabel: Record<string, string> = {
                         matched:      '✓ Matched',
                         mismatch:     '⚠ Mismatch',
-                        unverifiable: '— No timesheets found',
+                        unverifiable: unverifiableLabel,
                       };
                       return (
                         <div className={`mb-5 border rounded-lg overflow-hidden ${statusBg[recon.status]}`}>
@@ -5819,7 +5822,7 @@ const TimesheetSystem = () => {
                             </span>
                             {recon.timesheetHours != null && (
                               <span className={`text-sm font-mono ${statusText[recon.status]}`}>
-                                Invoice {inv.totalHours?.toFixed(2) ?? '—'} h · TS {recon.timesheetHours.toFixed(2)} h
+                                {inv.totalHours != null ? `Invoice ${inv.totalHours.toFixed(2)} h · TS ${recon.timesheetHours.toFixed(2)} h` : `TS ${recon.timesheetHours.toFixed(2)} h`}
                                 {recon.delta != null && recon.delta !== 0 && (
                                   <span className="ml-2 font-semibold">
                                     ({recon.delta > 0 ? '+' : ''}{recon.delta.toFixed(2)} h)
@@ -5831,7 +5834,7 @@ const TimesheetSystem = () => {
                           <div className="p-3">
                             {recon.rows.length === 0 ? (
                               <p className="text-sm text-gray-400 py-1">
-                                No approved or pending timesheets found for {inv.userName} covering {parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}.
+                                {inv.totalHours == null ? 'No timesheets found to derive hours from.' : `No approved or pending timesheets found for ${inv.userName} covering ${parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}.`}
                               </p>
                             ) : (
                               <table className="w-full text-sm">
