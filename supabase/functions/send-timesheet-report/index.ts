@@ -133,13 +133,17 @@ function buildTimingSection(
   allTimesheets: Array<{ id: number; user_id: string; week_start: string; submitted_at: string | null; source: string }>,
   profileIds: Set<string>,
   completedWeeks: string[],
-  profiles: Array<{ id: string; start_date: string | null }>,
+  profiles: Array<{ id: string; start_date: string | null; end_date: string | null }>,
 ): string {
   const timingWeeks = completedWeeks.slice(-6);
   if (timingWeeks.length === 0) return '';
 
   const profileStartDate = new Map<string, string>();
-  for (const p of profiles) profileStartDate.set(p.id, p.start_date ?? '');
+  const profileEndDate   = new Map<string, string>();
+  for (const p of profiles) {
+    profileStartDate.set(p.id, p.start_date ?? '');
+    profileEndDate.set(p.id, p.end_date ?? '');
+  }
 
   type WeekStat = { total: number; portal: number; email: number; within1d: number; within3d: number; sumDays: number };
   const stats = new Map<string, WeekStat>();
@@ -150,6 +154,8 @@ function buildTimingSection(
     if (!stats.has(wk) || !profileIds.has(ts.user_id) || !ts.submitted_at) continue;
     const sd = profileStartDate.get(ts.user_id) ?? '';
     if (sd && sd > wk) continue;
+    const ed = profileEndDate.get(ts.user_id) ?? '';
+    if (ed && ed < wk) continue;
     const [y, m, d]  = wk.split('-').map(Number);
     const weekEndMs  = Date.UTC(y, m - 1, d + 6);
     const daysAfter  = (new Date(ts.submitted_at).getTime() - weekEndMs) / 86400000;
@@ -247,8 +253,8 @@ serve(async (req) => {
 
   const { data: allProfiles, error: profErr } = await db
     .from('profiles')
-    .select('id, name, start_date, role')
-    .in('role', ['timesheetuser', 'vendormanager'])
+    .select('id, name, start_date, end_date, role')
+    .eq('role', 'timesheetuser')
     .order('name');
 
   if (profErr) {
@@ -320,8 +326,11 @@ serve(async (req) => {
 
     const tsMap = tsByWeek.get(weekStart) ?? new Map();
 
-    // Eligible: contractors whose start_date is on or before this week
-    const eligible = profiles.filter(p => p.start_date && p.start_date <= weekStart);
+    // Eligible: started on or before this week AND not ended before this week
+    const eligible = profiles.filter(p =>
+      p.start_date && p.start_date <= weekStart &&
+      (!p.end_date || p.end_date >= weekStart)
+    );
     if (eligible.length === 0) continue;
 
     const missingNames: string[] = [];
