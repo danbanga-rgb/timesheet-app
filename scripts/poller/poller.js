@@ -490,6 +490,50 @@ function parseXlsx(buffer, filename) {
       const jsonRaw  = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
       const json     = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
 
+      // ── Portal export format (timesheets_export_*.csv) ───────────────────────
+      // Header: Employee Name, Week Start, Project, Mon–Sun, Total Hours, Status…
+      // One row per timesheet week; parse each row and skip the template scanner.
+      const hdr = (json[0] || []).map(c => String(c).toLowerCase().trim());
+      if (hdr.includes('employee name') && hdr.includes('week start') &&
+          ['mon','tue','wed','thu','fri'].filter(d => hdr.includes(d)).length >= 5) {
+        const nameIdx = hdr.indexOf('employee name');
+        const weekIdx = hdr.indexOf('week start');
+        const dayIdxMap = {};
+        ['mon','tue','wed','thu','fri','sat','sun'].forEach(d => {
+          const i = hdr.indexOf(d); if (i >= 0) dayIdxMap[d] = i;
+        });
+        for (let r = 1; r < json.length; r++) {
+          const row = json[r] || [];
+          if (row.every(c => !String(c).trim())) continue;
+          const weekRaw = String(row[weekIdx] || '').trim();
+          let weekStart = null;
+          const mdy = weekRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+          if (mdy) {
+            weekStart = getMondayOf(new Date(Date.UTC(+mdy[3], +mdy[1]-1, +mdy[2])));
+          } else if (/^\d{4}-\d{2}-\d{2}$/.test(weekRaw)) {
+            weekStart = getMondayOf(new Date(weekRaw + 'T12:00:00Z'));
+          }
+          if (!weekStart) continue;
+          const base = new Date(weekStart + 'T12:00:00Z');
+          const fullEntries = {};
+          ['mon','tue','wed','thu','fri','sat','sun'].forEach((d, i) => {
+            const dt = new Date(base); dt.setUTCDate(base.getUTCDate() + i);
+            const raw = String(row[dayIdxMap[d]] ?? '').replace(/[^0-9.]/g, '');
+            const val = parseFloat(raw);
+            fullEntries[dt.toISOString().split('T')[0]] = (!isNaN(val) && val >= 0 && val <= 24) ? val : 0;
+          });
+          const total = Object.values(fullEntries).reduce((s, h) => s + h, 0);
+          results.push({
+            weekStart,
+            entries: fullEntries,
+            total,
+            nameFromSheet: String(row[nameIdx] || '').trim() || null,
+            notes: `Sheet: ${sheetName} (portal export)`,
+          });
+        }
+        continue;
+      }
+
       let weekStartDate = null;
       let dayLabelRowIdx = -1;
       const hours = {};
