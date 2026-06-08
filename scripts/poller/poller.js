@@ -1389,26 +1389,39 @@ function postProcessInvoice(result, pdfText) {
     if (derived >= 1 && derived < 10000) result = { ...result, totalHours: Math.round(derived * 100) / 100 };
   } else if (r == null && h != null && h > 0 && t != null) {
     const derived = t / h;
-    if (derived >= 1 && derived < 10000) result = { ...result, rate: Math.round(derived * 100) / 100 };
+    // Sanity cap: derived rate > $120/hr means totalAmount was a false regex match — discard.
+    if (derived >= 1 && derived <= 120) result = { ...result, rate: Math.round(derived * 100) / 100 };
+  }
+
+  // Sanity cap on any rate value (derived or explicit) — $120/hr is the ceiling.
+  // If exceeded, null it out so Claude or a human can supply the correct value.
+  if (result.rate != null && result.rate > 120) {
+    const capNote = `Rate $${result.rate}/hr exceeded $120 cap — likely parse error`;
+    result = { ...result, rate: null, parseNotes: [capNote, result.parseNotes].filter(Boolean).join(' | ') };
   }
 
   return result;
 }
 
-// Merge regex and Claude results: regex wins on every field it found (deterministic);
-// Claude fills in whatever regex missed.
-// Exception: currency — if Claude says USD but regex says EUR, trust Claude (EUR templates
-// with USD billing are common; regex sees the symbol, Claude understands context).
+// Merge regex and Claude results.
+// Financial fields (totalHours, rate, totalAmount): Claude wins when available — regex is
+// prone to false matches on large numbers. Regex fills in only what Claude missed.
+// Non-financial fields (invoiceNumber, periodStart, periodEnd): regex wins (deterministic).
+// Exception: currency — Claude wins over regex when they conflict (EUR templates with USD billing).
 function mergeInvoiceResults(regex, claude) {
   const merged = { ...claude, paymentDetails: { ...(claude.paymentDetails || {}) } };
   if (!regex) return merged;
-  for (const f of ['invoiceNumber', 'periodStart', 'periodEnd', 'totalHours', 'rate', 'totalAmount']) {
+  // Non-financial: regex wins
+  for (const f of ['invoiceNumber', 'periodStart', 'periodEnd']) {
     if (regex[f] != null) merged[f] = regex[f];
+  }
+  // Financial: Claude wins; regex only fills gaps
+  for (const f of ['totalHours', 'rate', 'totalAmount']) {
+    if (merged[f] == null && regex[f] != null) merged[f] = regex[f];
   }
   // Currency: regex wins only when Claude has no opinion, or both agree.
   if (regex.currency != null) {
     if (claude?.currency == null || claude.currency === regex.currency) merged.currency = regex.currency;
-    // else: keep Claude's value (already set from the spread above)
   }
   for (const f of ['iban', 'swift', 'accountNumber', 'sortCode', 'routingNumber', 'bankName', 'companyName']) {
     if (regex.paymentDetails?.[f] != null) merged.paymentDetails[f] = regex.paymentDetails[f];
