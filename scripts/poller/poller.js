@@ -330,7 +330,7 @@ function extractNameFromXlsx(buffer) {
 // Extract name from XLSX filename (strip dates and common suffixes)
 function extractNameFromFilename(filename) {
   // Remove extension
-  let name = filename.replace(/\.(xlsx|xls|pdf)$/i, '');
+  let name = filename.replace(/\.(xlsx|xls|csv|pdf)$/i, '');
   // Remove date-like patterns: 27apr, 03may, 2026, 27Apr-03May, 05032026 etc
   name = name.replace(/\d{1,2}(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\d*/gi, '');
   name = name.replace(/\d{4}/g, '');
@@ -1699,7 +1699,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   // Classify each PDF as timesheet / invoice / both / unknown via content scoring.
   // XLSX is always treated as a timesheet (no invoice XLSX path exists).
   // DOCX is always treated as an invoice (contractors use Word for invoice templates).
-  const xlsxAtts    = relevantAtts.filter(a => a.isXlsx);
+  const xlsxAtts    = relevantAtts.filter(a => a.isXlsx || a.isCsv);
   const pdfQueue    = relevantAtts.filter(a => a.isPdf);
   const docxQueue   = relevantAtts.filter(a => a.isDocx);
 
@@ -2047,6 +2047,8 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
     // Detect by contentType OR filename — covers inline attachments too
     isXlsx: !!(a.contentType?.includes('spreadsheet') || a.contentType?.includes('excel') ||
                (a.filename||'').match(/\.(xlsx|xls)$/i)),
+    isCsv:  !!(a.contentType?.includes('text/csv') || a.contentType?.includes('csv') ||
+               (a.filename||'').match(/\.csv$/i)),
     isPdf:  !!(a.contentType?.includes('pdf') ||
                (a.filename||'').match(/\.pdf$/i) ||
                // Some clients send PDFs with generic octet-stream content type
@@ -2064,7 +2066,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   });
 
   const emlAtts = attachments.filter(a => a.isEml);
-  const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isDocx || a.isEml);
+  const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isCsv || a.isPdf || a.isDocx || a.isEml);
 
   // ── No timesheet content — skip ────────────────────────────────────────────
   if (!hasTimesheetContent) {
@@ -2099,12 +2101,14 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
           // Also check related/alternative content parts that may contain PDFs
           const isXlsx = !!(ctype.includes('spreadsheet') || ctype.includes('excel') ||
                             fname.match(/\.(xlsx|xls)$/i));
+          const isCsv  = !!(ctype.includes('text/csv') || ctype.includes('csv') ||
+                            fname.match(/\.csv$/i));
           const isPdf  = !!(ctype.includes('pdf') ||
                             fname.match(/\.pdf$/i) ||
                             (ctype.includes('octet-stream') && fname.match(/\.pdf$/i)));
           const isDocx = !!(ctype.includes('wordprocessingml') || ctype.includes('msword') ||
                             fname.match(/\.docx?$/i));
-          return { name: fname || ctype.split('/')[1] || 'unnamed', buffer: a.content, size, isXlsx, isPdf, isDocx, isEml: false };
+          return { name: fname || ctype.split('/')[1] || 'unnamed', buffer: a.content, size, isXlsx, isCsv, isPdf, isDocx, isEml: false };
         }).filter(a => {
           if (a.size > MAX_ATTACHMENT_BYTES) {
             console.warn(`  ⚠️  Inner attachment too large (${(a.size / 1024 / 1024).toFixed(1)}MB), skipping: ${a.name}`);
@@ -2723,6 +2727,8 @@ async function main() {
       size:   a.size || a.content?.length || 0,
       isXlsx: !!(a.contentType?.includes('spreadsheet') || a.contentType?.includes('excel') ||
                  (a.filename||'').match(/\.(xlsx|xls)$/i)),
+      isCsv:  !!(a.contentType?.includes('text/csv') || a.contentType?.includes('csv') ||
+                 (a.filename||'').match(/\.csv$/i)),
       isPdf:  !!(a.contentType?.includes('pdf') || (a.filename||'').match(/\.pdf$/i) ||
                  (a.contentType?.includes('octet-stream') && (a.filename||'').match(/\.pdf$/i))),
       isDocx: !!(a.contentType?.includes('wordprocessingml') || a.contentType?.includes('msword') ||
@@ -2736,7 +2742,7 @@ async function main() {
       return true;
     });
 
-    const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isPdf || a.isDocx || a.isEml);
+    const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isCsv || a.isPdf || a.isDocx || a.isEml);
 
     // No timesheet content: forward to helpdesk, mark seen
     if (!hasTimesheetContent) {
