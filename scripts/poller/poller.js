@@ -1965,7 +1965,16 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         forwardedBy:     forwardedBy || null,
       });
       const action = res.body?.action || String(res.status);
-      results.push({ contractor: contractorEmail, week: ts.weekStart, status: res.status, action });
+      results.push({
+        type:           'timesheet',
+        contractor:     contractorEmail,
+        contractorName: res.body?.userName || ts.resolvedName || contractorEmail,
+        week:           res.body?.weekStart || ts.weekStart,
+        status:         res.status,
+        action,
+        attachmentName: ts.attachmentName || 'body',
+        notes:          res.body?.notes || '',
+      });
       console.log(`  ✅ ${contractorEmail} | ${ts.weekStart} | ${ts.attachmentName || 'body'} → ${action}`);
     } catch (e) {
       results.push({ contractor: contractorEmail, week: ts.weekStart, error: e.message });
@@ -2757,6 +2766,26 @@ ${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ atte
 `;
   }
 
+  if (summary.timesheetReports.length > 0) {
+    const ACTION_ICON = {
+      created:              '✅ created    ',
+      correction_imported:  '✏️  correction ',
+      correction_pending:   '⏳ pending    ',
+      duplicate:            '🔁 duplicate  ',
+    };
+    body += `
+TIMESHEET PROCESSING LOG (${summary.timesheetReports.length} entries)
+${'─'.repeat(50)}
+`;
+    for (const r of summary.timesheetReports) {
+      const icon = ACTION_ICON[r.action] || `   ${r.action.padEnd(12)}`;
+      const wk   = r.week ? r.week.slice(0, 10) : '—';
+      const file = r.attachmentName || 'body';
+      body += `  [${icon}] ${r.contractorName} | ${wk} | ${file}\n`;
+      if (r.notes) body += `              Notes: ${r.notes}\n`;
+    }
+  }
+
   if (summary.invoiceReports.length > 0) {
     const methodCounts = {};
     for (const inv of summary.invoiceReports) {
@@ -2824,7 +2853,7 @@ async function main() {
   const summary = {
     total: rawMessages.length, dmarc: 0, forwarded: 0,
     created: 0, duplicates: 0, corrections: 0,
-    newUsers: [], failures: [], invoiceReports: [],
+    newUsers: [], failures: [], invoiceReports: [], timesheetReports: [],
   };
 
   for (const raw of rawMessages) {
@@ -2913,6 +2942,7 @@ async function main() {
 
     // Accumulate summary counts
     emailResults.forEach(r => {
+      if (r.type === 'timesheet') summary.timesheetReports.push(r);
       if (r.action === 'created') summary.created++;
       else if (r.action === 'duplicate') summary.duplicates++;
       else if (r.action === 'correction_imported') summary.corrections++;
