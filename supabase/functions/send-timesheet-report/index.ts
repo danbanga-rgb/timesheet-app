@@ -153,7 +153,7 @@ function buildTimingSection(
     const wk = ts.week_start.slice(0, 10);
     if (!stats.has(wk) || !profileIds.has(ts.user_id) || !ts.submitted_at) continue;
     const sd = profileStartDate.get(ts.user_id) ?? '';
-    if (sd && sd > wk) continue;
+    if (sd && sd > addDays(wk, 6)) continue;
     const ed = profileEndDate.get(ts.user_id) ?? '';
     if (ed && ed < wk) continue;
     const [y, m, d]  = wk.split('-').map(Number);
@@ -325,13 +325,40 @@ serve(async (req) => {
     }
 
     const tsMap = tsByWeek.get(weekStart) ?? new Map();
+    const weekSunday = addDays(weekStart, 6);
 
-    // Eligible: started on or before this week AND not ended before this week
+    // Eligible: started on or before this week's Sunday AND not ended before this week's Monday
     const eligible = profiles.filter(p =>
-      p.start_date && p.start_date <= weekStart &&
+      p.start_date && p.start_date <= weekSunday &&
       (!p.end_date || p.end_date >= weekStart)
     );
     if (eligible.length === 0) continue;
+
+    // Changes note: new starters this week, or contractors who became inactive last week
+    const WK_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const newStarters = profiles.filter(p =>
+      p.start_date && p.start_date >= weekStart && p.start_date <= weekSunday
+    );
+    const newlyInactive = profiles.filter(p =>
+      p.end_date && p.end_date >= addDays(weekStart, -7) && p.end_date < weekStart
+    );
+    let changesNote = '';
+    if (newStarters.length > 0 || newlyInactive.length > 0) {
+      const parts: string[] = [];
+      if (newStarters.length > 0) {
+        parts.push('New: ' + newStarters.map(p => {
+          const [, em, ed] = p.start_date!.split('-').map(Number);
+          return `${p.name} (started ${WK_MONTHS[em - 1]} ${ed})`;
+        }).join(', '));
+      }
+      if (newlyInactive.length > 0) {
+        parts.push('Inactive: ' + newlyInactive.map(p => {
+          const [, em, ed] = p.end_date!.split('-').map(Number);
+          return `${p.name} (end date ${WK_MONTHS[em - 1]} ${ed})`;
+        }).join(', '));
+      }
+      changesNote = `<p style="margin:8px 0 0;padding:6px 10px;background:#f8f9fa;border-left:3px solid #9ca3af;font-size:12px;color:#6b7280;font-style:italic">${parts.join(' · ')}</p>`;
+    }
 
     const missingNames: string[] = [];
     let submitted = 0;
@@ -375,6 +402,7 @@ serve(async (req) => {
         </div>
         <div style="padding:12px 16px">
           ${missingChips}
+          ${changesNote}
         </div>
       </div>`;
 
