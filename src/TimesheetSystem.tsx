@@ -627,7 +627,8 @@ const TimesheetSystem = () => {
   const [pendingPaymentMethod, setPendingPaymentMethod] = useState('');
   const [pendingPaymentTerms, setPendingPaymentTerms] = useState('');
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
-  const [pendingUsdRate, setPendingUsdRate] = useState('');       // accountant-entered USD rate for non-USD imported invoices
+  const [pendingUsdRate, setPendingUsdRate] = useState('');
+  const [profileSwitchOpen, setProfileSwitchOpen] = useState(false);
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
@@ -1802,6 +1803,7 @@ const TimesheetSystem = () => {
     setPendingPaymentMethod('');
     setPendingPaymentTerms('');
     setPendingUsdRate('');
+    setProfileSwitchOpen(false);
   };
 
   const toggleCombinePayments = async (profileId: number, current: boolean | null) => {
@@ -1842,6 +1844,14 @@ const TimesheetSystem = () => {
       ...(fields.paymentMethod !== undefined ? { paymentMethodOverride: fields.paymentMethod || null } : {}),
       ...(fields.paymentTerms !== undefined ? { paymentTerms: fields.paymentTerms || null } : {}),
     } : prev);
+  };
+
+  const switchInvoicePaymentProfile = async (invoiceId: number, newProfile: PaymentProfile) => {
+    const { error } = await supabase.from('invoices').update({ payment_profile: newProfile }).eq('id', invoiceId);
+    if (error) { alert('Error switching profile: ' + error.message); return; }
+    setSelectedInvoice(prev => prev ? { ...prev, paymentProfile: newProfile } : prev);
+    setInvoices(prev => prev.map(i => i.id === invoiceId ? { ...i, paymentProfile: newProfile } : i));
+    setProfileSwitchOpen(false);
   };
 
   const savePaymentProfile = async () => {
@@ -5705,14 +5715,14 @@ const TimesheetSystem = () => {
             const recon = reconcileInvoiceLive(inv, timesheets);
             const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
             return (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => setShowInvoiceModal(false)}>
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => { setShowInvoiceModal(false); setProfileSwitchOpen(false); }}>
                 <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                   <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-start z-10">
                     <div>
                       <h2 className="text-xl font-bold text-gray-800 font-mono">{inv.invoiceNumber}</h2>
                       <p className="text-gray-600 text-sm">{inv.userName} · {parseLocalDate(inv.periodStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
                     </div>
-                    <button onClick={() => setShowInvoiceModal(false)} className="text-gray-500 hover:text-gray-700 p-1"><X className="w-5 h-5" /></button>
+                    <button onClick={() => { setShowInvoiceModal(false); setProfileSwitchOpen(false); }} className="text-gray-500 hover:text-gray-700 p-1"><X className="w-5 h-5" /></button>
                   </div>
                   <div className="p-6">
                     <div className="flex items-center gap-3 mb-5">
@@ -5765,9 +5775,49 @@ const TimesheetSystem = () => {
                         </tr>
                       </tfoot>
                     </table>
+                    {(() => {
+                      const contractorProfiles = paymentProfiles.filter(p => p.userId === inv.userId);
+                      return !inv.paymentProfile && contractorProfiles.length > 0 ? (
+                        <div className="mb-5 border border-amber-200 rounded-lg overflow-hidden">
+                          <div className="bg-amber-50 px-4 py-2.5 border-b border-amber-200 flex items-center justify-between">
+                            <span className="font-semibold text-amber-800 text-sm">⚠ No payment profile attached</span>
+                            <button onClick={() => setProfileSwitchOpen(o => !o)} className="text-xs px-2 py-1 border border-amber-400 rounded hover:bg-amber-100 text-amber-700">Assign Profile</button>
+                          </div>
+                          {profileSwitchOpen && (
+                            <div className="p-3 space-y-1 bg-white">
+                              {contractorProfiles.map(p => (
+                                <button key={p.id} onClick={() => switchInvoicePaymentProfile(inv.id, p)}
+                                  className="w-full text-left px-3 py-2 rounded hover:bg-indigo-50 border border-gray-100 text-sm">
+                                  <span className="font-medium text-gray-800">{p.profileName}</span>
+                                  <span className="text-gray-400 ml-2 text-xs">{p.bankName}{p.iban ? ` · ${p.iban.slice(-6)}` : ''}</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : null;
+                    })()}
                     {inv.paymentProfile && (
                       <div className="mb-5 border border-green-200 rounded-lg overflow-hidden">
-                        <div className="bg-green-50 px-4 py-2 border-b border-green-200"><span className="font-semibold text-green-800 text-sm">💳 Payment Details — {inv.paymentProfile.profileName}</span></div>
+                        <div className="bg-green-50 px-4 py-2 border-b border-green-200 flex items-center justify-between">
+                          <span className="font-semibold text-green-800 text-sm">💳 Payment Details — {inv.paymentProfile.profileName}</span>
+                          {paymentProfiles.filter(p => p.userId === inv.userId).length > 1 && (
+                            <button onClick={() => setProfileSwitchOpen(o => !o)} className="text-xs px-2 py-1 border border-green-400 rounded hover:bg-green-100 text-green-700">Switch</button>
+                          )}
+                        </div>
+                        {profileSwitchOpen && (
+                          <div className="px-3 py-2 bg-white border-b border-green-100 space-y-1">
+                            {paymentProfiles.filter(p => p.userId === inv.userId).map(p => (
+                              <button key={p.id} onClick={() => switchInvoicePaymentProfile(inv.id, p)}
+                                className={`w-full text-left px-3 py-2 rounded text-sm flex items-center gap-2 ${p.id === inv.paymentProfile?.id ? 'bg-green-50 border border-green-200' : 'hover:bg-indigo-50 border border-gray-100'}`}>
+                                {p.id === inv.paymentProfile?.id && <span className="text-green-600 text-xs">✓</span>}
+                                <span className="font-medium text-gray-800">{p.profileName}</span>
+                                <span className="text-gray-400 text-xs ml-auto">{p.bankName}{p.iban ? ` · ···${p.iban.slice(-6)}` : ''}</span>
+                              </button>
+                            ))}
+                            <button onClick={() => setProfileSwitchOpen(false)} className="text-xs text-gray-400 hover:text-gray-600 px-3 py-1">Cancel</button>
+                          </div>
+                        )}
                         <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
                           {[['Company Name', inv.paymentProfile.companyName],['Company Address', inv.paymentProfile.companyAddress],['Country', inv.paymentProfile.country],['Bank Name', inv.paymentProfile.bankName],['Bank Address', inv.paymentProfile.bankAddress],['Bank Branch', inv.paymentProfile.bankBranch],['Account Number', inv.paymentProfile.accountNumber],['IBAN', inv.paymentProfile.iban],['SWIFT / BIC', inv.paymentProfile.swift],['Payment Email', inv.paymentProfile.paymentEmail]].filter(([,v]) => v).map(([label, value]) => (
                             <div key={label as string}><span className="text-gray-500">{label}: </span><span className="font-medium text-gray-800 font-mono">{value}</span></div>
