@@ -310,11 +310,14 @@ async function findProfileBySubjectName(subject) {
   for (const w of words) candidates.push([w]);
 
   for (const wset of candidates) {
-    const params = wset.map(w => `name=ilike.*${encodeURIComponent(w)}*`).join('&');
     try {
       const res = await fetch(
-        `${SUPABASE_REST_URL}/profiles?${params}&role=eq.timesheetuser&select=id,email,name&limit=10`,
-        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
+        `${SUPABASE_REST_URL}/rpc/find_profiles_by_name_words`,
+        {
+          method: 'POST',
+          headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ p_words: wset }),
+        }
       );
       if (!res.ok) continue;
       const rows = await res.json();
