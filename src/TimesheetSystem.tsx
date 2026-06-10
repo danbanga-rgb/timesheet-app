@@ -174,6 +174,7 @@ interface UserProfile {
   remindersEnabled: boolean;
   vendorManagerId: string | null;
   lastLogin: string | null;
+  paymentTerms: string | null;
 }
 
 interface Project {
@@ -279,6 +280,7 @@ interface Invoice {
   reconciliationNotes: string | null;
   groupKey: string | null;  // shared key for multi-contractor invoices from same attachment
   corrected: boolean;        // re-submitted with different values; reset to submitted for re-approval
+  paymentTerms: string | null; // NET15 / NET30 / NET45 / NET60
 }
 
 interface ConveraPaymentRow {
@@ -322,6 +324,7 @@ interface UserForm {
   invoice_enabled: boolean;
   reminders_enabled: boolean;
   vendor_manager_id: string | null;
+  payment_terms: string;
 }
 
 interface ProjectForm {
@@ -592,7 +595,7 @@ const TimesheetSystem = () => {
   const [showQuickAddModal, setShowQuickAddModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: ''
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -620,8 +623,9 @@ const TimesheetSystem = () => {
   const [invoiceDateRange, setInvoiceDateRange] = useState({ start: '', end: '' });
   const [invoicePayDateRange, setInvoicePayDateRange] = useState({ start: '', end: '' });
   const [invoicePaidDateRange, setInvoicePaidDateRange] = useState({ start: '', end: '' });
-  const [pendingPayOnDate, setPendingPayOnDate] = useState('');   // expected pay on date (set on approve or anytime)
-  const [pendingPaymentMethod, setPendingPaymentMethod] = useState(''); // accountant-editable payment method
+  const [pendingPayOnDate, setPendingPayOnDate] = useState('');
+  const [pendingPaymentMethod, setPendingPaymentMethod] = useState('');
+  const [pendingPaymentTerms, setPendingPaymentTerms] = useState('');
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [pendingUsdRate, setPendingUsdRate] = useState('');       // accountant-entered USD rate for non-USD imported invoices
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
@@ -762,6 +766,17 @@ const TimesheetSystem = () => {
     if (currentUser?.country) setBannerCountry(currentUser.country);
     if (currentUser?.region) setBannerRegion(currentUser.region);
   }, [currentUser?.id]);
+
+  // Pre-fill payment terms + auto-calculate pay-on when invoice modal opens
+  useEffect(() => {
+    if (!selectedInvoice) return;
+    const profileTerms = users.find(u => u.id === selectedInvoice.userId)?.paymentTerms || '';
+    const terms = selectedInvoice.paymentTerms || profileTerms;
+    setPendingPaymentTerms(terms);
+    if (terms && !selectedInvoice.payOnDate) {
+      setPendingPayOnDate(calculatePayOn(selectedInvoice.periodEnd, terms));
+    }
+  }, [selectedInvoice?.id]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -906,6 +921,7 @@ const TimesheetSystem = () => {
       remindersEnabled: p.reminders_enabled === undefined ? true : !!(p.reminders_enabled as boolean),
       vendorManagerId: (p.vendor_manager_id as string) || null,
       lastLogin: null,
+      paymentTerms: (p.payment_terms as string) || null,
     };
   }
 
@@ -954,6 +970,28 @@ const TimesheetSystem = () => {
     const clean = dateStr.split('T')[0];
     const [y, m, d] = clean.split('-').map(Number);
     return new Date(y, m - 1, d);
+  }
+
+  function calculatePayOn(periodEnd: string, terms: string): string {
+    const daysMap: Record<string, number> = { NET15: 15, NET30: 30, NET45: 45, NET60: 60 };
+    const n = daysMap[terms];
+    if (!n || !periodEnd) return '';
+    const due = parseLocalDate(periodEnd);
+    due.setDate(due.getDate() + n);
+    // Find the first payment run (15th or EOM) on or after the due date
+    let payRun: Date | null = null;
+    for (let mo = 0; mo <= 3 && !payRun; mo++) {
+      const y = due.getFullYear() + Math.floor((due.getMonth() + mo) / 12);
+      const m = (due.getMonth() + mo) % 12;
+      for (const candidate of [new Date(y, m, 15), new Date(y, m + 1, 0)]) {
+        if (candidate >= due) { payRun = candidate; break; }
+      }
+    }
+    if (!payRun) return '';
+    const dow = payRun.getDay();
+    if (dow === 6) payRun.setDate(payRun.getDate() - 1); // Sat → Fri
+    if (dow === 0) payRun.setDate(payRun.getDate() + 1); // Sun → Mon
+    return `${payRun.getFullYear()}-${String(payRun.getMonth() + 1).padStart(2, '0')}-${String(payRun.getDate()).padStart(2, '0')}`;
   }
 
   function formatDate(date: Date): string {
@@ -1247,18 +1285,18 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, reminders_enabled: user.remindersEnabled !== false, vendor_manager_id: user.vendorManagerId || null });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, reminders_enabled: user.remindersEnabled !== false, vendor_manager_id: user.vendorManagerId || null, payment_terms: user.paymentTerms || '' });
     } else {
       setEditingUser(null);
       const autoPassword = generatePassword();
-      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null });
+      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: '' });
     }
     setShowUserModal(true);
   };
 
   const openQuickAddModal = () => {
     setEditingUser(null);
-    setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null });
+    setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: '' });
     setShowQuickAddModal(true);
   };
 
@@ -1286,6 +1324,7 @@ const TimesheetSystem = () => {
         invoice_enabled: userForm.invoice_enabled,
         reminders_enabled: userForm.reminders_enabled,
         vendor_manager_id: userForm.vendor_manager_id || null,
+        payment_terms: userForm.payment_terms || null,
       };
       const { data: updated, error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id).select('id');
       if (error) { alert('Error updating user: ' + error.message); return; }
@@ -1615,6 +1654,7 @@ const TimesheetSystem = () => {
       reconciliationNotes: (r.reconciliation_notes as string) || null,
       groupKey: (r.group_key as string) || null,
       corrected: !!(r.corrected as boolean),
+      paymentTerms: (r.payment_terms as string) || null,
     };
   }
 
@@ -1738,7 +1778,7 @@ const TimesheetSystem = () => {
     setPendingUsdRate('');
   };
 
-  const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string) => {
+  const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
     const update: Record<string, unknown> = {
       status,
       reviewed_at: new Date().toISOString(),
@@ -1747,6 +1787,7 @@ const TimesheetSystem = () => {
     if (payOnDate !== undefined) update.pay_on_date = payOnDate || null;
     if (status === 'paid' && paidDate) update.paid_date = paidDate;
     if (pmOverride !== undefined) update.payment_method = pmOverride || null;
+    if (paymentTerms !== undefined) update.payment_terms = paymentTerms || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error updating invoice: ' + error.message); return; }
     await fetchInvoices();
@@ -1754,6 +1795,7 @@ const TimesheetSystem = () => {
     setPendingPayOnDate('');
     setPendingPaidDate('');
     setPendingPaymentMethod('');
+    setPendingPaymentTerms('');
     setPendingUsdRate('');
   };
 
@@ -1770,7 +1812,7 @@ const TimesheetSystem = () => {
   };
 
   // Save approval status and/or pay on date without closing modal
-  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string }) => {
+  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string }) => {
     const update: Record<string, unknown> = {};
     if (fields.status !== undefined) {
       update.status = fields.status;
@@ -1779,6 +1821,7 @@ const TimesheetSystem = () => {
     }
     if (fields.payOnDate !== undefined) update.pay_on_date = fields.payOnDate || null;
     if (fields.paymentMethod !== undefined) update.payment_method = fields.paymentMethod || null;
+    if (fields.paymentTerms !== undefined) update.payment_terms = fields.paymentTerms || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error saving changes: ' + error.message); return; }
     await fetchInvoices();
@@ -1787,6 +1830,7 @@ const TimesheetSystem = () => {
       ...(fields.status ? { status: fields.status, reviewedBy: currentUser!.name, reviewedAt: new Date().toISOString() } : {}),
       ...(fields.payOnDate !== undefined ? { payOnDate: fields.payOnDate || null } : {}),
       ...(fields.paymentMethod !== undefined ? { paymentMethodOverride: fields.paymentMethod || null } : {}),
+      ...(fields.paymentTerms !== undefined ? { paymentTerms: fields.paymentTerms || null } : {}),
     } : prev);
   };
 
@@ -3119,6 +3163,16 @@ const TimesheetSystem = () => {
                           <select value={userForm.project_id || ''} onChange={e => setUserForm({...userForm, project_id: e.target.value ? parseInt(e.target.value) : null})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                             <option value="">Select Project</option>
                             {projects.filter(p => p.status === 'active').map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Payment Terms <span className="text-gray-400 font-normal">(default for invoices)</span></label>
+                          <select value={userForm.payment_terms} onChange={e => setUserForm({...userForm, payment_terms: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                            <option value="">— not set —</option>
+                            <option value="NET15">NET15</option>
+                            <option value="NET30">NET30</option>
+                            <option value="NET45">NET45</option>
+                            <option value="NET60">NET60</option>
                           </select>
                         </div>
                         <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg space-y-3">
@@ -5931,6 +5985,23 @@ const TimesheetSystem = () => {
                       <div className="mt-5 space-y-3">
                         <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
                           <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Payment Terms</label>
+                            <select
+                              value={pendingPaymentTerms}
+                              onChange={e => {
+                                setPendingPaymentTerms(e.target.value);
+                                if (e.target.value) setPendingPayOnDate(calculatePayOn(inv.periodEnd, e.target.value));
+                              }}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm bg-white"
+                            >
+                              <option value="">— select —</option>
+                              <option value="NET15">NET15</option>
+                              <option value="NET30">NET30</option>
+                              <option value="NET45">NET45</option>
+                              <option value="NET60">NET60</option>
+                            </select>
+                          </div>
+                          <div>
                             <label className="block text-xs font-medium text-gray-600 mb-1">Pay On Date (optional)</label>
                             <input
                               type="date"
@@ -5952,7 +6023,7 @@ const TimesheetSystem = () => {
                           </div>
                         </div>
                         <div className="flex gap-3">
-                          <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined, undefined, pendingPaymentMethod || paymentMethod(inv))} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
+                          <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined, undefined, pendingPaymentMethod || paymentMethod(inv), pendingPaymentTerms || undefined)} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
                           <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
                         </div>
                       </div>
@@ -5961,11 +6032,29 @@ const TimesheetSystem = () => {
                     {/* ── Approved: edit approval details + separate mark-paid panel ── */}
                     {inv.status === 'approved' && (() => {
                       const editPayOn = pendingPayOnDate !== '' ? pendingPayOnDate : (inv.payOnDate || '');
+                      const editTerms = pendingPaymentTerms !== '' ? pendingPaymentTerms : (inv.paymentTerms || '');
                       return (
                         <div className="mt-5 space-y-4">
                           {/* Edit panel */}
                           <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
                             <p className="text-sm font-semibold text-amber-800 flex items-center gap-2"><Edit2 className="w-4 h-4" /> Edit Approval Details</p>
+                            <div>
+                              <label className="block text-xs font-medium text-amber-700 mb-1">Payment Terms</label>
+                              <select
+                                value={editTerms}
+                                onChange={e => {
+                                  setPendingPaymentTerms(e.target.value);
+                                  if (e.target.value && !editPayOn) setPendingPayOnDate(calculatePayOn(inv.periodEnd, e.target.value));
+                                }}
+                                className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-400 text-sm bg-white"
+                              >
+                                <option value="">— select —</option>
+                                <option value="NET15">NET15</option>
+                                <option value="NET30">NET30</option>
+                                <option value="NET45">NET45</option>
+                                <option value="NET60">NET60</option>
+                              </select>
+                            </div>
                             <div>
                               <label className="block text-xs font-medium text-amber-700 mb-1">Pay On Date (expected)</label>
                               <input
@@ -5989,9 +6078,10 @@ const TimesheetSystem = () => {
                             <div className="flex gap-2">
                               <button
                                 onClick={async () => {
-                                  await saveInvoiceEdits(inv.id, { payOnDate: editPayOn, paymentMethod: pendingPaymentMethod || paymentMethod(inv) });
+                                  await saveInvoiceEdits(inv.id, { payOnDate: editPayOn, paymentMethod: pendingPaymentMethod || paymentMethod(inv), paymentTerms: editTerms });
                                   setPendingPayOnDate('');
                                   setPendingPaymentMethod('');
+                                  setPendingPaymentTerms('');
                                   alert('Changes saved.');
                                 }}
                                 className="flex-1 flex items-center justify-center gap-2 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 font-medium text-sm"
