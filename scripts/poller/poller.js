@@ -280,6 +280,54 @@ function extractDocxText(buffer) {
   }
 }
 
+// Resolve a contractor from an email subject when no email address is in the body.
+// Used when an internal forwarder (e.g. accountant) adds a contractor name to the subject
+// instead of forwarding the original email with headers intact.
+// Returns { profile } on unique match, or { profile: null, ambiguous, reason } otherwise.
+async function findProfileBySubjectName(subject) {
+  if (!subject || !SUPABASE_REST_URL) return { profile: null, reason: 'no subject' };
+
+  const STOPWORDS = new Set([
+    'invoice', 'billing', 'timesheet', 'payment', 'hours', 'week', 'monthly', 'report',
+    'fwd', 'fw', 'ref', 're', 'the', 'for', 'and', 'from', 'with', 'urgent',
+    'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+    'january', 'february', 'march', 'april', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december',
+  ]);
+
+  // Extract capitalized words (3+ chars), filter stopwords — likely candidate name tokens
+  const words = (subject.match(/\b[A-ZŠŽČĆĐ][a-zA-ZÀ-žšžčćđ]{2,}\b/g) || [])
+    .map(w => w.toLowerCase())
+    .filter(w => !STOPWORDS.has(w));
+
+  if (words.length === 0) return { profile: null, reason: `no name candidates in subject '${subject}'` };
+
+  // Try: all words → 2-word sliding windows → individual words (first unique match wins)
+  const candidates = [words];
+  if (words.length > 2) {
+    for (let i = 0; i <= words.length - 2; i++) candidates.push(words.slice(i, i + 2));
+  }
+  for (const w of words) candidates.push([w]);
+
+  for (const wset of candidates) {
+    const params = wset.map(w => `name=ilike.*${encodeURIComponent(w)}*`).join('&');
+    try {
+      const res = await fetch(
+        `${SUPABASE_REST_URL}/profiles?${params}&role=eq.timesheetuser&select=id,email,name&limit=10`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
+      );
+      if (!res.ok) continue;
+      const rows = await res.json();
+      if (rows?.length === 1) return { profile: rows[0] };
+      if (rows?.length > 1 && wset.length === 1) {
+        return { profile: null, ambiguous: true, reason: `'${wset[0]}' matched ${rows.length} profiles: ${rows.map(r => r.name).join(', ')}` };
+      }
+    } catch { /* try next candidate */ }
+  }
+
+  return { profile: null, reason: `no unique profile found for subject '${subject}' (candidates: ${words.join(', ')})` };
+}
+
 // Extract email + name from forwarded body headers
 // Returns { email, name } — name may be null
 function extractSenderFromBody(text) {
@@ -2356,15 +2404,27 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   let contractorName = null;
 
   if (isInternal(fromEmail)) {
-    // Extract contractor from forwarded body
+    // Extract contractor from forwarded body; fall back to name lookup from subject
     const extracted = extractSenderFromBody(bodyText);
-    if (!extracted) {
-      console.warn(`  ⚠️  Cannot extract contractor from: ${subject} — skipping`);
-      results.push({ type: 'forward', subject, action: 'skipped_unidentified' });
-      return;
+    if (extracted) {
+      contractor = extracted.email;
+      contractorName = extracted.name;
+    } else {
+      const { profile, ambiguous, reason } = await findProfileBySubjectName(subject);
+      if (profile) {
+        contractor = profile.email;
+        contractorName = profile.name;
+        console.log(`  📝 Contractor resolved from subject: ${contractorName} (${contractor})`);
+      } else {
+        const msg = ambiguous
+          ? `Ambiguous contractor in forwarded subject — ${reason}`
+          : `Cannot identify contractor from body or subject — ${reason}`;
+        console.warn(`  ⚠️  ${msg}: ${subject}`);
+        results.push({ type: 'forward', subject, action: 'skipped_unidentified' });
+        await forwardToHelpdesk(subject, bodyText, fromEmail, msg);
+        return;
+      }
     }
-    contractor = extracted.email;
-    contractorName = extracted.name;
     if (isInternal(contractor)) {
       console.warn(`  ⚠️  Extracted contractor is internal address (${contractor}) — skipping: ${subject}`);
       results.push({ type: 'forward', subject, action: 'skipped_internal' });
