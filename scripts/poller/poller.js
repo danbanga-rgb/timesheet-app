@@ -1413,10 +1413,35 @@ function postProcessInvoice(result, pdfText) {
   }
 
   // Sanity cap on any rate value (derived or explicit) — $120/hr is the ceiling.
-  // If exceeded, null it out so Claude or a human can supply the correct value.
+  // Before nulling, try hours↔rate swap: if the hours value would be a valid rate and the
+  // math still balances, the parser likely read the columns in the wrong order.
   if (result.rate != null && result.rate > 120) {
-    const capNote = `Rate $${result.rate}/hr exceeded $120 cap — likely parse error`;
-    result = { ...result, rate: null, parseNotes: [capNote, result.parseNotes].filter(Boolean).join(' | ') };
+    const swapRate  = result.totalHours;
+    const swapHours = result.rate;
+    if (swapRate != null && swapRate >= 1 && swapRate <= 120 &&
+        result.totalAmount != null &&
+        Math.abs(swapHours * swapRate - result.totalAmount) <= 1) {
+      const swapNote = `hours/rate swapped (parsed rate $${result.rate}/hr > $120 cap; $${swapRate}/hr × ${swapHours}h = $${result.totalAmount} ✓)`;
+      console.warn(`  🔄 ${swapNote}`);
+      result = { ...result, totalHours: swapHours, rate: swapRate, parseNotes: [swapNote, result.parseNotes].filter(Boolean).join(' | ') };
+    } else {
+      const capNote = `Rate $${result.rate}/hr exceeded $120 cap — likely parse error`;
+      result = { ...result, rate: null, parseNotes: [capNote, result.parseNotes].filter(Boolean).join(' | ') };
+    }
+  }
+
+  // Cents guard: if totalAmount is ~100× what rate × hours produces, the amount was
+  // stored in cents instead of dollars. Divide by 100 and note it.
+  if (result.totalAmount != null && result.totalHours != null && result.rate != null) {
+    const expected  = result.totalHours * result.rate;
+    const centsDiff = Math.abs(result.totalAmount / 100 - expected);
+    const dollarDiff = Math.abs(result.totalAmount - expected);
+    if (dollarDiff > 1 && centsDiff <= 1) {
+      const corrected = Math.round(result.totalAmount / 100 * 100) / 100;
+      const centsNote = `Amount $${result.totalAmount} looks like cents — corrected to $${corrected}`;
+      console.warn(`  💵 ${centsNote}`);
+      result = { ...result, totalAmount: corrected, parseNotes: [centsNote, result.parseNotes].filter(Boolean).join(' | ') };
+    }
   }
 
   // Future period guard — invoices are always for past work.
