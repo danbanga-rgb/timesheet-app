@@ -3,6 +3,55 @@
 // Phase 3 of the Production Deployment Guide
 // ============================================================
 
+// Provides overflow-x scroll + a sticky mirror scrollbar that floats at the
+// bottom of the viewport so users don't have to scroll to the page bottom to
+// drag the scrollbar horizontally.
+const StickyScrollWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
+  const outerRef = useRef<HTMLDivElement>(null);
+  const mirrorRef = useRef<HTMLDivElement>(null);
+  const syncingRef = useRef(false);
+  const [tableWidth, setTableWidth] = useState(0);
+
+  useEffect(() => {
+    const outer = outerRef.current;
+    const mirror = mirrorRef.current;
+    if (!outer || !mirror) return;
+    const onOuter = () => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      mirror.scrollLeft = outer.scrollLeft;
+      requestAnimationFrame(() => { syncingRef.current = false; });
+    };
+    const onMirror = () => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      outer.scrollLeft = mirror.scrollLeft;
+      requestAnimationFrame(() => { syncingRef.current = false; });
+    };
+    outer.addEventListener('scroll', onOuter);
+    mirror.addEventListener('scroll', onMirror);
+    const ro = new ResizeObserver(() => setTableWidth(outer.scrollWidth));
+    ro.observe(outer);
+    setTableWidth(outer.scrollWidth);
+    return () => {
+      outer.removeEventListener('scroll', onOuter);
+      mirror.removeEventListener('scroll', onMirror);
+      ro.disconnect();
+    };
+  }, []);
+
+  return (
+    <div>
+      <div ref={outerRef} className={`overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0 ${className ?? ''}`}>
+        {children}
+      </div>
+      <div ref={mirrorRef} className="overflow-x-scroll sticky bottom-0 -mx-3 sm:mx-0 bg-white border-t border-gray-100" style={{ height: 14 }}>
+        <div style={{ width: tableWidth, height: 1 }} />
+      </div>
+    </div>
+  );
+};
+
 const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { report: { weekEndings: string[]; partialWeeks: Set<string>; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number }; parseLocalDate: (s: string) => Date; testAccounts?: string[] }) => {
   const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal } = report;
   const allStatuses = employeeRows.flatMap(r => Object.values(r.statuses));
@@ -43,11 +92,11 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
           <span className="font-semibold">Partial</span> weeks include only the working days that fall within the selected date range.
         </div>
       )}
-      <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
+      <StickyScrollWrapper>
         <table className="border-collapse text-sm w-full">
           <thead>
             <tr className="bg-green-600 text-white">
-              <th className="border border-green-700 px-3 py-2 text-left">Employee</th>
+              <th className="border border-green-700 px-3 py-2 text-left sticky left-0 z-20 bg-green-600">Employee</th>
               <th className="border border-green-700 px-3 py-2 text-left">Country</th>
               <th className="border border-green-700 px-3 py-2 text-left">Project</th>
               {weekEndings.map((we: string) => {
@@ -68,7 +117,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
           <tbody>
             {employeeRows.map((row, ri) => (
               <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                <td className="border border-gray-300 px-3 py-2 font-semibold">{row.name}</td>
+                <td className={`border border-gray-300 px-3 py-2 font-semibold sticky left-0 z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)] ${ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>{row.name}</td>
                 <td className="border border-gray-300 px-3 py-2 text-gray-500">{row.country}</td>
                 <td className="border border-gray-300 px-3 py-2 text-indigo-600 text-xs">{row.project}</td>
                 {weekEndings.map((we: string) => {
@@ -88,7 +137,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
               </tr>
             ))}
             <tr className="bg-green-600 text-white font-bold">
-              <td className="border border-green-700 px-3 py-2" colSpan={3}>Total</td>
+              <td className="border border-green-700 px-3 py-2 sticky left-0 z-10 bg-green-600" colSpan={3}>Total</td>
               {weekEndings.map((we: string) => (
                 <td key={we} className={`border border-green-700 px-3 py-2 text-center ${partialWeeks.has(we) ? 'bg-amber-600' : ''}`}>{colTotals[we].toFixed(1)}</td>
               ))}
@@ -96,7 +145,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
             </tr>
           </tbody>
         </table>
-      </div>
+      </StickyScrollWrapper>
     </div>
   );
 };
@@ -4096,12 +4145,12 @@ const TimesheetSystem = () => {
                 </div>
                 <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next →</button>
               </div>
-              <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
+              <StickyScrollWrapper>
                 <table className="w-full border-collapse">
                   <thead>
                     <tr className="bg-indigo-600 text-white">
-                      <th className="border border-indigo-700 px-2 py-3 text-center text-xs">ID</th>
-                      <th className="border border-indigo-700 px-4 py-3 text-left">Employee</th>
+                      <th className="border border-indigo-700 px-2 py-3 text-center text-xs sticky left-0 z-20 bg-indigo-600">ID</th>
+                      <th className="border border-indigo-700 px-4 py-3 text-left sticky z-20 bg-indigo-600 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.18)]" style={{ left: 53 }}>Employee</th>
                       <th className="border border-indigo-700 px-4 py-3 text-left">Source</th>
                       <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
                       {weekDates.map((d, i) => <th key={i} className="border border-indigo-700 px-4 py-3 text-center"><div>{d.toLocaleDateString('en-US', { weekday: 'short' })}</div><div className="text-xs font-normal">{d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div></th>)}
@@ -4112,8 +4161,8 @@ const TimesheetSystem = () => {
                   <tbody>
                     {reportData.map((row, idx) => (
                       <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                        <td className="border border-gray-300 px-2 py-3 text-center text-xs text-gray-400 whitespace-nowrap">{row.timesheetId ? `#${row.timesheetId}` : '—'}</td>
-                        <td className="border border-gray-300 px-4 py-3 font-medium">{row.name}</td>
+                        <td className={`border border-gray-300 px-2 py-3 text-center text-xs text-gray-400 whitespace-nowrap sticky left-0 z-10 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>{row.timesheetId ? `#${row.timesheetId}` : '—'}</td>
+                        <td className={`border border-gray-300 px-4 py-3 font-medium sticky z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)] ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`} style={{ left: 53 }}>{row.name}</td>
                         <td className="border border-gray-300 px-4 py-3">
                           {row.source === 'imported'
                             ? <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">Email</span>
@@ -4128,14 +4177,14 @@ const TimesheetSystem = () => {
                       </tr>
                     ))}
                     <tr className="bg-indigo-50 font-bold">
-                      <td className="border border-gray-300 px-4 py-3 text-gray-800" colSpan={4}>TOTAL</td>
+                      <td className="border border-gray-300 px-4 py-3 text-gray-800 sticky left-0 z-10 bg-indigo-50" colSpan={4}>TOTAL</td>
                       {weekDates.map((_, i) => <td key={i} className="border border-gray-300 px-4 py-3 text-center">{reportData.reduce((s, r) => s + r.dailyHours[i], 0).toFixed(1)}</td>)}
                       <td className="border border-gray-300 px-4 py-3 text-center text-indigo-600 text-lg">{grandTotal.toFixed(1)}</td>
                       <td className="border border-gray-300 px-4 py-3"></td>
                     </tr>
                   </tbody>
                 </table>
-              </div>
+              </StickyScrollWrapper>
               <div className="flex justify-between items-center mt-4 pt-4 border-t border-gray-200">
                 <button onClick={() => changeReportWeek(-1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">← Prev</button>
                 <span className="text-sm text-gray-600">{weekDates[0].toLocaleDateString()} – {weekDates[6].toLocaleDateString()}</span>
@@ -4508,7 +4557,7 @@ const TimesheetSystem = () => {
                   {filtered.length === 0 ? (
                     <div className="text-center py-12 text-gray-400"><Receipt className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No invoices match the current filter</p></div>
                   ) : (
-                    <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
+                    <StickyScrollWrapper>
                       {(() => {
                         // Build display groups once — shared by tbody and tfoot
                         const groupMap = new Map<string, Invoice[]>();
@@ -4558,7 +4607,7 @@ const TimesheetSystem = () => {
                       <table className="w-full border-collapse text-sm">
                         <thead className="bg-indigo-600 text-white">
                           <tr>
-                            <th className="border border-indigo-700 px-4 py-3 text-left">Contractor</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-left sticky left-0 z-20 bg-indigo-600">Contractor</th>
                             <th className="border border-indigo-700 px-4 py-3 text-left">Period</th>
                             <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
                             <th className="border border-indigo-700 px-4 py-3 text-center">Hours</th>
@@ -4584,10 +4633,12 @@ const TimesheetSystem = () => {
                                 const inv = group[0];
                                 const project = projects.find(p => p.id === inv.projectId);
                                 const sym = currencySymbols[inv.currency] || '$';
-                                const rowClass = rowIdx++ % 2 === 0 ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50';
+                                const isEvenRow = rowIdx % 2 === 0;
+                                const rowClass = isEvenRow ? 'bg-white hover:bg-blue-50' : 'bg-gray-50 hover:bg-blue-50';
+                                rowIdx++;
                                 return (
-                                  <tr key={inv.id} className={'cursor-pointer ' + rowClass} onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
-                                    <td className="border border-gray-200 px-4 py-3">
+                                  <tr key={inv.id} className={'cursor-pointer group ' + rowClass} onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                                    <td className={`border border-gray-200 px-4 py-3 sticky left-0 z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)] group-hover:bg-blue-50 ${isEvenRow ? 'bg-white' : 'bg-gray-50'}`}>
                                       <div className="font-medium text-gray-800">{inv.userName}</div>
                                       <div className="font-mono text-xs text-gray-400 mt-0.5">#{inv.invoiceNumber}</div>
                                     </td>
@@ -4693,7 +4744,7 @@ const TimesheetSystem = () => {
                               return [
                                 // Group header row
                                 <tr key={`grp-hdr-${groupKey}`} className="bg-indigo-50 border-l-4 border-l-indigo-500 font-semibold">
-                                  <td className="border border-indigo-200 px-4 py-2.5">
+                                  <td className="border border-indigo-200 px-4 py-2.5 sticky left-0 z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)] bg-indigo-50">
                                     <div className="font-medium text-indigo-900">{companyName}</div>
                                     <div className="flex items-center gap-1.5 mt-0.5">
                                       <span className="font-mono text-xs text-gray-400">#{groupKey}</span>
@@ -4782,8 +4833,8 @@ const TimesheetSystem = () => {
                                   const project = projects.find(p => p.id === inv.projectId);
                                   const sym = currencySymbols[inv.currency] || '$';
                                   return (
-                                    <tr key={inv.id} className="bg-white border-l-4 border-l-indigo-200 hover:bg-indigo-50 cursor-pointer" onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
-                                      <td className="border border-gray-200 px-4 py-2 pl-7">
+                                    <tr key={inv.id} className="bg-white border-l-4 border-l-indigo-200 hover:bg-indigo-50 cursor-pointer group" onClick={() => { setSelectedInvoice(inv); setShowInvoiceModal(true); }}>
+                                      <td className="border border-gray-200 px-4 py-2 pl-7 sticky left-0 z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)] bg-white group-hover:bg-indigo-50">
                                         <div className="flex items-center gap-1.5">
                                           <span className="text-gray-300 text-xs">↳</span>
                                           <span className="font-medium text-gray-800 text-sm">{inv.userName}</span>
@@ -4848,7 +4899,7 @@ const TimesheetSystem = () => {
                         </tbody>
                         <tfoot className="bg-gray-100 font-semibold">
                           <tr>
-                            <td className="border border-gray-200 px-4 py-3 text-gray-700" colSpan={4}>Filtered Total ({displayGroups.length} payee{displayGroups.length !== 1 ? 's' : ''}, {filtered.length} invoice{filtered.length !== 1 ? 's' : ''})</td>
+                            <td className="border border-gray-200 px-4 py-3 text-gray-700 sticky left-0 z-10 bg-gray-100" colSpan={4}>Filtered Total ({displayGroups.length} payee{displayGroups.length !== 1 ? 's' : ''}, {filtered.length} invoice{filtered.length !== 1 ? 's' : ''})</td>
                             <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + (i.totalHours ?? 0), 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
@@ -4858,7 +4909,7 @@ const TimesheetSystem = () => {
                       </table>
                         );
                       })()}
-                    </div>
+                    </StickyScrollWrapper>
                   )}
                 </div>
               </div>
