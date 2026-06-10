@@ -1430,17 +1430,14 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
-  // Cents guard: if totalAmount is ~100× what rate × hours produces, the amount was
-  // stored in cents instead of dollars. Divide by 100 and note it.
+  // Amount snap: if parsed amount is within $1 of rate × hours, use the computed value.
+  // PDFs often display a slightly rounded total; rate × hours is the source of truth.
   if (result.totalAmount != null && result.totalHours != null && result.rate != null) {
-    const expected  = result.totalHours * result.rate;
-    const centsDiff = Math.abs(result.totalAmount / 100 - expected);
-    const dollarDiff = Math.abs(result.totalAmount - expected);
-    if (dollarDiff > 1 && centsDiff <= 1) {
-      const corrected = Math.round(result.totalAmount / 100 * 100) / 100;
-      const centsNote = `Amount $${result.totalAmount} looks like cents — corrected to $${corrected}`;
-      console.warn(`  💵 ${centsNote}`);
-      result = { ...result, totalAmount: corrected, parseNotes: [centsNote, result.parseNotes].filter(Boolean).join(' | ') };
+    const computed = Math.round(result.totalHours * result.rate * 100) / 100;
+    if (result.totalAmount !== computed && Math.abs(result.totalAmount - computed) <= 1) {
+      const snapNote = `Amount $${result.totalAmount} snapped to $${computed} (within $1 of ${result.totalHours}h × $${result.rate}/hr)`;
+      console.warn(`  💵 ${snapNote}`);
+      result = { ...result, totalAmount: computed, parseNotes: [snapNote, result.parseNotes].filter(Boolean).join(' | ') };
     }
   }
 
