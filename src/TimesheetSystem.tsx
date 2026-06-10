@@ -1790,6 +1790,11 @@ const TimesheetSystem = () => {
     if (paymentTerms !== undefined) update.payment_terms = paymentTerms || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error updating invoice: ' + error.message); return; }
+    // Cascade non-empty terms to the contractor's profile default
+    if (paymentTerms && selectedInvoice?.userId) {
+      await supabase.from('profiles').update({ payment_terms: paymentTerms }).eq('id', selectedInvoice.userId);
+      setUsers(prev => prev.map(u => u.id === selectedInvoice.userId ? { ...u, paymentTerms } : u));
+    }
     await fetchInvoices();
     setShowInvoiceModal(false);
     setPendingPayOnDate('');
@@ -1824,6 +1829,11 @@ const TimesheetSystem = () => {
     if (fields.paymentTerms !== undefined) update.payment_terms = fields.paymentTerms || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error saving changes: ' + error.message); return; }
+    // Cascade non-empty terms to the contractor's profile default
+    if (fields.paymentTerms && selectedInvoice?.userId) {
+      await supabase.from('profiles').update({ payment_terms: fields.paymentTerms }).eq('id', selectedInvoice.userId);
+      setUsers(prev => prev.map(u => u.id === selectedInvoice.userId ? { ...u, paymentTerms: fields.paymentTerms! } : u));
+    }
     await fetchInvoices();
     setSelectedInvoice(prev => prev ? {
       ...prev,
