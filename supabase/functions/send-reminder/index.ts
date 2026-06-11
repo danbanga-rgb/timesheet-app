@@ -412,6 +412,22 @@ These links are valid for 7 days and are single-use.`;
   const managers    = testUser ? [] : allProfiles.filter((p: Record<string,unknown>) => p.role === 'manager');
   const accountants = testUser ? [] : allProfiles.filter((p: Record<string,unknown>) => p.role === 'accountant');
 
+  // Batch-load reply-pending flags — suppress Monday/Tuesday reminders for users who
+  // replied YES but whose auto-submit hasn't landed yet (or failed). 72h TTL.
+  const { data: pendingFlags } = await supabase
+    .from('system_settings')
+    .select('key, value')
+    .like('key', 'reply_yes_pending_%');
+  const REPLY_PENDING_TTL_MS = 72 * 60 * 60 * 1000;
+  const replyPendingUserIds = new Set<string>(
+    (pendingFlags || [])
+      .filter((r: { key: string; value: unknown }) => {
+        const v = r.value as { created_at?: string };
+        return v?.created_at && (Date.now() - new Date(v.created_at).getTime()) < REPLY_PENDING_TTL_MS;
+      })
+      .map((r: { key: string }) => r.key.replace('reply_yes_pending_', ''))
+  );
+
   // ── SPAM GUARDRAIL — atomic per-user daily claim + hard cap per invocation ──
   // Before each send, attempt an atomic INSERT for key reminder_user_{YYYYMMDD}_{userId}.
   // PK unique-violation = already sent today → skip. No in-memory state, no race window.
@@ -494,6 +510,11 @@ These links are valid for 7 days and are single-use.`;
     const missing = allMissing.filter(w => w >= REMINDER_CUTOFF);
 
     if (missing.length === 0) { results.push({ role: 'timesheetuser', user: user.name, action: 'all submitted' }); continue; }
+
+    if (!force && replyPendingUserIds.has(user.id as string)) {
+      results.push({ role: 'timesheetuser', user: user.name, action: 'reply_yes_pending (reminder suppressed)' });
+      continue;
+    }
 
     if (!force) {
       const claimed = await claimSend(user.id as string);

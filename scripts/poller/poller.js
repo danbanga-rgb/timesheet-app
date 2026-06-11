@@ -37,6 +37,7 @@ const CONFIG = {
   fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
   groqApiKey: process.env.GROQ_API_KEY || null,
+  supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY || null,
   timesheetReportUrl: process.env.TIMESHEET_REPORT_URL || 'https://mimlatvdwxqtgxrgcins.supabase.co/functions/v1/send-timesheet-report',
   // These addresses are never treated as contractors (internal staff / system)
   blockedContractorDomains: ['synergietechsolutions.com', 'ionos.com'],
@@ -2325,6 +2326,28 @@ async function fetchLastApprovedEntries(contractorEmail) {
   return { userId, weekStart: rows[0].week_start, entries: rows[0].entries };
 }
 
+// Write a reply-pending flag to system_settings so send-reminder suppresses reminders
+// even if the auto-submit fails. TTL checked on read (72h). Fire-and-forget — never throws.
+async function setReplyPendingFlag(userId, weekStart, email) {
+  if (!CONFIG.supabaseServiceKey) return;
+  const key = `reply_yes_pending_${userId}`;
+  const value = { weekStart, created_at: new Date().toISOString(), email };
+  try {
+    await fetch(`${SUPABASE_REST_URL}/system_settings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${CONFIG.supabaseServiceKey}`,
+        'apikey': CONFIG.supabaseServiceKey,
+        'Prefer': 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify({ key, value }),
+    });
+  } catch (e) {
+    console.warn(`  ⚠️  Could not write reply_yes_pending flag: ${e.message}`);
+  }
+}
+
 // Submit a timesheet via the ingest edge function (YES auto-submit)
 async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, sourceEntries, messageId, runId) {
   // Zero out weekend hours, preserve weekday pattern
@@ -2408,6 +2431,8 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
             results.push({ type: 'reply_yes_no_history', subject, contractor: fromEmail });
             return;
           }
+          // Write pending flag BEFORE auto-submit — if ingest fails the reminder is still suppressed
+          await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
           const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, runId);
           const ok = ingestRes?.ok !== false;
           console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);

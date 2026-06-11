@@ -41,7 +41,8 @@ jobs:
           INVOICE_INGEST_ENABLED: "true"
           BREVO_API_KEY:         ${{ secrets.BREVO_API_KEY }}
           ANTHROPIC_API_KEY:     ${{ secrets.ANTHROPIC_API_KEY }}
-          GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY:              ${{ secrets.GROQ_API_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           FROM_EMAIL:            timesheets@mysynergie.net
           FROM_NAME:             Synergie Timesheet System
         run: node poller.js
