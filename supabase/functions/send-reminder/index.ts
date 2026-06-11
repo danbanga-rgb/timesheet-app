@@ -460,13 +460,16 @@ These links are valid for 7 days and are single-use.`;
     if (isFriday5pm || force) {
       const { data: recentTs } = await supabase
         .from('timesheets')
-        .select('entries')
+        .select('entries, source')
         .eq('user_id', user.id)
         .eq('status', 'approved')
         .order('week_start', { ascending: false })
         .limit(5);
-      if (recentTs && recentTs.length >= 3) {
-        const weeklyHours = recentTs.map((t: { entries: Record<string, number | { hours?: string | number }> }) => {
+      // Suppress reply CTA for portal-only submitters — they should use the portal or chat agent
+      const isPortalOnly = recentTs && recentTs.length >= 3 &&
+        recentTs.every((t: { source: string }) => t.source === 'direct');
+      if (recentTs && recentTs.length >= 3 && !isPortalOnly) {
+        const weeklyHours = recentTs.map((t: { entries: Record<string, number | { hours?: string | number }>; source: string }) => {
           const entries = t.entries || {};
           return Object.values(entries).reduce((sum, e) => {
             const h = typeof e === 'number' ? e : parseFloat(String(e?.hours ?? 0)) || 0;
@@ -484,7 +487,7 @@ These links are valid for 7 days and are single-use.`;
         }
       }
     }
-    const allMissing = getMissingWeeks(user.start_date as string, submitted, lt, isFriday5pm, user.end_date as string | null);
+    const allMissing = getMissingWeeks(user.start_date as string, submitted, lt, isFriday5pm || force, user.end_date as string | null);
     // Only remind for weeks on or after 2026-04-27 (the Monday containing 2026-05-01).
     // Pre-May weeks are backfill and should not generate automated reminders.
     const REMINDER_CUTOFF = '2026-04-27';
@@ -536,12 +539,18 @@ These links are valid for 7 days and are single-use.`;
     const multiWeekNote = missing.length > 1 ? `\n(If you have outstanding weeks from before, they're listed above too.)` : '';
 
     const patternTextLine = patternLine ? `\n${patternLine}` : '';
-    const replyCta = isConsistent
-      ? `  4. Reply YES to this email — we'll automatically submit the same hours for you`
-      : `  4. Reply to this email describing your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")`;
+    const replyCta = patternLine
+      ? (isConsistent
+        ? `  1. Reply YES to this email — we'll automatically submit the same hours for you`
+        : `  1. Reply to this email with your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")`)
+      : null;
+    const appOption   = replyCta ? `  2. Log into the app: ${APP_URL}` : `  1. Log into the app: ${APP_URL}`;
+    const attachOpt   = replyCta ? `  3. Reply to this email with your timesheet file attached` : `  2. Reply to this email with your timesheet file attached`;
+    const emailOpt    = replyCta ? `  4. Email your timesheet to ${TIMESHEET_EMAIL}` : `  3. Email your timesheet to ${TIMESHEET_EMAIL}`;
+    const submitLines = [replyCta, appOption, attachOpt, emailOpt].filter(Boolean).join('\n');
 
     const bodyText = isFirst
-      ? `Hi ${user.name},\n\nHope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:\n\n${weekListText}${multiWeekNote}${patternTextLine}\n\nA few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n${replyCta}\n\n${helpdeskLine}${delayNote}`
+      ? `Hi ${user.name},\n\nHope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:\n\n${weekListText}${multiWeekNote}${patternTextLine}\n\n${submitLines}\n\n${helpdeskLine}${delayNote}`
       : `Hi ${user.name},\n\nWe still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nPlease submit as soon as possible:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`;
 
     const patternHtml = patternLine
@@ -549,16 +558,18 @@ These links are valid for 7 days and are single-use.`;
       : '';
     const replyCtaHtml = isConsistent
       ? `<li><strong>Reply YES</strong> to this email — we'll automatically submit the same hours for you</li>`
-      : `<li>Reply to this email describing your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")</li>`;
+      : patternLine
+        ? `<li>Reply to this email with your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")</li>`
+        : '';
 
     const submitOptionsHtml = `
       ${patternHtml}
-      <p style="color:#374151;font-weight:600;margin-top:20px">${isFirst ? 'A few ways to submit:' : 'Please submit as soon as possible:'}</p>
+      <p style="color:#374151;font-weight:600;margin-top:20px">${isFirst ? 'Quickest ways to submit:' : 'Please submit as soon as possible:'}</p>
       <ol style="color:#374151;line-height:2.2;padding-left:20px;margin:0">
+        ${isFirst && replyCtaHtml ? replyCtaHtml : ''}
         <li>Use the button below to log into the app</li>
         <li>Reply to this email with your timesheet file attached</li>
         <li>Email your timesheet directly to <a href="mailto:${TIMESHEET_EMAIL}" style="color:#4f46e5">${TIMESHEET_EMAIL}</a></li>
-        ${isFirst ? replyCtaHtml : ''}
       </ol>
       <p style="color:#6b7280;font-size:13px;margin-top:16px;border-top:1px solid #e5e7eb;padding-top:16px">
         ${isFirst
