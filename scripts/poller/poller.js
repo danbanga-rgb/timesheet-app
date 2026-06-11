@@ -36,6 +36,7 @@ const CONFIG = {
   fromEmail:     process.env.FROM_EMAIL || 'timesheets@mysynergie.net',
   fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
+  groqApiKey: process.env.GROQ_API_KEY || null,
   timesheetReportUrl: process.env.TIMESHEET_REPORT_URL || 'https://mimlatvdwxqtgxrgcins.supabase.co/functions/v1/send-timesheet-report',
   // These addresses are never treated as contractors (internal staff / system)
   blockedContractorDomains: ['synergietechsolutions.com', 'ionos.com'],
@@ -2244,6 +2245,112 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   return { results, failedAttachments };
 }
 
+// ─── AI reply classifier ──────────────────────────────────────────────────────
+
+const GROQ_CLASSIFIER_SYSTEM = `You are classifying a contractor's reply to a timesheet reminder email.
+The contractor may be confirming they want to submit the same hours as last week, modifying their hours, or declining.
+
+Respond with EXACTLY one JSON object on a single line, no other text:
+{"intent":"YES","hours":null,"notes":null}
+{"intent":"MODIFY","hours":40,"notes":"took Friday off"}
+{"intent":"NO","hours":null,"notes":null}
+
+Rules:
+- intent=YES: contractor confirms submission with no changes ("yes", "ok", "go ahead", "same as last week", "correct", "please submit", affirmative in any language)
+- intent=MODIFY: contractor specifies different hours or days (extract numeric hours if mentioned)
+- intent=NO: contractor declines, says they'll submit themselves, or the message is clearly not a timesheet reply
+- When in doubt between YES and MODIFY, prefer MODIFY
+- When in doubt between MODIFY and NO, prefer NO`;
+
+async function classifyReply(bodyText, contractorName) {
+  if (!CONFIG.groqApiKey) return { intent: 'NO', hours: null, notes: 'no groq key' };
+
+  // Strip quoted reply text (lines starting with ">") to focus on what the contractor wrote
+  const strippedBody = bodyText
+    .split('\n')
+    .filter(line => !line.trimStart().startsWith('>'))
+    .join('\n')
+    .trim()
+    .slice(0, 500);
+
+  if (!strippedBody) return { intent: 'NO', hours: null, notes: 'empty body after stripping quotes' };
+
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.groqApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: GROQ_CLASSIFIER_SYSTEM },
+          { role: 'user', content: `Contractor: ${contractorName}\nReply: ${strippedBody}` },
+        ],
+        max_tokens: 60,
+        temperature: 0,
+      }),
+    });
+    if (!res.ok) {
+      console.warn(`  ⚠️  Groq API error ${res.status}: ${await res.text()}`);
+      return { intent: 'NO', hours: null, notes: `groq_error_${res.status}` };
+    }
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || '';
+    const parsed = JSON.parse(raw);
+    return { intent: parsed.intent || 'NO', hours: parsed.hours || null, notes: parsed.notes || null };
+  } catch (e) {
+    console.warn(`  ⚠️  Groq classify error: ${e.message}`);
+    return { intent: 'NO', hours: null, notes: `groq_exception: ${e.message}` };
+  }
+}
+
+// Fetch the most recently approved timesheet entries for a contractor
+async function fetchLastApprovedEntries(contractorEmail) {
+  const profileRes = await fetch(
+    `${SUPABASE_REST_URL}/profiles?email=eq.${encodeURIComponent(contractorEmail)}&select=id&limit=1`,
+    { headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` } }
+  );
+  const profiles = await profileRes.json();
+  if (!profiles?.length) return null;
+  const userId = profiles[0].id;
+
+  const tsRes = await fetch(
+    `${SUPABASE_REST_URL}/timesheets?user_id=eq.${userId}&status=eq.approved&select=week_start,entries&order=week_start.desc&limit=1`,
+    { headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` } }
+  );
+  const rows = await tsRes.json();
+  if (!rows?.length) return null;
+  return { userId, weekStart: rows[0].week_start, entries: rows[0].entries };
+}
+
+// Submit a timesheet via the ingest edge function (YES auto-submit)
+async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, sourceEntries, messageId, runId) {
+  // Zero out weekend hours, preserve weekday pattern
+  const entries = {};
+  for (const [dateKey, entry] of Object.entries(sourceEntries)) {
+    const d = new Date(dateKey);
+    const dow = d.getDay(); // 0=Sun, 6=Sat
+    entries[dateKey] = (dow === 0 || dow === 6)
+      ? { ...entry, hours: '0' }
+      : { ...entry };
+  }
+
+  const payload = {
+    contractorEmail,
+    displayName: contractorName,
+    weekStart,
+    entries,
+    source: 'direct',
+    forwardedBy: null,
+    messageId: `reply-yes-${messageId}`,
+    runId,
+  };
+
+  return postToIngest(payload, CONFIG.ingestUrl);
+}
+
 // ─── Process one parsed email ─────────────────────────────────────────────────
 
 async function processEmail(parsed, messageId, results, failedAtts, summary, runId = null) {
@@ -2281,8 +2388,46 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   const emlAtts = attachments.filter(a => a.isEml);
   const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isCsv || a.isPdf || a.isDocx || a.isEml);
 
-  // ── No timesheet content — skip ────────────────────────────────────────────
+  // ── No timesheet content — check if this is a reminder reply ──────────────
   if (!hasTimesheetContent) {
+    const isReply = /^re:/i.test(subject);
+    const weekStart = isReply ? parseWeekFromSubject(subject) : null;
+
+    if (isReply && weekStart && CONFIG.groqApiKey) {
+      // Check sender is a known contractor before calling Groq
+      const allowlisted = await isKnownContractor(fromEmail);
+      if (allowlisted) {
+        console.log(`  🤖 Reply from known contractor — classifying with Groq: ${subject}`);
+        const classification = await classifyReply(bodyText, fromName || fromEmail);
+        console.log(`  🤖 Classification: ${classification.intent} | hours: ${classification.hours} | notes: ${classification.notes}`);
+
+        if (classification.intent === 'YES') {
+          const lastTs = await fetchLastApprovedEntries(fromEmail);
+          if (!lastTs) {
+            console.warn(`  ⚠️  YES reply but no approved timesheet found for ${fromEmail}`);
+            results.push({ type: 'reply_yes_no_history', subject, contractor: fromEmail });
+            return;
+          }
+          const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, runId);
+          const ok = ingestRes?.ok !== false;
+          console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);
+          results.push({ type: ok ? 'reply_yes_submitted' : 'reply_yes_failed', subject, contractor: fromEmail, weekStart });
+          return;
+        }
+
+        if (classification.intent === 'MODIFY') {
+          // Log for accountant review — full NL parsing is phase 2
+          console.log(`  📋 MODIFY reply — flagged for accountant review: ${fromEmail}`);
+          results.push({ type: 'reply_modify_pending', subject, contractor: fromEmail, weekStart, notes: classification.notes, hours: classification.hours, originalText: bodyText.slice(0, 300) });
+          return;
+        }
+
+        // NO or unclear — drop silently
+        results.push({ type: 'reply_no', subject, contractor: fromEmail, notes: classification.notes });
+        return;
+      }
+    }
+
     console.log(`  ⏭️  Skipped (no attachments): ${subject}`);
     results.push({ type: 'skipped', subject, reason: 'no timesheet attachments' });
     return;
