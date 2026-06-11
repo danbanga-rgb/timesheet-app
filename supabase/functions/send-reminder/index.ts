@@ -120,7 +120,9 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   const url = new URL(req.url);
-  const force = url.searchParams.get('force') === 'true';
+  const force   = url.searchParams.get('force')    === 'true';
+  const dryRun  = url.searchParams.get('dry_run')  === 'true';
+  const testTo  = url.searchParams.get('test_to')  || null; // redirect all emails here
 
   const BREVO_API_KEY = Deno.env.get('BREVO_API_KEY');
   const FROM_EMAIL    = Deno.env.get('FROM_EMAIL');
@@ -452,6 +454,7 @@ These links are valid for 7 days and are single-use.`;
 
     // Pattern detection for Friday reminder reply-CTA
     let patternLine = '';
+    let isConsistent = false;
     if (isFriday5pm || force) {
       const { data: recentTs } = await supabase
         .from('timesheets')
@@ -461,14 +464,21 @@ These links are valid for 7 days and are single-use.`;
         .order('week_start', { ascending: false })
         .limit(5);
       if (recentTs && recentTs.length >= 3) {
-        const weeklyHours = recentTs.map((t: { entries: Record<string, { hours: string }> }) => {
+        const weeklyHours = recentTs.map((t: { entries: Record<string, number | { hours?: string | number }> }) => {
           const entries = t.entries || {};
-          return Object.values(entries).reduce((sum, e) => sum + (parseFloat(e.hours) || 0), 0);
+          return Object.values(entries).reduce((sum, e) => {
+            const h = typeof e === 'number' ? e : parseFloat(String(e?.hours ?? 0)) || 0;
+            return sum + h;
+          }, 0);
         });
         const avg = Math.round(weeklyHours.reduce((a, b) => a + b, 0) / weeklyHours.length);
-        const consistent = weeklyHours.every(h => Math.abs(h - avg) <= 2);
-        if (consistent && avg > 0) {
-          patternLine = `You've submitted ${avg} hours every week for the past ${weeklyHours.length} weeks.`;
+        const minH = Math.min(...weeklyHours);
+        const maxH = Math.max(...weeklyHours);
+        isConsistent = (maxH - minH) <= 4 && avg > 0;
+        if (avg > 0) {
+          patternLine = isConsistent
+            ? `You've been submitting around ${avg} hours per week consistently over the past ${weeklyHours.length} weeks.`
+            : `You've averaged around ${avg} hours per week over the past ${weeklyHours.length} weeks (ranging from ${minH} to ${maxH} hours).`;
         }
       }
     }
@@ -524,9 +534,9 @@ These links are valid for 7 days and are single-use.`;
     const multiWeekNote = missing.length > 1 ? `\n(If you have outstanding weeks from before, they're listed above too.)` : '';
 
     const patternTextLine = patternLine ? `\n${patternLine}` : '';
-    const replyCta = patternLine
+    const replyCta = isConsistent
       ? `  4. Reply YES to this email — we'll automatically submit the same hours for you`
-      : `  4. Reply to this email with your hours in free text (e.g. "40 hours this week")`;
+      : `  4. Reply to this email describing your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")`;
 
     const bodyText = isFirst
       ? `Hi ${user.name},\n\nHope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:\n\n${weekListText}${multiWeekNote}${patternTextLine}\n\nA few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n${replyCta}\n\n${helpdeskLine}${delayNote}`
@@ -535,9 +545,9 @@ These links are valid for 7 days and are single-use.`;
     const patternHtml = patternLine
       ? `<p style="color:#374151;background:#f0fdf4;border-left:3px solid #16a34a;padding:10px 14px;margin:16px 0;border-radius:0 4px 4px 0">${patternLine}</p>`
       : '';
-    const replyCtaHtml = patternLine
+    const replyCtaHtml = isConsistent
       ? `<li><strong>Reply YES</strong> to this email — we'll automatically submit the same hours for you</li>`
-      : `<li>Reply to this email with your hours in free text (e.g. "40 hours this week")</li>`;
+      : `<li>Reply to this email describing your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")</li>`;
 
     const submitOptionsHtml = `
       ${patternHtml}
@@ -568,9 +578,15 @@ These links are valid for 7 days and are single-use.`;
       'Submit via App →',
     );
 
-    const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, user.email as string, user.name as string, subject, bodyText, bodyHtml);
+    if (dryRun) {
+      results.push({ role: 'timesheetuser', user: user.name, action: 'dry_run', missing: missing.length, subject, patternLine, isConsistent, bodyText });
+      continue;
+    }
+    const toEmail = testTo || user.email as string;
+    const toName  = testTo ? `[TEST→${user.name}]` : user.name as string;
+    const r = await sendEmail(BREVO_API_KEY, FROM_EMAIL, FROM_NAME, toEmail, toName, subject, bodyText, bodyHtml);
     if (r.ok) invocationEmailCount++;
-    results.push({ role: 'timesheetuser', user: user.name, action: r.ok ? 'email sent' : 'email failed', missing: missing.length, ...(r.error && { error: r.error }) });
+    results.push({ role: 'timesheetuser', user: user.name, action: r.ok ? (testTo ? 'email sent (test redirect)' : 'email sent') : 'email failed', missing: missing.length, ...(r.error && { error: r.error }) });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
