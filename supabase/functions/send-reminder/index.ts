@@ -592,7 +592,7 @@ These links are valid for 7 days and are single-use.`;
     );
 
     if (dryRun) {
-      results.push({ role: 'timesheetuser', user: user.name, action: 'dry_run', missing: missing.length, subject, patternLine, isConsistent, bodyText });
+      results.push({ role: 'timesheetuser', user: user.name, action: 'dry_run', missing: missing.length, subject, patternLine, isConsistent, bodyText, bodyHtml });
       continue;
     }
     const toEmail = testTo || user.email as string;
