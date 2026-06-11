@@ -449,6 +449,29 @@ These links are valid for 7 days and are single-use.`;
 
     const { data: ts } = await supabase.from('timesheets').select('week_start').eq('user_id', user.id).neq('status', 'rejected');
     const submitted = new Set((ts || []).map((t: { week_start: string }) => t.week_start.split('T')[0]));
+
+    // Pattern detection for Friday reminder reply-CTA
+    let patternLine = '';
+    if (isFriday5pm || force) {
+      const { data: recentTs } = await supabase
+        .from('timesheets')
+        .select('entries')
+        .eq('user_id', user.id)
+        .eq('status', 'approved')
+        .order('week_start', { ascending: false })
+        .limit(5);
+      if (recentTs && recentTs.length >= 3) {
+        const weeklyHours = recentTs.map((t: { entries: Record<string, { hours: string }> }) => {
+          const entries = t.entries || {};
+          return Object.values(entries).reduce((sum, e) => sum + (parseFloat(e.hours) || 0), 0);
+        });
+        const avg = Math.round(weeklyHours.reduce((a, b) => a + b, 0) / weeklyHours.length);
+        const consistent = weeklyHours.every(h => Math.abs(h - avg) <= 2);
+        if (consistent && avg > 0) {
+          patternLine = `You've submitted ${avg} hours every week for the past ${weeklyHours.length} weeks.`;
+        }
+      }
+    }
     const allMissing = getMissingWeeks(user.start_date as string, submitted, lt, isFriday5pm, user.end_date as string | null);
     // Only remind for weeks on or after 2026-04-27 (the Monday containing 2026-05-01).
     // Pre-May weeks are backfill and should not generate automated reminders.
@@ -484,9 +507,13 @@ These links are valid for 7 days and are single-use.`;
     const TIMESHEET_EMAIL = 'timesheets@mysynergie.net';
     const HELPDESK_EMAIL  = 'helpdesk@synergietechsolutions.com';
 
+    const currentWeek = missing[missing.length - 1]; // most recent missing week
+    const currentWeekSun = (() => { const m = parseLocalDate(currentWeek); const s = new Date(m); s.setDate(m.getDate() + 6); return s; })();
+    const currentWeekStr = currentWeekSun.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
     const subject = isFirst
-      ? `Your timesheet${missing.length > 1 ? 's' : ''} for this week`
-      : `URGENT: ${missing.length} Timesheet${missing.length > 1 ? 's' : ''} Overdue`;
+      ? `Your timesheet${missing.length > 1 ? 's' : ''} — week ending ${currentWeekStr}${missing.length > 1 ? ` (+${missing.length - 1} more)` : ''}`
+      : `URGENT: Timesheet overdue — week ending ${currentWeekStr}`;
 
     const helpdeskLine = isFirst
       ? `Need help logging in? Contact ${HELPDESK_EMAIL} and they'll reset your password.`
@@ -496,16 +523,30 @@ These links are valid for 7 days and are single-use.`;
 
     const multiWeekNote = missing.length > 1 ? `\n(If you have outstanding weeks from before, they're listed above too.)` : '';
 
+    const patternTextLine = patternLine ? `\n${patternLine}` : '';
+    const replyCta = patternLine
+      ? `  4. Reply YES to this email — we'll automatically submit the same hours for you`
+      : `  4. Reply to this email with your hours in free text (e.g. "40 hours this week")`;
+
     const bodyText = isFirst
-      ? `Hi ${user.name},\n\nHope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:\n\n${weekListText}${multiWeekNote}\n\nA few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`
+      ? `Hi ${user.name},\n\nHope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:\n\n${weekListText}${multiWeekNote}${patternTextLine}\n\nA few ways to submit:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n${replyCta}\n\n${helpdeskLine}${delayNote}`
       : `Hi ${user.name},\n\nWe still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nPlease submit as soon as possible:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`;
 
+    const patternHtml = patternLine
+      ? `<p style="color:#374151;background:#f0fdf4;border-left:3px solid #16a34a;padding:10px 14px;margin:16px 0;border-radius:0 4px 4px 0">${patternLine}</p>`
+      : '';
+    const replyCtaHtml = patternLine
+      ? `<li><strong>Reply YES</strong> to this email — we'll automatically submit the same hours for you</li>`
+      : `<li>Reply to this email with your hours in free text (e.g. "40 hours this week")</li>`;
+
     const submitOptionsHtml = `
+      ${patternHtml}
       <p style="color:#374151;font-weight:600;margin-top:20px">${isFirst ? 'A few ways to submit:' : 'Please submit as soon as possible:'}</p>
       <ol style="color:#374151;line-height:2.2;padding-left:20px;margin:0">
         <li>Use the button below to log into the app</li>
         <li>Reply to this email with your timesheet file attached</li>
         <li>Email your timesheet directly to <a href="mailto:${TIMESHEET_EMAIL}" style="color:#4f46e5">${TIMESHEET_EMAIL}</a></li>
+        ${isFirst ? replyCtaHtml : ''}
       </ol>
       <p style="color:#6b7280;font-size:13px;margin-top:16px;border-top:1px solid #e5e7eb;padding-top:16px">
         ${isFirst
