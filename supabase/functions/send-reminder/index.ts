@@ -120,9 +120,10 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   const url = new URL(req.url);
-  const force   = url.searchParams.get('force')    === 'true';
-  const dryRun  = url.searchParams.get('dry_run')  === 'true';
-  const testTo  = url.searchParams.get('test_to')  || null; // redirect all emails here
+  const force      = url.searchParams.get('force')     === 'true';
+  const dryRun     = url.searchParams.get('dry_run')   === 'true';
+  const testTo     = url.searchParams.get('test_to')   || null; // redirect all emails here
+  const testUser   = url.searchParams.get('test_user') || null; // only process this one email
 
   const BREVO_API_KEY = Deno.env.get('BREVO_API_KEY');
   const FROM_EMAIL    = Deno.env.get('FROM_EMAIL');
@@ -405,10 +406,11 @@ These links are valid for 7 days and are single-use.`;
   // Only remind timesheetusers who have a start_date and have reminders enabled.
   // reminders_enabled defaults to true; only false explicitly opts out.
   const timesheetUsers = allProfiles.filter((p: Record<string,unknown>) =>
-    p.role === 'timesheetuser' && p.start_date && p.reminders_enabled !== false
+    p.role === 'timesheetuser' && p.start_date && p.reminders_enabled !== false &&
+    (!testUser || (p.email as string).toLowerCase() === testUser.toLowerCase())
   );
-  const managers       = allProfiles.filter((p: Record<string,unknown>) => p.role === 'manager');
-  const accountants    = allProfiles.filter((p: Record<string,unknown>) => p.role === 'accountant');
+  const managers    = testUser ? [] : allProfiles.filter((p: Record<string,unknown>) => p.role === 'manager');
+  const accountants = testUser ? [] : allProfiles.filter((p: Record<string,unknown>) => p.role === 'accountant');
 
   // ── SPAM GUARDRAIL — atomic per-user daily claim + hard cap per invocation ──
   // Before each send, attempt an atomic INSERT for key reminder_user_{YYYYMMDD}_{userId}.
