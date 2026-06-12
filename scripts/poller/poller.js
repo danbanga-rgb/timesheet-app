@@ -2980,10 +2980,15 @@ ${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ atte
 
   if (summary.timesheetReports.length > 0) {
     const ACTION_ICON = {
-      created:              '✅ created    ',
-      correction_imported:  '✏️  correction ',
-      correction_pending:   '⏳ pending    ',
-      duplicate:            '🔁 duplicate  ',
+      created:                  '✅ created    ',
+      correction_imported:      '✏️  correction ',
+      correction_pending:       '⏳ pending    ',
+      duplicate:                '🔁 duplicate  ',
+      reply_yes_submitted:      '🤖 auto-YES   ',
+      reply_yes_failed:         '❌ auto-YES?  ',
+      reply_yes_no_history:     '⚠️  YES-nohist',
+      reply_modify_pending:     '📋 modify-pend',
+      reply_no:                 '🚫 reply-no   ',
     };
     body += `
 TIMESHEET PROCESSING LOG (${summary.timesheetReports.length} entries)
@@ -3132,25 +3137,25 @@ async function main() {
             const lastTs = await fetchLastApprovedEntries(fromEmail);
             if (!lastTs) {
               console.warn(`  ⚠️  YES reply but no approved timesheet found for ${fromEmail}`);
-              summary.timesheetReports.push({ type: 'reply_yes_no_history', subject, contractor: fromEmail });
+              summary.timesheetReports.push({ action: 'reply_yes_no_history', contractorName: fromEmail, week: null, attachmentName: subject });
               continue;
             }
             await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
             const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, RUN_ID);
             const ok = ingestRes?.ok !== false;
             console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);
-            summary.timesheetReports.push({ type: ok ? 'reply_yes_submitted' : 'reply_yes_failed', subject, contractor: fromEmail, weekStart });
+            summary.timesheetReports.push({ action: ok ? 'reply_yes_submitted' : 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject });
             continue;
           }
 
           if (classification.intent === 'MODIFY') {
             console.log(`  📋 MODIFY reply — flagged for accountant review: ${fromEmail}`);
-            summary.timesheetReports.push({ type: 'reply_modify_pending', subject, contractor: fromEmail, weekStart, notes: classification.notes, hours: classification.hours, originalText: bodyText.slice(0, 300) });
+            summary.timesheetReports.push({ action: 'reply_modify_pending', contractorName: fromEmail, week: weekStart, attachmentName: subject, notes: `hours=${classification.hours} | ${classification.notes}` });
             continue;
           }
 
           // NO or unclear — drop silently
-          summary.timesheetReports.push({ type: 'reply_no', subject, contractor: fromEmail, notes: classification.notes });
+          summary.timesheetReports.push({ action: 'reply_no', contractorName: fromEmail, week: null, attachmentName: subject, notes: classification.notes });
           continue;
         }
       }
