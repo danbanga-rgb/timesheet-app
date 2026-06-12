@@ -411,7 +411,7 @@ serve(async (req) => {
     if (!found) {
       await supabase.from('email_import_log').insert({
         message_id:      messageId,
-        from_email:      contractorEmail,
+        from_email:      (forwardedBy as string) || contractorEmail,
         resolved_email:  contractorEmail,
         subject,
         attachment_name: attachmentName || null,
@@ -428,7 +428,7 @@ serve(async (req) => {
   } catch (e) {
     await supabase.from('email_import_log').insert({
       message_id:      messageId,
-      from_email:      contractorEmail,
+      from_email:      (forwardedBy as string) || contractorEmail,
       resolved_email:  contractorEmail,
       subject,
       attachment_name: attachmentName || null,
@@ -491,7 +491,7 @@ serve(async (req) => {
   // ── Log ───────────────────────────────────────────────────────────────────
   await supabase.from('email_import_log').insert({
     message_id:      messageId,
-    from_email:      contractorEmail,
+    from_email:      (forwardedBy as string) || contractorEmail,
     resolved_email:  contractorEmail,
     subject:         subject || null,
     attachment_name: attachmentName || null,
