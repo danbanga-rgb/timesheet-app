@@ -134,6 +134,7 @@ function buildTimingSection(
   profileIds: Set<string>,
   completedWeeks: string[],
   profiles: Array<{ id: string; start_date: string | null; end_date: string | null }>,
+  channelMap: Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>,
 ): string {
   const timingWeeks = completedWeeks.slice(-6);
   if (timingWeeks.length === 0) return '';
@@ -145,9 +146,9 @@ function buildTimingSection(
     profileEndDate.set(p.id, p.end_date ?? '');
   }
 
-  type WeekStat = { total: number; portal: number; email: number; within1d: number; within3d: number; sumDays: number };
+  type WeekStat = { total: number; portal: number; direct: number; forwarded: number; autoYes: number; within1d: number; within3d: number; sumDays: number };
   const stats = new Map<string, WeekStat>();
-  for (const wk of timingWeeks) stats.set(wk, { total: 0, portal: 0, email: 0, within1d: 0, within3d: 0, sumDays: 0 });
+  for (const wk of timingWeeks) stats.set(wk, { total: 0, portal: 0, direct: 0, forwarded: 0, autoYes: 0, within1d: 0, within3d: 0, sumDays: 0 });
 
   for (const ts of allTimesheets) {
     const wk = ts.week_start.slice(0, 10);
@@ -161,7 +162,11 @@ function buildTimingSection(
     const daysAfter  = (new Date(ts.submitted_at).getTime() - weekEndMs) / 86400000;
     const st         = stats.get(wk)!;
     st.total++;
-    if (ts.source === 'direct') st.portal++; else st.email++;
+    const channel = channelMap.get(ts.id) ?? (ts.source === 'direct' ? 'portal' : 'direct');
+    if (channel === 'portal')    st.portal++;
+    else if (channel === 'forwarded') st.forwarded++;
+    else if (channel === 'auto_yes')  st.autoYes++;
+    else                              st.direct++;
     if (daysAfter <= 1) st.within1d++;
     if (daysAfter <= 3) st.within3d++;
     st.sumDays += Math.max(daysAfter, 0);
@@ -177,11 +182,14 @@ function buildTimingSection(
     const [, em, ed] = addDays(wk, 6).split('-').map(Number);
     const c1d = pct1d >= 50 ? '#15803d' : pct1d >= 25 ? '#b45309' : '#dc2626';
     const c3d = pct3d >= 90 ? '#15803d' : pct3d >= 70 ? '#b45309' : '#dc2626';
+    const cYes = st.autoYes > 0 ? '#15803d' : '#9ca3af';
     return `<tr>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb">W/E ${MONTHS[em-1]} ${ed}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center">${st.total}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.portal}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.email}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.direct}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.forwarded}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${cYes}">${st.autoYes}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c1d}">${pct1d}%</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c3d}">${pct3d}%</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center">${avg}d</td>
@@ -196,16 +204,18 @@ function buildTimingSection(
       <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb">
         <thead><tr style="background:#1e40af;color:white">
           <th style="padding:8px 10px;text-align:left;font-weight:600">Week</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Submitted</th>
+          <th style="padding:8px 10px;text-align:center;font-weight:600">Total</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">Portal</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">Email</th>
+          <th style="padding:8px 10px;text-align:center;font-weight:600">Fwd</th>
+          <th style="padding:8px 10px;text-align:center;font-weight:600">Auto-YES</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">≤1 day</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">≤3 days</th>
           <th style="padding:8px 10px;text-align:center;font-weight:600">Avg days</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="margin:6px 0 0;font-size:11px;color:#9ca3af">Days after Sunday week-end. ≤1 day = by Monday; ≤3 days = by Wednesday. Portal = web app · Email = submitted by email.</p>
+      <p style="margin:6px 0 0;font-size:11px;color:#9ca3af">Days after Sunday week-end. ≤1 day = by Monday; ≤3 days = by Wednesday. Portal = web app · Email = direct email · Fwd = forwarded by staff · Auto-YES = AI auto-submitted.</p>
     </div>`;
 }
 
@@ -294,6 +304,31 @@ serve(async (req) => {
     const wk = ts.week_start.slice(0, 10);
     if (!tsByWeek.has(wk)) tsByWeek.set(wk, new Map());
     tsByWeek.get(wk)!.set(ts.user_id, ts.entries ?? {});
+  }
+
+  // ─── Build channel map from email_import_log ────────────────────────────────
+
+  const allTimesheetIds = (allTimesheets ?? []).map(ts => ts.id);
+  const channelMap = new Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>();
+
+  if (allTimesheetIds.length > 0) {
+    const { data: logRows } = await db
+      .from('email_import_log')
+      .select('timesheet_id, from_email, resolved_email, message_id')
+      .in('timesheet_id', allTimesheetIds);
+
+    for (const row of (logRows ?? [])) {
+      if (!row.timesheet_id) continue;
+      let channel: 'portal' | 'direct' | 'forwarded' | 'auto_yes';
+      if (row.message_id && String(row.message_id).startsWith('reply-yes-')) {
+        channel = 'auto_yes';
+      } else if (row.from_email && row.resolved_email && row.from_email !== row.resolved_email) {
+        channel = 'forwarded';
+      } else {
+        channel = 'direct';
+      }
+      channelMap.set(row.timesheet_id, channel);
+    }
   }
 
   // ─── Build per-week report sections ──────────────────────────────────────────
@@ -419,7 +454,7 @@ serve(async (req) => {
   // ─── Compose email ────────────────────────────────────────────────────────────
 
   const totalMissingWeeks = weekReports.length;
-  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles);
+  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap);
 
   let bodyHtml: string;
   let bodyText: string;
