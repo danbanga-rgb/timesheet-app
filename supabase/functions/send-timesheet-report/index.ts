@@ -53,8 +53,9 @@ function currentMonday(): string {
   return monday.toISOString().slice(0, 10);
 }
 
-function isFridayUtc(): boolean {
-  return todayUtc().getUTCDay() === 5;
+function isFridayOrLaterUtc(): boolean {
+  const dow = todayUtc().getUTCDay(); // 0=Sun, 5=Fri, 6=Sat
+  return dow === 5 || dow === 6 || dow === 0;
 }
 
 function completedWeeksSince(cutoff: string): string[] {
@@ -135,8 +136,12 @@ function buildTimingSection(
   completedWeeks: string[],
   profiles: Array<{ id: string; start_date: string | null; end_date: string | null }>,
   channelMap: Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>,
+  currentWeekForTimeliness: string | null = null,
 ): string {
   const timingWeeks = completedWeeks.slice(-6);
+  if (currentWeekForTimeliness && !timingWeeks.includes(currentWeekForTimeliness)) {
+    timingWeeks.push(currentWeekForTimeliness);
+  }
   if (timingWeeks.length === 0) return '';
 
   const profileStartDate = new Map<string, string>();
@@ -183,8 +188,12 @@ function buildTimingSection(
     const c1d = pct1d >= 50 ? '#15803d' : pct1d >= 25 ? '#b45309' : '#dc2626';
     const c3d = pct3d >= 90 ? '#15803d' : pct3d >= 70 ? '#b45309' : '#dc2626';
     const cYes = st.autoYes > 0 ? '#15803d' : '#9ca3af';
+    const isInProgress = wk === currentWeekForTimeliness;
+    const weekLabel = isInProgress
+      ? `W/E ${MONTHS[em-1]} ${ed} <span style="font-size:10px;color:#9ca3af;font-weight:400">(in progress)</span>`
+      : `W/E ${MONTHS[em-1]} ${ed}`;
     return `<tr>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb">W/E ${MONTHS[em-1]} ${ed}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb">${weekLabel}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center">${st.total}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.portal}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.direct}</td>
@@ -245,13 +254,16 @@ serve(async (req) => {
 
   // ─── Weeks to cover ───────────────────────────────────────────────────────────
 
-  const completedWeeks     = completedWeeksSince(CUTOFF);
-  const includeCurrentWeek = isFridayUtc();
-  const currentWeekStart   = currentMonday();
-  const weeks              = [...completedWeeks];
-  if (includeCurrentWeek && !weeks.includes(currentWeekStart)) {
+  const completedWeeks           = completedWeeksSince(CUTOFF);
+  const currentWeekStart         = currentMonday();
+  const fetchCurrentWeek         = isFridayOrLaterUtc();   // fetch data Fri/Sat/Sun
+  const weeks                    = [...completedWeeks];
+  if (fetchCurrentWeek && !weeks.includes(currentWeekStart)) {
     weeks.push(currentWeekStart);
   }
+  // Current week shown in timeliness table (Fri/Sat/Sun, data-gated by >0 submissions).
+  // Never shown as a detail card — by Monday it's a completed week and handled normally.
+  const currentWeekForTimeliness = fetchCurrentWeek ? currentWeekStart : null;
 
   if (weeks.length === 0) {
     return new Response(JSON.stringify({ ok: true, message: 'No completed weeks yet' }), {
@@ -344,7 +356,6 @@ serve(async (req) => {
     htmlSection: string;
     csvContent: string;
     csvName: string;
-    isCurrentWeek: boolean;
   };
 
   const weekReports: WeekReport[] = [];
@@ -416,7 +427,10 @@ serve(async (req) => {
     // Skip weeks where everyone submitted
     if (missingNames.length === 0) continue;
 
-    const isCurrentWeek = includeCurrentWeek && weekStart === currentWeekStart;
+    // Never show current week as a detail card — noisy before the week ends.
+    // It appears in the timeliness table on Fri/Sat/Sun; on Monday it's a completed week.
+    if (weekStart === currentWeekStart) continue;
+
     const label = weekLabel(weekStart);
     const total = eligible.length;
 
@@ -424,14 +438,11 @@ serve(async (req) => {
       `<span style="display:inline-block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;border-radius:4px;padding:3px 10px;margin:3px 4px 3px 0;font-size:13px;font-weight:600">${n}</span>`
     ).join('');
 
-    const headerBg   = isCurrentWeek ? '#92400e' : '#1e40af';
-    const weekTitle  = isCurrentWeek
-      ? `${label} <span style="font-size:11px;font-weight:400;opacity:.85">(in progress — week not yet complete)</span>`
-      : `Week ending ${label.split('–')[1]?.trim() ?? label}`;
+    const weekTitle = `Week ending ${label.split('–')[1]?.trim() ?? label}`;
 
     const htmlSection = `
       <div style="margin-top:20px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
-        <div style="background:${headerBg};color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
+        <div style="background:#1e40af;color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
           <strong>${weekTitle}</strong>
           <span style="font-size:12px;opacity:.85">${submitted}/${total} submitted · <span style="color:#fca5a5">${missingNames.length} missing</span></span>
         </div>
@@ -447,14 +458,13 @@ serve(async (req) => {
       htmlSection,
       csvContent: buildCsv(csvRows),
       csvName: csvFilename(weekStart),
-      isCurrentWeek,
     });
   }
 
   // ─── Compose email ────────────────────────────────────────────────────────────
 
   const totalMissingWeeks = weekReports.length;
-  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap);
+  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap, currentWeekForTimeliness);
 
   let bodyHtml: string;
   let bodyText: string;
@@ -479,7 +489,7 @@ serve(async (req) => {
 
     const summaryRows = weekReports.map(r =>
       `<tr>
-        <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;font-weight:600">${r.label}${r.isCurrentWeek ? ' <span style="font-size:11px;font-weight:400;color:#92400e">(in progress)</span>' : ''}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;font-weight:600">${r.label}</td>
         <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center">${r.submitted}/${r.total}</td>
         <td style="padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:center;color:#dc2626;font-weight:700">${r.missingNames.length}</td>
       </tr>`
