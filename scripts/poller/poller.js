@@ -2309,9 +2309,12 @@ async function classifyReply(bodyText, contractorName) {
 
 // Fetch the most recently approved timesheet entries for a contractor
 async function fetchLastApprovedEntries(contractorEmail) {
+  if (!CONFIG.supabaseServiceKey) return null;
+  const authHeaders = { 'apikey': CONFIG.supabaseServiceKey, 'Authorization': `Bearer ${CONFIG.supabaseServiceKey}` };
+
   const profileRes = await fetch(
     `${SUPABASE_REST_URL}/profiles?email=eq.${encodeURIComponent(contractorEmail)}&select=id&limit=1`,
-    { headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` } }
+    { headers: authHeaders }
   );
   const profiles = await profileRes.json();
   if (!profiles?.length) return null;
@@ -2319,7 +2322,7 @@ async function fetchLastApprovedEntries(contractorEmail) {
 
   const tsRes = await fetch(
     `${SUPABASE_REST_URL}/timesheets?user_id=eq.${userId}&status=eq.approved&select=week_start,entries&order=week_start.desc&limit=1`,
-    { headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` } }
+    { headers: authHeaders }
   );
   const rows = await tsRes.json();
   if (!rows?.length) return null;
