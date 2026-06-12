@@ -2757,14 +2757,14 @@ function markEmailsSeen(uids) {
 // ─── Trigger weekly timesheet report ─────────────────────────────────────────
 
 async function writePollerHeartbeat(data) {
-  if (!SUPABASE_REST_URL || !SUPABASE_ANON_KEY) return;
+  if (!SUPABASE_REST_URL || !CONFIG.supabaseServiceKey) return;
   try {
     await fetch(`${SUPABASE_REST_URL}/system_settings`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: CONFIG.supabaseServiceKey,
+        Authorization: `Bearer ${CONFIG.supabaseServiceKey}`,
         Prefer: 'resolution=merge-duplicates',
       },
       body: JSON.stringify({ key: 'poller_last_run', value: JSON.stringify(data) }),
