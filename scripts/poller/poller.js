@@ -2411,52 +2411,9 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   const emlAtts = attachments.filter(a => a.isEml);
   const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isCsv || a.isPdf || a.isDocx || a.isEml);
 
-  // ── No timesheet content — check if this is a reminder reply ──────────────
-  if (!hasTimesheetContent) {
-    const isReply = /^re:/i.test(subject);
-    const weekStart = isReply ? parseWeekFromSubject(subject) : null;
-
-    if (isReply && weekStart && CONFIG.groqApiKey) {
-      // Check sender is a known contractor before calling Groq
-      const allowlisted = await isKnownContractor(fromEmail);
-      if (allowlisted) {
-        console.log(`  🤖 Reply from known contractor — classifying with Groq: ${subject}`);
-        const classification = await classifyReply(bodyText, fromName || fromEmail);
-        console.log(`  🤖 Classification: ${classification.intent} | hours: ${classification.hours} | notes: ${classification.notes}`);
-
-        if (classification.intent === 'YES') {
-          const lastTs = await fetchLastApprovedEntries(fromEmail);
-          if (!lastTs) {
-            console.warn(`  ⚠️  YES reply but no approved timesheet found for ${fromEmail}`);
-            results.push({ type: 'reply_yes_no_history', subject, contractor: fromEmail });
-            return;
-          }
-          // Write pending flag BEFORE auto-submit — if ingest fails the reminder is still suppressed
-          await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
-          const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, runId);
-          const ok = ingestRes?.ok !== false;
-          console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);
-          results.push({ type: ok ? 'reply_yes_submitted' : 'reply_yes_failed', subject, contractor: fromEmail, weekStart });
-          return;
-        }
-
-        if (classification.intent === 'MODIFY') {
-          // Log for accountant review — full NL parsing is phase 2
-          console.log(`  📋 MODIFY reply — flagged for accountant review: ${fromEmail}`);
-          results.push({ type: 'reply_modify_pending', subject, contractor: fromEmail, weekStart, notes: classification.notes, hours: classification.hours, originalText: bodyText.slice(0, 300) });
-          return;
-        }
-
-        // NO or unclear — drop silently
-        results.push({ type: 'reply_no', subject, contractor: fromEmail, notes: classification.notes });
-        return;
-      }
-    }
-
-    console.log(`  ⏭️  Skipped (no attachments): ${subject}`);
-    results.push({ type: 'skipped', subject, reason: 'no timesheet attachments' });
-    return;
-  }
+  // Note: no-attachment emails (including YES/MODIFY/NO replies) are handled in the
+  // outer loop before processEmail is called. This function only receives emails with
+  // timesheet content (XLSX, PDF, DOCX, CSV, or EML attachments).
 
   // ── BATCH: .eml attachments ────────────────────────────────────────────────
   if (emlAtts.length > 0) {
@@ -3159,8 +3116,45 @@ async function main() {
 
     const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isCsv || a.isPdf || a.isDocx || a.isEml);
 
-    // No timesheet content: forward to helpdesk, mark seen
+    // No timesheet content: check for YES/MODIFY/NO reply first, then forward to helpdesk
     if (!hasTimesheetContent) {
+      const isReply = /^re:/i.test(subject);
+      const weekStart = isReply ? parseWeekFromSubject(subject) : null;
+      if (isReply && weekStart && CONFIG.groqApiKey && !isInternal(fromEmail)) {
+        const allowlisted = await isKnownContractor(fromEmail);
+        if (allowlisted) {
+          const fromName = fromAddr?.name || null;
+          console.log(`  🤖 Reply from known contractor — classifying with Groq: ${subject}`);
+          const classification = await classifyReply(bodyText, fromName || fromEmail);
+          console.log(`  🤖 Classification: ${classification.intent} | hours: ${classification.hours} | notes: ${classification.notes}`);
+
+          if (classification.intent === 'YES') {
+            const lastTs = await fetchLastApprovedEntries(fromEmail);
+            if (!lastTs) {
+              console.warn(`  ⚠️  YES reply but no approved timesheet found for ${fromEmail}`);
+              summary.timesheetReports.push({ type: 'reply_yes_no_history', subject, contractor: fromEmail });
+              continue;
+            }
+            await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
+            const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, RUN_ID);
+            const ok = ingestRes?.ok !== false;
+            console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);
+            summary.timesheetReports.push({ type: ok ? 'reply_yes_submitted' : 'reply_yes_failed', subject, contractor: fromEmail, weekStart });
+            continue;
+          }
+
+          if (classification.intent === 'MODIFY') {
+            console.log(`  📋 MODIFY reply — flagged for accountant review: ${fromEmail}`);
+            summary.timesheetReports.push({ type: 'reply_modify_pending', subject, contractor: fromEmail, weekStart, notes: classification.notes, hours: classification.hours, originalText: bodyText.slice(0, 300) });
+            continue;
+          }
+
+          // NO or unclear — drop silently
+          summary.timesheetReports.push({ type: 'reply_no', subject, contractor: fromEmail, notes: classification.notes });
+          continue;
+        }
+      }
+
       // Log unsupported file types so they're visible in the import log
       if (!isInternal(fromEmail) && attachments.length > 0) {
         const unsupported = attachments.filter(a =>
