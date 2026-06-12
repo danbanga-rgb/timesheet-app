@@ -3277,12 +3277,13 @@ async function main() {
   });
 
   // Summary email — only if something actionable happened
+  const autoSubmitted = summary.timesheetReports.filter(r => r.action === 'reply_yes_submitted').length;
   const actionable = summary.created + summary.duplicates + summary.corrections +
                      summary.forwarded + summary.failures.length + summary.newUsers.length +
-                     summary.invoiceReports.length;
+                     summary.invoiceReports.length + summary.timesheetReports.length;
   if (actionable > 0) {
     await sendSummaryEmail(summary, 0);
-    if (summary.created + summary.corrections > 0) {
+    if (summary.created + summary.corrections + autoSubmitted > 0) {
       await triggerTimesheetReport();
     }
     const invoicesIngested = summary.invoiceReports.filter(r => r.ingestOk);
