@@ -3436,7 +3436,7 @@ const TimesheetSystem = () => {
                     let h = 0;
                     Object.entries(ts.entries).forEach(([dateKey, entry]) => {
                       const d = parseLocalDate(dateKey);
-                      if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
+                      if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0') || 0;
                     });
                     hours[we] = h; statuses[we] = ts.status; rowTotal += h;
                   } else if (!user.startDate || user.startDate > weEnd || (user.endDate && user.endDate < we)) {
@@ -4116,7 +4116,7 @@ const TimesheetSystem = () => {
             let h = 0;
             Object.entries(ts.entries).forEach(([dateKey, entry]) => {
               const d = parseLocalDate(dateKey);
-              if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0');
+              if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0') || 0;
             });
             hours[we] = h; statuses[we] = ts.status; rowTotal += h;
           } else if (!user.startDate || user.startDate > weEnd || (user.endDate && user.endDate < we)) {
