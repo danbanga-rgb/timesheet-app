@@ -790,6 +790,15 @@ const TimesheetSystem = () => {
     return () => { supabase.removeChannel(channel); };
   }, [currentUser?.id]);
 
+  // Auto-default invoices tab to latest month when data first loads
+  useEffect(() => {
+    if (invoices.length > 0 && invoiceMonthPreset === '') {
+      const latest = [...new Set(invoices.map(i => i.periodStart?.slice(0, 7)).filter(Boolean) as string[])]
+        .sort((a, b) => b.localeCompare(a))[0];
+      if (latest) setInvoiceMonthPreset(latest);
+    }
+  }, [invoices.length]);
+
   // ─── Data loading helpers ─────────────────────────────────────────────────
   async function loadProfileAndData(userId: string) {
     setLoading(true);
@@ -4475,9 +4484,15 @@ const TimesheetSystem = () => {
               invoices.map(i => i.periodStart?.slice(0, 7)).filter(Boolean) as string[]
             )].sort((a, b) => b.localeCompare(a)).slice(0, 12);
 
-            // Build pay-on-date pills from distinct payOnDate values
+            // Build pay-on-date pills from invoices matching all filters except payOnPreset itself
+            let prePayOnFiltered = invoices;
+            if (invoiceSelectedUsers !== null) prePayOnFiltered = prePayOnFiltered.filter(i => invoiceSelectedUsers.includes(i.userId));
+            if (invoiceDateRange.start && invoiceDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
+            if (invoicePayDateRange.start && invoicePayDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
+            if (invoicePaidDateRange.start && invoicePaidDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
+            if (invoiceMonthPreset) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodStart?.slice(0, 7) === invoiceMonthPreset);
             const payOnDates = [...new Set(
-              invoices.map(i => i.payOnDate).filter(Boolean) as string[]
+              prePayOnFiltered.map(i => i.payOnDate).filter(Boolean) as string[]
             )].sort();
 
             // Pre-status filtered: all filters except status — used for status pill counts and KPIs
@@ -4507,7 +4522,7 @@ const TimesheetSystem = () => {
                   <div className="flex flex-col gap-3">
                     {/* Month pills */}
                     {invoiceMonths.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex flex-wrap gap-1.5 items-center">
                         <button onClick={() => setInvoiceMonthPreset('')}
                           className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${!invoiceMonthPreset ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
                           All months
@@ -4523,6 +4538,9 @@ const TimesheetSystem = () => {
                             </button>
                           );
                         })}
+                        {invoiceMonthPreset === invoiceMonths[0] && (
+                          <span className="text-xs text-gray-400 ml-1">Loaded to latest period — select All months to see everything</span>
+                        )}
                       </div>
                     )}
                     {/* Pay On Date quick pills */}
@@ -4535,7 +4553,7 @@ const TimesheetSystem = () => {
                         </button>
                         {payOnDates.map(d => {
                           const label = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                          const count = invoices.filter(i => i.payOnDate === d).length;
+                          const count = prePayOnFiltered.filter(i => i.payOnDate === d).length;
                           return (
                             <button key={d} onClick={() => setInvoicePayOnPreset(invoicePayOnPreset === d ? '' : d)}
                               className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-blue-700 border-blue-200 hover:border-blue-400'}`}>
@@ -4545,7 +4563,7 @@ const TimesheetSystem = () => {
                         })}
                         <button onClick={() => setInvoicePayOnPreset(invoicePayOnPreset === 'none' ? '' : 'none')}
                           className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset === 'none' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400'}`}>
-                          Not assigned <span className="opacity-70">({invoices.filter(i => !i.payOnDate).length})</span>
+                          Not assigned <span className="opacity-70">({prePayOnFiltered.filter(i => !i.payOnDate).length})</span>
                         </button>
                       </div>
                     )}
