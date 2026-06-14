@@ -2,6 +2,8 @@
 
 > Generated 2026-06-12. These are gaps, ambiguities, and items that need developer input to document accurately.
 
+**Session 2026-06-13/14:** UI improvements made (invoice filters, channel cards, NaN fix). Open questions below remain unresolved.
+
 ---
 
 1. **`email_invoice_log` schema** — The docs reference this table (for invoice ingestion tracking, parse method, etc.) but its exact column list was not confirmed from source. What are the full columns? Is it a separate table from `email_import_log`, or did invoice logging get added to the same table with a `type` column?

@@ -4,6 +4,35 @@
 
 ---
 
+## 2026-06-13/14 — Invoice Filter Overhaul, Submission Channel Cards, NaN Fix
+
+**Commits:** `e6147f4`, `23fd4fa`, `02f754a`, `d8f3d0d`, `4ff7bed`
+
+### Invoice tab UI overhaul
+
+The filters panel was moved above the KPI cards so filters are always visible when scanning totals. KPI cards now derive from the **filtered** invoice set rather than the global `invoices` array, so the numbers always reflect what is on screen.
+
+Two key filter interactions were also fixed:
+
+- **Status pill counts** use `preStatusFiltered` (all active filters except status) so switching between status tabs shows meaningful counts rather than collapsing to 0.
+- **Pay On Date quick-select pills** are dynamically built from distinct `payOnDate` values present in the DB. An explicit "Not assigned" pill covers invoices with no pay date. These pills react to all other active filters (month, contractor, etc.) — built from `prePayOnFiltered`. Auto-default to the latest month is applied when invoices first load via a `useEffect` on `invoices.length`, with a "Loaded to latest period" hint shown next to the month pills.
+
+**Filter pipeline order:** `prePayOnFiltered` (no pay-on filter) → `preStatusFiltered` (adds pay-on, no status) → `filtered` (adds status). New state variable: `invoicePayOnPreset: string` (`''` = all, `'none'` = not assigned, `'YYYY-MM-DD'` = specific date).
+
+### NaN fix in consolidated reports
+
+`parseFloat` returns `NaN` for a truthy non-numeric string (e.g. `'null'` from a DB entry). This poisoned the `grandTotal` reduce in both the accountant and manager consolidated report generators. Fix: `parseFloat((entry as TimeEntry)?.hours || '0') || 0` — the trailing `|| 0` clamps `NaN` to 0. Applied at accountant line ~4119 and manager line ~3439.
+
+### Submission Channels KPI card — weekly view
+
+A 4th KPI card added to the accountant weekly view. Shows Portal count (`source === 'direct'`), Email count (`source === 'imported'`), percentage split, and a progress bar. Derived from `reportData` (already available — no extra fetch). Weekly KPI grid changed from `md:grid-cols-3` to `md:grid-cols-4`.
+
+### Submission Channels KPI card — consolidated tab
+
+`ConsolidatedTable` extended with an optional `sourceCounts?: { portal: number; email: number }` prop. When supplied, a 5th KPI card is rendered (grid becomes `md:grid-cols-5`). `generateConsolidatedReport` computes `sourceCounts` from the in-range timesheets after test-account exclusion. Manager view passes no `sourceCounts` — the prop is optional so manager behaviour is unchanged.
+
+---
+
 ## 2026-06-11 — Phase A AI Agent: Live
 
 **Commits:** `3da1312`, `a11b37c`, `68f00f4`, `8890290`, `38406cb`, `dda7304`, `4ff6bb1`, `503b163`, `a433b8a`, `5706dbe`, `c16b819`

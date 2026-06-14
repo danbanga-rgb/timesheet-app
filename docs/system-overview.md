@@ -77,10 +77,10 @@ Frontend ← Supabase Auth (sessionStorage, tab-isolated)
 
 ### `accountant`
 Four-tab UI:
-- **Weekly tab** — grid view of all contractors for a single week (Prev/Next nav only)
+- **Weekly tab** — grid view of all contractors for a single week (Prev/Next nav only). KPI row includes a **Submission Channels card** (Portal count, Email count, % split, progress bar — derived from `reportData`, no extra fetch). Grid is `md:grid-cols-4`.
 - **Timesheet Only tab** — filterable list view with date range + quick selectors
-- **Consolidated tab** — multi-week summary by contractor; project filter pills; CSV export
-- **Invoices tab** — all contractor invoices; approve, reject, switch payment profiles; Convera matching
+- **Consolidated tab** — multi-week summary by contractor; project filter pills; CSV export. Includes a **Submission Channels KPI card** (5th card, `md:grid-cols-5`) derived from in-range timesheets (test accounts excluded). Passed to `ConsolidatedTable` via optional `sourceCounts` prop — manager view omits this prop and is unaffected.
+- **Invoices tab** — all contractor invoices; approve, reject, switch payment profiles; Convera matching. Filter pipeline: `prePayOnFiltered` (all filters except pay-on date) → `preStatusFiltered` (adds pay-on, no status) → `filtered` (adds status). This order keeps status pill counts meaningful when switching tabs and keeps Pay On pills reactive to other filters. KPI cards derive from the filtered set. Auto-defaults to the latest invoice month on first load (`useEffect` on `invoices.length`). Pay On Date quick-select pills are dynamically built from distinct `payOnDate` values in DB, including a "Not assigned" pill for invoices with no pay date.
 
 Accountant can also import QuickBooks XLSX (Transaction Detail by Account export, client-side SheetJS parsing) for payment reconciliation.
 
