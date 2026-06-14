@@ -4194,8 +4194,11 @@ const TimesheetSystem = () => {
                 const pending   = reportData.filter(r => r.status === 'pending').length;
                 const notSub    = reportData.filter(r => r.status === 'not submitted').length;
                 const rejected  = reportData.filter(r => r.status === 'rejected').length;
+                const portalCount = reportData.filter(r => r.source === 'direct').length;
+                const emailCount  = reportData.filter(r => r.source === 'imported').length;
+                const totalSubmitted = portalCount + emailCount;
                 return (
-                  <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div className="bg-blue-50 p-4 rounded-lg">
                       <div className="text-sm text-gray-600 mb-1">Total Employees</div>
                       <div className="text-2xl font-bold text-blue-600 mb-3">{reportData.length}</div>
@@ -4216,8 +4219,39 @@ const TimesheetSystem = () => {
                         </div>
                       )}
                     </div>
-                    <div className="bg-green-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Total Hours</div><div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div></div>
-                    <div className="bg-purple-50 p-4 rounded-lg"><div className="text-sm text-gray-600 mb-1">Avg Hours/Employee</div><div className="text-2xl font-bold text-purple-600">{reportData.length > 0 ? (grandTotal / reportData.length).toFixed(1) : 0}h</div></div>
+                    <div className="bg-green-50 p-4 rounded-lg">
+                      <div className="text-sm text-gray-600 mb-1">Total Hours</div>
+                      <div className="text-2xl font-bold text-green-600">{grandTotal.toFixed(1)}h</div>
+                    </div>
+                    <div className="bg-purple-50 p-4 rounded-lg">
+                      <div className="text-sm text-gray-600 mb-1">Avg Hours/Employee</div>
+                      <div className="text-2xl font-bold text-purple-600">{reportData.length > 0 ? (grandTotal / reportData.length).toFixed(1) : 0}h</div>
+                    </div>
+                    <div className="bg-indigo-50 p-4 rounded-lg">
+                      <div className="text-sm text-gray-600 mb-1">Submission Channels</div>
+                      <div className="text-2xl font-bold text-indigo-600 mb-3">{totalSubmitted} <span className="text-sm font-normal text-gray-400">of {reportData.length}</span></div>
+                      <div className="space-y-1.5 text-sm">
+                        <div className="flex justify-between items-center">
+                          <span className="text-indigo-700">Portal</span>
+                          <span className="font-semibold text-indigo-700">
+                            {portalCount}
+                            {totalSubmitted > 0 && <span className="text-xs font-normal text-gray-400 ml-1">({Math.round(portalCount / totalSubmitted * 100)}%)</span>}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-blue-700">Email</span>
+                          <span className="font-semibold text-blue-700">
+                            {emailCount}
+                            {totalSubmitted > 0 && <span className="text-xs font-normal text-gray-400 ml-1">({Math.round(emailCount / totalSubmitted * 100)}%)</span>}
+                          </span>
+                        </div>
+                        {totalSubmitted > 0 && (
+                          <div className="mt-2 h-1.5 rounded-full bg-blue-200 overflow-hidden">
+                            <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.round(portalCount / totalSubmitted * 100)}%` }} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 );
               })()}
