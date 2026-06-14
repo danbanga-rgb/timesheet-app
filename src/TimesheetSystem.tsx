@@ -630,6 +630,7 @@ const TimesheetSystem = () => {
   const [pendingUsdRate, setPendingUsdRate] = useState('');
   const [profileSwitchOpen, setProfileSwitchOpen] = useState(false);
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
+  const [invoicePayOnPreset, setInvoicePayOnPreset] = useState(''); // '' = all, 'none' = not assigned, or 'YYYY-MM-DD'
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
   // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
@@ -4469,45 +4470,41 @@ const TimesheetSystem = () => {
               if (inv.groupKey) fullGroupSizes.set(inv.groupKey, (fullGroupSizes.get(inv.groupKey) || 0) + 1);
             }
 
-            let filtered = invoices;
-            if (invoiceSelectedUsers !== null) filtered = filtered.filter(i => invoiceSelectedUsers.includes(i.userId));
-            if (accountantInvoiceFilter !== 'all') filtered = filtered.filter(i => i.status === accountantInvoiceFilter);
-            if (invoiceDateRange.start && invoiceDateRange.end) {
-              filtered = filtered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
-            }
-            if (invoicePayDateRange.start && invoicePayDateRange.end) {
-              filtered = filtered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
-            }
-            if (invoicePaidDateRange.start && invoicePaidDateRange.end) {
-              filtered = filtered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
-            }
-            // Month preset filter
-            if (invoiceMonthPreset) {
-              filtered = filtered.filter(i => i.periodStart && i.periodStart.slice(0, 7) === invoiceMonthPreset);
-            }
-            filtered = [...filtered].sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
-
             // Build month pills from distinct months in loaded invoices
             const invoiceMonths = [...new Set(
               invoices.map(i => i.periodStart?.slice(0, 7)).filter(Boolean) as string[]
             )].sort((a, b) => b.localeCompare(a)).slice(0, 12);
 
-            const totalPaid = invoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
-            const totalApproved = invoices.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
+            // Build pay-on-date pills from distinct payOnDate values
+            const payOnDates = [...new Set(
+              invoices.map(i => i.payOnDate).filter(Boolean) as string[]
+            )].sort();
+
+            // Pre-status filtered: all filters except status — used for status pill counts and KPIs
+            let preStatusFiltered = invoices;
+            if (invoiceSelectedUsers !== null) preStatusFiltered = preStatusFiltered.filter(i => invoiceSelectedUsers.includes(i.userId));
+            if (invoiceDateRange.start && invoiceDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
+            if (invoicePayDateRange.start && invoicePayDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
+            if (invoicePaidDateRange.start && invoicePaidDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
+            if (invoiceMonthPreset) preStatusFiltered = preStatusFiltered.filter(i => i.periodStart?.slice(0, 7) === invoiceMonthPreset);
+            if (invoicePayOnPreset === 'none') preStatusFiltered = preStatusFiltered.filter(i => !i.payOnDate);
+            else if (invoicePayOnPreset) preStatusFiltered = preStatusFiltered.filter(i => i.payOnDate === invoicePayOnPreset);
+
+            let filtered = [...preStatusFiltered];
+            if (accountantInvoiceFilter !== 'all') filtered = filtered.filter(i => i.status === accountantInvoiceFilter);
+            filtered = filtered.sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
+
+            const totalPaid = filtered.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
+            const totalApproved = filtered.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
+            const isFiltered = invoiceSelectedUsers !== null || accountantInvoiceFilter !== 'all' ||
+              invoiceDateRange.start || invoicePayDateRange.start || invoicePaidDateRange.start ||
+              invoiceMonthPreset || invoicePayOnPreset;
 
             return (
               <div>
-                {/* Stats */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Pending Review</div><div className="text-2xl font-bold text-yellow-600">{invoices.filter(i => i.status === 'submitted').length}</div><div className="text-xs text-gray-400 mt-1">awaiting action</div></div>
-                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Approved</div><div className="text-2xl font-bold text-green-600">{invoices.filter(i => i.status === 'approved').length}</div><div className="text-xs text-gray-400 mt-1">${totalApproved.toFixed(2)} to pay</div></div>
-                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Paid</div><div className="text-2xl font-bold text-blue-600">{invoices.filter(i => i.status === 'paid').length}</div><div className="text-xs text-gray-400 mt-1">${totalPaid.toFixed(2)} total</div></div>
-                  <div className="bg-white rounded-lg shadow-md p-4"><div className="text-sm text-gray-500">Total Invoices</div><div className="text-2xl font-bold text-indigo-600">{invoices.length}</div><div className="text-xs text-gray-400 mt-1">all time</div></div>
-                </div>
-
-                <div className="bg-white rounded-lg shadow-md p-6">
-                  {/* Filters */}
-                  <div className="flex flex-col gap-3 mb-5">
+                {/* Filters */}
+                <div className="bg-white rounded-lg shadow-md p-4 mb-4">
+                  <div className="flex flex-col gap-3">
                     {/* Month pills */}
                     {invoiceMonths.length > 0 && (
                       <div className="flex flex-wrap gap-1.5">
@@ -4528,12 +4525,37 @@ const TimesheetSystem = () => {
                         })}
                       </div>
                     )}
+                    {/* Pay On Date quick pills */}
+                    {payOnDates.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 items-center">
+                        <span className="text-xs font-medium text-blue-600 mr-1">Pay On:</span>
+                        <button onClick={() => setInvoicePayOnPreset('')}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${!invoicePayOnPreset ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'}`}>
+                          All
+                        </button>
+                        {payOnDates.map(d => {
+                          const label = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                          const count = invoices.filter(i => i.payOnDate === d).length;
+                          return (
+                            <button key={d} onClick={() => setInvoicePayOnPreset(invoicePayOnPreset === d ? '' : d)}
+                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-blue-700 border-blue-200 hover:border-blue-400'}`}>
+                              {label} <span className="opacity-70">({count})</span>
+                            </button>
+                          );
+                        })}
+                        <button onClick={() => setInvoicePayOnPreset(invoicePayOnPreset === 'none' ? '' : 'none')}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset === 'none' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400'}`}>
+                          Not assigned <span className="opacity-70">({invoices.filter(i => !i.payOnDate).length})</span>
+                        </button>
+                      </div>
+                    )}
+                    {/* Status pills */}
                     <div className="flex flex-wrap gap-2">
                       {['all','submitted','approved','paid','rejected'].map(s => (
                         <button key={s} onClick={() => setAccountantInvoiceFilter(s)}
                           className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${accountantInvoiceFilter === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
-                          {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
-                          {s !== 'all' && <span className="ml-1.5 text-xs">({invoices.filter(i => i.status === s).length})</span>}
+                          {s === 'all' ? `All (${preStatusFiltered.length})` : s.charAt(0).toUpperCase() + s.slice(1)}
+                          {s !== 'all' && <span className="ml-1.5 text-xs">({preStatusFiltered.filter(i => i.status === s).length})</span>}
                         </button>
                       ))}
                     </div>
@@ -4590,7 +4612,6 @@ const TimesheetSystem = () => {
                         </div>
                       )}
                     </div>
-
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <div>
                         <span className="block text-xs font-medium text-gray-500 mb-1">Period</span>
@@ -4602,7 +4623,7 @@ const TimesheetSystem = () => {
                         </div>
                       </div>
                       <div>
-                        <span className="block text-xs font-medium text-blue-600 mb-1">Pay On Date</span>
+                        <span className="block text-xs font-medium text-blue-600 mb-1">Pay On Date (range)</span>
                         <div className="flex gap-1 items-center">
                           <input type="date" value={invoicePayDateRange.start} onChange={e => setInvoicePayDateRange({...invoicePayDateRange, start: e.target.value})} className="flex-1 min-w-0 px-2 py-1.5 border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-400" />
                           <span className="text-gray-400 text-xs">–</span>
@@ -4626,7 +4647,33 @@ const TimesheetSystem = () => {
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                     </div>
                   </div>
+                </div>
 
+                {/* KPI cards — reflect current filters */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                  <div className="bg-white rounded-lg shadow-md p-4">
+                    <div className="text-sm text-gray-500">Pending Review</div>
+                    <div className="text-2xl font-bold text-yellow-600">{filtered.filter(i => i.status === 'submitted').length}</div>
+                    <div className="text-xs text-gray-400 mt-1">{isFiltered ? 'in selection' : 'awaiting action'}</div>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-md p-4">
+                    <div className="text-sm text-gray-500">Approved</div>
+                    <div className="text-2xl font-bold text-green-600">{filtered.filter(i => i.status === 'approved').length}</div>
+                    <div className="text-xs text-gray-400 mt-1">${totalApproved.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} to pay</div>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-md p-4">
+                    <div className="text-sm text-gray-500">Paid</div>
+                    <div className="text-2xl font-bold text-blue-600">{filtered.filter(i => i.status === 'paid').length}</div>
+                    <div className="text-xs text-gray-400 mt-1">${totalPaid.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} total</div>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-md p-4">
+                    <div className="text-sm text-gray-500">{isFiltered ? 'Filtered' : 'Total Invoices'}</div>
+                    <div className="text-2xl font-bold text-indigo-600">{filtered.length}</div>
+                    <div className="text-xs text-gray-400 mt-1">{isFiltered ? `of ${invoices.length} total` : 'all time'}</div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-lg shadow-md p-6">
                   {/* Table */}
                   {filtered.length === 0 ? (
                     <div className="text-center py-12 text-gray-400"><Receipt className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No invoices match the current filter</p></div>
