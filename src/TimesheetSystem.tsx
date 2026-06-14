@@ -52,8 +52,8 @@ const StickyScrollWrapper = ({ children, className }: { children: React.ReactNod
   );
 };
 
-const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { report: { weekEndings: string[]; partialWeeks: Set<string>; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number }; parseLocalDate: (s: string) => Date; testAccounts?: string[] }) => {
-  const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal } = report;
+const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { report: { weekEndings: string[]; partialWeeks: Set<string>; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number; sourceCounts?: { portal: number; email: number } }; parseLocalDate: (s: string) => Date; testAccounts?: string[] }) => {
+  const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal, sourceCounts } = report;
   const allStatuses = employeeRows.flatMap(r => Object.values(r.statuses));
   const approvedCells  = allStatuses.filter(s => s === 'approved').length;
   const pendingCells   = allStatuses.filter(s => s === 'pending').length;
@@ -61,7 +61,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
   const rejectedCells  = allStatuses.filter(s => s === 'rejected').length;
   return (
     <div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div className={`grid grid-cols-2 ${sourceCounts ? 'md:grid-cols-5' : 'md:grid-cols-4'} gap-4 mb-6`}>
         <div className="bg-blue-50 p-4 rounded-lg">
           <div className="text-sm text-gray-600">Weeks</div>
           <div className="text-2xl font-bold text-blue-600">{weekEndings.length}</div>
@@ -86,6 +86,36 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
           )}
         </div>
         <div className="bg-amber-50 p-4 rounded-lg"><div className="text-sm text-gray-600">Avg Hrs/Employee</div><div className="text-2xl font-bold text-amber-600">{employeeRows.length > 0 ? (grandTotal / employeeRows.length).toFixed(1) : 0}h</div></div>
+        {sourceCounts && (() => {
+          const total = sourceCounts.portal + sourceCounts.email;
+          return (
+            <div className="bg-indigo-50 p-4 rounded-lg">
+              <div className="text-sm text-gray-600 mb-1">Submission Channels</div>
+              <div className="text-2xl font-bold text-indigo-600 mb-3">{total} <span className="text-sm font-normal text-gray-400">submitted</span></div>
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between items-center">
+                  <span className="text-indigo-700">Portal</span>
+                  <span className="font-semibold text-indigo-700">
+                    {sourceCounts.portal}
+                    {total > 0 && <span className="text-gray-400 font-normal ml-1">({Math.round(sourceCounts.portal / total * 100)}%)</span>}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-blue-700">Email</span>
+                  <span className="font-semibold text-blue-700">
+                    {sourceCounts.email}
+                    {total > 0 && <span className="text-gray-400 font-normal ml-1">({Math.round(sourceCounts.email / total * 100)}%)</span>}
+                  </span>
+                </div>
+                {total > 0 && (
+                  <div className="mt-2 h-1.5 rounded-full bg-blue-200 overflow-hidden">
+                    <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.round(sourceCounts.portal / total * 100)}%` }} />
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
       {partialWeeks.size > 0 && (
         <div className="flex items-center gap-2 mb-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -4130,7 +4160,11 @@ const TimesheetSystem = () => {
 
       const colTotals: Record<string, number> = {};
       weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
-      return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0), excludedTestNames };
+      const sourceCounts = {
+        portal: inRange.filter(t => t.source === 'direct' && !isTestAccount(users.find(u => u.id === t.userId)?.name ?? '')).length,
+        email:  inRange.filter(t => t.source === 'imported' && !isTestAccount(users.find(u => u.id === t.userId)?.name ?? '')).length,
+      };
+      return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0), excludedTestNames, sourceCounts };
     };
 
     const consolidatedReport = generateConsolidatedReport();
