@@ -37,6 +37,7 @@ const CONFIG = {
   fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
   groqApiKey: process.env.GROQ_API_KEY || null,
+  supabaseUrl:        process.env.SUPABASE_URL || 'https://mimlatvdwxqtgxrgcins.supabase.co',
   supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY || null,
   timesheetReportUrl: process.env.TIMESHEET_REPORT_URL || 'https://mimlatvdwxqtgxrgcins.supabase.co/functions/v1/send-timesheet-report',
   // These addresses are never treated as contractors (internal staff / system)
