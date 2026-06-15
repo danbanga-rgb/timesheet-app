@@ -193,6 +193,25 @@ async function resolveWeek(
   };
 }
 
+// When resolveWeek() switches to a different week (e.g. subject hint beats stale content dates),
+// entry date keys were built from the content dates and must be shifted to align with the resolved week.
+function shiftEntryDates(
+  entries: Record<string, number>,
+  fromWeek: string,
+  toWeek: string,
+): Record<string, number> {
+  const deltaMs = new Date(toWeek + 'T12:00:00Z').getTime() - new Date(fromWeek + 'T12:00:00Z').getTime();
+  const deltaDays = Math.round(deltaMs / 86400000);
+  if (deltaDays === 0) return entries;
+  const shifted: Record<string, number> = {};
+  for (const [dateKey, value] of Object.entries(entries)) {
+    const d = new Date(dateKey + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() + deltaDays);
+    shifted[d.toISOString().slice(0, 10)] = value;
+  }
+  return shifted;
+}
+
 // ─── Timesheet upsert with correction logic ───────────────────────────────────
 
 async function upsertTimesheet(
@@ -465,11 +484,17 @@ serve(async (req) => {
 
   if (entries && resolvedWeek) {
     try {
-      const parsedEntries = typeof entries === 'string' ? JSON.parse(entries as string) : entries;
+      let parsedEntries: Record<string, number> = typeof entries === 'string' ? JSON.parse(entries as string) : entries;
+      // If week resolution shifted away from the content-derived week, shift entry date keys to match.
+      const contentWeek = candidates[0];
+      if (resolvedWeek !== contentWeek) {
+        parsedEntries = shiftEntryDates(parsedEntries, contentWeek, resolvedWeek);
+        console.log(`  🗓️  Entry dates shifted from ${contentWeek} → ${resolvedWeek}`);
+      }
       const parsedTotal   = Number(total) || 0;
       const result = await upsertTimesheet(
         userId, userName, resolvedWeek,
-        parsedEntries as Record<string, number>, parsedTotal, supabase,
+        parsedEntries, parsedTotal, supabase,
         (forwardedBy as string) || null,
       );
       timesheetId  = result.timesheetId;
