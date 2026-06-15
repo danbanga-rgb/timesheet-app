@@ -72,6 +72,16 @@ async function main() {
     for (const p of profiles) profileMap[p.id] = p;
   }
 
+  // Fetch live invoice values for anomaly cross-checking (raw_extracted is ingestion snapshot only)
+  const invoiceIds = [...new Set(aiLogs.map(l => l.invoice_id).filter(Boolean))];
+  const liveInvoiceMap = {};
+  if (invoiceIds.length > 0) {
+    const liveInvoices = await restGet(
+      `invoices?id=in.(${invoiceIds.join(',')})&select=id,total_hours,rate,total_amount,currency,period_start,period_end`
+    );
+    for (const inv of liveInvoices) liveInvoiceMap[inv.id] = inv;
+  }
+
   // Group AI logs by contractor
   const byContractor = {};
   for (const log of aiLogs) {
@@ -83,6 +93,27 @@ async function main() {
     byContractor[key].calls.push(log);
   }
   const contractors = Object.values(byContractor).sort((a, b) => b.calls.length - a.calls.length);
+
+  // Detect anomalies by comparing raw_extracted against live DB values
+  // Only flag if current DB values still look wrong (not if they've been manually corrected)
+  const anomalies = [];
+  for (const log of aiLogs) {
+    if (!log.invoice_id || !log.raw_extracted) continue;
+    const live = liveInvoiceMap[log.invoice_id];
+    if (!live) continue;
+    const rx = log.raw_extracted;
+    // Flag if rate > $120/h and live DB still reflects that (cap heuristic — real rates rarely exceed $120)
+    if (live.rate != null && live.rate > 120) {
+      anomalies.push({ invoiceId: log.invoice_id, email: log.from_email, issue: `rate $${live.rate}/h in DB (>$120 cap — likely parse error)`, live, parsed: rx });
+    }
+    // Flag if live totalAmount wildly mismatches raw_extracted (>50% off and both non-null)
+    if (live.total_amount != null && rx.totalAmount != null && rx.totalAmount > 0) {
+      const ratio = live.total_amount / rx.totalAmount;
+      if (ratio > 2 || ratio < 0.5) {
+        anomalies.push({ invoiceId: log.invoice_id, email: log.from_email, issue: `total in DB $${live.total_amount} vs parsed $${rx.totalAmount} (>2x discrepancy)`, live, parsed: rx });
+      }
+    }
+  }
 
   // ── Output ───────────────────────────────────────────────────────────────────
   console.log(`\n${'='.repeat(60)}`);
@@ -104,6 +135,19 @@ async function main() {
 
   console.log(`CONTRACTORS NEEDING REGEX PATTERNS (${contractors.length} total, sorted by call count)\n`);
 
+  // Print anomalies first (verified against live DB, not raw_extracted snapshot)
+  if (anomalies.length > 0) {
+    console.log(`⚠️  DATA ANOMALIES (verified against live invoices table — ${anomalies.length} found)\n`);
+    for (const a of anomalies) {
+      console.log(`  Invoice #${a.invoiceId} — ${a.email}`);
+      console.log(`  Issue:   ${a.issue}`);
+      console.log(`  Live DB: ${a.live.total_hours ?? '—'}h @ $${a.live.rate ?? '—'}/h = $${a.live.total_amount ?? '—'} ${a.live.currency || ''}`);
+      console.log(`  Parsed:  ${a.parsed.totalHours ?? '—'}h @ $${a.parsed.rate ?? '—'}/h = $${a.parsed.totalAmount ?? '—'} ${a.parsed.currency || ''}\n`);
+    }
+  } else {
+    console.log('✅ No data anomalies detected (live DB values cross-checked against parsed snapshot)\n');
+  }
+
   for (const c of contractors) {
     const latest = c.calls[c.calls.length - 1];
     const rx     = latest.raw_extracted || {};
@@ -111,11 +155,13 @@ async function main() {
     const hasPayment = !!(pd.iban || pd.swift || pd.accountNumber || pd.routingNumber || pd.sortCode);
     const methods    = [...new Set(c.calls.map(l => l.raw_extracted?.parseMethod).filter(Boolean))].join(', ');
     const invoiceIds = [...new Set(c.calls.map(l => l.invoice_id).filter(Boolean))];
+    // Show live DB billing values (authoritative) alongside parsed (for context)
+    const liveInv    = liveInvoiceMap[invoiceIds[invoiceIds.length - 1]];
 
     console.log(`  ── ${c.name} <${c.email}>`);
     console.log(`     Calls:    ${c.calls.length}x  [${methods}]`);
-    console.log(`     Period:   ${rx.periodStart || '?'} → ${rx.periodEnd || '?'}`);
-    console.log(`     Billing:  ${rx.totalHours != null ? rx.totalHours + 'h' : '—'} @ ${rx.rate != null ? '$' + rx.rate + '/h' : '—'} = ${rx.totalAmount != null ? '$' + rx.totalAmount : '—'} ${rx.currency || ''}`);
+    console.log(`     Period:   ${liveInv?.period_start || rx.periodStart || '?'} → ${liveInv?.period_end || rx.periodEnd || '?'}  (live DB)`);
+    console.log(`     Billing:  ${liveInv?.total_hours ?? rx.totalHours ?? '—'}h @ $${liveInv?.rate ?? rx.rate ?? '—'}/h = $${liveInv?.total_amount ?? rx.totalAmount ?? '—'} ${liveInv?.currency || rx.currency || ''}  (live DB)`);
     console.log(`     Payment:  ${hasPayment ? 'YES (IBAN/SWIFT/account present)' : 'NO payment block'}`);
     console.log(`     Template: ${c.template}`);
     console.log(`     PDF IDs:  ${invoiceIds.join(', ')} → invoice-attachments/{id}/original.pdf`);
