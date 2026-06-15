@@ -2022,8 +2022,30 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   const results = [];
   for (const ts of timesheets) {
     if (ts.claudeAttempted || ts.xlsxParseFailed) continue; // sentinels — don't post, don't retry
-    const filenameWeek    = weekFromFilename(ts.attachmentName || '');
-    const weekCandidates  = [...new Set([ts.weekStart, weekFromSubject, filenameWeek].filter(Boolean))];
+    const filenameWeek = weekFromFilename(ts.attachmentName || '');
+    let weekCandidates = [...new Set([ts.weekStart, weekFromSubject, filenameWeek].filter(Boolean))];
+
+    // Pre-ingest Groq check: when filename week and embedded content week disagree
+    // (stale template pattern), ask Groq which week was intended before we file.
+    // On likely_new_submission + valid suggested_week, insert it as priority candidate
+    // so resolveWeek() in the edge function can pick the right week with DB context.
+    if (filenameWeek && filenameWeek !== ts.weekStart && !correctionHint && CONFIG.groqApiKey) {
+      const sanity = await checkCorrectionSanity({
+        contractorEmail,
+        subject,
+        attachmentName: ts.attachmentName,
+        contentWeek:    ts.weekStart,
+        filenameWeek,
+        total:          ts.total,
+      });
+      const flag = sanity.assessment === 'likely_new_submission' ? '🚨' : '🔍';
+      console.log(`  ${flag} GROQ_PRE | ${contractorEmail} | content=${ts.weekStart} filename=${filenameWeek} | ${sanity.assessment} | ${sanity.reason}`);
+      if (sanity.assessment === 'likely_new_submission' && sanity.suggested_week && sanity.suggested_week !== ts.weekStart) {
+        weekCandidates = [...new Set([ts.weekStart, sanity.suggested_week, weekFromSubject, filenameWeek].filter(Boolean))];
+        console.log(`  🤖 GROQ_PRE | candidates → ${weekCandidates.join(', ')}`);
+      }
+    }
+
     try {
       const res = await postToIngest({
         messageId:       `${messageId}::${ts.attachmentName || 'body'}`,
@@ -2054,24 +2076,6 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         notes:          res.body?.notes || '',
       });
       console.log(`  ✅ ${contractorEmail} | ${ts.weekStart} | ${ts.attachmentName || 'body'} → ${action}`);
-
-      // Groq sanity check: if filed as a correction but no explicit correction language,
-      // ask Groq whether this looks intentional or like a misfiled new submission.
-      if (action === 'correction_imported' && !correctionHint && CONFIG.groqApiKey) {
-        const resolvedWeek = res.body?.weekStart || ts.weekStart;
-        const sanity = await checkCorrectionSanity({
-          contractorEmail,
-          subject,
-          attachmentName:  ts.attachmentName,
-          contentWeek:     ts.weekStart,
-          filenameWeek,
-          resolvedWeek,
-          parseNotes:      res.body?.notes || '',
-          total:           ts.total,
-        });
-        const flag = sanity.assessment === 'likely_new_submission' ? '🚨' : '🔍';
-        console.log(`  ${flag} GROQ_CHECK | ${contractorEmail} | "${ts.attachmentName}" correction to ${resolvedWeek} | ${sanity.assessment} | ${sanity.reason}`);
-      }
     } catch (e) {
       results.push({ contractor: contractorEmail, week: ts.weekStart, error: e.message });
       console.error(`  ❌ ${contractorEmail} | ${ts.weekStart} → ${e.message}`);
@@ -2328,38 +2332,37 @@ async function classifyReply(bodyText, contractorName) {
   }
 }
 
-// ─── Groq sanity check for unexpected corrections ─────────────────────────────
-// Called when a timesheet lands as 'correction_imported' but the email contained
-// no explicit correction language. Groq determines whether it looks intentional
-// or like a new submission that was misfiled due to stale template dates.
+// ─── Groq week resolver (pre-ingest) ──────────────────────────────────────────
+// Called before postToIngest() when the attachment filename date range disagrees
+// with the dates embedded in the file. Groq determines which week the contractor
+// actually intended and returns a suggested_week to add to weekCandidates.
+// resolveWeek() in the edge function then does the final DB-aware decision.
 
-const GROQ_SANITY_SYSTEM = `You are auditing an automated timesheet processing decision.
-A contractor email was processed and filed as a CORRECTION to an already-approved timesheet.
-Determine whether this looks intentional (contractor genuinely correcting a prior submission)
-or accidental (new week's timesheet misfiled because the attachment has stale embedded dates).
+const GROQ_SANITY_SYSTEM = `You are resolving week ambiguity in a contractor timesheet system.
+A timesheet attachment's filename date range disagrees with the dates embedded inside the file.
+Determine which week the contractor actually intended to submit for.
 
 Respond with EXACTLY one JSON object on a single line, no other text:
-{"assessment":"intentional_correction","reason":"subject says amended"}
-{"assessment":"likely_new_submission","reason":"filename 8jun-12jun.xlsx but filed as Jun 1 week"}
-{"assessment":"unclear","reason":"not enough context"}
+{"assessment":"likely_new_submission","suggested_week":"2026-06-08","reason":"filename 8jun-12jun.xlsx suggests Jun 8 week"}
+{"assessment":"intentional_correction","suggested_week":null,"reason":"subject says amended hours for prior week"}
+{"assessment":"unclear","suggested_week":null,"reason":"insufficient context to determine intent"}
 
 Rules:
-- If the attachment filename date range matches the FILED week → likely intentional
-- If the filename date range suggests a DIFFERENT week than filed → likely_new_submission
-- If subject contains words like "corrected", "amended", "resubmit", "mistake" → intentional
-- If no filename date clues and no correction language → unclear`;
+- suggested_week must be a Monday date in YYYY-MM-DD format, or null
+- If filename clearly names a different week than embedded dates → likely_new_submission, use filename week as suggested_week
+- If email subject contains a "week ending" date → use that to derive suggested_week
+- If subject contains words like "corrected", "amended", "resubmit", "mistake" → intentional_correction
+- If no clear signal → unclear`;
 
-async function checkCorrectionSanity({ contractorEmail, subject, attachmentName, contentWeek, filenameWeek, resolvedWeek, parseNotes, total }) {
-  if (!CONFIG.groqApiKey) return { assessment: 'unclear', reason: 'no groq key' };
+async function checkCorrectionSanity({ contractorEmail, subject, attachmentName, contentWeek, filenameWeek, total }) {
+  if (!CONFIG.groqApiKey) return { assessment: 'unclear', suggested_week: null, reason: 'no groq key' };
   const userMsg = [
     `Contractor: ${contractorEmail}`,
     `Subject: ${subject || '(none)'}`,
     `Attachment filename: ${attachmentName || '(none)'}`,
-    `Filename-derived week: ${filenameWeek || '(none)'}`,
-    `Content-derived week: ${contentWeek}`,
-    `Filed as correction to week: ${resolvedWeek}`,
-    `Total hours: ${total ?? '?'}`,
-    `Parse notes: ${parseNotes || '(none)'}`,
+    `Dates embedded in file → week: ${contentWeek}`,
+    `Dates in filename → week: ${filenameWeek || '(none)'}`,
+    `Total hours in file: ${total ?? '?'}`,
   ].join('\n');
   try {
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -2375,13 +2378,22 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
         temperature: 0,
       }),
     });
-    if (!res.ok) return { assessment: 'unclear', reason: `groq_error_${res.status}` };
+    if (!res.ok) return { assessment: 'unclear', suggested_week: null, reason: `groq_error_${res.status}` };
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content?.trim() || '';
     const parsed = JSON.parse(raw);
-    return { assessment: parsed.assessment || 'unclear', reason: parsed.reason || '' };
+    // Validate suggested_week: must be a plausible Monday within last 6 months
+    let suggestedWeek = parsed.suggested_week || null;
+    if (suggestedWeek) {
+      const d = new Date(suggestedWeek + 'T12:00:00Z');
+      const ageMs = Date.now() - d.getTime();
+      if (isNaN(d.getTime()) || d.getUTCDay() !== 1 || ageMs < -7 * 86400000 || ageMs > 180 * 86400000) {
+        suggestedWeek = null; // invalid or implausible — discard
+      }
+    }
+    return { assessment: parsed.assessment || 'unclear', suggested_week: suggestedWeek, reason: parsed.reason || '' };
   } catch (e) {
-    return { assessment: 'unclear', reason: `groq_exception: ${e.message}` };
+    return { assessment: 'unclear', suggested_week: null, reason: `groq_exception: ${e.message}` };
   }
 }
 
