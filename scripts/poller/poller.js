@@ -2058,11 +2058,10 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     const filenameWeek = weekFromFilename(ts.attachmentName || '');
     let weekCandidates = [...new Set([ts.weekStart, weekFromSubject, filenameWeek].filter(Boolean))];
 
-    // Pre-ingest Groq check: when filename week and embedded content week disagree
-    // (stale template pattern), ask Groq which week was intended before we file.
-    // On likely_new_submission + valid suggested_week, insert it as priority candidate
-    // so resolveWeek() in the edge function can pick the right week with DB context.
-    if (filenameWeek && filenameWeek !== ts.weekStart && !correctionHint && CONFIG.groqApiKey) {
+    // Pre-ingest Groq check 1: filename week ≠ content week (stale template pattern).
+    // Ask Groq which week was intended before we file.
+    const filenameGroqFired = filenameWeek && filenameWeek !== ts.weekStart && !correctionHint && CONFIG.groqApiKey;
+    if (filenameGroqFired) {
       const sanity = await checkCorrectionSanity({
         contractorEmail,
         subject,
@@ -2076,6 +2075,30 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       if (sanity.assessment === 'likely_new_submission' && sanity.suggested_week && sanity.suggested_week !== ts.weekStart) {
         weekCandidates = [...new Set([ts.weekStart, sanity.suggested_week, weekFromSubject, filenameWeek].filter(Boolean))];
         console.log(`  🤖 GROQ_PRE | candidates → ${weekCandidates.join(', ')}`);
+      }
+    }
+
+    // Pre-ingest Groq check 2: content week already occupied in DB (no filename hint).
+    // Catches stale templates where the filename gives no date clue (e.g. "timesheet.xlsx").
+    // Only fires when check 1 didn't already call Groq.
+    if (!filenameGroqFired && !correctionHint && CONFIG.groqApiKey) {
+      const occupied = await isWeekOccupied(contractorEmail, ts.weekStart);
+      if (occupied) {
+        const sanity = await checkCorrectionSanity({
+          contractorEmail,
+          subject,
+          attachmentName: ts.attachmentName,
+          contentWeek:    ts.weekStart,
+          filenameWeek,
+          total:          ts.total,
+          weekOccupied:   true,
+        });
+        const flag = sanity.assessment === 'likely_new_submission' ? '🚨' : '🔍';
+        console.log(`  ${flag} GROQ_OCC | ${contractorEmail} | ${ts.weekStart} occupied | ${sanity.assessment} | ${sanity.reason}`);
+        if (sanity.assessment === 'likely_new_submission' && sanity.suggested_week && sanity.suggested_week !== ts.weekStart) {
+          weekCandidates = [...new Set([sanity.suggested_week, ...weekCandidates].filter(Boolean))];
+          console.log(`  🤖 GROQ_OCC | candidates → ${weekCandidates.join(', ')}`);
+        }
       }
     }
 
@@ -2380,8 +2403,7 @@ async function classifyReply(bodyText, contractorName) {
 // resolveWeek() in the edge function then does the final DB-aware decision.
 
 const GROQ_SANITY_SYSTEM = `You are resolving week ambiguity in a contractor timesheet system.
-A timesheet attachment's filename date range disagrees with the dates embedded inside the file.
-Determine which week the contractor actually intended to submit for.
+A timesheet may have been filed for the wrong week. Determine which week the contractor actually intended to submit for.
 
 Respond with EXACTLY one JSON object on a single line, no other text:
 {"assessment":"likely_new_submission","suggested_week":"2026-06-08","reason":"filename 8jun-12jun.xlsx suggests Jun 8 week"}
@@ -2393,9 +2415,10 @@ Rules:
 - If filename clearly names a different week than embedded dates → likely_new_submission, use filename week as suggested_week
 - If email subject contains a "week ending" date → use that to derive suggested_week
 - If subject contains words like "corrected", "amended", "resubmit", "mistake" → intentional_correction
+- If the content week is already occupied (contractor already has an approved timesheet for it) and there is no correction signal → likely_new_submission
 - If no clear signal → unclear`;
 
-async function checkCorrectionSanity({ contractorEmail, subject, attachmentName, contentWeek, filenameWeek, total }) {
+async function checkCorrectionSanity({ contractorEmail, subject, attachmentName, contentWeek, filenameWeek, total, weekOccupied = false }) {
   if (!CONFIG.groqApiKey) return { assessment: 'unclear', suggested_week: null, reason: 'no groq key' };
   const userMsg = [
     `Contractor: ${contractorEmail}`,
@@ -2404,7 +2427,8 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
     `Dates embedded in file → week: ${contentWeek}`,
     `Dates in filename → week: ${filenameWeek || '(none)'}`,
     `Total hours in file: ${total ?? '?'}`,
-  ].join('\n');
+    weekOccupied ? `DB status: contractor already has an approved timesheet for ${contentWeek}` : '',
+  ].filter(Boolean).join('\n');
   try {
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -2502,6 +2526,29 @@ async function groqExtractInvoice(preparedText, filename) {
     console.warn(`  ⚠️  Groq invoice exception: ${e.message}`);
     return null;
   }
+}
+
+// Returns true if the contractor already has a timesheet on file for the given week.
+// Fail-open (returns false on any error) so a DB hiccup never blocks normal ingestion.
+async function isWeekOccupied(email, weekStart) {
+  if (!CONFIG.supabaseServiceKey || !email || !weekStart) return false;
+  try {
+    const pRes = await fetch(
+      `${CONFIG.supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(email)}&select=id&limit=1`,
+      { headers: { apikey: CONFIG.supabaseServiceKey, Authorization: `Bearer ${CONFIG.supabaseServiceKey}` } }
+    );
+    if (!pRes.ok) return false;
+    const profiles = await pRes.json();
+    const contractorId = profiles[0]?.id;
+    if (!contractorId) return false;
+    const tRes = await fetch(
+      `${CONFIG.supabaseUrl}/rest/v1/timesheets?contractor_id=eq.${contractorId}&week_start=eq.${weekStart}&select=id&limit=1`,
+      { headers: { apikey: CONFIG.supabaseServiceKey, Authorization: `Bearer ${CONFIG.supabaseServiceKey}` } }
+    );
+    if (!tRes.ok) return false;
+    const rows = await tRes.json();
+    return rows.length > 0;
+  } catch { return false; }
 }
 
 // Look up a contractor's stored invoice template from profiles.invoice_template.
