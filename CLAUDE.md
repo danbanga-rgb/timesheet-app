@@ -4,9 +4,42 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Session startup
 
-At the start of every session, immediately schedule a recurring memory-save cron using CronCreate:
+At the start of every session, immediately schedule two recurring crons using CronCreate:
+
+**1. Hourly memory save** (every session):
 - **Schedule:** `13 * * * 1-5` (every hour, weekdays)
 - **Prompt:** Review `git log --oneline -10`, compare against MEMORY.md, and save any non-obvious decisions or behavioral changes to the appropriate memory file. Update MEMORY.md index if new files added. Skip anything derivable from reading code or git history.
+
+**2. Monthly invoice parser review** (durable: true — persists across sessions):
+- First check `CronList` — if a job with a prompt containing "MONTHLY INVOICE PARSER REVIEW" already exists, skip creation.
+- **Schedule:** `17 9 8 * *` (9:17am on the 8th of each month)
+- **durable: true**
+- **Prompt:** (full text below — copy exactly)
+
+```
+MONTHLY INVOICE PARSER REVIEW — automated session task.
+
+1. Find SUPABASE_SERVICE_ROLE_KEY: check process.env, then read scripts/poller/.env if it exists, then read .env.local, then ask user.
+
+2. Run: cd /Users/dbanga/timesheet-app && SUPABASE_SERVICE_ROLE_KEY=<key> node scripts/monthly-invoice-analysis.js
+   Read ALL stdout output carefully.
+
+3. For every contractor listed under "claude_full" calls:
+   a. Fetch their PDF: GET https://mimlatvdwxqtgxrgcins.supabase.co/storage/v1/object/invoice-attachments/{invoice_id}/original.pdf with Authorization: Bearer <key>
+   b. Extract the PDF text (use pdf-parse if available in scripts/poller/node_modules, or read raw bytes and extract text spans)
+   c. Identify the invoice layout: where is the period, hours, rate, total, payment block?
+   d. Write targeted regex patterns in scripts/invoice-parser/parser.js
+
+4. Test each new pattern against the extracted PDF text.
+
+5. git add scripts/invoice-parser/parser.js && git commit -m "Parser: add regex patterns for [contractor names] (monthly review)" && git push origin main
+
+6. Present Dan with a clean summary:
+   - Which contractors now have regex coverage (no more Claude calls)
+   - Estimated Claude calls saved per month
+   - Who still needs Claude (vision PDFs, or patterns too variable to regex)
+   - Any anomalies in the invoice data worth flagging
+```
 
 ## Memory save triggers — do not wait to be asked
 
