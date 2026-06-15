@@ -17,7 +17,7 @@ At the start of every session, immediately schedule two recurring crons using Cr
 - **Prompt:** (full text below — copy exactly)
 
 ```
-MONTHLY INVOICE PARSER REVIEW — automated session task.
+MONTHLY INVOICE PARSER REVIEW — automated session task. DO NOT edit parser.js or push anything until Dan approves.
 
 1. Find SUPABASE_SERVICE_ROLE_KEY: check process.env, then read scripts/poller/.env if it exists, then read .env.local, then ask user.
 
@@ -28,17 +28,16 @@ MONTHLY INVOICE PARSER REVIEW — automated session task.
    a. Fetch their PDF: GET https://mimlatvdwxqtgxrgcins.supabase.co/storage/v1/object/invoice-attachments/{invoice_id}/original.pdf with Authorization: Bearer <key>
    b. Extract the PDF text (use pdf-parse if available in scripts/poller/node_modules, or read raw bytes and extract text spans)
    c. Identify the invoice layout: where is the period, hours, rate, total, payment block?
-   d. Write targeted regex patterns in scripts/invoice-parser/parser.js
+   d. Draft the regex patterns you WOULD write — but do not write them yet.
 
-4. Test each new pattern against the extracted PDF text.
-
-5. git add scripts/invoice-parser/parser.js && git commit -m "Parser: add regex patterns for [contractor names] (monthly review)" && git push origin main
-
-6. Present Dan with a clean summary:
-   - Which contractors now have regex coverage (no more Claude calls)
-   - Estimated Claude calls saved per month
-   - Who still needs Claude (vision PDFs, or patterns too variable to regex)
+4. Present Dan with a complete review package:
+   - Summary: total invoices, Claude/Groq/regex split, estimated $ cost
+   - Per-contractor: what Claude extracted, what the PDF text looks like, the exact regex patterns you propose to add
+   - Who still needs Claude (image PDFs, patterns too variable to regex)
    - Any anomalies in the invoice data worth flagging
+
+5. STOP. Wait for Dan to review and approve each contractor's proposed patterns before touching parser.js.
+   Only after explicit approval: edit scripts/invoice-parser/parser.js, test, commit, push.
 ```
 
 ## Memory save triggers — do not wait to be asked
