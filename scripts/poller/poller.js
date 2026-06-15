@@ -1687,7 +1687,18 @@ function extractTotalHoursFromBodyProse(text) {
 // 2a. Regex has period + hours + payment → done, zero Claude calls
 // 2b. Regex has period + hours, missing payment → Claude for payment details only
 // 2c. Regex missing period or hours → full Claude extract, merge regex on top
-async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '') {
+async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null) {
+  // Fast-path: skip regex for known vision-only invoices
+  if (knownTemplate === 'claude_vision') {
+    if (!CONFIG.anthropicApiKey) return null;
+    console.log(`  🤖 Claude vision (known template): ${filename}`);
+    const claudeResult = await claudeFullExtractInvoice(null, pdfBuffer, true, filename, emailBodyText);
+    if (!claudeResult) return null;
+    const r = postProcessInvoice(applyFilenamePeriodFallback(claudeResult, filename), pdfText);
+    if (r) r.parseMethod = 'claude_vision';
+    return r;
+  }
+
   // ── Step 1: regex parser ───────────────────────────────────────────────────
   let regexResult = null;
   if (pdfText && pdfText.length > 30) {
@@ -1701,6 +1712,16 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBod
   const regexHasPeriod  = !!(regexResult?.periodStart && regexResult?.periodEnd);
   const regexHasHours   = regexResult?.totalHours != null;
   const regexSufficient = regexHasPeriod && regexHasHours;
+
+  // Fast-path: known regex contractor — trust regex, skip Claude payment check
+  if (regexSufficient && (knownTemplate === 'regex' || knownTemplate === 'regex_no_payment')) {
+    const pd         = regexResult.paymentDetails || {};
+    const hasPayment = !!(pd.iban || pd.swift || pd.accountNumber || pd.routingNumber);
+    console.log(`  ✅ Regex (known template): ${filename}`);
+    const r = postProcessInvoice(regexResult, pdfText);
+    if (r) r.parseMethod = hasPayment ? 'regex' : 'regex_no_payment';
+    return r;
+  }
 
   // ── Step 2a: regex complete ────────────────────────────────────────────────
   if (regexSufficient) {
@@ -2091,7 +2112,9 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_duplicate' });
       continue;
     }
-    let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name, bodyText || '');
+    const knownTemplate = await getInvoiceTemplate(contractorEmail);
+    if (knownTemplate) console.log(`  📋 Known template for ${contractorEmail}: ${knownTemplate}`);
+    let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name, bodyText || '', knownTemplate);
     if (parsed) parsed = applyEarlyMonthPeriodFix(parsed);
     // Supplement/extend from email body:
     // - fills missing fields (totalHours, rate, totalAmount)
@@ -2401,6 +2424,21 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
   } catch (e) {
     return { assessment: 'unclear', suggested_week: null, reason: `groq_exception: ${e.message}` };
   }
+}
+
+// Look up a contractor's stored invoice template from profiles.invoice_template.
+// Returns null on any error (fail-open — falls through to full detection).
+async function getInvoiceTemplate(contractorEmail) {
+  if (!CONFIG.supabaseServiceKey || !contractorEmail) return null;
+  try {
+    const res = await fetch(
+      `${CONFIG.supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(contractorEmail)}&select=invoice_template&limit=1`,
+      { headers: { 'apikey': CONFIG.supabaseServiceKey, 'Authorization': `Bearer ${CONFIG.supabaseServiceKey}` } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data[0]?.invoice_template || null;
+  } catch { return null; }
 }
 
 // Persist the successful parse method to profiles.invoice_template so the bucketing
