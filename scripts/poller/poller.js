@@ -1757,7 +1757,19 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBod
     return r2b;
   }
 
-  // ── Step 2c: regex insufficient — full Claude extract ─────────────────────
+  // ── Step 2c: regex insufficient — try Groq first, fall back to Claude ──────
+  if (CONFIG.groqApiKey && pdfText && pdfText.length > 30) {
+    const groqResult = await groqExtractInvoice(prepareInvoiceText(pdfText), filename);
+    if (groqResult?.periodStart && groqResult?.periodEnd) {
+      const merged = mergeInvoiceResults(regexResult, groqResult);
+      const r = postProcessInvoice(applyFilenamePeriodFallback(merged, filename), pdfText);
+      if (r) r.parseMethod = 'groq';
+      console.log(`  ⚡ Groq: ${filename}`);
+      return r;
+    }
+    console.log(`  ⚡ Groq insufficient — falling back to Claude: ${filename}`);
+  }
+
   if (!CONFIG.anthropicApiKey) {
     const r = regexResult ? postProcessInvoice(regexResult, pdfText) : null;
     if (r) r.parseMethod = 'regex_partial';
@@ -2423,6 +2435,72 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
     return { assessment: parsed.assessment || 'unclear', suggested_week: suggestedWeek, reason: parsed.reason || '' };
   } catch (e) {
     return { assessment: 'unclear', suggested_week: null, reason: `groq_exception: ${e.message}` };
+  }
+}
+
+// ─── Groq invoice extractor (mid-tier between regex and Claude) ───────────────
+
+const GROQ_INVOICE_SYSTEM = `You are an invoice field extractor. Read the invoice text and return ONLY a JSON object — no explanation, no markdown.
+
+{
+  "periodStart": "YYYY-MM-DD",
+  "periodEnd": "YYYY-MM-DD",
+  "totalHours": <number or null>,
+  "rate": <hourly rate or null>,
+  "totalAmount": <final amount due or null>,
+  "currency": "<USD/EUR/GBP/etc or null>",
+  "invoiceNumber": "<string or null>",
+  "paymentDetails": {
+    "iban": null,
+    "swift": null,
+    "accountNumber": null,
+    "routingNumber": null,
+    "sortCode": null,
+    "bankName": null,
+    "accountHolder": null
+  }
+}
+
+Rules:
+- periodStart/periodEnd = billing period, NOT the invoice date
+- totalAmount = final amount due/payable (after any deductions)
+- Set unknown fields to null
+- Dates in YYYY-MM-DD format only`;
+
+async function groqExtractInvoice(preparedText, filename) {
+  if (!CONFIG.groqApiKey || !preparedText) return null;
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: GROQ_INVOICE_SYSTEM },
+          { role: 'user', content: `Filename: ${filename}\n\n${preparedText}` },
+        ],
+        max_tokens: 350,
+        temperature: 0,
+      }),
+    });
+    if (!res.ok) { console.warn(`  ⚠️  Groq invoice error ${res.status}`); return null; }
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || '';
+    const parsed = JSON.parse(raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, ''));
+    // Normalise to camelCase (matches mergeInvoiceResults expectations)
+    return {
+      periodStart:    parsed.periodStart    || null,
+      periodEnd:      parsed.periodEnd      || null,
+      totalHours:     parsed.totalHours     ?? null,
+      rate:           parsed.rate           ?? null,
+      totalAmount:    parsed.totalAmount    ?? null,
+      currency:       parsed.currency       || null,
+      invoiceNumber:  parsed.invoiceNumber  || null,
+      paymentDetails: parsed.paymentDetails || {},
+    };
+  } catch (e) {
+    console.warn(`  ⚠️  Groq invoice exception: ${e.message}`);
+    return null;
   }
 }
 
