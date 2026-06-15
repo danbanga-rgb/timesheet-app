@@ -2200,6 +2200,9 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
             reconciliationDelta:  res.body?.reconciliationDelta ?? null,
             parsed: { ...parsed, totalHours: line.hours, rate: line.rate, totalAmount: line.amount },
           });
+          if (res.body?.ok === true && parsed?.parseMethod) {
+            await storeInvoiceTemplate(profile.email, parsed.parseMethod);
+          }
         } catch (e) {
           console.error(`    ❌ Ingest failed for ${profile.name}: ${e.message}`);
           results.push({ contractor: profile.email, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
@@ -2247,6 +2250,9 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           ingestNotes:         res.body?.notes || null,
           parsed,
         });
+        if (res.body?.ok === true && parsed?.parseMethod) {
+          await storeInvoiceTemplate(contractorEmail, parsed.parseMethod);
+        }
       } catch (e) {
         console.error(`     ❌ Ingest failed: ${e.message}`);
         results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
@@ -2394,6 +2400,31 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
     return { assessment: parsed.assessment || 'unclear', suggested_week: suggestedWeek, reason: parsed.reason || '' };
   } catch (e) {
     return { assessment: 'unclear', suggested_week: null, reason: `groq_exception: ${e.message}` };
+  }
+}
+
+// Persist the successful parse method to profiles.invoice_template so the bucketing
+// router can skip detection on the next submission from the same contractor.
+async function storeInvoiceTemplate(contractorEmail, parseMethod) {
+  if (!CONFIG.supabaseServiceKey || !parseMethod || !contractorEmail) return;
+  try {
+    const res = await fetch(
+      `${CONFIG.supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(contractorEmail)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'apikey':         CONFIG.supabaseServiceKey,
+          'Authorization':  `Bearer ${CONFIG.supabaseServiceKey}`,
+          'Content-Type':   'application/json',
+          'Prefer':         'return=minimal',
+        },
+        body: JSON.stringify({ invoice_template: parseMethod }),
+      }
+    );
+    if (!res.ok) console.warn(`  ⚠️  Template store failed for ${contractorEmail}: ${res.status}`);
+    else console.log(`  📋 Invoice template stored: ${contractorEmail} → ${parseMethod}`);
+  } catch (e) {
+    console.warn(`  ⚠️  Template store error for ${contractorEmail}: ${e.message}`);
   }
 }
 
