@@ -2012,7 +2012,9 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   }
 
   // Week resolution candidates: content-derived week (from attachment/body) is always
-  // first. Subject-derived week is the second candidate for the edge function to compare.
+  // first. Subject-derived week is second; filename-derived week is third. The edge
+  // function deduplicates and resolves the best match (see resolveWeek in ingest-timesheet).
+  // Filename week catches stale templates where embedded dates lag behind the filename.
   const weekFromSubject = parseWeekFromSubject(subject);
   const correctionHint  = CORRECTION_KEYWORDS.test(subject || '') ||
                           CORRECTION_KEYWORDS.test((bodyText || '').slice(0, 500));
@@ -2020,7 +2022,8 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
   const results = [];
   for (const ts of timesheets) {
     if (ts.claudeAttempted || ts.xlsxParseFailed) continue; // sentinels — don't post, don't retry
-    const weekCandidates = [...new Set([ts.weekStart, weekFromSubject].filter(Boolean))];
+    const filenameWeek    = weekFromFilename(ts.attachmentName || '');
+    const weekCandidates  = [...new Set([ts.weekStart, weekFromSubject, filenameWeek].filter(Boolean))];
     try {
       const res = await postToIngest({
         messageId:       `${messageId}::${ts.attachmentName || 'body'}`,
