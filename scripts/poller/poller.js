@@ -2054,6 +2054,24 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         notes:          res.body?.notes || '',
       });
       console.log(`  ✅ ${contractorEmail} | ${ts.weekStart} | ${ts.attachmentName || 'body'} → ${action}`);
+
+      // Groq sanity check: if filed as a correction but no explicit correction language,
+      // ask Groq whether this looks intentional or like a misfiled new submission.
+      if (action === 'correction_imported' && !correctionHint && CONFIG.groqApiKey) {
+        const resolvedWeek = res.body?.weekStart || ts.weekStart;
+        const sanity = await checkCorrectionSanity({
+          contractorEmail,
+          subject,
+          attachmentName:  ts.attachmentName,
+          contentWeek:     ts.weekStart,
+          filenameWeek,
+          resolvedWeek,
+          parseNotes:      res.body?.notes || '',
+          total:           ts.total,
+        });
+        const flag = sanity.assessment === 'likely_new_submission' ? '🚨' : '🔍';
+        console.log(`  ${flag} GROQ_CHECK | ${contractorEmail} | "${ts.attachmentName}" correction to ${resolvedWeek} | ${sanity.assessment} | ${sanity.reason}`);
+      }
     } catch (e) {
       results.push({ contractor: contractorEmail, week: ts.weekStart, error: e.message });
       console.error(`  ❌ ${contractorEmail} | ${ts.weekStart} → ${e.message}`);
@@ -2307,6 +2325,63 @@ async function classifyReply(bodyText, contractorName) {
   } catch (e) {
     console.warn(`  ⚠️  Groq classify error: ${e.message}`);
     return { intent: 'NO', hours: null, notes: `groq_exception: ${e.message}` };
+  }
+}
+
+// ─── Groq sanity check for unexpected corrections ─────────────────────────────
+// Called when a timesheet lands as 'correction_imported' but the email contained
+// no explicit correction language. Groq determines whether it looks intentional
+// or like a new submission that was misfiled due to stale template dates.
+
+const GROQ_SANITY_SYSTEM = `You are auditing an automated timesheet processing decision.
+A contractor email was processed and filed as a CORRECTION to an already-approved timesheet.
+Determine whether this looks intentional (contractor genuinely correcting a prior submission)
+or accidental (new week's timesheet misfiled because the attachment has stale embedded dates).
+
+Respond with EXACTLY one JSON object on a single line, no other text:
+{"assessment":"intentional_correction","reason":"subject says amended"}
+{"assessment":"likely_new_submission","reason":"filename 8jun-12jun.xlsx but filed as Jun 1 week"}
+{"assessment":"unclear","reason":"not enough context"}
+
+Rules:
+- If the attachment filename date range matches the FILED week → likely intentional
+- If the filename date range suggests a DIFFERENT week than filed → likely_new_submission
+- If subject contains words like "corrected", "amended", "resubmit", "mistake" → intentional
+- If no filename date clues and no correction language → unclear`;
+
+async function checkCorrectionSanity({ contractorEmail, subject, attachmentName, contentWeek, filenameWeek, resolvedWeek, parseNotes, total }) {
+  if (!CONFIG.groqApiKey) return { assessment: 'unclear', reason: 'no groq key' };
+  const userMsg = [
+    `Contractor: ${contractorEmail}`,
+    `Subject: ${subject || '(none)'}`,
+    `Attachment filename: ${attachmentName || '(none)'}`,
+    `Filename-derived week: ${filenameWeek || '(none)'}`,
+    `Content-derived week: ${contentWeek}`,
+    `Filed as correction to week: ${resolvedWeek}`,
+    `Total hours: ${total ?? '?'}`,
+    `Parse notes: ${parseNotes || '(none)'}`,
+  ].join('\n');
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: GROQ_SANITY_SYSTEM },
+          { role: 'user', content: userMsg },
+        ],
+        max_tokens: 80,
+        temperature: 0,
+      }),
+    });
+    if (!res.ok) return { assessment: 'unclear', reason: `groq_error_${res.status}` };
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || '';
+    const parsed = JSON.parse(raw);
+    return { assessment: parsed.assessment || 'unclear', reason: parsed.reason || '' };
+  } catch (e) {
+    return { assessment: 'unclear', reason: `groq_exception: ${e.message}` };
   }
 }
 
