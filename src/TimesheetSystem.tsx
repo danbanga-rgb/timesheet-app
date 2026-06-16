@@ -484,100 +484,196 @@ const TimesheetSystem = () => {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
 
-  const holidays2026 = {
-    US: [
-      { date: '2026-01-01', name: "New Year's Day" },
-      { date: '2026-01-19', name: 'Martin Luther King Jr. Day' },
-      { date: '2026-02-16', name: "Presidents' Day" },
-      { date: '2026-05-25', name: 'Memorial Day' },
-      { date: '2026-07-03', name: 'Independence Day (Observed)' },
-      { date: '2026-09-07', name: 'Labor Day' },
-      { date: '2026-11-26', name: 'Thanksgiving' },
-      { date: '2026-12-25', name: 'Christmas Day' }
-    ],
-    GB: [
-      { date: '2026-01-01', name: "New Year's Day" },
-      { date: '2026-04-03', name: 'Good Friday' },
-      { date: '2026-04-06', name: 'Easter Monday' },
-      { date: '2026-05-04', name: 'Early May Bank Holiday' },
-      { date: '2026-08-31', name: 'Summer Bank Holiday' },
-      { date: '2026-12-25', name: 'Christmas Day' }
-    ],
-    CA: [
-      { date: '2026-01-01', name: "New Year's Day" },
-      { date: '2026-07-01', name: 'Canada Day' },
-      { date: '2026-09-07', name: 'Labour Day' },
-      { date: '2026-12-25', name: 'Christmas Day' }
-    ],
-    HR: [
-      { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
-      { date: '2026-01-06', name: 'Sveta tri kralja (Epiphany)' },
-      { date: '2026-04-05', name: 'Uskrs (Easter Sunday)' },
-      { date: '2026-04-06', name: 'Uskrsni ponedjeljak (Easter Monday)' },
-      { date: '2026-05-01', name: 'Međunarodni praznik rada (Labour Day)' },
-      { date: '2026-05-30', name: 'Dan državnosti (National Day)' },
-      { date: '2026-06-04', name: 'Tijelovo (Corpus Christi)' },
-      { date: '2026-06-22', name: 'Dan antifašističke borbe (Anti-Fascist Struggle Day)' },
-      { date: '2026-08-05', name: 'Dan domovinske zahvalnosti (Victory & Thanksgiving Day)' },
-      { date: '2026-08-15', name: 'Velika Gospa (Assumption of Mary)' },
-      { date: '2026-10-08', name: 'Dan neovisnosti (Independence Day)' },
-      { date: '2026-11-01', name: 'Svi sveti (All Saints\' Day)' },
-      { date: '2026-12-25', name: 'Božić (Christmas Day)' },
-      { date: '2026-12-26', name: 'Sveti Stjepan (St. Stephen\'s Day)' }
-    ],
-    RS: [
-      { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
-      { date: '2026-01-02', name: "Nova godina (New Year's Day 2)" },
-      { date: '2026-01-07', name: 'Božić (Orthodox Christmas)' },
-      { date: '2026-02-15', name: 'Dan državnosti (Statehood Day)' },
-      { date: '2026-02-16', name: 'Dan državnosti (Statehood Day 2)' },
-      { date: '2026-04-10', name: 'Veliki petak (Orthodox Good Friday)' },
-      { date: '2026-04-12', name: 'Vaskrs (Orthodox Easter Sunday)' },
-      { date: '2026-04-13', name: 'Vaskrsni ponedeljak (Orthodox Easter Monday)' },
-      { date: '2026-05-01', name: 'Praznik rada (Labour Day)' },
-      { date: '2026-05-02', name: 'Praznik rada (Labour Day 2)' },
-      { date: '2026-11-11', name: 'Dan primirja (Armistice Day)' }
-    ],
-    BA: [
-      { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
-      { date: '2026-01-07', name: 'Božić (Orthodox Christmas)' },
-      { date: '2026-04-06', name: 'Dan neovisnosti (Independence Day)' },
-      { date: '2026-04-12', name: 'Vaskrs (Orthodox Easter Sunday)' },
-      { date: '2026-04-13', name: 'Uskrsni ponedjeljak (Easter Monday)' },
-      { date: '2026-05-01', name: 'Međunarodni dan rada (Labour Day)' },
-      { date: '2026-11-25', name: 'Dan državnosti (Statehood Day)' },
-      { date: '2026-12-25', name: 'Božić (Christmas Day)' }
-    ],
-    SI: [
-      { date: '2026-01-01', name: "Novo leto (New Year's Day)" },
-      { date: '2026-01-02', name: "Novo leto (New Year's Day 2)" },
-      { date: '2026-02-08', name: 'Prešernov dan (Prešeren Day)' },
-      { date: '2026-04-05', name: 'Velika noč (Easter Sunday)' },
-      { date: '2026-04-06', name: 'Velikonočni ponedeljek (Easter Monday)' },
-      { date: '2026-04-27', name: 'Dan upora proti okupatorju (Resistance Day)' },
-      { date: '2026-05-01', name: 'Praznik dela (Labour Day)' },
-      { date: '2026-05-02', name: 'Praznik dela (Labour Day 2)' },
-      { date: '2026-06-25', name: 'Dan državnosti (Statehood Day)' },
-      { date: '2026-08-15', name: 'Marijino vnebovzetje (Assumption of Mary)' },
-      { date: '2026-10-31', name: 'Dan reformacije (Reformation Day)' },
-      { date: '2026-11-01', name: 'Dan spomina na mrtve (All Saints\' Day)' },
-      { date: '2026-12-25', name: 'Božič (Christmas Day)' },
-      { date: '2026-12-26', name: 'Dan samostojnosti in enotnosti (Independence Day)' }
-    ],
-    MK: [
-      { date: '2026-01-01', name: "Нова Година (New Year's Day)" },
-      { date: '2026-01-07', name: 'Божиќ (Orthodox Christmas)' },
-      { date: '2026-04-12', name: 'Велигден (Orthodox Easter Sunday)' },
-      { date: '2026-04-13', name: 'Велигден (Orthodox Easter Monday)' },
-      { date: '2026-05-01', name: 'Ден на трудот (Labour Day)' },
-      { date: '2026-05-24', name: 'Св. Кирил и Методиј (Sts. Cyril & Methodius)' },
-      { date: '2026-08-02', name: 'Илинден (Ilinden - National Day)' },
-      { date: '2026-09-08', name: 'Ден на независноста (Independence Day)' },
-      { date: '2026-10-11', name: 'Ден на народното востание (National Uprising Day)' },
-      { date: '2026-10-23', name: 'Ден на македонската револуционерна борба (Revolution Day)' },
-      { date: '2026-12-08', name: 'Св. Климент Охридски (St. Clement of Ohrid)' },
-      { date: '2026-12-25', name: 'Божиќ (Christmas Day)' }
-    ]
+  const holidaysByYear: Record<string, Record<string, { date: string; name: string }[]>> = {
+    '2026': {
+      US: [
+        { date: '2026-01-01', name: "New Year's Day" },
+        { date: '2026-01-19', name: 'Martin Luther King Jr. Day' },
+        { date: '2026-02-16', name: "Presidents' Day" },
+        { date: '2026-05-25', name: 'Memorial Day' },
+        { date: '2026-07-03', name: 'Independence Day (Observed)' },
+        { date: '2026-09-07', name: 'Labor Day' },
+        { date: '2026-11-26', name: 'Thanksgiving' },
+        { date: '2026-12-25', name: 'Christmas Day' }
+      ],
+      GB: [
+        { date: '2026-01-01', name: "New Year's Day" },
+        { date: '2026-04-03', name: 'Good Friday' },
+        { date: '2026-04-06', name: 'Easter Monday' },
+        { date: '2026-05-04', name: 'Early May Bank Holiday' },
+        { date: '2026-08-31', name: 'Summer Bank Holiday' },
+        { date: '2026-12-25', name: 'Christmas Day' }
+      ],
+      CA: [
+        { date: '2026-01-01', name: "New Year's Day" },
+        { date: '2026-07-01', name: 'Canada Day' },
+        { date: '2026-09-07', name: 'Labour Day' },
+        { date: '2026-12-25', name: 'Christmas Day' }
+      ],
+      HR: [
+        { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
+        { date: '2026-01-06', name: 'Sveta tri kralja (Epiphany)' },
+        { date: '2026-04-05', name: 'Uskrs (Easter Sunday)' },
+        { date: '2026-04-06', name: 'Uskrsni ponedjeljak (Easter Monday)' },
+        { date: '2026-05-01', name: 'Međunarodni praznik rada (Labour Day)' },
+        { date: '2026-05-30', name: 'Dan državnosti (National Day)' },
+        { date: '2026-06-04', name: 'Tijelovo (Corpus Christi)' },
+        { date: '2026-06-22', name: 'Dan antifašističke borbe (Anti-Fascist Struggle Day)' },
+        { date: '2026-08-05', name: 'Dan domovinske zahvalnosti (Victory & Thanksgiving Day)' },
+        { date: '2026-08-15', name: 'Velika Gospa (Assumption of Mary)' },
+        { date: '2026-10-08', name: 'Dan neovisnosti (Independence Day)' },
+        { date: '2026-11-01', name: 'Svi sveti (All Saints\' Day)' },
+        { date: '2026-12-25', name: 'Božić (Christmas Day)' },
+        { date: '2026-12-26', name: 'Sveti Stjepan (St. Stephen\'s Day)' }
+      ],
+      RS: [
+        { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
+        { date: '2026-01-02', name: "Nova godina (New Year's Day 2)" },
+        { date: '2026-01-07', name: 'Božić (Orthodox Christmas)' },
+        { date: '2026-02-15', name: 'Dan državnosti (Statehood Day)' },
+        { date: '2026-02-16', name: 'Dan državnosti (Statehood Day 2)' },
+        { date: '2026-04-10', name: 'Veliki petak (Orthodox Good Friday)' },
+        { date: '2026-04-12', name: 'Vaskrs (Orthodox Easter Sunday)' },
+        { date: '2026-04-13', name: 'Vaskrsni ponedeljak (Orthodox Easter Monday)' },
+        { date: '2026-05-01', name: 'Praznik rada (Labour Day)' },
+        { date: '2026-05-02', name: 'Praznik rada (Labour Day 2)' },
+        { date: '2026-11-11', name: 'Dan primirja (Armistice Day)' }
+      ],
+      BA: [
+        { date: '2026-01-01', name: "Nova godina (New Year's Day)" },
+        { date: '2026-01-07', name: 'Božić (Orthodox Christmas)' },
+        { date: '2026-04-06', name: 'Dan neovisnosti (Independence Day)' },
+        { date: '2026-04-12', name: 'Vaskrs (Orthodox Easter Sunday)' },
+        { date: '2026-04-13', name: 'Uskrsni ponedjeljak (Easter Monday)' },
+        { date: '2026-05-01', name: 'Međunarodni dan rada (Labour Day)' },
+        { date: '2026-11-25', name: 'Dan državnosti (Statehood Day)' },
+        { date: '2026-12-25', name: 'Božić (Christmas Day)' }
+      ],
+      SI: [
+        { date: '2026-01-01', name: "Novo leto (New Year's Day)" },
+        { date: '2026-01-02', name: "Novo leto (New Year's Day 2)" },
+        { date: '2026-02-08', name: 'Prešernov dan (Prešeren Day)' },
+        { date: '2026-04-05', name: 'Velika noč (Easter Sunday)' },
+        { date: '2026-04-06', name: 'Velikonočni ponedeljek (Easter Monday)' },
+        { date: '2026-04-27', name: 'Dan upora proti okupatorju (Resistance Day)' },
+        { date: '2026-05-01', name: 'Praznik dela (Labour Day)' },
+        { date: '2026-05-02', name: 'Praznik dela (Labour Day 2)' },
+        { date: '2026-06-25', name: 'Dan državnosti (Statehood Day)' },
+        { date: '2026-08-15', name: 'Marijino vnebovzetje (Assumption of Mary)' },
+        { date: '2026-10-31', name: 'Dan reformacije (Reformation Day)' },
+        { date: '2026-11-01', name: 'Dan spomina na mrtve (All Saints\' Day)' },
+        { date: '2026-12-25', name: 'Božič (Christmas Day)' },
+        { date: '2026-12-26', name: 'Dan samostojnosti in enotnosti (Independence Day)' }
+      ],
+      MK: [
+        { date: '2026-01-01', name: "Нова Година (New Year's Day)" },
+        { date: '2026-01-07', name: 'Божиќ (Orthodox Christmas)' },
+        { date: '2026-04-12', name: 'Велигден (Orthodox Easter Sunday)' },
+        { date: '2026-04-13', name: 'Велигден (Orthodox Easter Monday)' },
+        { date: '2026-05-01', name: 'Ден на трудот (Labour Day)' },
+        { date: '2026-05-24', name: 'Св. Кирил и Методиј (Sts. Cyril & Methodius)' },
+        { date: '2026-08-02', name: 'Илинден (Ilinden - National Day)' },
+        { date: '2026-09-08', name: 'Ден на независноста (Independence Day)' },
+        { date: '2026-10-11', name: 'Ден на народното востание (National Uprising Day)' },
+        { date: '2026-10-23', name: 'Ден на македонската револуционерна борба (Revolution Day)' },
+        { date: '2026-12-08', name: 'Св. Климент Охридски (St. Clement of Ohrid)' },
+        { date: '2026-12-25', name: 'Божиќ (Christmas Day)' }
+      ]
+    },
+    '2027': {
+      US: [
+        { date: '2027-01-01', name: "New Year's Day" },
+        { date: '2027-01-18', name: 'Martin Luther King Jr. Day' },
+        { date: '2027-02-15', name: "Presidents' Day" },
+        { date: '2027-05-31', name: 'Memorial Day' },
+        { date: '2027-07-05', name: 'Independence Day (Observed)' },
+        { date: '2027-09-06', name: 'Labor Day' },
+        { date: '2027-11-25', name: 'Thanksgiving' },
+        { date: '2027-12-24', name: 'Christmas Day (Observed)' }
+      ],
+      GB: [
+        { date: '2027-01-01', name: "New Year's Day" },
+        { date: '2027-03-26', name: 'Good Friday' },
+        { date: '2027-03-29', name: 'Easter Monday' },
+        { date: '2027-05-03', name: 'Early May Bank Holiday' },
+        { date: '2027-08-30', name: 'Summer Bank Holiday' },
+        { date: '2027-12-27', name: 'Christmas Day (substitute)' }
+      ],
+      CA: [
+        { date: '2027-01-01', name: "New Year's Day" },
+        { date: '2027-07-01', name: 'Canada Day' },
+        { date: '2027-09-06', name: 'Labour Day' },
+        { date: '2027-12-27', name: 'Christmas Day (Observed)' }
+      ],
+      HR: [
+        { date: '2027-01-01', name: "Nova godina (New Year's Day)" },
+        { date: '2027-01-06', name: 'Sveta tri kralja (Epiphany)' },
+        { date: '2027-03-28', name: 'Uskrs (Easter Sunday)' },
+        { date: '2027-03-29', name: 'Uskrsni ponedjeljak (Easter Monday)' },
+        { date: '2027-05-01', name: 'Međunarodni praznik rada (Labour Day)' },
+        { date: '2027-05-30', name: 'Dan državnosti (National Day)' },
+        { date: '2027-05-27', name: 'Tijelovo (Corpus Christi)' },
+        { date: '2027-06-22', name: 'Dan antifašističke borbe (Anti-Fascist Struggle Day)' },
+        { date: '2027-08-05', name: 'Dan domovinske zahvalnosti (Victory & Thanksgiving Day)' },
+        { date: '2027-08-15', name: 'Velika Gospa (Assumption of Mary)' },
+        { date: '2027-10-08', name: 'Dan neovisnosti (Independence Day)' },
+        { date: '2027-11-01', name: 'Svi sveti (All Saints\' Day)' },
+        { date: '2027-12-25', name: 'Božić (Christmas Day)' },
+        { date: '2027-12-26', name: 'Sveti Stjepan (St. Stephen\'s Day)' }
+      ],
+      RS: [
+        { date: '2027-01-01', name: "Nova godina (New Year's Day)" },
+        { date: '2027-01-02', name: "Nova godina (New Year's Day 2)" },
+        { date: '2027-01-07', name: 'Božić (Orthodox Christmas)' },
+        { date: '2027-02-15', name: 'Dan državnosti (Statehood Day)' },
+        { date: '2027-02-16', name: 'Dan državnosti (Statehood Day 2)' },
+        { date: '2027-04-30', name: 'Veliki petak (Orthodox Good Friday)' },
+        { date: '2027-05-02', name: 'Vaskrs (Orthodox Easter Sunday)' },
+        { date: '2027-05-03', name: 'Vaskrsni ponedeljak (Orthodox Easter Monday)' },
+        { date: '2027-05-01', name: 'Praznik rada (Labour Day)' },
+        { date: '2027-11-11', name: 'Dan primirja (Armistice Day)' }
+      ],
+      BA: [
+        { date: '2027-01-01', name: "Nova godina (New Year's Day)" },
+        { date: '2027-01-07', name: 'Božić (Orthodox Christmas)' },
+        { date: '2027-04-06', name: 'Dan neovisnosti (Independence Day)' },
+        { date: '2027-05-02', name: 'Vaskrs (Orthodox Easter Sunday)' },
+        { date: '2027-05-03', name: 'Uskrsni ponedjeljak (Easter Monday)' },
+        { date: '2027-05-01', name: 'Međunarodni dan rada (Labour Day)' },
+        { date: '2027-11-25', name: 'Dan državnosti (Statehood Day)' },
+        { date: '2027-12-25', name: 'Božić (Christmas Day)' }
+      ],
+      SI: [
+        { date: '2027-01-01', name: "Novo leto (New Year's Day)" },
+        { date: '2027-01-02', name: "Novo leto (New Year's Day 2)" },
+        { date: '2027-02-08', name: 'Prešernov dan (Prešeren Day)' },
+        { date: '2027-03-28', name: 'Velika noč (Easter Sunday)' },
+        { date: '2027-03-29', name: 'Velikonočni ponedeljek (Easter Monday)' },
+        { date: '2027-04-27', name: 'Dan upora proti okupatorju (Resistance Day)' },
+        { date: '2027-05-01', name: 'Praznik dela (Labour Day)' },
+        { date: '2027-05-02', name: 'Praznik dela (Labour Day 2)' },
+        { date: '2027-06-25', name: 'Dan državnosti (Statehood Day)' },
+        { date: '2027-08-15', name: 'Marijino vnebovzetje (Assumption of Mary)' },
+        { date: '2027-10-31', name: 'Dan reformacije (Reformation Day)' },
+        { date: '2027-11-01', name: 'Dan spomina na mrtve (All Saints\' Day)' },
+        { date: '2027-12-25', name: 'Božič (Christmas Day)' },
+        { date: '2027-12-26', name: 'Dan samostojnosti in enotnosti (Independence Day)' }
+      ],
+      MK: [
+        { date: '2027-01-01', name: "Нова Година (New Year's Day)" },
+        { date: '2027-01-07', name: 'Божиќ (Orthodox Christmas)' },
+        { date: '2027-05-02', name: 'Велигден (Orthodox Easter Sunday)' },
+        { date: '2027-05-03', name: 'Велигден (Orthodox Easter Monday)' },
+        { date: '2027-05-01', name: 'Ден на трудот (Labour Day)' },
+        { date: '2027-05-24', name: 'Св. Кирил и Методиј (Sts. Cyril & Methodius)' },
+        { date: '2027-08-02', name: 'Илинден (Ilinden - National Day)' },
+        { date: '2027-09-08', name: 'Ден на независноста (Independence Day)' },
+        { date: '2027-10-11', name: 'Ден на народното востание (National Uprising Day)' },
+        { date: '2027-10-23', name: 'Ден на македонската револуционерна борба (Revolution Day)' },
+        { date: '2027-12-08', name: 'Св. Климент Охридски (St. Clement of Ohrid)' },
+        { date: '2027-12-25', name: 'Божиќ (Christmas Day)' }
+      ]
+    }
   };
 
   const countries = [
@@ -1196,7 +1292,8 @@ const TimesheetSystem = () => {
 
   function isHoliday(date: Date, country: string) {
     const dateStr = formatDate(date);
-    return (holidays2026[country as keyof typeof holidays2026] || []).find((h: { date: string; name: string }) => h.date === dateStr);
+    const year = dateStr.slice(0, 4);
+    return (holidaysByYear[year]?.[country] || []).find(h => h.date === dateStr);
   }
 
   function isWeekend(date: Date): boolean { const d = date.getDay(); return d === 0 || d === 6; }
