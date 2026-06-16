@@ -52,3 +52,8 @@ scripts/invoice-parser/samples/*.msg
 scripts/poller/convera-beneficiaries.json
 scripts/poller/convera-transactions.json
 scripts/poller/convera-contractor-map.json
+
+# Local Convera reconciliation scripts (hardcode service role key — never commit)
+scripts/poller/import-convera-transactions.js
+scripts/poller/mark-invoices-paid.js
+scripts/poller/match-invoices-to-transactions.js
