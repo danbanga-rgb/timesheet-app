@@ -701,6 +701,7 @@ const TimesheetSystem = () => {
   const [accountantTab, setAccountantTab] = useState('weekly');
   const [profileTabSearch, setProfileTabSearch] = useState('');
   const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'>('all');
+  const [profileTabExcludeTest, setProfileTabExcludeTest] = useState(true);
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -5559,7 +5560,10 @@ const TimesheetSystem = () => {
 
           {accountantTab === 'profiles' && (() => {
             const accountantManagedRoles = ['timesheetuser', 'vendormanager'];
-            const allManagedUsers = users.filter(u => accountantManagedRoles.includes(u.role));
+            const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
+            const allManagedUsers = users
+              .filter(u => accountantManagedRoles.includes(u.role))
+              .filter(u => !profileTabExcludeTest || !isTestAccount(u.name));
             const groups = allManagedUsers.map(u => {
               const profs = paymentProfiles
                 .filter(p => p.userId === u.id)
@@ -5603,7 +5607,11 @@ const TimesheetSystem = () => {
                       <span className="opacity-70 ml-1">({counts[f]})</span>
                     </button>
                   ))}
-                  <button onClick={() => setExpandedProfileUsers(new Set(allManagedUsers.map(u => u.id)))} className="text-xs text-indigo-600 hover:underline ml-auto">Expand all</button>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-600 ml-auto cursor-pointer select-none">
+                    <input type="checkbox" checked={profileTabExcludeTest} onChange={e => setProfileTabExcludeTest(e.target.checked)} className="rounded" />
+                    Exclude test accounts
+                  </label>
+                  <button onClick={() => setExpandedProfileUsers(new Set(allManagedUsers.map(u => u.id)))} className="text-xs text-indigo-600 hover:underline">Expand all</button>
                   <button onClick={() => setExpandedProfileUsers(new Set())} className="text-xs text-gray-500 hover:underline">Collapse all</button>
                 </div>
                 <div className="overflow-x-auto">
@@ -5629,10 +5637,18 @@ const TimesheetSystem = () => {
                               setExpandedProfileUsers(next);
                             }}>
                               <td className="px-4 py-2 font-semibold text-indigo-900" colSpan={5}>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 flex-wrap">
                                   {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                                   <span>{g.user.name}</span>
                                   <span className="text-xs text-indigo-600 font-normal">({g.profiles.length})</span>
+                                  {g.user.role === 'vendormanager' && (() => {
+                                    const team = users.filter(u => u.vendorManagerId === g.user.id);
+                                    return (
+                                      <span className="text-[10px] px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded font-medium uppercase tracking-wide" title={team.map(t => t.name).join(', ') || 'no contractors assigned'}>
+                                        Vendor Mgr{team.length > 0 ? ` · ${team.length}` : ''}
+                                      </span>
+                                    );
+                                  })()}
                                   {g.profiles.length === 0 && <span className="text-xs text-amber-700 font-normal ml-2">⚠ No profile</span>}
                                   {g.profiles.length > 0 && hasUnmatched && <span className="text-xs text-amber-700 font-normal ml-2">⚠ Needs benef</span>}
                                 </div>
