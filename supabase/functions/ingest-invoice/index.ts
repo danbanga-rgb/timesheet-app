@@ -395,7 +395,7 @@ serve(async (req) => {
 
     // Build payment profile snapshot from parsed bank details (if any)
     const pd = paymentDetails as Record<string, string | null> | null;
-    const paymentProfileSnapshot = pd ? {
+    let paymentProfileSnapshot = pd ? {
       id:             0,
       userId,
       profileName:    'Imported',
@@ -411,6 +411,220 @@ serve(async (req) => {
       paymentEmail:   '',
       isDefault:      false,
     } : null;
+
+    // ── Resolve payment profile via Convera beneficiary lookup ───────────────
+    // Source of truth: convera_beneficiaries (verified bank data from Convera exports).
+    // Flow:
+    //   1. Incomplete parsed data (no IBAN / no SWIFT+account) → strip; accountant assigns.
+    //   2. Already-linked existing payment_profile (same user, matching IBAN/swift+acc) → reuse.
+    //   3. Lookup convera_beneficiaries by IBAN. If 1 match → hydrate. If multiple (shared
+    //      intermediary like Bimosoft/NativeTeams/Revolut) → narrow by short_name containing
+    //      contractor's name. Create payment_profile linked to the beneficiary.
+    //   4. No beneficiary match → create a "pending" payment_profile from parsed data; it
+    //      will be enriched when a future Convera CSV import creates the matching beneficiary.
+    if (pd && paymentProfileSnapshot) {
+      const norm = (s: string | null | undefined) => (s || '').toUpperCase().replace(/\s+/g, '').trim();
+      const unaccent = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '');
+      const ibanN  = norm(pd.iban);
+      const swiftN = norm(pd.swift);
+      const accN   = norm(pd.accountNumber);
+
+      const hasIban   = !!ibanN;
+      const hasSwAcc  = !!(swiftN && accN);
+
+      if (!hasIban && !hasSwAcc) {
+        // Step 1 — incomplete
+        paymentProfileSnapshot = null;
+      } else {
+        // Step 2 — user's existing profiles
+        const { data: existing } = await supabase
+          .from('payment_profiles')
+          .select('id, profile_name, company_name, company_address, country, bank_name, bank_address, bank_branch, account_number, iban, swift, payment_email, is_default, convera_beneficiary_id')
+          .eq('user_id', userId);
+
+        const buildSnapshot = (row: Record<string, unknown>) => ({
+          id:             row.id as number,
+          userId,
+          profileName:    (row.profile_name as string) || 'Imported',
+          companyName:    (row.company_name as string) || '',
+          companyAddress: (row.company_address as string) || '',
+          country:        (row.country as string) || '',
+          bankName:       (row.bank_name as string) || '',
+          bankAddress:    (row.bank_address as string) || '',
+          bankBranch:     (row.bank_branch as string) || '',
+          accountNumber:  (row.account_number as string) || '',
+          iban:           (row.iban as string) || '',
+          swift:          (row.swift as string) || '',
+          paymentEmail:   (row.payment_email as string) || '',
+          isDefault:      Boolean(row.is_default),
+        });
+
+        let resolved = false;
+
+        const existingMatch = hasIban
+          ? (existing ?? []).find(p => norm(p.iban) === ibanN)
+          : (existing ?? []).find(p => norm(p.swift) === swiftN && norm(p.account_number) === accN);
+        if (existingMatch) {
+          paymentProfileSnapshot = buildSnapshot(existingMatch);
+          resolved = true;
+        }
+
+        // Step 3 — Convera beneficiary lookup. NOTE: convera_beneficiaries.bank_account
+        // holds the IBAN (for non-US) or the account number (for US). iban_unique is a
+        // BOOLEAN flag (true = unique to this beneficiary, false = shared intermediary like
+        // Revolut/Bimosoft). We match the parsed IBAN against bank_account.
+        if (!resolved && hasIban) {
+          const { data: benefs } = await supabase
+            .from('convera_beneficiaries')
+            .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
+            .ilike('bank_account', ibanN);
+
+          let chosen: Record<string, unknown> | null = null;
+          if (benefs && benefs.length === 1) {
+            chosen = benefs[0];
+          } else if (benefs && benefs.length > 1) {
+            // Shared intermediary — disambiguate by user name in short_name
+            const userTokens = unaccent((userName as string).toLowerCase())
+              .split(/\s+/).filter(t => t.length >= 3);
+            chosen = benefs.find(b => {
+              const sn = unaccent(((b.short_name as string) || '').toLowerCase());
+              return userTokens.some(t => sn.includes(t));
+            }) ?? null;
+          }
+
+          if (chosen) {
+            const alreadyLinked = (existing ?? []).find(p => p.convera_beneficiary_id === chosen!.id);
+            if (alreadyLinked) {
+              paymentProfileSnapshot = buildSnapshot(alreadyLinked);
+              resolved = true;
+            } else {
+              // bank_account holds IBAN if it starts with 2-letter country code; else account number
+              const benefAccount = (chosen.bank_account as string) || '';
+              const isIbanFormat = /^[A-Z]{2}\d/.test(benefAccount.replace(/\s+/g, '').toUpperCase());
+              // INSERT new payment_profile hydrated from the beneficiary
+              const { data: inserted } = await supabase
+                .from('payment_profiles')
+                .insert({
+                  user_id:                userId,
+                  profile_name:           (chosen.short_name as string) || 'Imported',
+                  company_name:           (chosen.beneficiary_name as string) || pd.companyName || '',
+                  country:                (chosen.beneficiary_country as string) || '',
+                  bank_name:              (chosen.bank_name as string) || pd.bankName || '',
+                  bank_branch:            pd.sortCode || '',
+                  account_number:         isIbanFormat ? (pd.accountNumber || '') : (benefAccount || pd.accountNumber || ''),
+                  iban:                   isIbanFormat ? benefAccount : (pd.iban || ''),
+                  swift:                  pd.swift || '',
+                  convera_beneficiary_id: chosen.id,
+                  is_default:             false,
+                })
+                .select('id, profile_name, company_name, company_address, country, bank_name, bank_address, bank_branch, account_number, iban, swift, payment_email, is_default')
+                .single();
+              if (inserted) {
+                paymentProfileSnapshot = buildSnapshot(inserted);
+                resolved = true;
+              }
+            }
+          }
+        }
+
+        // Step 3.5 — Name-based beneficiary fallback (requires BOTH first and last name
+        // as substring in short_name or beneficiary_name). Skips spelling variants by design;
+        // accountant handles those manually (one-time link).
+        if (!resolved) {
+          const parts = unaccent((userName as string).toLowerCase()).split(/\s+/).filter(t => t.length >= 3);
+          if (parts.length >= 2) {
+            const first = parts[0];
+            const last = parts[parts.length - 1];
+            const { data: nameBenefs } = await supabase
+              .from('convera_beneficiaries')
+              .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
+              .or(`short_name.ilike.*${last}*,beneficiary_name.ilike.*${last}*`);
+            const nameMatches = (nameBenefs ?? []).filter(b => {
+              const sn = unaccent(((b.short_name as string) || '').toLowerCase());
+              const bn = unaccent(((b.beneficiary_name as string) || '').toLowerCase());
+              return (sn.includes(first) && sn.includes(last)) || (bn.includes(first) && bn.includes(last));
+            });
+            if (nameMatches.length === 1) {
+              const m = nameMatches[0];
+              const alreadyLinked = (existing ?? []).find(p => p.convera_beneficiary_id === m.id);
+              if (alreadyLinked) {
+                paymentProfileSnapshot = buildSnapshot(alreadyLinked);
+                resolved = true;
+              } else {
+                const benefAccount = (m.bank_account as string) || '';
+                const isIbanFormat = /^[A-Z]{2}\d/.test(benefAccount.replace(/\s+/g, '').toUpperCase());
+                const { data: inserted } = await supabase
+                  .from('payment_profiles')
+                  .insert({
+                    user_id:                userId,
+                    profile_name:           (m.short_name as string) || 'Imported',
+                    company_name:           (m.beneficiary_name as string) || pd.companyName || '',
+                    country:                (m.beneficiary_country as string) || '',
+                    bank_name:              (m.bank_name as string) || pd.bankName || '',
+                    bank_branch:            pd.sortCode || '',
+                    account_number:         isIbanFormat ? (pd.accountNumber || '') : (benefAccount || pd.accountNumber || ''),
+                    iban:                   isIbanFormat ? benefAccount : (pd.iban || ''),
+                    swift:                  pd.swift || '',
+                    convera_beneficiary_id: m.id,
+                    is_default:             false,
+                  })
+                  .select('id, profile_name, company_name, company_address, country, bank_name, bank_address, bank_branch, account_number, iban, swift, payment_email, is_default')
+                  .single();
+                if (inserted) { paymentProfileSnapshot = buildSnapshot(inserted); resolved = true; }
+              }
+            }
+            // If 0 or >1 name matches, fall through to last-used / pending
+          }
+        }
+
+        // Step 3.6 — Last-used profile fallback. When neither IBAN nor name matched,
+        // pull the contractor's most recent prior invoice's payment_profile if it has
+        // usable bank data. This is the "they've been paid this way before" signal.
+        if (!resolved) {
+          const { data: priorInvoices } = await supabase
+            .from('invoices')
+            .select('payment_profile')
+            .eq('user_id', userId)
+            .lt('period_start', parsedPeriodStart)
+            .not('payment_profile', 'is', null)
+            .order('period_start', { ascending: false })
+            .limit(5);
+          const usefulPrior = (priorInvoices ?? [])
+            .map(r => r.payment_profile as Record<string, unknown> | null)
+            .find(pp => pp && (pp.iban || pp.accountNumber));
+          if (usefulPrior) {
+            // Use prior snapshot directly; this is just the JSONB carried over
+            paymentProfileSnapshot = { ...paymentProfileSnapshot, ...usefulPrior, userId } as typeof paymentProfileSnapshot;
+            resolved = true;
+          }
+        }
+
+        // Step 4 — no beneficiary match, persist a "pending" profile from parsed data
+        if (!resolved) {
+          const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          const [pyear, pmonth] = parsedPeriodStart.split('-');
+          const periodLabel = `${monthNames[parseInt(pmonth) - 1]} ${pyear}`;
+          const { data: inserted } = await supabase
+            .from('payment_profiles')
+            .insert({
+              user_id:         userId,
+              profile_name:    `Imported ${periodLabel}`,
+              company_name:    pd.companyName || '',
+              country:         '',
+              bank_name:       pd.bankName || '',
+              bank_branch:     pd.sortCode || '',
+              account_number:  pd.accountNumber || '',
+              iban:            pd.iban || '',
+              swift:           pd.swift || '',
+              is_default:      false,
+            })
+            .select('id, profile_name, company_name, company_address, country, bank_name, bank_address, bank_branch, account_number, iban, swift, payment_email, is_default')
+            .single();
+          if (inserted) paymentProfileSnapshot = buildSnapshot(inserted);
+          // If insert failed, fall through with original in-memory snapshot (id=0, name 'Imported')
+        }
+      }
+    }
 
     // ── Check for existing invoice for same user + period ────────────────────
     // True duplicate → reattach PDF only, no data changes.

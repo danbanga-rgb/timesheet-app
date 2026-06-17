@@ -436,25 +436,45 @@ function extractCurrency(text) {
 
 // ─── Payment detail extractors ────────────────────────────────────────────────
 
+// IBAN mod-97 checksum validator (ISO 13616). Used to strip trailing PDF-field-name bleed
+// like "HR5223600001102675840ACC" → "HR5223600001102675840" (where ACC was the next field).
+function ibanChecksumValid(iban) {
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban) || iban.length < 15 || iban.length > 34) return false;
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  const numeric = rearranged.replace(/[A-Z]/g, c => (c.charCodeAt(0) - 55).toString());
+  let r = 0;
+  for (const d of numeric) r = (r * 10 + parseInt(d, 10)) % 97;
+  return r === 1;
+}
+// Strip trailing alphabetic bleed by progressively shortening until checksum validates.
+function ibanStripBleed(candidate) {
+  if (ibanChecksumValid(candidate)) return candidate;
+  for (let trim = 1; trim <= 12; trim++) {
+    const shorter = candidate.slice(0, -trim);
+    if (shorter.length >= 15 && ibanChecksumValid(shorter)) return shorter;
+  }
+  return candidate; // keep as-is; caller may still accept on length grounds
+}
+
 function extractIban(text) {
   // Labeled: "IBAN:", "IBAN/IFSC:", "IBAN/BIC:" — allow horizontal whitespace only (no newline crossing)
   // Lookahead (?=...) stops greedy match before adjacent words (e.g. "Acc. No." after IBAN)
   const labeled = text.match(/IBAN(?:\/[A-Z]+)?[:\s#]+([A-Z]{2}[ \t]*\d{2}(?:[ \t]*[A-Z0-9]){11,30})(?=[ \t\n\r]|[^A-Za-z0-9]|$)/i);
   if (labeled) {
     const candidate = labeled[1].replace(/[ \t]/g, '').toUpperCase();
-    if (candidate.length >= 15 && candidate.length <= 34) return candidate;
+    if (candidate.length >= 15 && candidate.length <= 34) return ibanStripBleed(candidate);
   }
   // Bare IBAN: compact (no spaces)
   const bare = text.match(/\b([A-Z]{2}\d{2}[A-Z0-9]{11,30})\b/);
   if (bare) {
     const candidate = bare[1];
-    if (candidate.length >= 15 && candidate.length <= 34) return candidate;
+    if (candidate.length >= 15 && candidate.length <= 34) return ibanStripBleed(candidate);
   }
   // Bare IBAN: space-grouped like "LT60 3250 0022 8875 3177"
   const spaceGrouped = text.match(/\b([A-Z]{2}\d{2}(?:\s[A-Z0-9]{4}){2,8})\b/);
   if (spaceGrouped) {
     const candidate = spaceGrouped[1].replace(/\s/g, '').toUpperCase();
-    if (candidate.length >= 15 && candidate.length <= 34) return candidate;
+    if (candidate.length >= 15 && candidate.length <= 34) return ibanStripBleed(candidate);
   }
   return null;
 }
