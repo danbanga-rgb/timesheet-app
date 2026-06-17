@@ -180,8 +180,8 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
   );
 };
 
-import { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle } from 'lucide-react';
+import { useState, useEffect, useRef, Fragment } from 'react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronRight } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 
@@ -699,6 +699,12 @@ const TimesheetSystem = () => {
   const [timesheets, setTimesheets] = useState<Timesheet[]>([]);
   const timesheetsRef = useRef<Timesheet[]>([]);
   const [accountantTab, setAccountantTab] = useState('weekly');
+  const [profileTabSearch, setProfileTabSearch] = useState('');
+  const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'>('all');
+  const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
+  // When accountant edits/creates a profile for another contractor, this overrides currentUser
+  // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
+  const [profileEditUserId, setProfileEditUserId] = useState<string | null>(null);
   const [consolidatedRange, setConsolidatedRange] = useState({ start: '', end: '' });
   const [appliedRange, setAppliedRange] = useState({ start: '', end: '' });
   const [consolidatedMonthPreset, setConsolidatedMonthPreset] = useState('');
@@ -2003,8 +2009,10 @@ const TimesheetSystem = () => {
     if (!profileForm.profileName || !profileForm.companyName || !profileForm.bankName || !profileForm.accountNumber || !profileForm.swift) {
       alert('Please fill in all required fields: Profile Label, Company Name, Bank Name, Account Number and SWIFT/BIC.'); return;
     }
+    // Use profileEditUserId when set (accountant editing another contractor); fall back to currentUser
+    const targetUserId = profileEditUserId || currentUser!.id;
     const payload = {
-      user_id: currentUser!.id,
+      user_id: targetUserId,
       profile_name: profileForm.profileName,
       company_name: profileForm.companyName,
       company_address: profileForm.companyAddress,
@@ -2025,16 +2033,17 @@ const TimesheetSystem = () => {
       const { error } = await supabase.from('payment_profiles').insert(payload);
       if (error) { alert('Error saving profile: ' + error.message); return; }
     }
-    // If marked default, unset others
+    // If marked default, unset others for the target user
     if (profileForm.isDefault && editingProfile) {
-      await supabase.from('payment_profiles').update({ is_default: false }).eq('user_id', currentUser!.id).neq('id', editingProfile.id);
+      await supabase.from('payment_profiles').update({ is_default: false }).eq('user_id', targetUserId).neq('id', editingProfile.id);
     } else if (profileForm.isDefault) {
-      const { data: last } = await supabase.from('payment_profiles').select('id').eq('user_id', currentUser!.id).order('id', { ascending: false }).limit(1);
-      if (last && last[0]) await supabase.from('payment_profiles').update({ is_default: false }).eq('user_id', currentUser!.id).neq('id', last[0].id);
+      const { data: last } = await supabase.from('payment_profiles').select('id').eq('user_id', targetUserId).order('id', { ascending: false }).limit(1);
+      if (last && last[0]) await supabase.from('payment_profiles').update({ is_default: false }).eq('user_id', targetUserId).neq('id', last[0].id);
     }
     await fetchPaymentProfiles();
-    setShowProfileModal(false);
+    setShowProfileModal(false); setProfileEditUserId(null);
     setEditingProfile(null);
+    setProfileEditUserId(null);
     setProfileForm(emptyProfileForm());
   };
 
@@ -4197,11 +4206,11 @@ const TimesheetSystem = () => {
 
           {/* Reuse the payment profile modal */}
           {showProfileModal && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => setShowProfileModal(false)}>
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }}>
               <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                 <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-center z-10">
                   <h3 className="text-lg font-bold text-gray-800">{editingProfile ? 'Edit Payment Profile' : 'New Payment Profile'}</h3>
-                  <button onClick={() => setShowProfileModal(false)} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
+                  <button onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
                 </div>
                 <div className="p-6 space-y-4">
                   <div><label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Profile Label *</label>
@@ -4224,7 +4233,7 @@ const TimesheetSystem = () => {
                   </div>
                   <div className="flex gap-3 pt-2">
                     <button onClick={savePaymentProfile} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 font-medium"><Save className="w-4 h-4" /> Save Profile</button>
-                    <button onClick={() => setShowProfileModal(false)} className="px-4 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
+                    <button onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }} className="px-4 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
                   </div>
                 </div>
               </div>
@@ -4343,6 +4352,10 @@ const TimesheetSystem = () => {
                   )}
                 </span>
                 <span>Invoices</span>
+              </button>
+              <button onClick={() => setAccountantTab('profiles')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'profiles' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <CreditCard className="w-5 h-5 flex-shrink-0" />
+                <span>Payment Profiles</span>
               </button>
             </div>
           </div>
@@ -5539,6 +5552,149 @@ const TimesheetSystem = () => {
                       </div>
                     </>
                   )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {accountantTab === 'profiles' && (() => {
+            const accountantManagedRoles = ['timesheetuser', 'vendormanager'];
+            const allManagedUsers = users.filter(u => accountantManagedRoles.includes(u.role));
+            const groups = allManagedUsers.map(u => {
+              const profs = paymentProfiles
+                .filter(p => p.userId === u.id)
+                .sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.profileName.localeCompare(b.profileName));
+              const lastUsedById = new Map<number, Invoice>();
+              profs.forEach(p => {
+                const used = invoices
+                  .filter(i => i.userId === u.id && i.paymentProfile?.id === p.id)
+                  .sort((a, b) => (b.periodStart || '').localeCompare(a.periodStart || ''))[0];
+                if (used) lastUsedById.set(p.id, used);
+              });
+              return { user: u, profiles: profs, lastUsedById };
+            });
+            let displayed = groups;
+            if (profileTabSearch) {
+              const q = profileTabSearch.toLowerCase();
+              displayed = displayed.filter(g => g.user.name.toLowerCase().includes(q));
+            }
+            if (profileTabFilter === 'multiple') displayed = displayed.filter(g => g.profiles.length > 1);
+            else if (profileTabFilter === 'unmatched') displayed = displayed.filter(g => g.profiles.length === 0 || g.profiles.some(p => !p.converaBeneficiaryId));
+            displayed = displayed.slice().sort((a, b) => a.user.name.localeCompare(b.user.name));
+            const counts = {
+              all: groups.length,
+              multiple: groups.filter(g => g.profiles.length > 1).length,
+              unmatched: groups.filter(g => g.profiles.length === 0 || g.profiles.some(p => !p.converaBeneficiaryId)).length,
+            };
+            return (
+              <div className="bg-white rounded-lg shadow-md overflow-hidden">
+                <div className="p-4 border-b border-gray-200 flex flex-wrap gap-2 items-center">
+                  <input
+                    type="text"
+                    value={profileTabSearch}
+                    onChange={e => setProfileTabSearch(e.target.value)}
+                    placeholder="Search contractor..."
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm flex-1 min-w-[200px] focus:ring-2 focus:ring-indigo-500"
+                  />
+                  {(['all','multiple','unmatched'] as const).map(f => (
+                    <button key={f} onClick={() => setProfileTabFilter(f)}
+                      className={'px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ' + (profileTabFilter === f ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400')}>
+                      {f === 'all' ? 'All' : f === 'multiple' ? 'Multiple profiles' : 'Needs benef'}
+                      <span className="opacity-70 ml-1">({counts[f]})</span>
+                    </button>
+                  ))}
+                  <button onClick={() => setExpandedProfileUsers(new Set(allManagedUsers.map(u => u.id)))} className="text-xs text-indigo-600 hover:underline ml-auto">Expand all</button>
+                  <button onClick={() => setExpandedProfileUsers(new Set())} className="text-xs text-gray-500 hover:underline">Collapse all</button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 border-b border-gray-200">
+                      <tr>
+                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Contractor / Profile</th>
+                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Bank / Acct</th>
+                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Convera Benef</th>
+                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Last Used</th>
+                        <th className="px-4 py-2 text-right font-semibold text-gray-600">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {displayed.map(g => {
+                        const expanded = expandedProfileUsers.has(g.user.id) || g.profiles.length === 0;
+                        const hasUnmatched = g.profiles.some(p => !p.converaBeneficiaryId);
+                        return (
+                          <Fragment key={g.user.id}>
+                            <tr className="bg-indigo-50 hover:bg-indigo-100 cursor-pointer" onClick={() => {
+                              const next = new Set(expandedProfileUsers);
+                              if (next.has(g.user.id)) next.delete(g.user.id); else next.add(g.user.id);
+                              setExpandedProfileUsers(next);
+                            }}>
+                              <td className="px-4 py-2 font-semibold text-indigo-900" colSpan={5}>
+                                <div className="flex items-center gap-2">
+                                  {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                                  <span>{g.user.name}</span>
+                                  <span className="text-xs text-indigo-600 font-normal">({g.profiles.length})</span>
+                                  {g.profiles.length === 0 && <span className="text-xs text-amber-700 font-normal ml-2">⚠ No profile</span>}
+                                  {g.profiles.length > 0 && hasUnmatched && <span className="text-xs text-amber-700 font-normal ml-2">⚠ Needs benef</span>}
+                                </div>
+                              </td>
+                            </tr>
+                            {expanded && g.profiles.map(p => {
+                              const benef = converaBeneficiaries.find(b => b.id === p.converaBeneficiaryId);
+                              const lastInv = g.lastUsedById.get(p.id);
+                              const acctTail = p.iban ? `IBAN ····${p.iban.slice(-4)}` : (p.accountNumber ? `acct ····${p.accountNumber.slice(-4)}` : '—');
+                              return (
+                                <tr key={p.id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-2 pl-10">
+                                    {p.isDefault && <span className="text-amber-500 mr-1" title="Default">★</span>}
+                                    <span className="font-medium text-gray-800">{p.profileName}</span>
+                                  </td>
+                                  <td className="px-4 py-2 text-xs text-gray-700">
+                                    <div className="text-gray-500">{p.bankName || '—'}</div>
+                                    <div className="font-mono">{acctTail}</div>
+                                  </td>
+                                  <td className="px-4 py-2 text-xs">
+                                    {benef ? <span className="text-green-700">✓ {benef.shortName}</span> : <span className="text-amber-600">⚠ Needs benef</span>}
+                                  </td>
+                                  <td className="px-4 py-2 text-xs text-gray-600">
+                                    {lastInv ? (
+                                      <button onClick={() => { setSelectedInvoice(lastInv); setShowInvoiceModal(true); }} className="hover:underline text-indigo-600">
+                                        {new Date(lastInv.periodStart + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} (#{lastInv.id})
+                                      </button>
+                                    ) : '—'}
+                                  </td>
+                                  <td className="px-4 py-2 text-right whitespace-nowrap text-xs">
+                                    <button onClick={() => {
+                                      setEditingProfile(p);
+                                      setProfileEditUserId(p.userId);
+                                      setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride });
+                                      setShowProfileModal(true);
+                                    }} className="px-2 py-1 text-indigo-700 hover:underline">Edit</button>
+                                    <button onClick={() => { setBeneficiaryOverrideProfileId(p.id); loadConveraBeneficiaries(); }} className="px-2 py-1 text-blue-600 hover:underline">Re-link</button>
+                                    <button onClick={() => deletePaymentProfile(p.id, p.profileName)} className="px-2 py-1 text-red-600 hover:underline">Delete</button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                            {expanded && (
+                              <tr className="bg-gray-50">
+                                <td colSpan={5} className="px-4 py-2 pl-10">
+                                  <button onClick={() => {
+                                    setEditingProfile(null);
+                                    setProfileEditUserId(g.user.id);
+                                    setProfileForm(emptyProfileForm());
+                                    setShowProfileModal(true);
+                                  }} className="text-xs text-indigo-600 hover:underline">+ New profile for {g.user.name}</button>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                      {displayed.length === 0 && (
+                        <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400 text-sm">No contractors match the current filter.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             );
@@ -7655,11 +7811,11 @@ const TimesheetSystem = () => {
 
         {/* Payment Profile Modal */}
         {showProfileModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => setShowProfileModal(false)}>
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }}>
             <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
               <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-center z-10">
                 <h3 className="text-lg font-bold text-gray-800">{editingProfile ? 'Edit Payment Profile' : 'New Payment Profile'}</h3>
-                <button onClick={() => setShowProfileModal(false)} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
+                <button onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
               </div>
               <div className="p-6 space-y-4">
                 <div>
@@ -7734,7 +7890,7 @@ const TimesheetSystem = () => {
                 </div>
                 <div className="flex gap-3 pt-2">
                   <button onClick={savePaymentProfile} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"><Save className="w-4 h-4" /> Save Profile</button>
-                  <button onClick={() => setShowProfileModal(false)} className="px-4 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
+                  <button onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }} className="px-4 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
                 </div>
               </div>
             </div>
