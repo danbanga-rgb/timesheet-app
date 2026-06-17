@@ -2327,9 +2327,19 @@ const TimesheetSystem = () => {
       'Total Hours','Rate','Total Amount','Currency','Status','Submitted','Pay On Date','Paid Date','Payment Method',
       'Company Name','Company Address','Country',
       'Bank Name','Bank Address','Bank Branch',
-      'Account Number','IBAN','SWIFT/BIC','Payment Email','Convera Short Name'
+      'Account Number','IBAN','SWIFT/BIC','Payment Email','Convera Short Name','Banking Note'
     ];
     let csv = headers.join(',') + '\n';
+    // Pre-compute prior-month convera_beneficiary_id per contractor for the CHANGE COMPANY signal
+    const profileBenefId = (profileId: number | null | undefined): number | null => {
+      if (!profileId) return null;
+      return paymentProfiles.find(p => p.id === profileId)?.converaBeneficiaryId ?? null;
+    };
+    const priorMonthKey = (periodStart: string): string => {
+      const d = parseLocalDate(periodStart);
+      d.setMonth(d.getMonth() - 1);
+      return formatDate(d).slice(0, 7);
+    };
     list.forEach(inv => {
       const project = projects.find(p => p.id === inv.projectId);
       const pp = inv.paymentProfile;
@@ -2337,6 +2347,16 @@ const TimesheetSystem = () => {
       const converaShortName = profile?.converaBeneficiaryId
         ? (converaBeneficiaries.find(b => b.id === profile.converaBeneficiaryId)?.shortName || '')
         : '';
+      // Banking note: NEW COMPANY when current profile has no benef OR no prior invoice;
+      // CHANGE COMPANY when prior month's benef differs from current. Blank otherwise.
+      const currentBenefId = profileBenefId(pp?.id);
+      const prevKey = priorMonthKey(inv.periodStart);
+      const priorInv = invoices.find(o => o.userId === inv.userId && o.id !== inv.id && o.periodStart?.slice(0,7) === prevKey);
+      const priorBenefId = profileBenefId(priorInv?.paymentProfile?.id);
+      let bankingNote = '';
+      if (!currentBenefId) bankingNote = 'NEW COMPANY';
+      else if (!priorInv) bankingNote = 'NEW';
+      else if (priorBenefId && priorBenefId !== currentBenefId) bankingNote = 'CHANGE COMPANY';
       const row = [
         `"${inv.invoiceNumber}"`,
         `"${inv.userName}"`,
@@ -2363,6 +2383,7 @@ const TimesheetSystem = () => {
         `"${pp?.swift || ''}"`,
         `"${pp?.paymentEmail || ''}"`,
         `"${converaShortName}"`,
+        `"${bankingNote}"`,
       ];
       csv += row.join(',') + '\n';
     });
