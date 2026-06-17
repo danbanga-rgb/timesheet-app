@@ -5518,13 +5518,15 @@ const TimesheetSystem = () => {
                               <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Wed</th>
                               <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Thu</th>
                               <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Fri</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Sat</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Sun</th>
                               <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Total</th>
                               <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Status</th>
                             </tr>
                           </thead>
                           <tbody>
                             {filteredTs.length === 0 ? (
-                              <tr><td colSpan={12} className="text-center py-6 text-gray-400">No timesheets found for selected range</td></tr>
+                              <tr><td colSpan={14} className="text-center py-6 text-gray-400">No timesheets found for selected range</td></tr>
                             ) : (
                               filteredTs.map((ts, idx) => {
                                 const user = users.find(u => u.id === ts.userId);
