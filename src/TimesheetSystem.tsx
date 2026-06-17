@@ -4979,7 +4979,7 @@ const TimesheetSystem = () => {
                                         : <span className="text-gray-300 text-xs">—</span>}
                                     </td>
                                     <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
-                                      {inv.paymentProfile
+                                      {(inv.paymentProfile || inv.paymentMethodOverride)
                                         ? <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethod(inv) === 'Intuit' ? 'bg-green-50 text-green-700' : 'bg-purple-50 text-purple-700'}`}>{paymentMethod(inv)}</span>
                                         : <span className="text-gray-300 text-xs">—</span>}
                                     </td>
