@@ -894,9 +894,16 @@ const TimesheetSystem = () => {
     if (currentUser?.region) setBannerRegion(currentUser.region);
   }, [currentUser?.id]);
 
-  // Pre-fill payment terms + auto-calculate pay-on when invoice modal opens
+  // Pre-fill payment terms + auto-calculate pay-on when invoice modal opens.
+  // Also reset all "pending" form state — otherwise values leak between invoices when
+  // the accountant switches modals (e.g. seeing "Intuit" on Rumiya because they just
+  // saved Intuit for Mek).
   useEffect(() => {
     if (!selectedInvoice) return;
+    setPendingPaymentMethod('');
+    setPendingPayOnDate('');
+    setPendingPaidDate('');
+    setPendingUsdRate('');
     const profileTerms = users.find(u => u.id === selectedInvoice.userId)?.paymentTerms || '';
     const terms = selectedInvoice.paymentTerms || profileTerms;
     setPendingPaymentTerms(terms);
