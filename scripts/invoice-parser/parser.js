@@ -132,7 +132,11 @@ function extractInvoiceNumber(text) {
   for (const p of patterns) {
     const m = text.match(p);
     if (m && !SKIP.test(m[1]) && hasDigit(m[1])) {
-      return m[1].trim().replace(/\s*([\/\-\.])\s*/g, '$1');
+      return m[1].trim()
+        .replace(/\s*([\/\-\.])\s*/g, '$1')
+        // Strip trailing non-numeric bleed (e.g. "15-1-1Mjesto" → "15-1-1" when next PDF field
+        // runs into the captured number with no separator). Only strips letters AFTER a digit.
+        .replace(/(\d)[^\d\-\/]+$/, '$1');
     }
   }
   return null;
