@@ -436,16 +436,19 @@ serve(async (req) => {
                           && Math.abs((existingAmount ?? 0) - computedAmount) < 0.01;
 
       if (!isDuplicate) {
-        // Correction: update invoice data and reset status for re-approval
+        // Correction: update invoice data and reset status for re-approval.
+        // invoice_number must be updated too — corrected PDFs often have a new number
+        // and the audit trail lives in email_invoice_log.raw_extracted snapshots.
         const updatePayload: Record<string, unknown> = {
-          total_hours:   parsedHours,
-          rate:          parsedRate,
-          total_amount:  computedAmount,
+          invoice_number: finalInvoiceNumber,
+          total_hours:    parsedHours,
+          rate:           parsedRate,
+          total_amount:   computedAmount,
           lines,
-          corrected:     true,
-          status:        'submitted',
-          reviewed_at:   null,
-          reviewed_by:   null,
+          corrected:      true,
+          status:         'submitted',
+          reviewed_at:    null,
+          reviewed_by:    null,
         };
         if (paymentProfileSnapshot) updatePayload.payment_profile = paymentProfileSnapshot;
 

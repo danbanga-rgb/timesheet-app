@@ -93,6 +93,17 @@ function extractInvoiceNumber(text) {
   const SKIP = /^(?:date|number|amount|due|total|description|details?|page|copy)\b/i;
   const hasDigit = (s) => /\d/.test(s);
   const patterns = [
+    // ── PDF text-extraction quirks: field labels and values get smushed together ──
+    // "INVOICE NUMBER...DATE OF ISSUE" header with no column separator on value line
+    // e.g. Tarik: "INVOICE NUMBERDATE OF ISSUEDUE DATE\n...\n707/06/202622/06/2026"
+    // → capture digits BEFORE the first DD/MM/YYYY date on the value line
+    /INVOICE\s+NUMBER[\s\S]{0,80}?DATE\s+OF\s+ISSUE[\s\S]{0,200}?\n\s*(\d{1,5})(?=\d{2}\/\d{2}\/\d{4})/i,
+    // "IN:806/01/2026" — value smushed with date of issue (Imran's template)
+    /\bIN[:\s]+(\d{1,4})(?=\d{2}\/\d{2}\/\d{4})/i,
+    // Number on a line by itself directly above "INVOICE NO." (Antonio's template — visual layout
+    // places the number next to the label but text extraction reads them on separate lines)
+    /(?:^|\n)\s*(\d{2,5})\s*\n\s*INVOICE\s+NO/im,
+    // ── Standard patterns ──
     // "Invoice Number:", "Invoice No.", "Invoice #" — (?!\w) prevents "NUM" matching in "NUMBER"
     /invoice\s*(?:number|num|no\.?)(?!\w)[:\s#]*(?!(?:date|of\s+issue|number|due)\b)([A-Z0-9][\w\-\/]{1,25})/i,
     /invoice\s*#[:\s#]*(?!(?:date|of\s+issue|number|due)\b)([A-Z0-9][\w\-\/]{1,25})/i,
@@ -136,7 +147,10 @@ function extractInvoiceNumber(text) {
         .replace(/\s*([\/\-\.])\s*/g, '$1')
         // Strip trailing non-numeric bleed (e.g. "15-1-1Mjesto" → "15-1-1" when next PDF field
         // runs into the captured number with no separator). Only strips letters AFTER a digit.
-        .replace(/(\d)[^\d\-\/]+$/, '$1');
+        .replace(/(\d)[^\d\-\/]+$/, '$1')
+        // CSV-safety: prepend "INV " for purely-numeric invoice numbers so Excel doesn't
+        // strip leading zeros or treat them as numbers.
+        .replace(/^(\d+)$/, 'INV $1');
     }
   }
   return null;
