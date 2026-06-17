@@ -957,6 +957,13 @@ const TimesheetSystem = () => {
 
       await Promise.all([fetchUsers(), fetchProjects(), fetchTimesheets(), fetchInvoices(), fetchPaymentProfiles()]);
 
+      // Accountants and admins need the Convera beneficiary list pre-loaded for the
+      // Payment Profiles tab and CSV export — otherwise everything reads as "Needs benef"
+      // until they open the matching modal.
+      if (normalisedProfile.role === 'accountant' || normalisedProfile.role === 'admin') {
+        loadConveraBeneficiaries();
+      }
+
       if (normalisedProfile.role === 'timesheetuser') {
         loadTimesheetForWeek(normalisedProfile.id, getCurrentWeekStart(), timesheetsRef.current);
       }
@@ -5614,21 +5621,21 @@ const TimesheetSystem = () => {
                   <button onClick={() => setExpandedProfileUsers(new Set(allManagedUsers.map(u => u.id)))} className="text-xs text-indigo-600 hover:underline">Expand all</button>
                   <button onClick={() => setExpandedProfileUsers(new Set())} className="text-xs text-gray-500 hover:underline">Collapse all</button>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 280px)' }}>
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
-                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Contractor / Profile</th>
-                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Bank / Acct</th>
-                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Convera Benef</th>
-                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Last Used</th>
-                        <th className="px-4 py-2 text-right font-semibold text-gray-600">Actions</th>
+                        <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Contractor / Profile</th>
+                        <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Bank / Acct</th>
+                        <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Convera Benef</th>
+                        <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Last Used</th>
+                        <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-right font-semibold text-gray-600">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {displayed.map(g => {
                         const expanded = expandedProfileUsers.has(g.user.id) || g.profiles.length === 0;
-                        const hasUnmatched = g.profiles.some(p => !p.converaBeneficiaryId);
+                        const hasUnmatched = g.profiles.some(p => !p.converaBeneficiaryId); // true linkage check (FK), not benef-array lookup
                         return (
                           <Fragment key={g.user.id}>
                             <tr className="bg-indigo-50 hover:bg-indigo-100 cursor-pointer" onClick={() => {
@@ -5655,7 +5662,8 @@ const TimesheetSystem = () => {
                               </td>
                             </tr>
                             {expanded && g.profiles.map(p => {
-                              const benef = converaBeneficiaries.find(b => b.id === p.converaBeneficiaryId);
+                              const isLinked = !!p.converaBeneficiaryId;
+                              const benef = isLinked ? converaBeneficiaries.find(b => b.id === p.converaBeneficiaryId) : null;
                               const lastInv = g.lastUsedById.get(p.id);
                               const acctTail = p.iban ? `IBAN ····${p.iban.slice(-4)}` : (p.accountNumber ? `acct ····${p.accountNumber.slice(-4)}` : '—');
                               return (
@@ -5669,7 +5677,13 @@ const TimesheetSystem = () => {
                                     <div className="font-mono">{acctTail}</div>
                                   </td>
                                   <td className="px-4 py-2 text-xs">
-                                    {benef ? <span className="text-green-700">✓ {benef.shortName}</span> : <span className="text-amber-600">⚠ Needs benef</span>}
+                                    {!isLinked ? (
+                                      <span className="text-amber-600">⚠ Needs benef</span>
+                                    ) : benef ? (
+                                      <span className="text-green-700">✓ {benef.shortName}</span>
+                                    ) : (
+                                      <span className="text-gray-500">✓ linked (#{p.converaBeneficiaryId})</span>
+                                    )}
                                   </td>
                                   <td className="px-4 py-2 text-xs text-gray-600">
                                     {lastInv ? (
