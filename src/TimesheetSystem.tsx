@@ -756,6 +756,7 @@ const TimesheetSystem = () => {
   const [pendingUsdRate, setPendingUsdRate] = useState('');
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
   const [invoicePayOnPreset, setInvoicePayOnPreset] = useState(''); // '' = all, 'none' = not assigned, or 'YYYY-MM-DD'
+  const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState(''); // '' = all, 'Intuit', or 'Convera'
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
   // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
@@ -4689,13 +4690,14 @@ const TimesheetSystem = () => {
 
             let filtered = [...preStatusFiltered];
             if (accountantInvoiceFilter !== 'all') filtered = filtered.filter(i => i.status === accountantInvoiceFilter);
+            if (invoicePaymentMethodPreset) filtered = filtered.filter(i => paymentMethod(i) === invoicePaymentMethodPreset);
             filtered = filtered.sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
 
             const totalPaid = filtered.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
             const totalApproved = filtered.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
             const isFiltered = invoiceSelectedUsers !== null || accountantInvoiceFilter !== 'all' ||
               invoiceDateRange.start || invoicePayDateRange.start || invoicePaidDateRange.start ||
-              invoiceMonthPreset || invoicePayOnPreset;
+              invoiceMonthPreset || invoicePayOnPreset || invoicePaymentMethodPreset;
 
             return (
               <div>
@@ -4758,6 +4760,26 @@ const TimesheetSystem = () => {
                           {s !== 'all' && <span className="ml-1.5 text-xs">({preStatusFiltered.filter(i => i.status === s).length})</span>}
                         </button>
                       ))}
+                    </div>
+                    {/* Payment method pills */}
+                    <div className="flex flex-wrap gap-1.5 items-center">
+                      <span className="text-xs font-medium text-gray-600 mr-1">Method:</span>
+                      <button onClick={() => setInvoicePaymentMethodPreset('')}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${!invoicePaymentMethodPreset ? 'bg-gray-700 text-white border-gray-700' : 'bg-white text-gray-600 border-gray-300 hover:border-gray-500'}`}>
+                        All
+                      </button>
+                      {(['Intuit', 'Convera'] as const).map(m => {
+                        const count = preStatusFiltered.filter(i => (accountantInvoiceFilter === 'all' || i.status === accountantInvoiceFilter) && paymentMethod(i) === m).length;
+                        const active = invoicePaymentMethodPreset === m;
+                        const activeColor = m === 'Intuit' ? 'bg-green-600 border-green-600 text-white' : 'bg-purple-600 border-purple-600 text-white';
+                        const inactiveColor = m === 'Intuit' ? 'bg-white text-green-700 border-green-300 hover:border-green-500' : 'bg-white text-purple-700 border-purple-300 hover:border-purple-500';
+                        return (
+                          <button key={m} onClick={() => setInvoicePaymentMethodPreset(active ? '' : m)}
+                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? activeColor : inactiveColor}`}>
+                            {m} <span className="opacity-70">({count})</span>
+                          </button>
+                        );
+                      })}
                     </div>
                     {/* Contractor picker */}
                     <div className="relative">
