@@ -6,7 +6,7 @@
 // Provides overflow-x scroll + a sticky mirror scrollbar that floats at the
 // bottom of the viewport so users don't have to scroll to the page bottom to
 // drag the scrollbar horizontally.
-const StickyScrollWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
+const StickyScrollWrapper = ({ children, className, maxHeight }: { children: React.ReactNode; className?: string; maxHeight?: string }) => {
   const outerRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
   const syncingRef = useRef(false);
@@ -40,9 +40,13 @@ const StickyScrollWrapper = ({ children, className }: { children: React.ReactNod
     };
   }, []);
 
+  // When maxHeight is set, the outer container also handles vertical scrolling so that
+  // sticky-top table headers stay anchored as the user scrolls the rows.
+  const outerStyle = maxHeight ? { maxHeight } : undefined;
+  const outerOverflow = maxHeight ? 'overflow-auto' : 'overflow-x-auto';
   return (
     <div>
-      <div ref={outerRef} className={`overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0 ${className ?? ''}`}>
+      <div ref={outerRef} style={outerStyle} className={`${outerOverflow} -mx-3 sm:mx-0 px-3 sm:px-0 ${className ?? ''}`}>
         {children}
       </div>
       <div ref={mirrorRef} className="overflow-x-scroll sticky bottom-0 -mx-3 sm:mx-0 bg-white border-t border-gray-100" style={{ height: 14 }}>
@@ -122,20 +126,20 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
           <span className="font-semibold">Partial</span> weeks include only the working days that fall within the selected date range.
         </div>
       )}
-      <StickyScrollWrapper>
+      <StickyScrollWrapper maxHeight="calc(100vh - 320px)">
         <table className="border-collapse text-sm w-full">
-          <thead>
+          <thead className="sticky top-0 z-20">
             <tr className="bg-green-600 text-white">
-              <th className="border border-green-700 px-3 py-2 text-left sticky left-0 z-20 bg-green-600">Employee</th>
-              <th className="border border-green-700 px-3 py-2 text-left">Country</th>
-              <th className="border border-green-700 px-3 py-2 text-left">Project</th>
+              <th className="border border-green-700 px-3 py-2 text-left sticky left-0 z-30 bg-green-600">Employee</th>
+              <th className="border border-green-700 px-3 py-2 text-left bg-green-600">Country</th>
+              <th className="border border-green-700 px-3 py-2 text-left bg-green-600">Project</th>
               {weekEndings.map((we: string) => {
                 const isPartial = partialWeeks.has(we);
                 const weekMon = parseLocalDate(we);
                 const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4); // Keep for label
                 const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
                 return (
-                  <th key={we} className={`border border-green-700 px-3 py-2 text-center whitespace-nowrap ${isPartial ? 'bg-amber-600' : ''}`}>
+                  <th key={we} className={`border border-green-700 px-3 py-2 text-center whitespace-nowrap ${isPartial ? 'bg-amber-600' : 'bg-green-600'}`}>
                     <div className="text-xs opacity-80">{isPartial ? 'Partial' : 'W/E'}</div>
                     <div>{weekSun.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
                   </th>
@@ -4454,17 +4458,17 @@ const TimesheetSystem = () => {
                 </div>
                 <button onClick={() => changeReportWeek(1)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Next →</button>
               </div>
-              <StickyScrollWrapper>
+              <StickyScrollWrapper maxHeight="calc(100vh - 360px)">
                 <table className="w-full border-collapse">
-                  <thead>
+                  <thead className="sticky top-0 z-20">
                     <tr className="bg-indigo-600 text-white">
-                      <th className="border border-indigo-700 px-2 py-3 text-center text-xs sticky left-0 z-20 bg-indigo-600">ID</th>
-                      <th className="border border-indigo-700 px-4 py-3 text-left sticky z-20 bg-indigo-600 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.18)]" style={{ left: 53 }}>Employee</th>
-                      <th className="border border-indigo-700 px-4 py-3 text-left">Source</th>
-                      <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
-                      {weekDates.map((d, i) => <th key={i} className="border border-indigo-700 px-4 py-3 text-center"><div>{d.toLocaleDateString('en-US', { weekday: 'short' })}</div><div className="text-xs font-normal">{d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div></th>)}
-                      <th className="border border-indigo-700 px-4 py-3 text-center">Total</th>
-                      <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
+                      <th className="border border-indigo-700 px-2 py-3 text-center text-xs sticky left-0 z-30 bg-indigo-600">ID</th>
+                      <th className="border border-indigo-700 px-4 py-3 text-left sticky z-30 bg-indigo-600 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.18)]" style={{ left: 53 }}>Employee</th>
+                      <th className="border border-indigo-700 px-4 py-3 text-left bg-indigo-600">Source</th>
+                      <th className="border border-indigo-700 px-4 py-3 text-left bg-indigo-600">Project</th>
+                      {weekDates.map((d, i) => <th key={i} className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600"><div>{d.toLocaleDateString('en-US', { weekday: 'short' })}</div><div className="text-xs font-normal">{d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div></th>)}
+                      <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Total</th>
+                      <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Status</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -4942,7 +4946,7 @@ const TimesheetSystem = () => {
                   {filtered.length === 0 ? (
                     <div className="text-center py-12 text-gray-400"><Receipt className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No invoices match the current filter</p></div>
                   ) : (
-                    <StickyScrollWrapper>
+                    <StickyScrollWrapper maxHeight="calc(100vh - 360px)">
                       {(() => {
                         // Build display groups once — shared by tbody and tfoot
                         const groupMap = new Map<string, Invoice[]>();
@@ -4990,21 +4994,21 @@ const TimesheetSystem = () => {
 
                         return (
                       <table className="w-full border-collapse text-sm">
-                        <thead className="bg-indigo-600 text-white">
+                        <thead className="bg-indigo-600 text-white sticky top-0 z-20">
                           <tr>
-                            <th className="border border-indigo-700 px-4 py-3 text-left sticky left-0 z-20 bg-indigo-600">Contractor</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-left">Period</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-left">Project</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Hours</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Rate</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-right">Amount</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Pay On Date</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Payment Method</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Paid Date</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Status</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Recon</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">PDF</th>
-                            <th className="border border-indigo-700 px-4 py-3 text-center">Actions</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-left sticky left-0 z-30 bg-indigo-600">Contractor</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-left bg-indigo-600">Period</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-left bg-indigo-600">Project</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Hours</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Rate</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-right bg-indigo-600">Amount</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Pay On Date</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Payment Method</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Paid Date</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Status</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Recon</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">PDF</th>
+                            <th className="border border-indigo-700 px-4 py-3 text-center bg-indigo-600">Actions</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -5500,22 +5504,22 @@ const TimesheetSystem = () => {
                       })()}
 
                       {/* Timesheets table */}
-                      <div className="overflow-x-auto">
+                      <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 360px)' }}>
                         <table className="w-full border-collapse text-sm">
-                          <thead className="bg-indigo-600 text-white">
+                          <thead className="bg-indigo-600 text-white sticky top-0 z-20">
                             <tr>
-                              <th className="border border-indigo-700 px-2 py-2 text-center text-xs">ID</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-left">Employee</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-left">Source</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-left">Week Ending</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-left">Project</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-center">Mon</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-center">Tue</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-center">Wed</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-center">Thu</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-center">Fri</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-center">Total</th>
-                              <th className="border border-indigo-700 px-3 py-2 text-center">Status</th>
+                              <th className="border border-indigo-700 px-2 py-2 text-center text-xs bg-indigo-600">ID</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-left bg-indigo-600">Employee</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-left bg-indigo-600">Source</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-left bg-indigo-600">Week Ending</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-left bg-indigo-600">Project</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Mon</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Tue</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Wed</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Thu</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Fri</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Total</th>
+                              <th className="border border-indigo-700 px-3 py-2 text-center bg-indigo-600">Status</th>
                             </tr>
                           </thead>
                           <tbody>
