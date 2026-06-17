@@ -334,6 +334,79 @@ async function findProfileBySubjectName(subject) {
   return { profile: null, reason: `no unique profile found for subject '${subject}' (candidates: ${words.join(', ')})` };
 }
 
+// Extract the forwarder's prepended note (text before the forwarded message divider).
+// Used when an internal forwarder writes "this is for <contractor>" above the original
+// message — we need to feed that note into the subject-name resolver as if it were
+// part of the subject. Capped at 2000 chars to avoid scanning huge bodies.
+function extractForwarderNote(bodyText) {
+  if (!bodyText) return '';
+  const markers = [
+    /\n\s*From:\s/i,
+    /-{3,}\s*Original Message\s*-{3,}/i,
+    /Begin forwarded message:/i,
+    /On .{1,50} wrote:/i,
+    /-{5,}\s*Forwarded message\s*-{5,}/i,
+    /_{5,}/,
+    /\n\s*Sent:\s/i,
+  ];
+  let firstIdx = bodyText.length;
+  for (const m of markers) {
+    const match = bodyText.match(m);
+    if (match && match.index !== undefined && match.index < firstIdx) firstIdx = match.index;
+  }
+  return bodyText.slice(0, Math.min(firstIdx, 2000)).trim();
+}
+
+// findProfileBySubjectName extracts capitalized words. Accountants writing in
+// lowercase ("this is for marta susek") would slip through. Capitalize each word
+// so the existing word-token extractor picks them up; stopwords still filter
+// "this", "for", etc.
+function capitalizeForNameMatch(text) {
+  return text.split(/(\s+)/).map(w => /^[a-zà-ÿšžčćđ]/.test(w) ? w[0].toUpperCase() + w.slice(1) : w).join('');
+}
+
+// Groq fallback for contractor identification. Used after regex-based subject +
+// forwarder-note extraction fails. Groq reads natural language ("this is for
+// Marta Susek", "for marta", "Marta only sent her TS") and returns the contractor's
+// name, which we then resolve via the existing findProfileByName RPC.
+// Returns { name } on success, null otherwise.
+async function groqResolveContractor(subject, forwarderNote) {
+  if (!CONFIG.groqApiKey) return null;
+  const userText = [
+    subject ? `Subject: ${subject}` : '',
+    forwarderNote ? `Forwarder note (text the accountant added above the forwarded message):\n${forwarderNote.slice(0, 800)}` : '',
+  ].filter(Boolean).join('\n\n');
+  if (!userText.trim()) return null;
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: 'You identify a single contractor (person) being referenced in a forwarded invoice email. The forwarder is an accountant who may explicitly mention the contractor by name because the original email came from a payment platform or company (Native Teams, Bimosoft, Wise, Intuit, etc.) rather than the contractor directly. Return JSON {"contractor_name": "First Last"} when a person is clearly identified. Return {"contractor_name": null} if only a company is mentioned, or if no specific person is named. Do not invent. Do not return company names. Preserve original spelling and diacritics.' },
+          { role: 'user', content: userText },
+        ],
+        max_tokens: 60,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+      }),
+    });
+    if (!res.ok) {
+      console.warn(`  ⚠️  Groq resolveContractor HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || '';
+    const parsed = JSON.parse(raw);
+    const name = parsed.contractor_name;
+    return (name && typeof name === 'string') ? { name } : null;
+  } catch (e) {
+    console.warn(`  ⚠️  Groq resolveContractor exception: ${e.message}`);
+    return null;
+  }
+}
+
 // Extract email + name from forwarded body headers
 // Returns { email, name } — name may be null
 function extractSenderFromBody(text) {
@@ -2836,22 +2909,47 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
       contractorName = extracted.name;
     } else {
       if (extracted) {
-        console.log(`  📭 Body From=${extracted.email} not in profiles — trying subject-name resolution`);
+        console.log(`  📭 Body From=${extracted.email} not in profiles — trying subject + forwarder-note resolution`);
       }
-      const { profile, ambiguous, reason } = await findProfileBySubjectName(subject);
+      // Layer 1: cheap deterministic regex on subject + forwarder's prepended note.
+      const forwarderNote = extractForwarderNote(bodyText);
+      const searchText = forwarderNote
+        ? `${subject || ''} ${capitalizeForNameMatch(forwarderNote)}`
+        : (subject || '');
+      const { profile, ambiguous, reason } = await findProfileBySubjectName(searchText);
       if (profile) {
         contractor = profile.email;
         contractorName = profile.name;
-        console.log(`  📝 Contractor resolved from subject: ${contractorName} (${contractor})`);
+        console.log(`  📝 Contractor resolved from subject/note: ${contractorName} (${contractor})`);
       } else {
-        const bodyNote = extracted ? `body From ${extracted.email} not a known contractor` : 'no sender in body';
-        const msg = ambiguous
-          ? `Ambiguous contractor in forwarded subject — ${reason}`
-          : `Cannot identify contractor (${bodyNote}; ${reason})`;
-        console.warn(`  ⚠️  ${msg}: ${subject}`);
-        results.push({ type: 'forward', subject, action: 'skipped_unidentified' });
-        await forwardToHelpdesk(subject, bodyText, fromEmail, msg);
-        return;
+        // Layer 2: Groq fallback — handles natural-language phrasings, lowercase notes,
+        // and single-name references the regex can't catch.
+        let groqResolvedName = null;
+        if (CONFIG.groqApiKey) {
+          const groqRes = await groqResolveContractor(subject, forwarderNote);
+          if (groqRes?.name) {
+            const groqProfile = await findProfileByName(groqRes.name);
+            if (groqProfile) {
+              contractor = groqProfile.email;
+              contractorName = groqProfile.name;
+              groqResolvedName = groqRes.name;
+              console.log(`  🤖 Contractor resolved via Groq: ${contractorName} (${contractor})`);
+            } else {
+              console.warn(`  🤖 Groq suggested "${groqRes.name}" but no profile matched`);
+            }
+          }
+        }
+        if (!contractor) {
+          const bodyNote = extracted ? `body From ${extracted.email} not a known contractor` : 'no sender in body';
+          const groqNote = groqResolvedName ? `; Groq suggested "${groqResolvedName}" but no profile match` : '';
+          const msg = ambiguous
+            ? `Ambiguous contractor in forwarded subject — ${reason}${groqNote}`
+            : `Cannot identify contractor (${bodyNote}; ${reason}${groqNote})`;
+          console.warn(`  ⚠️  ${msg}: ${subject}`);
+          results.push({ type: 'forward', subject, action: 'skipped_unidentified' });
+          await forwardToHelpdesk(subject, bodyText, fromEmail, msg);
+          return;
+        }
       }
     }
     if (isInternal(contractor)) {
