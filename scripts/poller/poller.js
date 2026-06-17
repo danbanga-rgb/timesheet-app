@@ -2822,21 +2822,32 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   let contractorName = null;
 
   if (isInternal(fromEmail)) {
-    // Extract contractor from forwarded body; fall back to name lookup from subject
+    // Extract contractor from forwarded body; fall back to name lookup from subject.
+    // The body's "From:" header is often a company / platform address (Native Teams,
+    // Bimosoft, Konforta umbrella, Wise) — when that email doesn't resolve to a known
+    // profile and isn't an Intuit notification, treat it like "no body sender" and
+    // try the subject-name resolver. The accountant typically adds the contractor's
+    // name to the subject when forwarding company-routed invoices.
     const extracted = extractSenderFromBody(bodyText);
-    if (extracted) {
+    const bodyEmailIsKnown = extracted ? await isKnownContractor(extracted.email) : false;
+    const bodyEmailIsIntuit = extracted && isIntuitNotification(extracted.email);
+    if (extracted && (bodyEmailIsKnown || bodyEmailIsIntuit)) {
       contractor = extracted.email;
       contractorName = extracted.name;
     } else {
+      if (extracted) {
+        console.log(`  📭 Body From=${extracted.email} not in profiles — trying subject-name resolution`);
+      }
       const { profile, ambiguous, reason } = await findProfileBySubjectName(subject);
       if (profile) {
         contractor = profile.email;
         contractorName = profile.name;
         console.log(`  📝 Contractor resolved from subject: ${contractorName} (${contractor})`);
       } else {
+        const bodyNote = extracted ? `body From ${extracted.email} not a known contractor` : 'no sender in body';
         const msg = ambiguous
           ? `Ambiguous contractor in forwarded subject — ${reason}`
-          : `Cannot identify contractor from body or subject — ${reason}`;
+          : `Cannot identify contractor (${bodyNote}; ${reason})`;
         console.warn(`  ⚠️  ${msg}: ${subject}`);
         results.push({ type: 'forward', subject, action: 'skipped_unidentified' });
         await forwardToHelpdesk(subject, bodyText, fromEmail, msg);
