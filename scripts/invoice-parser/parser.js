@@ -598,7 +598,23 @@ function parseInvoice(text, filename) {
   }
 
   const invoiceNumber = track('invoiceNumber', extractInvoiceNumber(text));
-  const { periodStart, periodEnd } = extractPeriod(text);
+  // eslint-disable-next-line prefer-const
+  let { periodStart, periodEnd } = extractPeriod(text);
+  // Cap period_end to last day of period_start's month when period_start is the first
+  // of a month and the parser inferred a period_end in a later month. Contractors almost
+  // always invoice for a calendar month; templates that only show an "issue date"
+  // (e.g. OBAI's Croatian template) cause the parser to bleed into the next month.
+  // Mid-month period_start values are left alone — those are legitimate partial periods.
+  if (periodStart && periodEnd && /^\d{4}-\d{2}-01$/.test(periodStart)) {
+    const [psY, psM] = periodStart.split('-').map(Number);
+    const [peY, peM] = periodEnd.split('-').map(Number);
+    if (peY > psY || (peY === psY && peM > psM)) {
+      const capped = new Date(psY, psM, 0); // day 0 of next month = last day of current month
+      const newEnd = `${capped.getFullYear()}-${String(capped.getMonth() + 1).padStart(2, '0')}-${String(capped.getDate()).padStart(2, '0')}`;
+      track('parseNotes', `period_end capped from ${periodEnd} to ${newEnd} (calendar-month invoice guard)`);
+      periodEnd = newEnd;
+    }
+  }
   track('periodStart', periodStart);
   track('periodEnd',   periodEnd);
 
