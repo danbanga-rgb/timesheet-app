@@ -588,6 +588,88 @@ function extractPaymentDetails(text) {
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
+// ─── Known templates ──────────────────────────────────────────────────────────
+// Returns { invoiceNumber, periodStart, periodEnd, totalHours, rate, totalAmount,
+// currency, template } when a known invoice format matches, or null. These bypass
+// the generic regex chain for the small set of contractors using these templates,
+// keeping them on the cheap parse path forever.
+
+function parseBimosoftTemplate(text) {
+  if (!/Bimosoft\s*E\s*O[ÜU]/i.test(text)) return null;
+  const out = { template: 'bimosoft', currency: 'USD' };
+  const prNo = text.match(/PR\s*NO\.?\s*[:\s]+(\d{8,14})/i);
+  if (prNo) out.invoiceNumber = 'INV ' + prNo[1];
+  const prDate = text.match(/PR\s*DATE\s*[:\s]+([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/i);
+  if (prDate) {
+    const months = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11,
+      january:0,february:1,march:2,april:3,june:5,july:6,august:7,september:8,october:9,november:10,december:11 };
+    const m = months[prDate[1].toLowerCase()];
+    if (m !== undefined) {
+      const pm = m === 0 ? 11 : m - 1;
+      const py = m === 0 ? parseInt(prDate[3]) - 1 : parseInt(prDate[3]);
+      const lastDay = new Date(py, pm + 1, 0).getDate();
+      const mm = String(pm + 1).padStart(2, '0');
+      out.periodStart = py + '-' + mm + '-01';
+      out.periodEnd = py + '-' + mm + '-' + String(lastDay).padStart(2, '0');
+    }
+  }
+  // SUBTOTAL is the authoritative total
+  const sub = text.match(/SUBTOTAL\s*([\d,]+\.\d{2})\s*USD/i);
+  if (sub) out.totalAmount = parseFloat(sub[1].replace(/,/g, ''));
+  // Inline rate USD qty total USD — greedy match may bleed adjacent year digits
+  // into rate. Validate rate × qty ≈ total, fall back to rate % 100 if not.
+  const inline = text.match(/(\d+\.\d{2})\s*USD\s*(\d+\.\d{2})([\d,]+\.\d{2})\s*USD(?=\s*\n?\s*SUBTOTAL)/i);
+  if (inline) {
+    let rate = parseFloat(inline[1]);
+    const qty = parseFloat(inline[2]);
+    const inlineTotal = parseFloat(inline[3].replace(/,/g, ''));
+    const match = (r, q, t) => Math.abs(r * q - t) < 0.5;
+    if (!match(rate, qty, inlineTotal) && rate > 99) {
+      const corrected = rate % 100;
+      if (corrected >= 1 && match(corrected, qty, inlineTotal)) rate = corrected;
+    }
+    if (match(rate, qty, inlineTotal)) {
+      out.rate = rate;
+      out.totalHours = qty;
+    }
+  }
+  return out;
+}
+
+function parseNativeTeamsTemplate(text) {
+  if (!/Native\s*Teams\s*Limited/i.test(text)) return null;
+  const out = { template: 'nativeteams', currency: 'USD' };
+  const inv = text.match(/Invoice\s*#?(NT-[a-z0-9]+)/i);
+  if (inv) out.invoiceNumber = inv[1];
+  // Issue date is DD/MM/YYYY (EU format). Work period = previous calendar month.
+  const issue = text.match(/Issue\s*date\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  if (issue) {
+    const m = parseInt(issue[2]) - 1;
+    const y = parseInt(issue[3]);
+    const pm = m === 0 ? 11 : m - 1;
+    const py = m === 0 ? y - 1 : y;
+    const lastDay = new Date(py, pm + 1, 0).getDate();
+    const mm = String(pm + 1).padStart(2, '0');
+    out.periodStart = py + '-' + mm + '-01';
+    out.periodEnd = py + '-' + mm + '-' + String(lastDay).padStart(2, '0');
+  }
+  // "Total" label line is clean
+  const total = text.match(/(?:^|\n)\s*Total\s*\n?\s*USD\s*([\d,]+\.\d{2})/i);
+  if (total) out.totalAmount = parseFloat(total[1].replace(/,/g, ''));
+  // Item-line rate appears as "-USD<rate>"
+  const rate = text.match(/-USD(\d+\.\d{2})/);
+  if (rate) out.rate = parseFloat(rate[1]);
+  // Qty has no decimal on inline so derive hours = total / rate
+  if (out.totalAmount && out.rate && out.rate > 0) {
+    out.totalHours = Math.round((out.totalAmount / out.rate) * 100) / 100;
+  }
+  return out;
+}
+
+function tryTemplateParsers(text) {
+  return parseBimosoftTemplate(text) || parseNativeTeamsTemplate(text) || null;
+}
+
 function parseInvoice(text, filename) {
   const found   = [];
   const missing = [];
@@ -597,9 +679,16 @@ function parseInvoice(text, filename) {
     return value;
   }
 
-  const invoiceNumber = track('invoiceNumber', extractInvoiceNumber(text));
+  // Known-template fast path: when a template signature matches, prefer its
+  // field values over the generic extractors. Payment details still come from
+  // the generic extractor since IBAN/SWIFT live in different layouts.
+  const tpl = tryTemplateParsers(text);
+
+  const invoiceNumber = track('invoiceNumber', tpl?.invoiceNumber ?? extractInvoiceNumber(text));
   // eslint-disable-next-line prefer-const
-  let { periodStart, periodEnd } = extractPeriod(text);
+  let { periodStart, periodEnd } = (tpl?.periodStart && tpl?.periodEnd)
+    ? { periodStart: tpl.periodStart, periodEnd: tpl.periodEnd }
+    : extractPeriod(text);
   // Cap period_end to last day of period_start's month when period_start is the first
   // of a month and the parser inferred a period_end in a later month. Contractors almost
   // always invoice for a calendar month; templates that only show an "issue date"
@@ -618,9 +707,9 @@ function parseInvoice(text, filename) {
   track('periodStart', periodStart);
   track('periodEnd',   periodEnd);
 
-  let totalHours  = extractHours(text);
-  let rate        = extractRate(text);
-  let totalAmount = extractTotal(text);
+  let totalHours  = tpl?.totalHours  ?? extractHours(text);
+  let rate        = tpl?.rate        ?? extractRate(text);
+  let totalAmount = tpl?.totalAmount ?? extractTotal(text);
 
   // Multi-contractor detection: if the text contains 3+ distinct person+hours patterns
   // (e.g. "Sancanin 160h $35"), the invoice covers multiple contractors. Hours extracted
@@ -657,7 +746,7 @@ function parseInvoice(text, filename) {
   track('totalHours',  totalHours);
   track('rate',        rate);
   track('totalAmount', totalAmount);
-  const currency      = track('currency',    extractCurrency(text));
+  const currency      = track('currency',    tpl?.currency ?? extractCurrency(text));
 
   const paymentDetails = extractPaymentDetails(text);
   const pdFields = ['iban', 'swift', 'accountNumber', 'sortCode', 'routingNumber', 'bankName', 'companyName'];
