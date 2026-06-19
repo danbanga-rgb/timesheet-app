@@ -2729,7 +2729,7 @@ async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, s
     source: 'direct',
     forwardedBy: null,
     messageId: `reply-yes-${messageId}`,
-    runId,
+    run_id: runId,
   };
 
   return postToIngest(payload, CONFIG.ingestUrl);
@@ -3327,6 +3327,7 @@ async function sendSummaryEmail(summary, leftUnseen) {
   const status = hasFailures ? '⚠️ PARTIAL' : '✅ OK';
   const subject = `[Timesheet Poller] ${status} — ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`;
 
+  const autoYesCount = summary.timesheetReports.filter(r => r.action === 'reply_yes_submitted').length;
   let body = `Synergie Timesheet Poller — Run Summary
 ${'='.repeat(50)}
 Run time   : ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
@@ -3334,7 +3335,7 @@ Emails found: ${summary.total}
 
 RESULTS
 -------
-✅ Created        : ${summary.created}
+✅ Created        : ${summary.created}${autoYesCount > 0 ? `  (incl. 🤖 ${autoYesCount} auto-YES)` : ''}
 🔁 Duplicates     : ${summary.duplicates}
 ✏️  Corrections    : ${summary.corrections}
 📨 Forwarded      : ${summary.forwarded}
@@ -3542,6 +3543,9 @@ async function main() {
             const ok = ingestRes?.ok !== false;
             console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);
             summary.timesheetReports.push({ action: ok ? 'reply_yes_submitted' : 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject });
+            // Count auto-YES successes so heartbeat / summary email reflect reality.
+            // Without this, summary.created stays 0 even when an auto-YES creates a timesheet.
+            if (ok) summary.created++;
             continue;
           }
 
