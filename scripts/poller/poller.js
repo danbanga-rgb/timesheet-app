@@ -1004,8 +1004,12 @@ function parseSynergiePdfText(text, filename) {
   const hoursLinesCandidates = chosenSection?.hoursLines ?? [];
   if (chosenSection?.total != null) total = chosenSection.total;
 
-  // Fallback: if total > 168 (4800% artifact), find standalone number in hoursLines
-  if (!total || total > 168) {
+  // Fallback: only when total is genuinely missing (null) or a >168 artifact.
+  // `total === 0` is a legitimate value (zero-hour submission, e.g. LOA week) and
+  // must NOT trigger the fallback — previously `!total` was true for 0 and the
+  // fallback then refused values with `t > 0`, leaving total stuck and the entire
+  // parse silently abandoned at line 1031.
+  if (total == null || total > 168) {
     for (const hl of hoursLinesCandidates) {
       if (/^\d+$/.test(hl)) {
         const t = parseFloat(hl);
