@@ -446,11 +446,12 @@ serve(async (req) => {
     }
     ({ userId, userName, nameUpdated } = found);
 
-    // Reject timesheets for contractors more than 7 days past their end_date.
-    // 7-day grace window covers legitimate last-week submissions that arrive after end_date.
+    // Reject timesheets for contractors more than 14 days past their end_date.
+    // 14-day grace window covers last-week submissions and catches cases where
+    // a contractor was marked inactive prematurely but is still working.
     if (found.endDate) {
       const graceCutoff = new Date(found.endDate);
-      graceCutoff.setDate(graceCutoff.getDate() + 7);
+      graceCutoff.setDate(graceCutoff.getDate() + 14);
       if (new Date() > graceCutoff) {
         await supabase.from('email_import_log').insert({
           message_id:      messageId,
@@ -459,7 +460,7 @@ serve(async (req) => {
           subject,
           attachment_name: attachmentName || null,
           parse_status:    'failed',
-          parse_notes:     `Contractor inactive — end_date ${found.endDate} exceeded 7-day grace window`,
+          parse_notes:     `Contractor inactive — end_date ${found.endDate} exceeded 14-day grace window`,
           user_id:         userId,
           attempt_count:   attemptCount,
           run_id:          run_id || null,
