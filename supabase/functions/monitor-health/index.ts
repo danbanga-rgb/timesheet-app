@@ -54,11 +54,14 @@ async function checkPollerHeartbeat(supabase: ReturnType<typeof createClient>): 
     .eq('key', 'poller_last_run')
     .single();
 
-  if (error || !data?.value?.ran_at) {
+  const rawVal = data?.value;
+  const val = rawVal ? (typeof rawVal === 'string' ? JSON.parse(rawVal) : rawVal) : null;
+
+  if (error || !val?.ran_at) {
     return { ...base, ok: false, current: 'no heartbeat found', details: 'system_settings.poller_last_run is missing or empty' };
   }
 
-  const lastRun = new Date(data.value.ran_at as string);
+  const lastRun = new Date(val.ran_at as string);
   const gapMinutes = (now.getTime() - lastRun.getTime()) / 60000;
 
   return {
@@ -146,7 +149,7 @@ async function checkUnprocessedCount(supabase: ReturnType<typeof createClient>):
       .select('*', { count: 'exact', head: true })
       .in('parse_status', ['failed', 'partial'])
       .is('timesheet_id', null)
-      .gte('created_at', since),
+      .gte('received_at', since),  // email_import_log uses received_at not created_at
     supabase
       .from('email_invoice_log')
       .select('*', { count: 'exact', head: true })
@@ -304,7 +307,7 @@ serve(async (req) => {
   const SUPABASE_KEY    = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   const BREVO_API_KEY   = Deno.env.get('BREVO_API_KEY')!;
   const FROM_EMAIL      = Deno.env.get('FROM_EMAIL') || 'timesheets@mysynergie.net';
-  const SUPABASE_PAT    = Deno.env.get('SUPABASE_PAT') || '';
+  const SUPABASE_PAT    = Deno.env.get('SB_ANALYTICS_PAT') || '';
   const PROJECT_REF     = 'mimlatvdwxqtgxrgcins';
   const DRY_RUN         = new URL(req.url).searchParams.get('dry_run') === 'true';
 
