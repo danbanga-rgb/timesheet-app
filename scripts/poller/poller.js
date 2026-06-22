@@ -3642,6 +3642,39 @@ async function main() {
       });
     });
 
+    // YES fallback: attachment was present but parsing produced no timesheet.
+    // If the email body is a YES reply, auto-submit last week's hours rather than
+    // silently dropping the email. Covers contractors who say "yes" and also attach a file.
+    const timesheetCreated = emailResults.some(r =>
+      r.action === 'created' || r.action === 'duplicate' || r.action === 'correction_imported'
+    );
+    if (!timesheetCreated && !isInternal(fromEmail) && CONFIG.groqApiKey) {
+      const isReply = /^re:/i.test(subject);
+      const weekStart = isReply ? parseWeekFromSubject(subject) : null;
+      if (isReply && weekStart) {
+        const allowlisted = await isKnownContractor(fromEmail);
+        if (allowlisted) {
+          const fromName = fromAddr?.name || null;
+          console.log(`  🤖 Attachment parse miss — checking body for YES fallback: ${subject}`);
+          const classification = await classifyReply(bodyText, fromName || fromEmail);
+          console.log(`  🤖 Fallback classification: ${classification.intent}`);
+          if (classification.intent === 'YES') {
+            const lastTs = await fetchLastApprovedEntries(fromEmail);
+            if (!lastTs) {
+              console.warn(`  ⚠️  YES fallback but no approved timesheet history for ${fromEmail}`);
+            } else {
+              await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
+              const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, RUN_ID);
+              const ok = ingestRes?.ok !== false;
+              console.log(`  ${ok ? '✅' : '❌'} YES fallback auto-submitted for ${fromEmail} week ${weekStart}`);
+              summary.timesheetReports.push({ action: ok ? 'reply_yes_submitted' : 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject });
+              if (ok) summary.created++;
+            }
+          }
+        }
+      }
+    }
+
   }
 
   // IMAP operations — only DMARC deletes needed (emails already marked seen on fetch)
