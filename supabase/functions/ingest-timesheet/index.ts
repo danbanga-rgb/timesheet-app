@@ -53,13 +53,13 @@ async function findUser(
   email: string,
   contractorName: string | null,
   supabase: ReturnType<typeof createClient>
-): Promise<{ userId: string; userName: string; nameUpdated: boolean } | null> {
+): Promise<{ userId: string; userName: string; nameUpdated: boolean; endDate: string | null } | null> {
 
   contractorName = sanitizeName(contractorName);
 
   const { data: existing } = await supabase
     .from('profiles')
-    .select('id, name')
+    .select('id, name, end_date')
     .eq('email', email.toLowerCase())
     .maybeSingle();
 
@@ -77,6 +77,7 @@ async function findUser(
     userId: existing.id,
     userName: nameUpdated ? contractorName! : (existing.name || email),
     nameUpdated,
+    endDate: (existing.end_date as string | null) ?? null,
   };
 }
 
@@ -444,6 +445,30 @@ serve(async (req) => {
       });
     }
     ({ userId, userName, nameUpdated } = found);
+
+    // Reject timesheets for contractors more than 7 days past their end_date.
+    // 7-day grace window covers legitimate last-week submissions that arrive after end_date.
+    if (found.endDate) {
+      const graceCutoff = new Date(found.endDate);
+      graceCutoff.setDate(graceCutoff.getDate() + 7);
+      if (new Date() > graceCutoff) {
+        await supabase.from('email_import_log').insert({
+          message_id:      messageId,
+          from_email:      (forwardedBy as string) || contractorEmail,
+          resolved_email:  contractorEmail,
+          subject,
+          attachment_name: attachmentName || null,
+          parse_status:    'failed',
+          parse_notes:     `Contractor inactive — end_date ${found.endDate} exceeded 7-day grace window`,
+          user_id:         userId,
+          attempt_count:   attemptCount,
+          run_id:          run_id || null,
+        });
+        return new Response(JSON.stringify({ ok: false, error: 'contractor_inactive' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
   } catch (e) {
     await supabase.from('email_import_log').insert({
       message_id:      messageId,
