@@ -2975,6 +2975,31 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
             }
           }
         }
+        // Layer 4: scan PDF text of invoice attachments for candidate last-name tokens.
+        // Catches Native Teams / Bimosoft where the contractor's full name appears inside
+        // the PDF (e.g. "From Ahmet Buzaljko") but not in the email body or filename.
+        if (!contractor && ambiguous && candidates?.length) {
+          const pdfParse = require('pdf-parse');
+          for (const att of attachments) {
+            if (!att.isPdf && !att.isDocx) continue;
+            try {
+              const pdfData = await pdfParse(att.buffer);
+              const pdfText = pdfData.text || '';
+              const normalize = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+              const normPdf = normalize(pdfText);
+              const matches = candidates.filter(c => {
+                const tokens = normalize(c.name).split(/\s+/).filter(t => t.length >= 4);
+                return tokens.some(t => normPdf.includes(t));
+              });
+              if (matches.length === 1) {
+                contractor = matches[0].email;
+                contractorName = matches[0].name;
+                console.log(`  📄 Contractor resolved via PDF text: ${contractorName} (${contractor})`);
+                break;
+              }
+            } catch { /* unparseable PDF — try next */ }
+          }
+        }
         // Layer 5: attachment-filename fallback for ambiguous first-name matches.
         // e.g. subject "Ahmet" matches both "Ahmet Buzaljko" and "Tarik Ahmetović" —
         // if one candidate's last name appears in the attachment filename, use that profile.
