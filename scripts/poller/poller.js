@@ -387,11 +387,12 @@ function capitalizeForNameMatch(text) {
 // Marta Susek", "for marta", "Marta only sent her TS") and returns the contractor's
 // name, which we then resolve via the existing findProfileByName RPC.
 // Returns { name } on success, null otherwise.
-async function groqResolveContractor(subject, forwarderNote) {
+async function groqResolveContractor(subject, forwarderNote, bodyExcerpt) {
   if (!CONFIG.groqApiKey) return null;
   const userText = [
     subject ? `Subject: ${subject}` : '',
     forwarderNote ? `Forwarder note (text the accountant added above the forwarded message):\n${forwarderNote.slice(0, 800)}` : '',
+    bodyExcerpt ? `Email body excerpt (may contain platform invoice details with contractor name):\n${bodyExcerpt.slice(0, 1500)}` : '',
   ].filter(Boolean).join('\n\n');
   if (!userText.trim()) return null;
   try {
@@ -2960,7 +2961,21 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
             }
           }
         }
-        // Layer 3: attachment-filename fallback for ambiguous first-name matches.
+        // Layer 3: retry Groq with full body when first call only returned an ambiguous
+        // first name. Platform invoices (Native Teams, Bimosoft) embed the contractor's
+        // full name in the body after the forwarded divider — the first call misses it.
+        if (!contractor && ambiguous && candidates?.length && CONFIG.groqApiKey) {
+          const groqRes2 = await groqResolveContractor(subject, forwarderNote, bodyText);
+          if (groqRes2?.name) {
+            const groqProfile2 = await findProfileByName(groqRes2.name);
+            if (groqProfile2) {
+              contractor = groqProfile2.email;
+              contractorName = groqProfile2.name;
+              console.log(`  🤖 Contractor resolved via Groq (body): ${contractorName} (${contractor})`);
+            }
+          }
+        }
+        // Layer 5: attachment-filename fallback for ambiguous first-name matches.
         // e.g. subject "Ahmet" matches both "Ahmet Buzaljko" and "Tarik Ahmetović" —
         // if one candidate's last name appears in the attachment filename, use that profile.
         if (!contractor && ambiguous && candidates?.length) {
