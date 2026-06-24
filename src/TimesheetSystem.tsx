@@ -937,7 +937,7 @@ const TimesheetSystem = () => {
   // Auto-default invoices tab to latest month when data first loads
   useEffect(() => {
     if (invoices.length > 0 && invoiceMonthPreset === '') {
-      const latest = [...new Set(invoices.map(i => i.periodStart?.slice(0, 7)).filter(Boolean) as string[])]
+      const latest = [...new Set(invoices.map(i => i.periodEnd?.slice(0, 7)).filter(Boolean) as string[])]
         .sort((a, b) => b.localeCompare(a))[0];
       if (latest) setInvoiceMonthPreset(latest);
     }
@@ -2371,8 +2371,8 @@ const TimesheetSystem = () => {
       // Banking note: NEW COMPANY when current profile has no benef OR no prior invoice;
       // CHANGE COMPANY when prior month's benef differs from current. Blank otherwise.
       const currentBenefId = profileBenefId(pp?.id);
-      const prevKey = priorMonthKey(inv.periodStart);
-      const priorInv = invoices.find(o => o.userId === inv.userId && o.id !== inv.id && o.periodStart?.slice(0,7) === prevKey);
+      const prevKey = priorMonthKey(inv.periodEnd);
+      const priorInv = invoices.find(o => o.userId === inv.userId && o.id !== inv.id && o.periodEnd?.slice(0,7) === prevKey);
       const priorBenefId = profileBenefId(priorInv?.paymentProfile?.id);
       let bankingNote = '';
       if (!currentBenefId) bankingNote = 'NEW COMPANY';
@@ -4710,7 +4710,7 @@ const TimesheetSystem = () => {
 
             // Build month pills from distinct months in loaded invoices
             const invoiceMonths = [...new Set(
-              invoices.map(i => i.periodStart?.slice(0, 7)).filter(Boolean) as string[]
+              invoices.map(i => i.periodEnd?.slice(0, 7)).filter(Boolean) as string[]
             )].sort((a, b) => b.localeCompare(a)).slice(0, 12);
 
             // Build pay-on-date pills from invoices matching all filters except payOnPreset itself
@@ -4719,7 +4719,7 @@ const TimesheetSystem = () => {
             if (invoiceDateRange.start && invoiceDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
             if (invoicePayDateRange.start && invoicePayDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
             if (invoicePaidDateRange.start && invoicePaidDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
-            if (invoiceMonthPreset) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodStart?.slice(0, 7) === invoiceMonthPreset);
+            if (invoiceMonthPreset) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodEnd?.slice(0, 7) === invoiceMonthPreset);
             const payOnDates = [...new Set(
               prePayOnFiltered.map(i => i.payOnDate).filter(Boolean) as string[]
             )].sort();
@@ -4730,7 +4730,7 @@ const TimesheetSystem = () => {
             if (invoiceDateRange.start && invoiceDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
             if (invoicePayDateRange.start && invoicePayDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
             if (invoicePaidDateRange.start && invoicePaidDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
-            if (invoiceMonthPreset) preStatusFiltered = preStatusFiltered.filter(i => i.periodStart?.slice(0, 7) === invoiceMonthPreset);
+            if (invoiceMonthPreset) preStatusFiltered = preStatusFiltered.filter(i => i.periodEnd?.slice(0, 7) === invoiceMonthPreset);
             if (invoicePayOnPreset === 'none') preStatusFiltered = preStatusFiltered.filter(i => !i.payOnDate);
             else if (invoicePayOnPreset) preStatusFiltered = preStatusFiltered.filter(i => i.payOnDate === invoicePayOnPreset);
 
@@ -4760,7 +4760,7 @@ const TimesheetSystem = () => {
                         {invoiceMonths.map(ym => {
                           const [y, m] = ym.split('-');
                           const label = new Date(parseInt(y), parseInt(m) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-                          const count = invoices.filter(i => i.periodStart?.slice(0, 7) === ym).length;
+                          const count = invoices.filter(i => i.periodEnd?.slice(0, 7) === ym).length;
                           return (
                             <button key={ym} onClick={() => setInvoiceMonthPreset(invoiceMonthPreset === ym ? '' : ym)}
                               className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoiceMonthPreset === ym ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
