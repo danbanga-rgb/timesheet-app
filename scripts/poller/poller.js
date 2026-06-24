@@ -68,7 +68,7 @@ const SUPABASE_ANON_KEY  = 'sb_publishable_qYa4tmVYu2zsIZfUhvT7hg_UaGgAgKc';
 
 // Filenames that are never timesheets — filter silently so they don't appear as failures.
 // No outer \b wrappers — many patterns appear mid-word or before digits (e.g. "SOW002", "AUP.pdf").
-const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|genworth|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$/i;
+const NON_TIMESHEET_DOC_RE = /agreement|acceptable.use|acknowledgem[ae]nt|aup|sow\b|sow\d|statement.of.work|confirmation.letter|account.confirmation|consolidated.report|_signed\.pdf$/i;
 
 const FWD_PATTERNS = [
   /from:\s*([^<\n]*?)\s*<([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})>/gi,
@@ -326,12 +326,29 @@ async function findProfileBySubjectName(subject) {
       const rows = await res.json();
       if (rows?.length === 1) return { profile: rows[0] };
       if (rows?.length > 1 && wset.length === 1) {
-        return { profile: null, ambiguous: true, reason: `'${wset[0]}' matched ${rows.length} profiles: ${rows.map(r => r.name).join(', ')}` };
+        return { profile: null, ambiguous: true, reason: `'${wset[0]}' matched ${rows.length} profiles: ${rows.map(r => r.name).join(', ')}`, candidates: rows };
       }
     } catch { /* try next candidate */ }
   }
 
   return { profile: null, reason: `no unique profile found for subject '${subject}' (candidates: ${words.join(', ')})` };
+}
+
+// When subject/Groq resolve to multiple profiles, try to break the tie using attachment
+// filenames. Looks for ≥4-char name tokens (stripped of diacritics) from each candidate
+// appearing in the filename. Returns the profile if exactly one candidate matches.
+function resolveAmbiguousByAttachment(candidates, attachments) {
+  if (!candidates?.length || !attachments?.length) return null;
+  const normalize = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ' ');
+  for (const att of attachments) {
+    const fname = normalize(att.name || '');
+    const matches = candidates.filter(c => {
+      const tokens = normalize(c.name).split(/\s+/).filter(t => t.length >= 4);
+      return tokens.some(t => fname.includes(t));
+    });
+    if (matches.length === 1) return matches[0];
+  }
+  return null;
 }
 
 // Extract the forwarder's prepended note (text before the forwarded message divider).
@@ -1171,7 +1188,7 @@ function parseSynergiePdfText(text, filename) {
 
 function classifyByFilename(name) {
   const n = name.toLowerCase();
-  const isInvoice   = /invoice|billing|\binv\b|\bpaymentrequest\b/.test(n);
+  const isInvoice   = /invoice|billing|(?<![a-zA-Z])inv(?![a-zA-Z])|\bpaymentrequest\b/.test(n);
   const isTimesheet = /timesheet|timesheets?|weekly.?time|time.?sheet/.test(n);
   if (isInvoice && isTimesheet) return 'both';
   if (isInvoice)   return 'invoice';
@@ -2920,7 +2937,7 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
       const searchText = forwarderNote
         ? `${subject || ''} ${capitalizeForNameMatch(forwarderNote)}`
         : (subject || '');
-      const { profile, ambiguous, reason } = await findProfileBySubjectName(searchText);
+      const { profile, ambiguous, reason, candidates } = await findProfileBySubjectName(searchText);
       if (profile) {
         contractor = profile.email;
         contractorName = profile.name;
@@ -2941,6 +2958,17 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
             } else {
               console.warn(`  🤖 Groq suggested "${groqRes.name}" but no profile matched`);
             }
+          }
+        }
+        // Layer 3: attachment-filename fallback for ambiguous first-name matches.
+        // e.g. subject "Ahmet" matches both "Ahmet Buzaljko" and "Tarik Ahmetović" —
+        // if one candidate's last name appears in the attachment filename, use that profile.
+        if (!contractor && ambiguous && candidates?.length) {
+          const attMatch = resolveAmbiguousByAttachment(candidates, attachments);
+          if (attMatch) {
+            contractor = attMatch.email;
+            contractorName = attMatch.name;
+            console.log(`  📎 Contractor resolved via attachment filename: ${contractorName} (${contractor})`);
           }
         }
         if (!contractor) {
