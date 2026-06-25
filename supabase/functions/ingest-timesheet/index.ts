@@ -186,12 +186,18 @@ async function resolveWeek(
   }
 
   const bothOccupied = occupied.has(weekA) && occupied.has(weekB);
-  return {
-    resolvedWeek: weekA,
-    resolutionNote: bothOccupied
-      ? `both weeks occupied → correction for content week ${weekA}`
-      : `both weeks empty → content week ${weekA}`,
-  };
+  if (bothOccupied) {
+    return { resolvedWeek: weekA, resolutionNote: `both weeks occupied → correction for content week ${weekA}` };
+  }
+  // Both empty: if the filename/subject week (weekB) is older than the content week (weekA),
+  // the contractor likely filled their template with the current week's data but named/replied
+  // for an overdue week. Prefer the older filename week — shiftEntryDates will realign the entries.
+  const dateA = new Date(weekA + 'T12:00:00Z').getTime();
+  const dateB = new Date(weekB + 'T12:00:00Z').getTime();
+  if (dateB < dateA) {
+    return { resolvedWeek: weekB, resolutionNote: `both weeks empty, filename/subject week ${weekB} is older than content ${weekA} → prefer filename week (entries shifted)` };
+  }
+  return { resolvedWeek: weekA, resolutionNote: `both weeks empty → content week ${weekA}` };
 }
 
 // When resolveWeek() switches to a different week (e.g. subject hint beats stale content dates),
