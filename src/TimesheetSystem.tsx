@@ -773,7 +773,9 @@ const TimesheetSystem = () => {
   // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
   const [showConveraModal, setShowConveraModal] = useState(false);
   const [converaTab, setConveraTab] = useState<'convera' | 'quickbooks' | 'intuit' | 'beneficiaries'>('quickbooks');
+  const [converaSubTab, setConveraSubTab] = useState<'pdf' | 'xls'>('xls');
   const [converaFile, setConveraFile] = useState<File | null>(null);
+  const [converaXlsFile, setConveraXlsFile] = useState<File | null>(null);
   const [qbFile, setQbFile] = useState<File | null>(null);
   const [intuitText, setIntuitText] = useState('');
   const [converaRows, setConveraRows] = useState<ConveraPaymentRow[]>([]);
@@ -2128,6 +2130,44 @@ const TimesheetSystem = () => {
     return (s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
   }
 
+  // Match a Convera/QB payment row to an invoice.
+  // Invoice ref alone is not enough — many contractors reuse sequential numbers (e.g. "6-1-1").
+  // Strategy:
+  //   1. All invoices whose ref matches → prefer the one whose company name is also compatible.
+  //   2. If no company match, prefer the one whose amount is within $0.02.
+  //   3. If no ref match at all, fall back to company name + amount.
+  function matchPaymentToInvoice(invoiceRef: string, beneficiary: string, amount: number): Invoice | null {
+    const normRef   = normaliseRef(invoiceRef);
+    const normBenef = normaliseCompany(beneficiary);
+
+    if (invoiceRef) {
+      const refMatches = invoices.filter(inv => normaliseRef(inv.invoiceNumber) === normRef);
+
+      // Ref + company name
+      if (normBenef) {
+        const byCompany = refMatches.find(inv => {
+          const c = normaliseCompany(inv.paymentProfile?.companyName ?? inv.userName);
+          return c.length > 2 && (c.includes(normBenef) || normBenef.includes(c));
+        });
+        if (byCompany) return byCompany;
+      }
+
+      // Ref + amount (catches cases where company name isn't in our DB — e.g. Ivica → NET SCALE)
+      const byAmount = refMatches.find(inv => Math.abs(inv.totalAmount - amount) < 0.02);
+      if (byAmount) return byAmount;
+    }
+
+    // Pure company + amount fallback (no ref match)
+    if (normBenef) {
+      return invoices.find(inv => {
+        const c = normaliseCompany(inv.paymentProfile?.companyName ?? inv.userName);
+        return c.length > 2 && (c.includes(normBenef) || normBenef.includes(c)) && Math.abs(inv.totalAmount - amount) < 0.02;
+      }) ?? null;
+    }
+
+    return null;
+  }
+
   const parseConveraPdf = async () => {
     if (!converaFile) return;
     setConveraParsing(true);
@@ -2144,8 +2184,7 @@ const TimesheetSystem = () => {
       const json = await resp.json();
       if (!resp.ok || json.error) { setConveraError(json.error || 'Parse failed'); return; }
       const rows: ConveraPaymentRow[] = (json.payments || []).map((p: { itemNumber: string; beneficiary: string; amount: number; currency: string; invoiceRef: string }) => {
-        const ref = (p.invoiceRef || '').trim();
-        const match = invoices.find(inv => normaliseRef(inv.invoiceNumber) === normaliseRef(ref));
+        const match = matchPaymentToInvoice(p.invoiceRef ?? '', p.beneficiary ?? '', p.amount ?? 0);
         return { source: 'convera' as const, suggestedDate: '', ...p, matchedInvoice: match ?? null, selected: !!match && match.status !== 'paid' };
       });
       setConveraRows(rows);
@@ -2178,6 +2217,65 @@ const TimesheetSystem = () => {
     if (!mon) return '';
     return `${new Date().getFullYear()}-${mon}-${day}`;
   }
+
+  const parseConveraXls = async () => {
+    if (!converaXlsFile) return;
+    setConveraParsing(true);
+    setConveraError('');
+    setConveraRows([]);
+    try {
+      const buffer = await converaXlsFile.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
+
+      // Row 0 is the header; data starts at row 1.
+      // Columns: [1]=Date of Order (Excel serial), [4]=Beneficiary Name,
+      //          [5]=Foreign Amount (USD), [6]=Ref 1 ("Inv# XXX"), [9]=Value Date (Excel serial)
+      const excelSerial = (n: number) =>
+        n ? new Date((n - 25569) * 86400 * 1000).toISOString().slice(0, 10) : '';
+
+      const payments: ConveraPaymentRow[] = [];
+      for (let i = 1; i < rawRows.length; i++) {
+        const r = rawRows[i];
+        const beneficiary = String(r[4] ?? '').trim();
+        const amount      = parseFloat(String(r[5]));
+        const ref1        = String(r[6] ?? '').trim();
+        const valueDate   = excelSerial(r[9] as number);
+        if (!beneficiary || isNaN(amount) || amount <= 0) continue;
+
+        const invMatch   = ref1.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
+        const invoiceRef = invMatch?.[1]?.trim() ?? '';
+
+        const matchedInvoice = matchPaymentToInvoice(invoiceRef, beneficiary, amount);
+
+        payments.push({
+          source: 'convera',
+          itemNumber: '',
+          beneficiary,
+          amount,
+          currency: 'USD',
+          invoiceRef,
+          suggestedDate: valueDate,
+          matchedInvoice,
+          selected: !!matchedInvoice && matchedInvoice.status !== 'paid',
+        });
+      }
+
+      if (!payments.length) { setConveraError('No payment rows found. Expected Convera transaction listing with columns: Service Charges, Date of Order, Target Currency, Settlement Currency, Beneficiary Name, Foreign Amount, Ref 1.'); return; }
+
+      setConveraRows(payments);
+      // Pre-fill paid date from the most common Value Date in the file
+      const dates = payments.map(p => p.suggestedDate).filter(Boolean);
+      const freq = dates.reduce<Record<string, number>>((acc, d) => { acc[d] = (acc[d] || 0) + 1; return acc; }, {});
+      const mostCommon = Object.entries(freq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+      if (mostCommon && !converaPaidDate) setConveraPaidDate(mostCommon);
+    } catch (e: unknown) {
+      setConveraError(e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setConveraParsing(false);
+    }
+  };
 
   const parseQbXlsx = async () => {
     if (!qbFile) return;
@@ -2229,18 +2327,7 @@ const TimesheetSystem = () => {
         const invMatch = memo.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
         const invoiceRef = invMatch?.[1]?.trim() ?? '';
 
-        // Match: try invoice number first, then company name + amount
-        let matchedInvoice: Invoice | null = null;
-        if (invoiceRef) {
-          matchedInvoice = invoices.find(inv => normaliseRef(inv.invoiceNumber) === normaliseRef(invoiceRef)) ?? null;
-        }
-        if (!matchedInvoice) {
-          const normName = normaliseCompany(name);
-          matchedInvoice = invoices.find(inv => {
-            const invComp = normaliseCompany(inv.paymentProfile?.companyName || inv.userName);
-            return (invComp.includes(normName) || normName.includes(invComp)) && Math.abs(inv.totalAmount - amt) < 0.02;
-          }) ?? null;
-        }
+        const matchedInvoice = matchPaymentToInvoice(invoiceRef, name, amt);
 
         payments.push({
           source: 'quickbooks',
@@ -5955,7 +6042,7 @@ const TimesheetSystem = () => {
                   {converaRows.length === 0 && (
                     <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-5 w-fit">
                       <button onClick={() => { setConveraTab('quickbooks'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'quickbooks' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>QuickBooks Export</button>
-                      <button onClick={() => { setConveraTab('convera'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'convera' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera PDF</button>
+                      <button onClick={() => { setConveraTab('convera'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'convera' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera</button>
                       <button onClick={() => { setConveraTab('intuit'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Intuit Emails</button>
                       <button onClick={() => { setConveraTab('beneficiaries'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'beneficiaries' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera Beneficiaries</button>
                     </div>
@@ -5990,31 +6077,70 @@ const TimesheetSystem = () => {
                     </div>
                   )}
 
-                  {/* Step 1A: Convera PDF upload */}
+                  {/* Step 1A: Convera — PDF confirmation or XLS transaction listing */}
                   {converaRows.length === 0 && converaTab === 'convera' && (
                     <div>
-                      <p className="text-sm text-gray-600 mb-4">Upload the Convera outgoing payment confirmation PDF. Each payment is matched to an invoice by reference number (Re: Inv#).</p>
-                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
-                        {converaFile ? (
-                          <div className="flex items-center justify-center gap-2 text-indigo-700">
-                            <FileText className="w-5 h-5" />
-                            <span className="text-sm font-medium">{converaFile.name}</span>
-                            <button onClick={() => setConveraFile(null)} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                      {/* Sub-tab: PDF vs XLS */}
+                      <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-4 w-fit">
+                        <button onClick={() => { setConveraSubTab('xls'); setConveraError(''); }} className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${converaSubTab === 'xls' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Transaction Listing (XLS)</button>
+                        <button onClick={() => { setConveraSubTab('pdf'); setConveraError(''); }} className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${converaSubTab === 'pdf' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Payment Confirmation (PDF)</button>
+                      </div>
+
+                      {converaSubTab === 'xls' && (
+                        <div>
+                          <p className="text-sm text-gray-600 mb-1">Upload Convera's <strong>transaction listing export</strong> (.xls / .xlsx). Each row is matched to an invoice by the reference in the <em>Ref 1</em> column, falling back to beneficiary name + amount.</p>
+                          <p className="text-xs text-gray-400 mb-4">In Convera: Payments → Transaction History → Export to Excel. Expected columns: <em>Date of Order · Beneficiary Name · Foreign Amount · Ref 1 (Inv#) · Value Date</em></p>
+                          <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
+                            {converaXlsFile ? (
+                              <div className="flex items-center justify-center gap-2 text-indigo-700">
+                                <FileText className="w-5 h-5" />
+                                <span className="text-sm font-medium">{converaXlsFile.name}</span>
+                                <button onClick={() => setConveraXlsFile(null)} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                              </div>
+                            ) : (
+                              <label className="cursor-pointer">
+                                <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
+                                <p className="text-sm text-gray-600">Click to select .xls / .xlsx file</p>
+                                <input type="file" accept=".xlsx,.xls" className="hidden" onChange={e => setConveraXlsFile(e.target.files?.[0] ?? null)} />
+                              </label>
+                            )}
                           </div>
-                        ) : (
-                          <label className="cursor-pointer">
-                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
-                            <p className="text-sm text-gray-600">Click to select PDF</p>
-                            <input type="file" accept=".pdf" className="hidden" onChange={e => setConveraFile(e.target.files?.[0] ?? null)} />
-                          </label>
-                        )}
-                      </div>
-                      {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
-                      <div className="flex justify-end">
-                        <button onClick={parseConveraPdf} disabled={!converaFile || converaParsing} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
-                          {converaParsing ? <><Clock className="w-4 h-4 animate-spin" /> Parsing…</> : <><FileText className="w-4 h-4" /> Parse PDF</>}
-                        </button>
-                      </div>
+                          {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
+                          <div className="flex justify-end">
+                            <button onClick={parseConveraXls} disabled={!converaXlsFile || converaParsing} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                              {converaParsing ? <><Clock className="w-4 h-4 animate-spin" /> Parsing…</> : <><FileText className="w-4 h-4" /> Parse Listing</>}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {converaSubTab === 'pdf' && (
+                        <div>
+                          <p className="text-sm text-gray-600 mb-1">Upload a Convera <strong>outgoing payment confirmation PDF</strong>. Each payment is matched to an invoice by the <em>Re: Inv#</em> reference in the document.</p>
+                          <p className="text-xs text-gray-400 mb-4">In Convera: Payments → Payment History → open a payment → Download PDF confirmation.</p>
+                          <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
+                            {converaFile ? (
+                              <div className="flex items-center justify-center gap-2 text-indigo-700">
+                                <FileText className="w-5 h-5" />
+                                <span className="text-sm font-medium">{converaFile.name}</span>
+                                <button onClick={() => setConveraFile(null)} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                              </div>
+                            ) : (
+                              <label className="cursor-pointer">
+                                <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
+                                <p className="text-sm text-gray-600">Click to select PDF</p>
+                                <input type="file" accept=".pdf" className="hidden" onChange={e => setConveraFile(e.target.files?.[0] ?? null)} />
+                              </label>
+                            )}
+                          </div>
+                          {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
+                          <div className="flex justify-end">
+                            <button onClick={parseConveraPdf} disabled={!converaFile || converaParsing} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                              {converaParsing ? <><Clock className="w-4 h-4 animate-spin" /> Parsing…</> : <><FileText className="w-4 h-4" /> Parse PDF</>}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
