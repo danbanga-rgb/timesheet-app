@@ -4739,8 +4739,15 @@ const TimesheetSystem = () => {
             if (invoicePaymentMethodPreset) filtered = filtered.filter(i => paymentMethod(i) === invoicePaymentMethodPreset);
             filtered = filtered.sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
 
-            const totalPaid = filtered.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
-            const totalApproved = filtered.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
+            const usdFiltered = filtered.filter(i => !i.currency || i.currency === 'USD');
+            const nonUsdFiltered = filtered.filter(i => i.currency && i.currency !== 'USD');
+            const totalPaid = usdFiltered.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
+            const totalApproved = usdFiltered.filter(i => i.status === 'approved').reduce((s, i) => s + i.totalAmount, 0);
+            const nonUsdByCurrency = nonUsdFiltered.reduce((acc, i) => {
+              if (!acc[i.currency]) acc[i.currency] = 0;
+              acc[i.currency]++;
+              return acc;
+            }, {} as Record<string, number>);
             const isFiltered = invoiceSelectedUsers !== null || accountantInvoiceFilter !== 'all' ||
               invoiceDateRange.start || invoicePayDateRange.start || invoicePaidDateRange.start ||
               invoiceMonthPreset || invoicePayOnPreset || invoicePaymentMethodPreset;
@@ -4920,25 +4927,35 @@ const TimesheetSystem = () => {
                 {/* KPI cards — reflect current filters */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                   <div className="bg-white rounded-lg shadow-md p-4">
-                    <div className="text-sm text-gray-500">Pending Review</div>
+                    <div className="text-sm text-gray-500 mb-1">Pending Review</div>
                     <div className="text-2xl font-bold text-yellow-600">{filtered.filter(i => i.status === 'submitted').length}</div>
                     <div className="text-xs text-gray-400 mt-1">{isFiltered ? 'in selection' : 'awaiting action'}</div>
                   </div>
                   <div className="bg-white rounded-lg shadow-md p-4">
-                    <div className="text-sm text-gray-500">Approved</div>
-                    <div className="text-2xl font-bold text-green-600">{filtered.filter(i => i.status === 'approved').length}</div>
-                    <div className="text-xs text-gray-400 mt-1">${totalApproved.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} to pay</div>
+                    <div className="text-sm text-gray-500 mb-1">Approved — to pay</div>
+                    <div className="text-2xl font-bold text-green-600">${totalApproved.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                    <div className="text-xs text-gray-400 mt-1">{usdFiltered.filter(i => i.status === 'approved').length} invoice{usdFiltered.filter(i => i.status === 'approved').length !== 1 ? 's' : ''}</div>
                   </div>
                   <div className="bg-white rounded-lg shadow-md p-4">
-                    <div className="text-sm text-gray-500">Paid</div>
-                    <div className="text-2xl font-bold text-blue-600">{filtered.filter(i => i.status === 'paid').length}</div>
-                    <div className="text-xs text-gray-400 mt-1">${totalPaid.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} total</div>
+                    <div className="text-sm text-gray-500 mb-1">Paid</div>
+                    <div className="text-2xl font-bold text-blue-600">${totalPaid.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                    <div className="text-xs text-gray-400 mt-1">{usdFiltered.filter(i => i.status === 'paid').length} invoice{usdFiltered.filter(i => i.status === 'paid').length !== 1 ? 's' : ''}</div>
                   </div>
-                  <div className="bg-white rounded-lg shadow-md p-4">
-                    <div className="text-sm text-gray-500">{isFiltered ? 'Filtered' : 'Total Invoices'}</div>
-                    <div className="text-2xl font-bold text-indigo-600">{filtered.length}</div>
-                    <div className="text-xs text-gray-400 mt-1">{isFiltered ? `of ${invoices.length} total` : 'all time'}</div>
-                  </div>
+                  {nonUsdFiltered.length > 0 ? (
+                    <div className="bg-amber-50 border border-amber-300 rounded-lg shadow-md p-4">
+                      <div className="text-sm text-amber-700 font-semibold mb-1">Non-USD Invoices</div>
+                      <div className="text-2xl font-bold text-amber-600">{nonUsdFiltered.length}</div>
+                      <div className="text-xs text-amber-600 mt-1">
+                        {Object.entries(nonUsdByCurrency).map(([cur, cnt]) => `${cnt} ${cur}`).join(', ')} — USD amounts needed
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-white rounded-lg shadow-md p-4">
+                      <div className="text-sm text-gray-500 mb-1">{isFiltered ? 'Filtered' : 'Total Invoices'}</div>
+                      <div className="text-2xl font-bold text-indigo-600">{filtered.length}</div>
+                      <div className="text-xs text-gray-400 mt-1">{isFiltered ? `of ${invoices.length} total` : 'all time'}</div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="bg-white rounded-lg shadow-md p-6">
