@@ -4750,9 +4750,7 @@ const TimesheetSystem = () => {
             const totalLabel = accountantInvoiceFilter === 'all'
               ? 'Total (USD)'
               : `${accountantInvoiceFilter.charAt(0).toUpperCase() + accountantInvoiceFilter.slice(1)} (USD)`;
-            const isFiltered = invoiceSelectedUsers !== null || accountantInvoiceFilter !== 'all' ||
-              invoiceDateRange.start || invoicePayDateRange.start || invoicePaidDateRange.start ||
-              invoiceMonthPreset || invoicePayOnPreset || invoicePaymentMethodPreset;
+
 
             return (
               <div>
@@ -4931,7 +4929,7 @@ const TimesheetSystem = () => {
                   <div className="bg-white rounded-lg shadow-md p-4">
                     <div className="text-sm text-gray-500 mb-1">{totalLabel}</div>
                     <div className="text-2xl font-bold text-indigo-600">${totalFilteredUsd.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-                    <div className="text-xs text-gray-400 mt-1">{usdFiltered.length} invoice{usdFiltered.length !== 1 ? 's' : ''}{isFiltered ? ` of ${invoices.filter(i => !i.currency || i.currency === 'USD').length} total` : ''}</div>
+                    <div className="text-xs text-gray-400 mt-1">{nonUsdFiltered.length > 0 ? `excl. ${nonUsdFiltered.length} non-USD` : 'USD only'}</div>
                   </div>
                   <div className="bg-white rounded-lg shadow-md p-4">
                     <div className="text-sm text-gray-500 mb-1">Pending Review</div>
