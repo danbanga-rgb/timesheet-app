@@ -755,7 +755,7 @@ const TimesheetSystem = () => {
   const [selectedPaymentProfileId, setSelectedPaymentProfileId] = useState<number | null>(null);
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
-  const [accountantInvoiceFilter, setAccountantInvoiceFilter] = useState('all');
+  const [accountantInvoiceFilter, setAccountantInvoiceFilter] = useState<Set<string>>(new Set());
   const [showConsolidatedExportMenu, setShowConsolidatedExportMenu] = useState(false);
   const [invoiceDateRange, setInvoiceDateRange] = useState({ start: '', end: '' });
   const [invoicePayDateRange, setInvoicePayDateRange] = useState({ start: '', end: '' });
@@ -765,9 +765,9 @@ const TimesheetSystem = () => {
   const [pendingPaymentTerms, setPendingPaymentTerms] = useState('');
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [pendingUsdRate, setPendingUsdRate] = useState('');
-  const [invoiceMonthPreset, setInvoiceMonthPreset] = useState('');
-  const [invoicePayOnPreset, setInvoicePayOnPreset] = useState(''); // '' = all, 'none' = not assigned, or 'YYYY-MM-DD'
-  const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState(''); // '' = all, 'Intuit', or 'Convera'
+  const [invoiceMonthPreset, setInvoiceMonthPreset] = useState<Set<string>>(new Set());
+  const [invoicePayOnPreset, setInvoicePayOnPreset] = useState<Set<string>>(new Set()); // empty=all, 'none'=not assigned, 'YYYY-MM-DD'=specific date
+  const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState<Set<string>>(new Set()); // empty=all
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
   // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
@@ -936,10 +936,10 @@ const TimesheetSystem = () => {
 
   // Auto-default invoices tab to latest month when data first loads
   useEffect(() => {
-    if (invoices.length > 0 && invoiceMonthPreset === '') {
+    if (invoices.length > 0 && invoiceMonthPreset.size === 0) {
       const latest = [...new Set(invoices.map(i => i.periodEnd?.slice(0, 7)).filter(Boolean) as string[])]
         .sort((a, b) => b.localeCompare(a))[0];
-      if (latest) setInvoiceMonthPreset(latest);
+      if (latest) setInvoiceMonthPreset(new Set([latest]));
     }
   }, [invoices.length]);
 
@@ -4719,7 +4719,7 @@ const TimesheetSystem = () => {
             if (invoiceDateRange.start && invoiceDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
             if (invoicePayDateRange.start && invoicePayDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
             if (invoicePaidDateRange.start && invoicePaidDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
-            if (invoiceMonthPreset) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodEnd?.slice(0, 7) === invoiceMonthPreset);
+            if (invoiceMonthPreset.size > 0) prePayOnFiltered = prePayOnFiltered.filter(i => invoiceMonthPreset.has(i.periodEnd?.slice(0, 7) ?? ''));
             const payOnDates = [...new Set(
               prePayOnFiltered.map(i => i.payOnDate).filter(Boolean) as string[]
             )].sort();
@@ -4730,13 +4730,15 @@ const TimesheetSystem = () => {
             if (invoiceDateRange.start && invoiceDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
             if (invoicePayDateRange.start && invoicePayDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
             if (invoicePaidDateRange.start && invoicePaidDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
-            if (invoiceMonthPreset) preStatusFiltered = preStatusFiltered.filter(i => i.periodEnd?.slice(0, 7) === invoiceMonthPreset);
-            if (invoicePayOnPreset === 'none') preStatusFiltered = preStatusFiltered.filter(i => !i.payOnDate);
-            else if (invoicePayOnPreset) preStatusFiltered = preStatusFiltered.filter(i => i.payOnDate === invoicePayOnPreset);
+            if (invoiceMonthPreset.size > 0) preStatusFiltered = preStatusFiltered.filter(i => invoiceMonthPreset.has(i.periodEnd?.slice(0, 7) ?? ''));
+            if (invoicePayOnPreset.size > 0) preStatusFiltered = preStatusFiltered.filter(i => {
+              if (invoicePayOnPreset.has('none') && !i.payOnDate) return true;
+              return i.payOnDate != null && invoicePayOnPreset.has(i.payOnDate);
+            });
 
             let filtered = [...preStatusFiltered];
-            if (accountantInvoiceFilter !== 'all') filtered = filtered.filter(i => i.status === accountantInvoiceFilter);
-            if (invoicePaymentMethodPreset) filtered = filtered.filter(i => paymentMethod(i) === invoicePaymentMethodPreset);
+            if (accountantInvoiceFilter.size > 0) filtered = filtered.filter(i => accountantInvoiceFilter.has(i.status));
+            if (invoicePaymentMethodPreset.size > 0) filtered = filtered.filter(i => invoicePaymentMethodPreset.has(paymentMethod(i)));
             filtered = filtered.sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
 
             const usdFiltered = filtered.filter(i => !i.currency || i.currency === 'USD');
@@ -4747,9 +4749,10 @@ const TimesheetSystem = () => {
               acc[i.currency]++;
               return acc;
             }, {} as Record<string, number>);
-            const totalLabel = accountantInvoiceFilter === 'all'
-              ? 'Total (USD)'
-              : `${accountantInvoiceFilter.charAt(0).toUpperCase() + accountantInvoiceFilter.slice(1)} (USD)`;
+            const totalLabel = accountantInvoiceFilter.size === 0 ? 'Total (USD)'
+              : accountantInvoiceFilter.size === 1
+                ? `${[...accountantInvoiceFilter][0].charAt(0).toUpperCase() + [...accountantInvoiceFilter][0].slice(1)} (USD)`
+                : 'Selected (USD)';
 
 
             return (
@@ -4760,22 +4763,23 @@ const TimesheetSystem = () => {
                     {/* Month pills */}
                     {invoiceMonths.length > 0 && (
                       <div className="flex flex-wrap gap-1.5 items-center">
-                        <button onClick={() => setInvoiceMonthPreset('')}
-                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${!invoiceMonthPreset ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                        <button onClick={() => setInvoiceMonthPreset(new Set())}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoiceMonthPreset.size === 0 ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
                           All months
                         </button>
                         {invoiceMonths.map(ym => {
                           const [y, m] = ym.split('-');
                           const label = new Date(parseInt(y), parseInt(m) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
                           const count = invoices.filter(i => i.periodEnd?.slice(0, 7) === ym).length;
+                          const active = invoiceMonthPreset.has(ym);
                           return (
-                            <button key={ym} onClick={() => setInvoiceMonthPreset(invoiceMonthPreset === ym ? '' : ym)}
-                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoiceMonthPreset === ym ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                            <button key={ym} onClick={() => setInvoiceMonthPreset(prev => { const n = new Set(prev); active ? n.delete(ym) : n.add(ym); return n; })}
+                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
                               {label} <span className="opacity-70">({count})</span>
                             </button>
                           );
                         })}
-                        {invoiceMonthPreset === invoiceMonths[0] && (
+                        {invoiceMonthPreset.size === 1 && [...invoiceMonthPreset][0] === invoiceMonths[0] && (
                           <span className="text-xs text-gray-400 ml-1">Loaded to latest period — select All months to see everything</span>
                         )}
                       </div>
@@ -4784,50 +4788,58 @@ const TimesheetSystem = () => {
                     {payOnDates.length > 0 && (
                       <div className="flex flex-wrap gap-1.5 items-center">
                         <span className="text-xs font-medium text-blue-600 mr-1">Pay On:</span>
-                        <button onClick={() => setInvoicePayOnPreset('')}
-                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${!invoicePayOnPreset ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'}`}>
+                        <button onClick={() => setInvoicePayOnPreset(new Set())}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset.size === 0 ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'}`}>
                           All
                         </button>
                         {payOnDates.map(d => {
                           const label = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
                           const count = prePayOnFiltered.filter(i => i.payOnDate === d).length;
+                          const active = invoicePayOnPreset.has(d);
                           return (
-                            <button key={d} onClick={() => setInvoicePayOnPreset(invoicePayOnPreset === d ? '' : d)}
-                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-blue-700 border-blue-200 hover:border-blue-400'}`}>
+                            <button key={d} onClick={() => setInvoicePayOnPreset(prev => { const n = new Set(prev); active ? n.delete(d) : n.add(d); return n; })}
+                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-blue-700 border-blue-200 hover:border-blue-400'}`}>
                               {label} <span className="opacity-70">({count})</span>
                             </button>
                           );
                         })}
-                        <button onClick={() => setInvoicePayOnPreset(invoicePayOnPreset === 'none' ? '' : 'none')}
-                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset === 'none' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400'}`}>
+                        <button onClick={() => setInvoicePayOnPreset(prev => { const n = new Set(prev); n.has('none') ? n.delete('none') : n.add('none'); return n; })}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset.has('none') ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400'}`}>
                           Not assigned <span className="opacity-70">({prePayOnFiltered.filter(i => !i.payOnDate).length})</span>
                         </button>
                       </div>
                     )}
                     {/* Status pills */}
                     <div className="flex flex-wrap gap-2">
-                      {['all','submitted','approved','paid','rejected'].map(s => (
-                        <button key={s} onClick={() => setAccountantInvoiceFilter(s)}
-                          className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${accountantInvoiceFilter === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
-                          {s === 'all' ? `All (${preStatusFiltered.length})` : s.charAt(0).toUpperCase() + s.slice(1)}
-                          {s !== 'all' && <span className="ml-1.5 text-xs">({preStatusFiltered.filter(i => i.status === s).length})</span>}
-                        </button>
-                      ))}
+                      <button onClick={() => setAccountantInvoiceFilter(new Set())}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${accountantInvoiceFilter.size === 0 ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                        All <span className={`ml-1 text-xs ${accountantInvoiceFilter.size === 0 ? 'opacity-80' : 'opacity-60'}`}>({preStatusFiltered.length})</span>
+                      </button>
+                      {(['submitted','approved','paid','rejected'] as const).map(s => {
+                        const active = accountantInvoiceFilter.has(s);
+                        return (
+                          <button key={s} onClick={() => setAccountantInvoiceFilter(prev => { const n = new Set(prev); active ? n.delete(s) : n.add(s); return n; })}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                            {s.charAt(0).toUpperCase() + s.slice(1)}
+                            <span className={`ml-1.5 text-xs ${active ? 'opacity-80' : 'opacity-60'}`}>({preStatusFiltered.filter(i => i.status === s).length})</span>
+                          </button>
+                        );
+                      })}
                     </div>
                     {/* Payment method pills */}
                     <div className="flex flex-wrap gap-1.5 items-center">
                       <span className="text-xs font-medium text-gray-600 mr-1">Method:</span>
-                      <button onClick={() => setInvoicePaymentMethodPreset('')}
-                        className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${!invoicePaymentMethodPreset ? 'bg-gray-700 text-white border-gray-700' : 'bg-white text-gray-600 border-gray-300 hover:border-gray-500'}`}>
+                      <button onClick={() => setInvoicePaymentMethodPreset(new Set())}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePaymentMethodPreset.size === 0 ? 'bg-gray-700 text-white border-gray-700' : 'bg-white text-gray-600 border-gray-300 hover:border-gray-500'}`}>
                         All
                       </button>
                       {(['Intuit', 'Convera'] as const).map(m => {
-                        const count = preStatusFiltered.filter(i => (accountantInvoiceFilter === 'all' || i.status === accountantInvoiceFilter) && paymentMethod(i) === m).length;
-                        const active = invoicePaymentMethodPreset === m;
+                        const count = preStatusFiltered.filter(i => (accountantInvoiceFilter.size === 0 || accountantInvoiceFilter.has(i.status)) && paymentMethod(i) === m).length;
+                        const active = invoicePaymentMethodPreset.has(m);
                         const activeColor = m === 'Intuit' ? 'bg-green-600 border-green-600 text-white' : 'bg-purple-600 border-purple-600 text-white';
                         const inactiveColor = m === 'Intuit' ? 'bg-white text-green-700 border-green-300 hover:border-green-500' : 'bg-white text-purple-700 border-purple-300 hover:border-purple-500';
                         return (
-                          <button key={m} onClick={() => setInvoicePaymentMethodPreset(active ? '' : m)}
+                          <button key={m} onClick={() => setInvoicePaymentMethodPreset(prev => { const n = new Set(prev); active ? n.delete(m) : n.add(m); return n; })}
                             className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? activeColor : inactiveColor}`}>
                             {m} <span className="opacity-70">({count})</span>
                           </button>
