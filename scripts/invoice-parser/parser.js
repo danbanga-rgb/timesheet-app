@@ -98,6 +98,10 @@ function extractInvoiceNumber(text) {
     // e.g. Tarik: "INVOICE NUMBERDATE OF ISSUEDUE DATE\n...\n707/06/202622/06/2026"
     // → capture digits BEFORE the first DD/MM/YYYY date on the value line
     /INVOICE\s+NUMBER[\s\S]{0,80}?DATE\s+OF\s+ISSUE[\s\S]{0,200}?\n\s*(\d{1,5})(?=\d{2}\/\d{2}\/\d{4})/i,
+    // "005-202606/01/2026" — SD IT USLUGE template: INVOICE and DATE headers merge into
+    // "INVOICEDATE" with the invoice number and date run together on one line.
+    // Capture NNN-YYYY before a DD/MM/YYYY date (which immediately follows with no space).
+    /INVOICEDATE\s*(\d{3}-\d{4})(?=\d{2}\/\d{2}\/\d{4})/i,
     // "IN:806/01/2026" — value smushed with date of issue (Imran's template)
     /\bIN[:\s]+(\d{1,4})(?=\d{2}\/\d{2}\/\d{4})/i,
     // Number on a line by itself directly above "INVOICE NO." (Antonio's template — visual layout
@@ -666,8 +670,54 @@ function parseNativeTeamsTemplate(text) {
   return out;
 }
 
+// Croatian bilingual DOCX template used by SANCODE (Slaven Konforta) and FIX-IT (Nikolina
+// Radošević). Signature: "Račun br." label + "X USD per h x NNN" line item format.
+// These DOCX files contain absolute-position noise values and a EUR parallel column that
+// confuse Claude, so a targeted regex is much more reliable.
+function parseCroatianHrvatskiTemplate(text) {
+  // Both use "Invoice no. / Račun br." but so might others — require the rate line too
+  if (!/\bUSD per h(?:our)?\s+x\s+\d/.test(text)) return null;
+
+  const out = { template: 'croatian_hr', currency: 'USD' };
+
+  // Invoice number: "Invoice no. / Račun br.6-1-1" (no space before number)
+  const inv = text.match(/ra[cčćéç¢g]un\s*br\.?\s*([A-Z0-9][\w\-\/]{1,20})/i);
+  if (inv) out.invoiceNumber = inv[1].trim();
+
+  // Rate, hours, total from "35 USD per h x 168 = 5,880.00 USD" or
+  // "-35 USD per h x 168 = 5,880.00 USD" (the dash is a bullet artifact from extractDocxText)
+  const line = text.match(/-?(\d+(?:\.\d+)?)\s*USD per h(?:our)?\s*x\s*(\d+(?:\.\d+)?)\s*h?\s*=\s*([\d,]+\.?\d*)\s*USD/i);
+  if (line) {
+    out.rate       = parseFloat(line[1]);
+    out.totalHours = parseFloat(line[2]);
+    out.totalAmount = parseFloat(line[3].replace(/,/g, ''));
+  }
+
+  // Period: FIX-IT has an explicit range in the description that the generic extractor finds.
+  // SANCODE only shows the invoice issue date (e.g. "06/01/2026") with no billing period label.
+  // For SANCODE, infer period = previous calendar month relative to the invoice date.
+  // Only apply if the generic extractor would come up empty (no range in text).
+  const hasRange = /\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\s*(?:to|through|[-–—])\s*\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}/i.test(text);
+  if (!hasRange) {
+    // Look for invoice date in MM/DD/YYYY format (US variant present in SANCODE text alongside DD.MM.YYYY)
+    const issueDateMatch = text.match(/(?:place and time of invoice|invoice\s+issued)[^]*?(\d{2}\/\d{2}\/\d{4})/i);
+    if (issueDateMatch) {
+      const [mm, dd, yyyy] = issueDateMatch[1].split('/').map(Number);
+      const issueDate = new Date(yyyy, mm - 1, dd);
+      const pm = issueDate.getMonth() === 0 ? 11 : issueDate.getMonth() - 1;
+      const py = issueDate.getMonth() === 0 ? issueDate.getFullYear() - 1 : issueDate.getFullYear();
+      const lastDay = new Date(py, pm + 1, 0).getDate();
+      const pmStr = String(pm + 1).padStart(2, '0');
+      out.periodStart = `${py}-${pmStr}-01`;
+      out.periodEnd   = `${py}-${pmStr}-${String(lastDay).padStart(2, '0')}`;
+    }
+  }
+
+  return out.rate ? out : null;
+}
+
 function tryTemplateParsers(text) {
-  return parseBimosoftTemplate(text) || parseNativeTeamsTemplate(text) || null;
+  return parseBimosoftTemplate(text) || parseNativeTeamsTemplate(text) || parseCroatianHrvatskiTemplate(text) || null;
 }
 
 function parseInvoice(text, filename) {
