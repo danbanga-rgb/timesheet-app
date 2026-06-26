@@ -2732,13 +2732,20 @@ async function setReplyPendingFlag(userId, weekStart, email) {
 }
 
 // Submit a timesheet via the ingest edge function (YES auto-submit)
-async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, sourceEntries, messageId, runId) {
-  // Zero out weekend hours, preserve weekday pattern
+async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, sourceEntries, sourceWeekStart, messageId, runId) {
+  // Shift entry keys from the source week to the target week
+  const [ty, tm, td] = weekStart.split('-').map(Number);
+  const [sy, sm, sd] = sourceWeekStart.split('-').map(Number);
+  const deltaDays = Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(sy, sm - 1, sd)) / 86400000);
+
   const entries = {};
   for (const [dateKey, entry] of Object.entries(sourceEntries)) {
-    const d = new Date(dateKey);
-    const dow = d.getDay(); // 0=Sun, 6=Sat
-    entries[dateKey] = (dow === 0 || dow === 6)
+    const [ey, em, ed] = dateKey.split('-').map(Number);
+    const shifted = new Date(Date.UTC(ey, em - 1, ed));
+    shifted.setUTCDate(shifted.getUTCDate() + deltaDays);
+    const newKey = shifted.toISOString().slice(0, 10);
+    const dow = shifted.getUTCDay(); // 0=Sun, 6=Sat
+    entries[newKey] = (dow === 0 || dow === 6)
       ? { ...entry, hours: '0' }
       : { ...entry };
   }
@@ -3611,7 +3618,7 @@ async function main() {
               continue;
             }
             await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
-            const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, RUN_ID);
+            const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, lastTs.weekStart, messageId, RUN_ID);
             const ok = ingestRes?.ok !== false;
             console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);
             summary.timesheetReports.push({ action: ok ? 'reply_yes_submitted' : 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject });
@@ -3732,7 +3739,7 @@ async function main() {
               console.warn(`  ⚠️  YES fallback but no approved timesheet history for ${fromEmail}`);
             } else {
               await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
-              const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, messageId, RUN_ID);
+              const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, lastTs.weekStart, messageId, RUN_ID);
               const ok = ingestRes?.ok !== false;
               console.log(`  ${ok ? '✅' : '❌'} YES fallback auto-submitted for ${fromEmail} week ${weekStart}`);
               summary.timesheetReports.push({ action: ok ? 'reply_yes_submitted' : 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject });
