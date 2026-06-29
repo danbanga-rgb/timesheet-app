@@ -1943,6 +1943,31 @@ const TimesheetSystem = () => {
     setPendingUsdRate('');
   };
 
+  async function lockTimesheetDaysForInvoice(userId: string, periodStart: string, periodEnd: string) {
+    const ps = new Date(periodStart + 'T00:00:00Z');
+    const pe = new Date(periodEnd + 'T23:59:59Z');
+    // Fetch weeks that overlap the period (week could start up to 6 days before period_start)
+    const windowStart = new Date(ps.getTime() - 6 * 86400000).toISOString().slice(0, 10);
+    const { data: tsList } = await supabase
+      .from('timesheets')
+      .select('id, week_start')
+      .eq('user_id', userId)
+      .gte('week_start', windowStart)
+      .lte('week_start', periodEnd);
+    if (!tsList?.length) return;
+    for (const ts of tsList) {
+      const days: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(ts.week_start + 'T12:00:00Z');
+        d.setUTCDate(d.getUTCDate() + i);
+        if (d >= ps && d <= pe) days.push(d.toISOString().slice(0, 10));
+      }
+      if (days.length > 0) {
+        await supabase.from('timesheets').update({ locked_days: days }).eq('id', ts.id);
+      }
+    }
+  }
+
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
     const update: Record<string, unknown> = {
       status,
@@ -1960,6 +1985,9 @@ const TimesheetSystem = () => {
       await supabase.from('profiles').update({ payment_terms: paymentTerms }).eq('id', selectedInvoice.userId);
       setUsers(prev => prev.map(u => u.id === selectedInvoice.userId ? { ...u, paymentTerms } : u));
     }
+    if (status === 'approved' && selectedInvoice?.userId && selectedInvoice?.periodStart && selectedInvoice?.periodEnd) {
+      await lockTimesheetDaysForInvoice(selectedInvoice.userId, selectedInvoice.periodStart, selectedInvoice.periodEnd);
+    }
     await fetchInvoices();
     setShowInvoiceModal(false);
     setPendingPayOnDate('');
@@ -1967,7 +1995,6 @@ const TimesheetSystem = () => {
     setPendingPaymentMethod('');
     setPendingPaymentTerms('');
     setPendingUsdRate('');
-    
   };
 
   const toggleCombinePayments = async (profileId: number, current: boolean | null) => {
@@ -1999,6 +2026,9 @@ const TimesheetSystem = () => {
     if (fields.paymentTerms && selectedInvoice?.userId) {
       await supabase.from('profiles').update({ payment_terms: fields.paymentTerms }).eq('id', selectedInvoice.userId);
       setUsers(prev => prev.map(u => u.id === selectedInvoice.userId ? { ...u, paymentTerms: fields.paymentTerms! } : u));
+    }
+    if (fields.status === 'approved' && selectedInvoice?.userId && selectedInvoice?.periodStart && selectedInvoice?.periodEnd) {
+      await lockTimesheetDaysForInvoice(selectedInvoice.userId, selectedInvoice.periodStart, selectedInvoice.periodEnd);
     }
     await fetchInvoices();
     setSelectedInvoice(prev => prev ? {

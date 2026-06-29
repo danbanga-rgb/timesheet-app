@@ -2216,6 +2216,21 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         run_id:          runId,
         forwardedBy:     forwardedBy || null,
       });
+      if (res.body?.error === 'period_locked') {
+        const contractorName = res.body?.userName || ts.resolvedName || contractorEmail;
+        const lockedDays     = res.body?.lockedDays ?? [];
+        const periodLabel    = lockedDays.length
+          ? `${lockedDays[0]} → ${lockedDays[lockedDays.length - 1]}`
+          : ts.weekStart;
+        console.log(`  🔒 PERIOD LOCKED | ${contractorEmail} | ${ts.attachmentName || 'body'} | ${periodLabel}`);
+        results.push({ type: 'timesheet', contractor: contractorEmail, contractorName, week: ts.weekStart, status: res.status, action: 'period_locked', attachmentName: ts.attachmentName || 'body', notes: res.body?.notes || '' });
+        await sendEmail(
+          CONFIG.accountingEmail,
+          `Timesheet rejected — invoice period locked: ${contractorName}`,
+          `${contractorName} (${contractorEmail}) submitted a timesheet that was rejected because the invoice period is already approved.\n\nFile: ${ts.attachmentName || '(body)'}\nLocked period: ${periodLabel}\n\nIf this is a legitimate correction, un-approve the invoice first, then reprocess the email.`
+        );
+        continue;
+      }
       const action = res.body?.action || String(res.status);
       results.push({
         type:           'timesheet',

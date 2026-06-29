@@ -231,15 +231,35 @@ async function upsertTimesheet(
   forwardedBy: string | null = null,
 ): Promise<{
   timesheetId: number | null;
-  action: 'created' | 'updated' | 'correction_imported' | 'correction_pending' | 'duplicate';
+  action: 'created' | 'updated' | 'correction_imported' | 'correction_pending' | 'duplicate' | 'period_locked';
   notes: string;
+  lockedDays?: string[];
 }> {
   const { data: existing } = await supabase
     .from('timesheets')
-    .select('id, source, status, entries')
+    .select('id, source, status, entries, locked_days')
     .eq('user_id', userId)
     .eq('week_start', weekStart)
     .maybeSingle();
+
+  // ── Locked-period gate ────────────────────────────────────────────────────
+  // Days locked when accountant approves the invoice covering that period.
+  // Filter them out of incoming entries; if all days are locked, hard-reject.
+  const lockedDays: string[] = (existing?.locked_days as string[] | null) ?? [];
+  if (lockedDays.length > 0) {
+    const unlockedEntries = Object.fromEntries(
+      Object.entries(entries).filter(([d]) => !lockedDays.includes(d))
+    );
+    if (Object.keys(unlockedEntries).length === 0) {
+      return {
+        timesheetId: existing!.id,
+        action: 'period_locked',
+        notes: `All submitted days (${Object.keys(entries).join(', ')}) are locked — invoice approved for this period`,
+        lockedDays,
+      };
+    }
+    entries = unlockedEntries;
+  }
 
   // ── Rule 1: Native submission exists ─────────────────────────────────────
   // Internal forwarders (accountants) have authority to override portal submissions.
@@ -536,6 +556,34 @@ serve(async (req) => {
       if (action === 'correction_pending') parseStatus = 'correction_pending';
       else if (action === 'correction_imported') parseStatus = 'correction';
       else if (action === 'duplicate') parseStatus = 'duplicate';
+      else if (action === 'period_locked') {
+        parseStatus = 'period_locked';
+        // Return early — poller needs a distinct signal to notify accountant.
+        // Log first, then respond.
+        await supabase.from('email_import_log').insert({
+          message_id:      messageId,
+          from_email:      (forwardedBy as string) || contractorEmail,
+          resolved_email:  contractorEmail,
+          subject:         subject || null,
+          attachment_name: attachmentName || null,
+          parse_status:    'period_locked',
+          parse_notes:     [parseNotes, upsertNotes, resolutionNote].filter(Boolean).join(' | '),
+          user_id:         userId,
+          user_created:    wasCreated,
+          timesheet_id:    timesheetId,
+          week_start:      resolvedWeek || weekStart || null,
+          attempt_count:   attemptCount,
+          run_id:          run_id || null,
+        });
+        return new Response(JSON.stringify({
+          ok:         false,
+          error:      'period_locked',
+          lockedDays: result.lockedDays ?? [],
+          userId,
+          userName,
+          notes:      upsertNotes,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
     } catch (e) {
       parseStatus = 'failed';
       upsertNotes = `Upsert error: ${String(e)}`;
