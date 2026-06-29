@@ -2461,13 +2461,13 @@ const TimesheetSystem = () => {
 
   const exportInvoicesCSV = (list: Invoice[]) => {
     const headers = [
-      'Convera Short Name','Employee','Company Name','Invoice No',
+      'Convera Short Name','Employee','Invoice No',
       'Period Start','Period End','Total Hours','Rate','Total Amount','Currency',
       'Status','Pay On Date','Payment Method','IBAN','SWIFT/BIC','Bank Name',
       'Banking Note','Payment Email','Paid Date',
-      'Country','Bank Address','Bank Branch','Account Number','Company Address','Project'
+      'Country','Bank Address','Bank Branch','Account Number','Project'
     ];
-    let csv = headers.join(',') + '\n';
+    let csv = '﻿' + headers.join(',') + '\n';
     // Find the live payment_profiles record for an invoice — snapshot may have id:0 (Imported)
     // so fall back to IBAN match, then default profile for the contractor.
     const findLiveProfile = (inv: Invoice): typeof paymentProfiles[0] | null => {
@@ -2496,7 +2496,6 @@ const TimesheetSystem = () => {
       const converaShortName = liveProfile?.converaBeneficiaryId
         ? (converaBeneficiaries.find(b => b.id === liveProfile.converaBeneficiaryId)?.shortName || '')
         : '';
-      const companyName = liveProfile?.companyName || pp?.companyName || '';
       // Banking note: NEW COMPANY = no Convera beneficiary linked; NEW = first invoice; CHANGE COMPANY = beneficiary changed from prior month
       const currentBenefId = liveProfile?.converaBeneficiaryId ?? null;
       const prevKey = priorMonthKey(inv.periodEnd);
@@ -2510,7 +2509,6 @@ const TimesheetSystem = () => {
       const row = [
         `"${converaShortName}"`,
         `"${inv.userName}"`,
-        `"${companyName}"`,
         `"${inv.invoiceNumber}"`,
         `"${inv.periodStart}"`,
         `"${inv.periodEnd}"`,
@@ -2531,7 +2529,6 @@ const TimesheetSystem = () => {
         `"${pp?.bankAddress || ''}"`,
         `"${pp?.bankBranch || ''}"`,
         `"${pp?.accountNumber || ''}"`,
-        `"${pp?.companyAddress || ''}"`,
         `"${project?.name || ''}"`,
       ];
       csv += row.join(',') + '\n';
