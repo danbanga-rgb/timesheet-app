@@ -2461,44 +2461,57 @@ const TimesheetSystem = () => {
 
   const exportInvoicesCSV = (list: Invoice[]) => {
     const headers = [
-      'Invoice No','Employee','Project','Period Start','Period End',
-      'Total Hours','Rate','Total Amount','Currency','Status','Submitted','Pay On Date','Paid Date','Payment Method',
-      'Company Name','Company Address','Country',
-      'Bank Name','Bank Address','Bank Branch',
-      'Account Number','IBAN','SWIFT/BIC','Payment Email','Convera Short Name','Banking Note'
+      'Convera Short Name','Employee','Company Name','Invoice No',
+      'Period Start','Period End','Total Hours','Rate','Total Amount','Currency',
+      'Status','Pay On Date','Payment Method','IBAN','SWIFT/BIC','Bank Name',
+      'Banking Note','Payment Email','Paid Date',
+      'Country','Bank Address','Bank Branch','Account Number','Company Address','Project'
     ];
     let csv = headers.join(',') + '\n';
-    // Pre-compute prior-month convera_beneficiary_id per contractor for the CHANGE COMPANY signal
-    const profileBenefId = (profileId: number | null | undefined): number | null => {
-      if (!profileId) return null;
-      return paymentProfiles.find(p => p.id === profileId)?.converaBeneficiaryId ?? null;
+    // Find the live payment_profiles record for an invoice — snapshot may have id:0 (Imported)
+    // so fall back to IBAN match, then default profile for the contractor.
+    const findLiveProfile = (inv: Invoice): typeof paymentProfiles[0] | null => {
+      const pp = inv.paymentProfile;
+      if (!pp) return null;
+      if (pp.id) {
+        const byId = paymentProfiles.find(p => p.id === pp.id);
+        if (byId) return byId;
+      }
+      if (pp.iban) {
+        const byIban = paymentProfiles.find(p => p.userId === inv.userId && p.iban === pp.iban);
+        if (byIban) return byIban;
+      }
+      return paymentProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null;
     };
-    const priorMonthKey = (periodStart: string): string => {
-      const d = parseLocalDate(periodStart);
+    const priorMonthKey = (periodEnd: string): string => {
+      const d = parseLocalDate(periodEnd);
       d.setMonth(d.getMonth() - 1);
       return formatDate(d).slice(0, 7);
     };
+    const fmtDate = (s: string | null) => s ? s.slice(5, 7) + '/' + s.slice(8, 10) + '/' + s.slice(0, 4) : '';
     list.forEach(inv => {
       const project = projects.find(p => p.id === inv.projectId);
       const pp = inv.paymentProfile;
-      const profile = pp ? paymentProfiles.find(p => p.id === pp.id) : null;
-      const converaShortName = profile?.converaBeneficiaryId
-        ? (converaBeneficiaries.find(b => b.id === profile.converaBeneficiaryId)?.shortName || '')
+      const liveProfile = findLiveProfile(inv);
+      const converaShortName = liveProfile?.converaBeneficiaryId
+        ? (converaBeneficiaries.find(b => b.id === liveProfile.converaBeneficiaryId)?.shortName || '')
         : '';
-      // Banking note: NEW COMPANY when current profile has no benef OR no prior invoice;
-      // CHANGE COMPANY when prior month's benef differs from current. Blank otherwise.
-      const currentBenefId = profileBenefId(pp?.id);
+      const companyName = liveProfile?.companyName || pp?.companyName || '';
+      // Banking note: NEW COMPANY = no Convera beneficiary linked; NEW = first invoice; CHANGE COMPANY = beneficiary changed from prior month
+      const currentBenefId = liveProfile?.converaBeneficiaryId ?? null;
       const prevKey = priorMonthKey(inv.periodEnd);
       const priorInv = invoices.find(o => o.userId === inv.userId && o.id !== inv.id && o.periodEnd?.slice(0,7) === prevKey);
-      const priorBenefId = profileBenefId(priorInv?.paymentProfile?.id);
+      const priorLiveProfile = priorInv ? findLiveProfile(priorInv) : null;
+      const priorBenefId = priorLiveProfile?.converaBeneficiaryId ?? null;
       let bankingNote = '';
       if (!currentBenefId) bankingNote = 'NEW COMPANY';
       else if (!priorInv) bankingNote = 'NEW';
       else if (priorBenefId && priorBenefId !== currentBenefId) bankingNote = 'CHANGE COMPANY';
       const row = [
-        `"${inv.invoiceNumber}"`,
+        `"${converaShortName}"`,
         `"${inv.userName}"`,
-        `"${project?.name || 'N/A'}"`,
+        `"${companyName}"`,
+        `"${inv.invoiceNumber}"`,
         `"${inv.periodStart}"`,
         `"${inv.periodEnd}"`,
         inv.totalHours != null ? inv.totalHours.toFixed(2) : '',
@@ -2506,22 +2519,20 @@ const TimesheetSystem = () => {
         inv.totalAmount.toFixed(2),
         `"${inv.currency}"`,
         `"${inv.status}"`,
-        `"${inv.submittedAt ? new Date(inv.submittedAt).toLocaleDateString() : ''}"`,
-        `"${inv.payOnDate ? new Date(inv.payOnDate).toLocaleDateString() : ''}"`,
-        `"${inv.paidDate ? new Date(inv.paidDate).toLocaleDateString() : ''}"`,
-        `"${inv.paymentProfile ? paymentMethod(inv) : ''}"`,
-        `"${pp?.companyName || ''}"`,
-        `"${pp?.companyAddress || ''}"`,
-        `"${pp?.country || ''}"`,
+        `"${fmtDate(inv.payOnDate)}"`,
+        `"${(inv.paymentProfile || inv.paymentMethodOverride) ? paymentMethod(inv) : ''}"`,
+        `"${pp?.iban || ''}"`,
+        `"${pp?.swift || ''}"`,
         `"${pp?.bankName || ''}"`,
+        `"${bankingNote}"`,
+        `"${pp?.paymentEmail || ''}"`,
+        `"${fmtDate(inv.paidDate)}"`,
+        `"${pp?.country || ''}"`,
         `"${pp?.bankAddress || ''}"`,
         `"${pp?.bankBranch || ''}"`,
         `"${pp?.accountNumber || ''}"`,
-        `"${pp?.iban || ''}"`,
-        `"${pp?.swift || ''}"`,
-        `"${pp?.paymentEmail || ''}"`,
-        `"${converaShortName}"`,
-        `"${bankingNote}"`,
+        `"${pp?.companyAddress || ''}"`,
+        `"${project?.name || ''}"`,
       ];
       csv += row.join(',') + '\n';
     });
