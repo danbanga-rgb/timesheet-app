@@ -1590,6 +1590,11 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
+  // Invoice number: always prefix with "INV " if not already — contractors use dates, serials, etc.
+  if (result.invoiceNumber && !/^INV/i.test(result.invoiceNumber)) {
+    result = { ...result, invoiceNumber: 'INV ' + result.invoiceNumber };
+  }
+
   // Future period guard — invoices are always for past work.
   // If periodEnd is in the future, attempt MM/DD↔DD/MM swap; null both dates if not recoverable.
   if (result.periodEnd) {
