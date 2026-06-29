@@ -1100,6 +1100,8 @@ const TimesheetSystem = () => {
         normalisedEntries[date] = { hours: String(val) };
       } else if (typeof val === 'object' && val !== null && 'hours' in val) {
         normalisedEntries[date] = val as TimeEntry;
+      } else if (typeof val === 'object') {
+        normalisedEntries[date] = { hours: '0' };
       } else {
         normalisedEntries[date] = { hours: String(val ?? 0) };
       }
