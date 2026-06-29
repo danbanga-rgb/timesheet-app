@@ -1756,10 +1756,23 @@ const TimesheetSystem = () => {
   }
 
   async function setConveraOverride(profileId: number, beneficiaryId: number | null) {
-    await supabase.from('payment_profiles').update({
+    const update: Record<string, unknown> = {
       convera_beneficiary_id: beneficiaryId,
       convera_match_override: beneficiaryId !== null,
-    }).eq('id', profileId);
+    };
+    // Cascade banking fields from the canonical profile for this beneficiary so that
+    // IBAN/bank/swift/country on the profile always reflect what Convera actually pays to,
+    // not the contractor's personal account from their PDF.
+    if (beneficiaryId !== null) {
+      const canonical = paymentProfiles.find(p => p.id !== profileId && p.converaBeneficiaryId === beneficiaryId && !!p.iban);
+      if (canonical) {
+        update.iban = canonical.iban;
+        update.bank_name = canonical.bankName;
+        update.swift = canonical.swift;
+        update.country = canonical.country;
+      }
+    }
+    await supabase.from('payment_profiles').update(update).eq('id', profileId);
     await fetchPaymentProfiles();
     setBeneficiaryOverrideProfileId(null);
     setBeneficiaryOverrideSearch('');
