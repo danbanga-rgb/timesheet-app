@@ -1789,8 +1789,18 @@ function extractTotalHoursFromBodyProse(text) {
 // 2b. Regex has period + hours, missing payment → Claude for payment details only
 // 2c. Regex missing period or hours → full Claude extract, merge regex on top
 async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null) {
-  // Fast-path: skip regex for known vision-only invoices
-  if (knownTemplate === 'claude_vision') {
+  // Fast-path: skip regex for known vision-only invoices — try Groq vision first, Claude fallback
+  if (knownTemplate === 'claude_vision' || knownTemplate === 'groq_vision') {
+    if (CONFIG.groqApiKey) {
+      const groqResult = await groqVisionExtractInvoice(pdfBuffer, filename);
+      if (groqResult?.periodStart && groqResult?.periodEnd) {
+        const r = postProcessInvoice(applyFilenamePeriodFallback(groqResult, filename), pdfText);
+        if (r) r.parseMethod = 'groq_vision';
+        console.log(`  👁️  Groq vision: ${filename}`);
+        return r;
+      }
+      console.log(`  👁️  Groq vision insufficient — falling back to Claude vision: ${filename}`);
+    }
     if (!CONFIG.anthropicApiKey) return null;
     console.log(`  🤖 Claude vision (known template): ${filename}`);
     const claudeResult = await claudeFullExtractInvoice(null, pdfBuffer, true, filename, emailBodyText);
@@ -1869,6 +1879,19 @@ async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBod
       return r;
     }
     console.log(`  ⚡ Groq insufficient — falling back to Claude: ${filename}`);
+  }
+
+  // ── Step 2d: image PDF with no extractable text — try Groq vision before Claude ──
+  if (CONFIG.groqApiKey && isImagePdf && !pdfText) {
+    const groqResult = await groqVisionExtractInvoice(pdfBuffer, filename);
+    if (groqResult?.periodStart && groqResult?.periodEnd) {
+      const merged = mergeInvoiceResults(regexResult, groqResult);
+      const r = postProcessInvoice(applyFilenamePeriodFallback(merged, filename), pdfText);
+      if (r) r.parseMethod = 'groq_vision';
+      console.log(`  👁️  Groq vision: ${filename}`);
+      return r;
+    }
+    console.log(`  👁️  Groq vision insufficient — falling back to Claude: ${filename}`);
   }
 
   if (!CONFIG.anthropicApiKey) {
@@ -2640,6 +2663,76 @@ async function groqExtractInvoice(preparedText, filename) {
     };
   } catch (e) {
     console.warn(`  ⚠️  Groq invoice exception: ${e.message}`);
+    return null;
+  }
+}
+
+// ─── Groq vision (image PDFs) ─────────────────────────────────────────────────
+// pdfjs-dist v5 is ESM-only; dynamic import is cached so it runs at most once per session.
+let _pdfjsLib = null;
+async function _getPdfjsLib() {
+  if (_pdfjsLib) return _pdfjsLib;
+  const { Image } = require('@napi-rs/canvas');
+  globalThis.Image = Image; // pdfjs inline image decoder needs Image in globalThis
+  _pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  return _pdfjsLib;
+}
+
+async function pdfToJpegBase64(pdfBuffer) {
+  const { createCanvas } = require('@napi-rs/canvas');
+  const pdfjsLib = await _getPdfjsLib();
+
+  class NapiCanvasFactory {
+    create(w, h) { const c = createCanvas(w, h); return { canvas: c, context: c.getContext('2d') }; }
+    reset(cc, w, h) { cc.canvas.width = w; cc.canvas.height = h; }
+    destroy(cc) {}
+  }
+
+  const factory = new NapiCanvasFactory();
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(pdfBuffer), canvasFactory: factory }).promise;
+  const page = await pdf.getPage(1);
+  const viewport = page.getViewport({ scale: 2.0 });
+  const { canvas, context } = factory.create(viewport.width, viewport.height);
+  await page.render({ canvasContext: context, viewport, canvasFactory: factory }).promise;
+  return (await canvas.encode('jpeg', 85)).toString('base64');
+}
+
+async function groqVisionExtractInvoice(pdfBuffer, filename) {
+  if (!CONFIG.groqApiKey || !pdfBuffer) return null;
+  try {
+    const b64 = await pdfToJpegBase64(pdfBuffer);
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } },
+            { type: 'text', text: `Filename: ${filename}\n\n${GROQ_INVOICE_SYSTEM}` },
+          ],
+        }],
+        max_tokens: 400,
+        temperature: 0,
+      }),
+    });
+    if (!res.ok) { console.warn(`  ⚠️  Groq vision error ${res.status}`); return null; }
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || '';
+    const parsed = JSON.parse(raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, ''));
+    return {
+      periodStart:    parsed.periodStart    || null,
+      periodEnd:      parsed.periodEnd      || null,
+      totalHours:     parsed.totalHours     ?? null,
+      rate:           parsed.rate           ?? null,
+      totalAmount:    parsed.totalAmount    ?? null,
+      currency:       parsed.currency       || null,
+      invoiceNumber:  parsed.invoiceNumber  || null,
+      paymentDetails: parsed.paymentDetails || {},
+    };
+  } catch (e) {
+    console.warn(`  ⚠️  Groq vision exception: ${e.message}`);
     return null;
   }
 }
@@ -3507,6 +3600,7 @@ ${'─'.repeat(50)}
       methodCounts[m] = (methodCounts[m] || 0) + 1;
     }
     const claudeCalls = (methodCounts['regex+claude_payment'] || 0) + (methodCounts['claude_full'] || 0) + (methodCounts['claude_vision'] || 0);
+    const groqCalls   = (methodCounts['groq'] || 0) + (methodCounts['groq_vision'] || 0);
     const regexOnly   = (methodCounts['regex'] || 0) + (methodCounts['regex_no_payment'] || 0) + (methodCounts['regex_partial'] || 0);
 
     body += `
@@ -3514,9 +3608,11 @@ INVOICE PARSE REPORTS (${summary.invoiceReports.length})${CONFIG.invoiceIngestEn
 ${'─'.repeat(50)}
 Parse method breakdown:
   Regex-only          : ${regexOnly}  (0 Claude calls)
+  Groq text           : ${methodCounts['groq'] || 0}  (free)
+  Groq vision         : ${methodCounts['groq_vision'] || 0}  (free)
   Regex + Claude pay  : ${methodCounts['regex+claude_payment'] || 0}  (payment details only, ~256 tokens each)
   Claude full         : ${(methodCounts['claude_full'] || 0) + (methodCounts['claude_vision'] || 0)}  ${methodCounts['claude_vision'] ? `(${methodCounts['claude_vision']} vision)` : ''}
-  Claude calls total  : ${claudeCalls}
+  Groq total          : ${groqCalls}  Claude total: ${claudeCalls}
 `;
     for (const inv of summary.invoiceReports) {
       const p = inv.parsed;
