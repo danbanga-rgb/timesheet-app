@@ -716,8 +716,77 @@ function parseCroatianHrvatskiTemplate(text) {
   return out.rate ? out : null;
 }
 
+// Hooksoft template used by Mirza Hukić. PDF text-extraction merges columns:
+// "Software developmentUSD 4800.0030.00\n(hrs)\n160" where 4800.00 = total and 30.00 = rate.
+function parseHooksoftTemplate(text) {
+  if (!/Hooksoft/i.test(text)) return null;
+  const out = { template: 'hooksoft', currency: 'USD' };
+
+  const inv = text.match(/Invoice\s+No\.\s*\n\s*(\S+)/i);
+  if (inv) out.invoiceNumber = inv[1];
+
+  // Date field is "DD-MM-YYYY"; derive full calendar month as billing period.
+  const dt = text.match(/\bDate\s*\n\s*(\d{2})-(\d{2})-(\d{4})/i);
+  if (dt) {
+    const mm = dt[2];
+    const yyyy = dt[3];
+    const lastDay = new Date(+yyyy, +mm, 0).getDate();
+    out.periodStart = `${yyyy}-${mm}-01`;
+    out.periodEnd   = `${yyyy}-${mm}-${String(lastDay).padStart(2, '0')}`;
+  }
+
+  // Rate: last decimal value on the concatenated amount+rate line, right before the "(hrs)" line.
+  const rateM = text.match(/(\d+\.\d{2})\s*\n\s*\(hrs\)/i);
+  if (rateM) out.rate = parseFloat(rateM[1]);
+
+  const hrsM = text.match(/\(hrs\)\s*\n\s*(\d+)/i);
+  if (hrsM) out.totalHours = parseFloat(hrsM[1]);
+
+  // "TotalUSD 4,800.00"
+  const totalM = text.match(/TotalUSD\s*([\d,]+\.?\d*)/i);
+  if (totalM) out.totalAmount = cleanNum(totalM[1]);
+
+  return out.totalAmount ? out : null;
+}
+
+// VEB PORTALI template used by Vladimir Simsic. Header line encodes period and invoice number;
+// rate line uses European decimal format with "$/HOUR" unit.
+function parseVebPortaliTemplate(text) {
+  if (!/VEB\s+PORTALI/i.test(text)) return null;
+  const out = { template: 'veb_portali', currency: 'USD' };
+
+  // "INVOICE SYNERGIE 06/01-30/2026." → invoice number = "06/01-30/2026"
+  const inv = text.match(/INVOICE\s+SYNERGIE\s+([^\s.]+)/i);
+  if (inv) out.invoiceNumber = inv[1];
+
+  // Period: MM/startDay-endDay/YYYY
+  const period = text.match(/INVOICE\s+SYNERGIE\s+(\d{2})\/(\d{2})-(\d{2})\/(\d{4})/i);
+  if (period) {
+    const [, mm, sd, ed, yyyy] = period;
+    out.periodStart = `${yyyy}-${mm}-${sd}`;
+    out.periodEnd   = `${yyyy}-${mm}-${ed}`;
+  }
+
+  // "20 $/HOUR 176 3.520,00 USD" — rate precedes $/HOUR, hours follow it, total in European format
+  const rateM = text.match(/(\d+)\s*\$\/HOUR/i);
+  if (rateM) out.rate = parseFloat(rateM[1]);
+
+  const hrsM = text.match(/\$\/HOUR\s+(\d+)/i);
+  if (hrsM) out.totalHours = parseFloat(hrsM[1]);
+
+  const totalM = text.match(/([\d.]+,\d{2})\s*USD/i);
+  if (totalM) out.totalAmount = cleanNum(totalM[1]);
+
+  return out.totalAmount ? out : null;
+}
+
 function tryTemplateParsers(text) {
-  return parseBimosoftTemplate(text) || parseNativeTeamsTemplate(text) || parseCroatianHrvatskiTemplate(text) || null;
+  return parseBimosoftTemplate(text)
+    || parseNativeTeamsTemplate(text)
+    || parseCroatianHrvatskiTemplate(text)
+    || parseHooksoftTemplate(text)
+    || parseVebPortaliTemplate(text)
+    || null;
 }
 
 function parseInvoice(text, filename) {
