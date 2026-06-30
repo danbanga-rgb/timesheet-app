@@ -326,6 +326,7 @@ interface ConveraPaymentRow {
   invoiceRef: string;       // from "Re: Inv#" for Convera; empty for Intuit
   suggestedDate: string;    // date from Intuit email; empty for Convera
   matchedInvoice: Invoice | null;
+  matchLevel?: number;      // 1-4: confidence (1=highest); undefined=no match
   selected: boolean;
 }
 
@@ -2175,39 +2176,79 @@ const TimesheetSystem = () => {
     return (s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
   }
 
-  // Match a Convera/QB payment row to an invoice.
-  // Invoice ref alone is not enough — many contractors reuse sequential numbers (e.g. "6-1-1").
-  // Strategy:
-  //   1. All invoices whose ref matches → prefer the one whose company name is also compatible.
-  //   2. If no company match, prefer the one whose amount is within $0.02.
-  //   3. If no ref match at all, fall back to company name + amount.
-  function matchPaymentToInvoice(invoiceRef: string, beneficiary: string, amount: number): Invoice | null {
-    const normRef   = normaliseRef(invoiceRef);
-    const normBenef = normaliseCompany(beneficiary);
+  function normaliseBeneficiaryName(s: string): string {
+    return (s || '').toUpperCase().replace(/[^A-Z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
 
-    if (invoiceRef) {
-      const refMatches = invoices.filter(inv => normaliseRef(inv.invoiceNumber) === normRef);
+  // 5-level payment matching:
+  // Resolves Convera beneficiary name → converaBeneficiaryId → user IDs → candidate invoices.
+  // Then applies: L1=ref, L2=+amount, L3=+date proximity, L4=amount-only, L5=flag (null).
+  function matchPaymentToInvoice(
+    invoiceRef: string,
+    beneficiary: string,
+    amount: number,
+    paymentDate?: string,  // YYYY-MM-DD; undefined for PDF/QB where date isn't available
+  ): { invoice: Invoice; level: number } | null {
+    const normRef = normaliseRef(invoiceRef);
 
-      // Ref + company name
-      if (normBenef) {
-        const byCompany = refMatches.find(inv => {
-          const c = normaliseCompany(inv.paymentProfile?.companyName ?? inv.userName);
-          return c.length > 2 && (c.includes(normBenef) || normBenef.includes(c));
-        });
-        if (byCompany) return byCompany;
-      }
+    // Resolve Convera short name → beneficiary ID → candidate invoices for those users
+    const normBenefName = normaliseBeneficiaryName(beneficiary);
+    const matchedBenef = normBenefName
+      ? converaBeneficiaries.find(b => normaliseBeneficiaryName(b.shortName) === normBenefName)
+      : null;
 
-      // Ref + amount (catches cases where company name isn't in our DB — e.g. Ivica → NET SCALE)
-      const byAmount = refMatches.find(inv => Math.abs(inv.totalAmount - amount) < 0.02);
-      if (byAmount) return byAmount;
+    let pool: Invoice[];
+    if (matchedBenef) {
+      const userIds = new Set(
+        paymentProfiles
+          .filter(p => p.converaBeneficiaryId === matchedBenef.id)
+          .map(p => p.userId)
+      );
+      pool = invoices.filter(inv => userIds.has(inv.userId) && inv.status !== 'paid');
+    } else {
+      pool = invoices.filter(inv => inv.status !== 'paid');
     }
 
-    // Pure company + amount fallback (no ref match)
-    if (normBenef) {
-      return invoices.find(inv => {
-        const c = normaliseCompany(inv.paymentProfile?.companyName ?? inv.userName);
-        return c.length > 2 && (c.includes(normBenef) || normBenef.includes(c)) && Math.abs(inv.totalAmount - amount) < 0.02;
-      }) ?? null;
+    const parseYMD = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+    // Keep if no payOnDate on invoice (no date to compare); reject if set and >15 days from payment
+    const withinWindow = (inv: Invoice): boolean => {
+      if (!paymentDate || !inv.payOnDate) return true;
+      return Math.abs(parseYMD(paymentDate) - parseYMD(inv.payOnDate)) / 86400000 <= 15;
+    };
+    const closestDate = (a: Invoice, b: Invoice): number => {
+      if (paymentDate && a.payOnDate && b.payOnDate) {
+        const da = Math.abs(parseYMD(paymentDate) - parseYMD(a.payOnDate));
+        const db = Math.abs(parseYMD(paymentDate) - parseYMD(b.payOnDate));
+        if (da !== db) return da - db;
+      }
+      return a.periodStart.localeCompare(b.periodStart);
+    };
+
+    if (normRef) {
+      // Level 1: pool + ref → exactly 1
+      const byRef = pool.filter(inv => normaliseRef(inv.invoiceNumber) === normRef);
+      if (byRef.length === 1) return { invoice: byRef[0], level: 1 };
+
+      if (byRef.length > 1) {
+        // Level 2: + amount
+        const byRefAmt = byRef.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
+        if (byRefAmt.length === 1) return { invoice: byRefAmt[0], level: 2 };
+
+        if (byRefAmt.length > 1) {
+          // Level 3: + date proximity; pick closest, fall through if all outside window
+          const byRefAmtDate = byRefAmt.filter(withinWindow);
+          if (byRefAmtDate.length >= 1) return { invoice: [...byRefAmtDate].sort(closestDate)[0], level: 3 };
+        }
+      }
+    }
+
+    // Level 4: ref didn't resolve — pool + amount [+ date proximity]
+    const byAmt = pool.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
+    if (byAmt.length === 1) return { invoice: byAmt[0], level: 4 };
+    if (byAmt.length > 1) {
+      const byAmtDate = byAmt.filter(withinWindow);
+      if (byAmtDate.length === 1) return { invoice: byAmtDate[0], level: 4 };
+      // Multiple candidates even after date filter → Level 5: flag, never guess
     }
 
     return null;
@@ -2229,8 +2270,8 @@ const TimesheetSystem = () => {
       const json = await resp.json();
       if (!resp.ok || json.error) { setConveraError(json.error || 'Parse failed'); return; }
       const rows: ConveraPaymentRow[] = (json.payments || []).map((p: { itemNumber: string; beneficiary: string; amount: number; currency: string; invoiceRef: string }) => {
-        const match = matchPaymentToInvoice(p.invoiceRef ?? '', p.beneficiary ?? '', p.amount ?? 0);
-        return { source: 'convera' as const, suggestedDate: '', ...p, matchedInvoice: match ?? null, selected: !!match && match.status !== 'paid' };
+        const m = matchPaymentToInvoice(p.invoiceRef ?? '', p.beneficiary ?? '', p.amount ?? 0);
+        return { source: 'convera' as const, suggestedDate: '', ...p, matchedInvoice: m?.invoice ?? null, matchLevel: m?.level, selected: !!m && m.invoice.status !== 'paid' };
       });
       setConveraRows(rows);
       if (!converaPaidDate) setConveraPaidDate(new Date().toISOString().slice(0, 10));
@@ -2283,6 +2324,7 @@ const TimesheetSystem = () => {
       const payments: ConveraPaymentRow[] = [];
       for (let i = 1; i < rawRows.length; i++) {
         const r = rawRows[i];
+        const dateOfOrder = excelSerial(r[1] as number);
         const beneficiary = String(r[4] ?? '').trim();
         const amount      = parseFloat(String(r[5]));
         const ref1        = String(r[6] ?? '').trim();
@@ -2292,7 +2334,7 @@ const TimesheetSystem = () => {
         const invMatch   = ref1.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
         const invoiceRef = invMatch?.[1]?.trim() ?? '';
 
-        const matchedInvoice = matchPaymentToInvoice(invoiceRef, beneficiary, amount);
+        const m = matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined);
 
         payments.push({
           source: 'convera',
@@ -2302,8 +2344,9 @@ const TimesheetSystem = () => {
           currency: 'USD',
           invoiceRef,
           suggestedDate: valueDate,
-          matchedInvoice,
-          selected: !!matchedInvoice && matchedInvoice.status !== 'paid',
+          matchedInvoice: m?.invoice ?? null,
+          matchLevel: m?.level,
+          selected: !!m && m.invoice.status !== 'paid',
         });
       }
 
@@ -2372,7 +2415,7 @@ const TimesheetSystem = () => {
         const invMatch = memo.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
         const invoiceRef = invMatch?.[1]?.trim() ?? '';
 
-        const matchedInvoice = matchPaymentToInvoice(invoiceRef, name, amt);
+        const m = matchPaymentToInvoice(invoiceRef, name, amt, paidDate || undefined);
 
         payments.push({
           source: 'quickbooks',
@@ -2382,8 +2425,9 @@ const TimesheetSystem = () => {
           currency: 'USD',
           invoiceRef,
           suggestedDate: paidDate,
-          matchedInvoice,
-          selected: !!matchedInvoice && matchedInvoice.status !== 'paid',
+          matchedInvoice: m?.invoice ?? null,
+          matchLevel: m?.level,
+          selected: !!m && m.invoice.status !== 'paid',
         });
       }
 
@@ -2434,6 +2478,7 @@ const TimesheetSystem = () => {
         invoiceRef: '',
         suggestedDate,
         matchedInvoice: match,
+        matchLevel: match ? 4 : undefined,
         selected: !!match,
       };
     });
@@ -6363,7 +6408,10 @@ const TimesheetSystem = () => {
                                     {hasInvRefs && <td className="px-3 py-2 text-xs text-gray-500 font-mono">{row.invoiceRef || '—'}</td>}
                                     <td className="px-3 py-2 text-xs">
                                       {row.matchedInvoice
-                                        ? <span className="text-gray-800">{row.matchedInvoice.invoiceNumber} <span className="text-gray-400">· {row.matchedInvoice.userName}</span></span>
+                                        ? <span className="text-gray-800">
+                                            {row.matchedInvoice.invoiceNumber} <span className="text-gray-400">· {row.matchedInvoice.userName}</span>
+                                            {(row.matchLevel ?? 0) >= 3 && <span className="ml-1.5 px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs font-medium" title={`Weak match (level ${row.matchLevel}) — verify before applying`}>weak</span>}
+                                          </span>
                                         : <span className="text-red-500 italic">No match</span>}
                                     </td>
                                     <td className="px-3 py-2 text-center">
