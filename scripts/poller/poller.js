@@ -2316,11 +2316,19 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         if (parsed.rate == null && bodyResult?.rate != null) { parsed.rate = bodyResult.rate; changed.push(`rate→${bodyResult.rate}`); }
         if (parsed.totalAmount == null && bodyResult?.totalAmount != null) { parsed.totalAmount = bodyResult.totalAmount; changed.push(`amount→${bodyResult.totalAmount}`); }
         // Extend period if body has wider range (e.g. invoice spans two months but PDF only extracted one)
+        // Never extend periodEnd into the future — forwarded subjects/signatures often contain
+        // stray date strings (e.g. Zejd's recurring subject "Zejd Koco - September 2025") that
+        // the regex mistakes for a billing period.
         if (bodyResult?.periodStart && parsed.periodStart && bodyResult.periodStart < parsed.periodStart) {
           parsed.periodStart = bodyResult.periodStart; changed.push(`periodStart→${bodyResult.periodStart}`);
         }
         if (bodyResult?.periodEnd && parsed.periodEnd && bodyResult.periodEnd > parsed.periodEnd) {
-          parsed.periodEnd = bodyResult.periodEnd; changed.push(`periodEnd→${bodyResult.periodEnd}`);
+          const bodyEndMs = new Date(bodyResult.periodEnd + 'T12:00:00Z').getTime();
+          if (bodyEndMs <= Date.now()) {
+            parsed.periodEnd = bodyResult.periodEnd; changed.push(`periodEnd→${bodyResult.periodEnd}`);
+          } else {
+            changed.push(`periodEnd extend REJECTED (${bodyResult.periodEnd} in future)`);
+          }
         }
       } catch {}
       if (changed.length) {

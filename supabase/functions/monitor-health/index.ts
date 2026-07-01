@@ -4,11 +4,13 @@
 // when a threshold is breached, subject to per-SLO frequency caps.
 //
 // SLOs:
-//   1. poller_heartbeat   — gap > 90 min during weekday 9am-5pm ET       cap: 1/day
-//   2. claude_usage       — any Claude invoice call this week             cap: 1/week
-//   4. recon_mismatch     — any reconciliation mismatch in last 24h       cap: 1/day
-//   6. unprocessed_count  — any full parse miss (no DB record) in 7 days  cap: 1/day
-//   7. edge_5xx           — any edge function 5xx in last 6h              cap: 1/6h
+//   1. poller_heartbeat     — gap > 90 min during weekday 9am-5pm ET     cap: 1/day
+//   2. claude_usage         — any Claude invoice call this week           cap: 1/week
+//   4. recon_mismatch       — any reconciliation mismatch in last 24h     cap: 1/day
+//   6. unprocessed_count    — any full parse miss (no DB record) in 7 days cap: 1/day
+//   7. edge_5xx             — any edge function 5xx in last 6h            cap: 1/6h
+//   8. zero_hour_timesheet  — 0h approved timesheet for completed week    cap: 1/day
+//                              from a contractor with non-zero history
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -176,6 +178,88 @@ async function checkUnprocessedCount(supabase: ReturnType<typeof createClient>):
   };
 }
 
+async function checkZeroHourTimesheet(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
+  const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
+    key: 'zero_hour_timesheet',
+    threshold: '0 zero-hour timesheets for completed weeks (excluding known-inactive contractors)',
+    capMinutes: 24 * 60,
+    actionSuggestion: 'Query: SELECT id,user_id,user_name,week_start,entries FROM timesheets WHERE status IN (approved,correction_pending) AND week_start >= NOW()-INTERVAL \'30 days\'. Inspect entries JSON — likely parser or auto-YES bug (empty {} entries mean hours were silently dropped). Repair the timesheet and file a bug for the ingest path.',
+  };
+
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const historyStart = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  // Pull recent timesheets (approved or correction_pending) whose week has completed
+  const { data: recent, error } = await supabase
+    .from('timesheets')
+    .select('id, user_id, user_name, week_start, entries, source, status')
+    .in('status', ['approved', 'correction_pending'])
+    .gte('week_start', since);
+
+  if (error) {
+    return { ...base, ok: true, current: 'query error', details: `Could not query timesheets: ${error.message}` };
+  }
+
+  const sumHours = (entries: unknown): number => {
+    if (!entries || typeof entries !== 'object') return 0;
+    return Object.values(entries as Record<string, unknown>).reduce((acc: number, e) => {
+      if (typeof e === 'number') return acc + e;
+      if (e && typeof e === 'object') {
+        const h = (e as { hours?: string | number }).hours;
+        const n = typeof h === 'number' ? h : parseFloat(String(h ?? 0));
+        return acc + (isFinite(n) ? n : 0);
+      }
+      return acc;
+    }, 0);
+  };
+
+  // Filter: completed weeks (week_start + 6 days < today) with 0 total hours
+  const zeros = (recent || []).filter((t: { week_start: string; entries: unknown }) => {
+    const weekEnd = new Date(t.week_start);
+    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
+    if (weekEnd.toISOString().slice(0, 10) >= todayIso) return false; // week not complete
+    return sumHours(t.entries) === 0;
+  });
+
+  if (zeros.length === 0) {
+    return { ...base, ok: true, current: '0 zero-hour timesheets flagged', details: 'All recent completed-week timesheets have hours' };
+  }
+
+  // Filter out contractors with legitimately-zero history (LOA users) — only flag if they have
+  // ≥1 timesheet in the prior 90 days with non-zero hours
+  const userIds = [...new Set(zeros.map((t) => t.user_id))];
+  const { data: history } = await supabase
+    .from('timesheets')
+    .select('user_id, entries')
+    .in('user_id', userIds)
+    .gte('week_start', historyStart);
+
+  const usersWithHistory = new Set<string>();
+  for (const h of history || []) {
+    if (sumHours((h as { entries: unknown }).entries) > 0) {
+      usersWithHistory.add((h as { user_id: string }).user_id);
+    }
+  }
+
+  const suspicious = zeros.filter((t) => usersWithHistory.has(t.user_id));
+
+  if (suspicious.length === 0) {
+    return { ...base, ok: true, current: `${zeros.length} zero-hour timesheet(s), all from inactive contractors`, details: 'No flags (contractors have no non-zero history — likely LOA)' };
+  }
+
+  const preview = suspicious.slice(0, 5)
+    .map((t) => `${t.user_name} (id ${t.id}, week ${t.week_start})`)
+    .join('; ');
+
+  return {
+    ...base,
+    ok: false,
+    current: `${suspicious.length} zero-hour timesheet(s) flagged`,
+    details: `Contractors with non-zero recent history submitted 0h for a completed week: ${preview}${suspicious.length > 5 ? ` (+${suspicious.length - 5} more)` : ''}`,
+  };
+}
+
 async function checkEdge5xx(supabasePat: string, projectRef: string): Promise<SloResult> {
   const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
     key: 'edge_5xx',
@@ -319,6 +403,7 @@ serve(async (req) => {
     checkClaudeUsage(supabase),
     checkReconMismatch(supabase),
     checkUnprocessedCount(supabase),
+    checkZeroHourTimesheet(supabase),
     checkEdge5xx(SUPABASE_PAT, PROJECT_REF),
   ]);
 
