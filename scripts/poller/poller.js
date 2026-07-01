@@ -1822,6 +1822,59 @@ function extractTotalHoursFromBodyProse(text) {
   return null;
 }
 
+// Verification pass: runs Groq vision INDEPENDENTLY of the primary parse and compares field-by-field.
+// Zero production impact — only writes into email_invoice_log.groq_vision_verification for later
+// analysis. Enables phased migration to Groq-primary once we have data on agreement rate.
+// Returns null on any error (Groq HTTP failure, Qwen exception, etc.) — errors are logged as "no vote".
+async function runGroqVisionVerification(primary, pdfBuffer, filename) {
+  if (!CONFIG.groqApiKey || !pdfBuffer) return null;
+  let gv;
+  try { gv = await groqVisionExtractInvoice(pdfBuffer, filename); }
+  catch (e) {
+    return { ok: false, error: `groq_vision_exception: ${e.message}`, groq: null, primary: null, agreement: null };
+  }
+  if (!gv) return { ok: false, error: 'groq_vision_returned_null', groq: null, primary: null, agreement: null };
+
+  const p = primary || {};
+  const cmp = (a, b) => {
+    if (a == null && b == null) return 'both_null';
+    if (a == null) return 'primary_null_groq_has_value';
+    if (b == null) return 'primary_has_value_groq_null';
+    // Numeric equality within 0.5% tolerance
+    if (typeof a === 'number' && typeof b === 'number') {
+      return Math.abs(a - b) / Math.max(1, Math.abs(a)) < 0.005 ? 'agree' : 'disagree';
+    }
+    return String(a) === String(b) ? 'agree' : 'disagree';
+  };
+  const agreement = {
+    periodStart: cmp(p.periodStart, gv.periodStart),
+    periodEnd:   cmp(p.periodEnd,   gv.periodEnd),
+    totalHours:  cmp(p.totalHours,  gv.totalHours),
+    rate:        cmp(p.rate,        gv.rate),
+    totalAmount: cmp(p.totalAmount, gv.totalAmount),
+  };
+  return {
+    ok: true,
+    primary: {
+      periodStart: p.periodStart ?? null,
+      periodEnd:   p.periodEnd   ?? null,
+      totalHours:  p.totalHours  ?? null,
+      rate:        p.rate        ?? null,
+      totalAmount: p.totalAmount ?? null,
+      parseMethod: p.parseMethod ?? null,
+    },
+    groq: {
+      periodStart: gv.periodStart ?? null,
+      periodEnd:   gv.periodEnd   ?? null,
+      totalHours:  gv.totalHours  ?? null,
+      rate:        gv.rate        ?? null,
+      totalAmount: gv.totalAmount ?? null,
+    },
+    agreement,
+    verified_at: new Date().toISOString(),
+  };
+}
+
 // Gap-filler using Groq vision (free tier). Runs after any successful parse that came back
 // with missing period/hours/rate/total. Since Groq vision is zero-cost, we always try it as
 // a verification layer when the primary parse was incomplete. Only fills MISSING fields —
@@ -2385,6 +2438,18 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     if (knownTemplate) console.log(`  📋 Known template for ${contractorEmail}: ${knownTemplate}`);
     let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name, bodyText || '', knownTemplate);
     if (parsed) parsed = applyEarlyMonthPeriodFix(parsed);
+    // Shadow verification (Phase 1): run Groq vision alongside, compare, log — does NOT affect
+    // the primary parse or what goes into the DB. Enables data-driven decision on flipping
+    // Groq to primary in a future phase. See project-parser-verification memo.
+    const groqVerification = await runGroqVisionVerification(parsed, att.buffer, att.name);
+    if (groqVerification?.agreement) {
+      const disagreements = Object.entries(groqVerification.agreement).filter(([, v]) => v === 'disagree');
+      if (disagreements.length > 0) {
+        console.log(`  🔍 Groq verification: DISAGREES on ${disagreements.map(([k]) => k).join(', ')} for ${att.name}`);
+      } else {
+        console.log(`  🔍 Groq verification: agrees with primary for ${att.name}`);
+      }
+    }
     // Supplement/extend from email body:
     // - fills missing fields (totalHours, rate, totalAmount)
     // - extends period if body shows a wider date range than the PDF extracted
@@ -2487,6 +2552,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
             forwardedBy:     forwardedBy || null,
             groupKey,
             attachmentHash:  attHash,
+            groqVisionVerification: groqVerification,
           }, CONFIG.invoiceIngestUrl);
           const action = res.body?.action || res.body?.error || String(res.status);
           console.log(`    [${ci+1}] ${profile.name} → ${action}`);

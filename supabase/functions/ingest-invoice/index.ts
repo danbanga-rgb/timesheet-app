@@ -270,6 +270,9 @@ serve(async (req) => {
     correctionHint,
     // SHA-256 hex digest of the attachment bytes (for dedup analytics)
     attachmentHash,
+    // Phase 1 shadow verification: Groq vision's parse of the same PDF for later comparison.
+    // Never affects the invoice row — logged only. See project-parser-verification.
+    groqVisionVerification,
   } = body as Record<string, unknown>;
 
   if (!messageId || !contractorEmail) {
@@ -738,6 +741,7 @@ serve(async (req) => {
           raw_extracted:   body.rawExtracted ?? null,
           attempt_count:   attemptCount,
           attachment_hash: (attachmentHash as string) || null,
+          groq_vision_verification: (groqVisionVerification as Record<string, unknown>) || null,
         });
         return new Response(JSON.stringify({
           ok: true, action: 'corrected', parseStatus: 'success',
@@ -782,6 +786,7 @@ serve(async (req) => {
         period_end:      parsedPeriodEnd,
         attempt_count:   attemptCount,
         attachment_hash: (attachmentHash as string) || null,
+          groq_vision_verification: (groqVisionVerification as Record<string, unknown>) || null,
       });
 
       return new Response(JSON.stringify({
@@ -892,6 +897,7 @@ serve(async (req) => {
     raw_extracted:   body.rawExtracted ?? null,
     attempt_count:   attemptCount,
     attachment_hash: (attachmentHash as string) || null,
+          groq_vision_verification: (groqVisionVerification as Record<string, unknown>) || null,
   });
 
   return new Response(JSON.stringify({
