@@ -2584,8 +2584,9 @@ async function classifyReply(bodyText, contractorName) {
           { role: 'system', content: GROQ_CLASSIFIER_SYSTEM },
           { role: 'user', content: `Contractor: ${contractorName}\nReply: ${strippedBody}` },
         ],
-        max_tokens: 60,
+        max_tokens: 400,
         temperature: 0,
+        response_format: { type: 'json_object' },
       }),
     });
     if (!res.ok) {
@@ -2594,7 +2595,7 @@ async function classifyReply(bodyText, contractorName) {
     }
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = JSON.parse(raw);
+    const parsed = parseQwenJson(raw);
     return { intent: parsed.intent || 'NO', hours: parsed.hours || null, notes: parsed.notes || null };
   } catch (e) {
     console.warn(`  ⚠️  Groq classify error: ${e.message}`);
@@ -2645,14 +2646,15 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
           { role: 'system', content: GROQ_SANITY_SYSTEM },
           { role: 'user', content: userMsg },
         ],
-        max_tokens: 80,
+        max_tokens: 500,
         temperature: 0,
+        response_format: { type: 'json_object' },
       }),
     });
     if (!res.ok) return { assessment: 'unclear', suggested_week: null, reason: `groq_error_${res.status}` };
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = JSON.parse(raw);
+    const parsed = parseQwenJson(raw);
     // Validate suggested_week: must be a plausible Monday within last 6 months
     let suggestedWeek = parsed.suggested_week || null;
     if (suggestedWeek) {
@@ -2697,6 +2699,18 @@ Rules:
 - Set unknown fields to null
 - Dates in YYYY-MM-DD format only`;
 
+// Qwen thinking-mode strip: models emit <think>...</think> reasoning tokens before
+// the actual JSON. Strip them and any code fences before parsing.
+function parseQwenJson(raw) {
+  if (!raw) throw new Error('empty response');
+  const cleaned = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+  return JSON.parse(cleaned);
+}
+
 async function groqExtractInvoice(preparedText, filename) {
   if (!CONFIG.groqApiKey || !preparedText) return null;
   try {
@@ -2709,14 +2723,15 @@ async function groqExtractInvoice(preparedText, filename) {
           { role: 'system', content: GROQ_INVOICE_SYSTEM },
           { role: 'user', content: `Filename: ${filename}\n\n${preparedText}` },
         ],
-        max_tokens: 350,
+        max_tokens: 1500,
         temperature: 0,
+        response_format: { type: 'json_object' },
       }),
     });
     if (!res.ok) { console.warn(`  ⚠️  Groq invoice error ${res.status}`); return null; }
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = JSON.parse(raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, ''));
+    const parsed = parseQwenJson(raw);
     // Normalise to camelCase (matches mergeInvoiceResults expectations)
     return {
       periodStart:    parsed.periodStart    || null,
