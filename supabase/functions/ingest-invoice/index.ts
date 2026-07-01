@@ -135,15 +135,22 @@ async function reconcile(
     return { status: 'unverifiable', delta: null, notes: 'No timesheets found for period' };
   }
 
-  // Sum only entries whose date falls within [periodStart, periodEnd]
+  // Sum only entries whose date falls within [periodStart, periodEnd].
+  // Entries can be stored as plain numbers (from XLSX parser) or objects (from portal / auto-YES).
+  // Reading only entry.hours silently drops plain-number entries — causing reconciliation to
+  // report 0h and mark the invoice "unverifiable" when it should have been "mismatch".
   let timesheetHours = 0;
   for (const ts of timesheets) {
-    const entries = ts.entries as Record<string, { hours: string | number }>;
+    const entries = (ts.entries || {}) as Record<string, unknown>;
     for (const [date, entry] of Object.entries(entries)) {
-      if (date >= periodStart && date <= periodEnd) {
-        const h = parseFloat(String(entry.hours));
-        if (!isNaN(h) && h > 0) timesheetHours += h;
+      if (date < periodStart || date > periodEnd) continue;
+      let h = 0;
+      if (typeof entry === 'number') h = entry;
+      else if (entry && typeof entry === 'object') {
+        const raw = (entry as { hours?: string | number }).hours;
+        h = typeof raw === 'number' ? raw : parseFloat(String(raw ?? 0));
       }
+      if (!isNaN(h) && h > 0) timesheetHours += h;
     }
   }
 
