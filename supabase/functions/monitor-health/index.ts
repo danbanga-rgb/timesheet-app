@@ -11,6 +11,8 @@
 //   7. edge_5xx             — any edge function 5xx in last 6h            cap: 1/6h
 //   8. zero_hour_timesheet  — 0h approved timesheet for completed week    cap: 1/day
 //                              from a contractor with non-zero history
+//   9. auto_yes_zero_hour   — auto-YES submission resulted in 0h           cap: 4h
+//                              (CRITICAL — sanity gate should prevent this)
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -262,6 +264,76 @@ async function checkZeroHourTimesheet(supabase: ReturnType<typeof createClient>)
   };
 }
 
+async function checkAutoYesZeroHour(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
+  const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
+    key: 'auto_yes_zero_hour',
+    threshold: '0 auto-YES timesheets with 0 total hours (last 30d)',
+    capMinutes: 4 * 60,
+    actionSuggestion: 'CRITICAL. Auto-YES is meant to replicate a proven pattern — 0h means the sanity gate failed or was bypassed. Marta 902 + Nikolina 1047 caused client under-invoicing. Query: SELECT l.id, l.timesheet_id, l.from_email, l.raw_hours FROM email_import_log l JOIN timesheets t ON t.id=l.timesheet_id WHERE l.message_id LIKE \'reply-yes-%\' AND t.verified_zero_hours=FALSE. Repair the timesheet immediately; check if a client invoice has already gone out for that period.',
+  };
+
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data: yesLogs, error } = await supabase
+    .from('email_import_log')
+    .select('id, timesheet_id, from_email, raw_hours, received_at')
+    .like('message_id', 'reply-yes-%')
+    .not('timesheet_id', 'is', null)
+    .gte('received_at', since);
+
+  if (error) {
+    return { ...base, ok: true, current: 'query error', details: `Could not query import log: ${error.message}` };
+  }
+
+  const flagged: Array<{ id: number; ts: number; email: string; total: number }> = [];
+  const tsIds = (yesLogs || []).map((l: { timesheet_id: number }) => l.timesheet_id);
+
+  if (tsIds.length === 0) {
+    return { ...base, ok: true, current: '0 auto-YES submissions in last 30d', details: 'No auto-YES traffic to check' };
+  }
+
+  const { data: tsRows } = await supabase
+    .from('timesheets')
+    .select('id, entries, verified_zero_hours')
+    .in('id', tsIds)
+    .eq('verified_zero_hours', false);
+
+  const tsMap = new Map<number, unknown>();
+  for (const r of tsRows || []) tsMap.set((r as { id: number }).id, (r as { entries: unknown }).entries);
+
+  const sumHours = (entries: unknown): number => {
+    if (!entries || typeof entries !== 'object') return 0;
+    return Object.values(entries as Record<string, unknown>).reduce((acc: number, e) => {
+      if (typeof e === 'number') return acc + e;
+      if (e && typeof e === 'object') {
+        const h = (e as { hours?: string | number }).hours;
+        const n = typeof h === 'number' ? h : parseFloat(String(h ?? 0));
+        return acc + (isFinite(n) ? n : 0);
+      }
+      return acc;
+    }, 0);
+  };
+
+  for (const l of yesLogs || []) {
+    const log = l as { id: number; timesheet_id: number; from_email: string };
+    if (!tsMap.has(log.timesheet_id)) continue; // verified or missing
+    const total = sumHours(tsMap.get(log.timesheet_id));
+    if (total === 0) flagged.push({ id: log.id, ts: log.timesheet_id, email: log.from_email, total });
+  }
+
+  if (flagged.length === 0) {
+    return { ...base, ok: true, current: `0 zero-hour auto-YES (of ${tsIds.length} auto-YES in 30d)`, details: 'All auto-YES submissions have non-zero hours' };
+  }
+
+  const preview = flagged.slice(0, 5).map((f) => `${f.email} (ts ${f.ts})`).join('; ');
+  return {
+    ...base,
+    ok: false,
+    current: `${flagged.length} auto-YES with 0h`,
+    details: `🚨 CRITICAL: Auto-YES submission(s) resulted in 0h — client under-invoicing risk: ${preview}${flagged.length > 5 ? ` (+${flagged.length - 5} more)` : ''}`,
+  };
+}
+
 async function checkEdge5xx(supabasePat: string, projectRef: string): Promise<SloResult> {
   const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
     key: 'edge_5xx',
@@ -406,6 +478,7 @@ serve(async (req) => {
     checkReconMismatch(supabase),
     checkUnprocessedCount(supabase),
     checkZeroHourTimesheet(supabase),
+    checkAutoYesZeroHour(supabase),
     checkEdge5xx(SUPABASE_PAT, PROJECT_REF),
   ]);
 

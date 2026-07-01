@@ -2876,6 +2876,29 @@ async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, s
       : { ...normalized };
   }
 
+  // Sanity gate: refuse to auto-submit a 0h timesheet.
+  // Auto-YES is meant to replicate a proven pattern — 0h means either the source was
+  // corrupted or the shift produced empty entries. Under-invoicing a client (as
+  // happened with Marta 902 + Nikolina 1047) is worse than a missing timesheet, so we
+  // log-and-reject instead of submitting silently.
+  const totalHours = Object.values(entries).reduce((acc, e) => {
+    const h = typeof e === 'number' ? e : parseFloat(String(e?.hours ?? 0)) || 0;
+    return acc + (isFinite(h) ? h : 0);
+  }, 0);
+  if (totalHours === 0) {
+    console.warn(`  🚫 Auto-YES sanity gate: refusing 0h submission for ${contractorEmail} (source ${sourceWeekStart} → target ${weekStart})`);
+    await postToIngest({
+      logOnly: true,
+      messageId:      `reply-yes-${messageId}`,
+      contractorEmail,
+      subject:        null,
+      attachmentName: null,
+      parseNotes:     `Auto-YES sanity gate: shifted entries total 0h from source week ${sourceWeekStart}. Refusing to submit to avoid under-invoicing. Investigate source timesheet or auto-YES shift logic.`,
+      run_id:         runId,
+    }, CONFIG.ingestUrl);
+    return { ok: false, status: 200, body: { ok: false, error: 'auto_yes_zero_hours', action: 'sanity_gate_blocked' } };
+  }
+
   const payload = {
     contractorEmail,
     displayName: contractorName,
