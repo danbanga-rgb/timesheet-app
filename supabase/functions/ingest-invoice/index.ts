@@ -109,7 +109,7 @@ async function reconcile(
   invoiceHours: number,
   supabase: ReturnType<typeof createClient>
 ): Promise<{
-  status: 'matched' | 'mismatch' | 'unverifiable';
+  status: 'matched' | 'mismatch' | 'unverifiable' | 'pending_final_week' | 'undercharged';
   delta: number | null;
   notes: string;
 }> {
@@ -122,7 +122,7 @@ async function reconcile(
   // Status filter intentionally omitted — all submitted/pending/approved timesheets count.
   const { data: timesheets, error } = await supabase
     .from('timesheets')
-    .select('entries')
+    .select('week_start, entries')
     .eq('user_id', userId)
     .gte('week_start', rangeStartStr)
     .lte('week_start', periodEnd);
@@ -140,8 +140,18 @@ async function reconcile(
   // Reading only entry.hours silently drops plain-number entries — causing reconciliation to
   // report 0h and mark the invoice "unverifiable" when it should have been "mismatch".
   let timesheetHours = 0;
+  let lastCoveredDate = periodStart; // furthest date with a submitted timesheet entry in the period
   for (const ts of timesheets) {
     const entries = (ts.entries || {}) as Record<string, unknown>;
+    // A submitted week covers days up to its Sunday (week_start + 6), capped by periodEnd
+    const wsStr = String((ts as { week_start: string }).week_start).slice(0, 10);
+    const wsDate = new Date(wsStr + 'T12:00:00');
+    const weekSun = new Date(wsDate);
+    weekSun.setDate(wsDate.getDate() + 6);
+    const weekSunStr = weekSun.toISOString().slice(0, 10);
+    const coveredThroughStr = weekSunStr > periodEnd ? periodEnd : weekSunStr;
+    if (coveredThroughStr > lastCoveredDate) lastCoveredDate = coveredThroughStr;
+
     for (const [date, entry] of Object.entries(entries)) {
       if (date < periodStart || date > periodEnd) continue;
       let h = 0;
@@ -159,11 +169,51 @@ async function reconcile(
   }
 
   const delta = Math.round((invoiceHours - timesheetHours) * 100) / 100;
-  const matched = Math.abs(delta) < 0.01;
 
+  // Δ = 0 → matched
+  if (Math.abs(delta) < 0.01) {
+    return { status: 'matched', delta: 0, notes: `Timesheet: ${timesheetHours}h · Invoice: ${invoiceHours}h` };
+  }
+
+  // Δ < 0 → contractor billed us less than the timesheet shows. No financial risk (we may
+  // still bill the client using our estimated/timesheet hours). Tag as `undercharged`; SLO skips it.
+  if (delta < 0) {
+    return {
+      status: 'undercharged',
+      delta,
+      notes: `Timesheet: ${timesheetHours}h · Invoice: ${invoiceHours}h · Contractor billed ${Math.abs(delta)}h less than timesheet (no action)`,
+    };
+  }
+
+  // Δ > 0 → contractor billed us MORE than the timesheet shows. If invoice period extends past
+  // the last submitted week and Δ can be explained by pending weekdays (≤ 10h/day), tag it as
+  // pending_final_week — resolves automatically when the trailing week's timesheet arrives.
+  if (lastCoveredDate < periodEnd) {
+    // Count weekdays after lastCoveredDate through periodEnd
+    let missingWeekdays = 0;
+    const cursor = new Date(lastCoveredDate + 'T12:00:00');
+    const endD = new Date(periodEnd + 'T12:00:00');
+    cursor.setDate(cursor.getDate() + 1);
+    while (cursor <= endD) {
+      const dow = cursor.getDay();
+      if (dow !== 0 && dow !== 6) missingWeekdays++;
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    // Allow up to 10h/day slack for overtime patterns
+    if (delta <= missingWeekdays * 10 + 0.01) {
+      return {
+        status: 'pending_final_week',
+        delta,
+        notes: `Timesheet: ${timesheetHours}h · Invoice: ${invoiceHours}h · +${delta}h consistent with ${missingWeekdays} pending weekday(s) after ${lastCoveredDate}`,
+      };
+    }
+  }
+
+  // Δ > 0 and not explained by pending week → real mismatch. This is the "we may pay more than
+  // we invoiced the client" case (Nikolina/Marta risk). SLO fires.
   return {
-    status: matched ? 'matched' : 'mismatch',
-    delta: matched ? 0 : delta,
+    status: 'mismatch',
+    delta,
     notes: `Timesheet: ${timesheetHours}h · Invoice: ${invoiceHours}h`,
   };
 }
