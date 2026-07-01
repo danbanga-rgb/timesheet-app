@@ -1448,21 +1448,43 @@ function parsePeriodFromFilename(filename) {
   };
 }
 
-// Parses billing month from email subjects like "[Invoice 05/26]" or "[Invoice 05/2026]".
-// This is the highest-priority period signal — forwarder explicitly labels the month.
+// Parses billing month from email subjects.
+// Highest priority signals in order:
+//   1. "[Invoice 05/26]" or "[Invoice 05/2026]"  — explicit bracketed hint
+//   2. "month of June 2026" / "for the month of June 2026" — natural language
+//   3. "for June 2026" / "June 2026 invoice" / "Invoice for June 2026" / "Invoice June'26"
+//      — natural language MonthName + Year
+// Zlatan's subject "Invoice for the month of June 2026" triggered rule 2.
 function parsePeriodFromSubject(subject) {
   if (!subject) return null;
-  const m = subject.match(/\[Invoice\s+(\d{1,2})\/(\d{2,4})\]/i);
-  if (!m) return null;
-  let month = parseInt(m[1], 10);
-  let year  = parseInt(m[2], 10);
-  if (year < 100) year += 2000;
-  if (month < 1 || month > 12) return null;
-  const lastDay = new Date(year, month, 0).getDate();
-  return {
-    periodStart: `${year}-${String(month).padStart(2, '0')}-01`,
-    periodEnd:   `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+
+  const monthize = (month, year) => {
+    if (year < 100) year += 2000;
+    if (month < 1 || month > 12) return null;
+    const lastDay = new Date(year, month, 0).getDate();
+    return {
+      periodStart: `${year}-${String(month).padStart(2, '0')}-01`,
+      periodEnd:   `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+    };
   };
+
+  // 1. Bracketed
+  let m = subject.match(/\[Invoice\s+(\d{1,2})\/(\d{2,4})\]/i);
+  if (m) return monthize(parseInt(m[1], 10), parseInt(m[2], 10));
+
+  // 2 + 3. Natural language MonthName + Year
+  const monthWords = /(jan(?:uary)?|feb(?:r(?:uary?)?)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)/i;
+  const yearAny  = /(?:'|20)?(\d{2}|\d{4})/;
+  const combo = new RegExp(monthWords.source + `[\\s'.,-]*` + yearAny.source, 'i');
+  m = subject.match(combo);
+  if (m) {
+    const monthMap = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12 };
+    const month = monthMap[m[1].slice(0, 3).toLowerCase()];
+    let year = parseInt(m[2], 10);
+    if (year < 100) year += 2000;
+    if (month) return monthize(month, year);
+  }
+  return null;
 }
 
 function applyFilenamePeriodFallback(parsed, filename) {
