@@ -1618,6 +1618,23 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
+  // Period-length sanity guard — invoices are at most ~6 weeks. If we've ended up with a period
+  // longer than 60 days, some field disagreement (regex/body/filename) produced a nonsensical
+  // range spanning years or months. E.g. Bojan 147: PDF said "June 2025" (contractor typo),
+  // body-supplement extended periodEnd forward to 2026-06-30 but couldn't move periodStart forward.
+  // Prefer the periodEnd (usually right — invoice date anchors it) and reset periodStart to
+  // first-of-month of periodEnd's month. Log so operator can review.
+  if (result.periodStart && result.periodEnd) {
+    const spanDays = (new Date(result.periodEnd) - new Date(result.periodStart)) / 86400000;
+    if (spanDays > 60) {
+      const [ey, em] = result.periodEnd.split('-').map(Number);
+      const inferredStart = `${ey}-${String(em).padStart(2,'0')}-01`;
+      const note = `Period span ${Math.round(spanDays)}d exceeds 60d — likely year mismatch between fields. Reset periodStart ${result.periodStart}→${inferredStart}`;
+      console.warn(`  ⚠️  ${note}`);
+      result = { ...result, periodStart: inferredStart, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+    }
+  }
+
   return result;
 }
 
