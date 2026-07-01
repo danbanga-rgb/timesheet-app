@@ -2858,9 +2858,14 @@ async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, s
     shifted.setUTCDate(shifted.getUTCDate() + deltaDays);
     const newKey = shifted.toISOString().slice(0, 10);
     const dow = shifted.getUTCDay(); // 0=Sun, 6=Sat
+    // Normalize entry: source can be a plain number (e.g. 8) or object ({hours: '8', ...}).
+    // Spreading a number gives {} — losing hours entirely. Coerce first.
+    const normalized = (typeof entry === 'number')
+      ? { hours: String(entry) }
+      : (entry && typeof entry === 'object') ? entry : { hours: '0' };
     entries[newKey] = (dow === 0 || dow === 6)
-      ? { ...entry, hours: '0' }
-      : { ...entry };
+      ? { ...normalized, hours: '0' }
+      : { ...normalized };
   }
 
   const payload = {
