@@ -471,8 +471,12 @@ function reconcileInvoiceLive(
   }
   tsHours = Math.round(tsHours * 100) / 100;
 
-  const weeksWithHours = new Set(rows.filter(r => r.hoursInPeriod > 0).map(r => r.ts.weekStart));
-  const missingWeeks = expectedWeeks.filter(w => !weeksWithHours.has(w)).length;
+  // "Missing" = no timesheet submitted for that week, NOT "submitted with 0 hours".
+  // A 0-hour approved timesheet is a valid submission (LOA, PTO, no work that week) and
+  // should not inflate the missing count. Bojan Jun 1 example: he submitted approved 0h,
+  // was showing as missing alongside the current unsubmitted week.
+  const weeksWithSubmission = new Set(rows.map(r => r.ts.weekStart));
+  const missingWeeks = expectedWeeks.filter(w => !weeksWithSubmission.has(w)).length;
 
   if (tsHours === 0) return { status: 'unverifiable', delta: null, timesheetHours: 0, rows, missingWeeks };
   if (totalHours == null) return { status: 'unverifiable', delta: null, timesheetHours: tsHours, rows, missingWeeks };

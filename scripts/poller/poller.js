@@ -2802,8 +2802,18 @@ async function getInvoiceTemplate(contractorEmail) {
 
 // Persist the successful parse method to profiles.invoice_template so the bucketing
 // router can skip detection on the next submission from the same contractor.
+//
+// Never persist "_partial" methods — those signal an incomplete extraction (regex found
+// SOME fields but hours/rate/etc were missing). Persisting them would cause the router
+// to skip full extraction next time, permanently trapping the contractor in partial
+// parses. Only real templates (regex, regex+claude_payment, groq, claude_full,
+// claude_vision, groq_vision, regex_no_payment) are safe to persist.
 async function storeInvoiceTemplate(contractorEmail, parseMethod) {
   if (!CONFIG.supabaseServiceKey || !parseMethod || !contractorEmail) return;
+  if (/partial/i.test(parseMethod)) {
+    console.log(`  📋 Skipping template store for ${contractorEmail} — parseMethod=${parseMethod} (incomplete extraction)`);
+    return;
+  }
   try {
     const res = await fetch(
       `${CONFIG.supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(contractorEmail)}`,
