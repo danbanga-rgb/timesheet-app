@@ -392,34 +392,16 @@ serve(async (req) => {
     });
   }
 
-  // ── Derive hours from timesheets if invoice has none ─────────────────────
-  let hoursSourceNote: string | null = null;
-  if (parsedHours == null) {
-    const rangeStart = new Date(parsedPeriodStart + 'T12:00:00');
-    rangeStart.setDate(rangeStart.getDate() - 6);
-    const { data: tss } = await supabase
-      .from('timesheets')
-      .select('entries')
-      .eq('user_id', userId)
-      .gte('week_start', rangeStart.toISOString().slice(0, 10))
-      .lte('week_start', parsedPeriodEnd);
-    if (tss && tss.length > 0) {
-      let tsHours = 0;
-      for (const ts of tss) {
-        const entries = ts.entries as Record<string, { hours: string | number }>;
-        for (const [date, entry] of Object.entries(entries)) {
-          if (date >= parsedPeriodStart && date <= parsedPeriodEnd) {
-            const h = parseFloat(String(entry.hours));
-            if (!isNaN(h) && h > 0) tsHours += h;
-          }
-        }
-      }
-      if (tsHours > 0) {
-        parsedHours = Math.round(tsHours * 100) / 100;
-        hoursSourceNote = `Hours derived from timesheets (${parsedHours}h) — not on invoice`;
-      }
-    }
-  }
+  // Hours are optional. If the invoice parser missed hours, leave parsedHours as null
+  // so reconciliation flags the invoice as `unverifiable` for accountant review.
+  //
+  // Historical note: this block used to fill parsedHours from summed timesheets when
+  // the parser missed it. That masked parser failures with wrong-but-plausible numbers.
+  // Haris Balavac's June 2026 invoice (id 145) was the canary: PDF clearly said "176   $20   $3,520"
+  // but the parser missed 176 and $20 (regex_partial trap). Timesheet-derived fill stored
+  // 120h (his in-progress June total at moment of ingest), reconciliation compared
+  // 120 vs 160 and flagged `undercharged` — hiding the real gap. Removed 2026-07-01.
+  const hoursSourceNote: string | null = null;
 
   // ── Build invoice record ──────────────────────────────────────────────────
   let invoiceId: number | null = null;
