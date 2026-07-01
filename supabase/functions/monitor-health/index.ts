@@ -190,11 +190,13 @@ async function checkZeroHourTimesheet(supabase: ReturnType<typeof createClient>)
   const historyStart = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const todayIso = new Date().toISOString().slice(0, 10);
 
-  // Pull recent timesheets (approved or correction_pending) whose week has completed
+  // Pull recent timesheets (approved or correction_pending) whose week has completed.
+  // Exclude verified_zero_hours — accountant has already confirmed those as legitimate 0h weeks.
   const { data: recent, error } = await supabase
     .from('timesheets')
     .select('id, user_id, user_name, week_start, entries, source, status')
     .in('status', ['approved', 'correction_pending'])
+    .eq('verified_zero_hours', false)
     .gte('week_start', since);
 
   if (error) {
