@@ -357,6 +357,37 @@ function extractHours(text) {
   return null;
 }
 
+// Fallback: derive hours from a "hours rate amount" table row where hours × rate == total.
+// Haris Balavac's PDF: "QA Contractor Services...   176   $20.00   $3,520.00" — a tabular
+// row with no textual cue ("hours"/"rate"/"qty"). None of the ~19 hour-labelled patterns
+// match, but the arithmetic identifies it unambiguously: 176 × 20 = 3520.
+//
+// Called ONLY after extractTotal succeeded — cross-checks against the known total. Any
+// {hours, rate} candidate whose product equals total wins. Prevents false matches on
+// unrelated same-line number triples.
+function deriveHoursRateFromTotal(text, knownTotal) {
+  if (!knownTotal || knownTotal <= 0) return null;
+  // Match any line with three numeric-looking tokens: N $N.NN $N,NNN.NN (in any $-optional order)
+  const tripleRe = /(\d+(?:[.,]\d+)?)\s+\$?\s*(\d+(?:[.,]\d+)?)\s+\$?\s*(\d+(?:[.,]\d+)?)/g;
+  let m;
+  while ((m = tripleRe.exec(text)) !== null) {
+    const [n1, n2, n3] = [cleanNum(m[1]), cleanNum(m[2]), cleanNum(m[3])];
+    if (n1 == null || n2 == null || n3 == null) continue;
+    // Try (hours, rate, total) in most-likely positions
+    for (const [hCand, rCand, tCand] of [[n1, n2, n3], [n2, n3, n1]]) {
+      if (hCand < 1 || hCand > 1000) continue;              // plausible hours range
+      if (rCand < 1 || rCand > 500) continue;               // plausible rate range
+      if (Math.abs(hCand * rCand - knownTotal) < 0.5) {     // arithmetic checks out
+        return { hours: hCand, rate: rCand };
+      }
+      if (Math.abs(hCand * rCand - tCand) < 0.5 && Math.abs(tCand - knownTotal) < 0.5) {
+        return { hours: hCand, rate: rCand };
+      }
+    }
+  }
+  return null;
+}
+
 function extractRate(text) {
   const patterns = [
     // "30 USD/h" or "30 EUR/hr" or "30 USD per hour"
@@ -829,6 +860,17 @@ function parseInvoice(text, filename) {
   let totalHours  = tpl?.totalHours  ?? extractHours(text);
   let rate        = tpl?.rate        ?? extractRate(text);
   let totalAmount = tpl?.totalAmount ?? extractTotal(text);
+
+  // Table-row derivation: for tabular PDFs with no labelled hours/rate cues
+  // (Haris Balavac 145 case), search for a "hours rate amount" triple whose
+  // arithmetic matches the already-extracted total.
+  if ((totalHours == null || rate == null) && totalAmount != null) {
+    const derived = deriveHoursRateFromTotal(text, totalAmount);
+    if (derived) {
+      if (totalHours == null) totalHours = derived.hours;
+      if (rate == null)       rate       = derived.rate;
+    }
+  }
 
   // Multi-contractor detection: if the text contains 3+ distinct person+hours patterns
   // (e.g. "Sancanin 160h $35"), the invoice covers multiple contractors. Hours extracted
