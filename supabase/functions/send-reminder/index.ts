@@ -470,10 +470,10 @@ These links are valid for 7 days and are single-use.`;
     const { data: ts } = await supabase.from('timesheets').select('week_start').eq('user_id', user.id).neq('status', 'rejected');
     const submitted = new Set((ts || []).map((t: { week_start: string }) => t.week_start.split('T')[0]));
 
-    // Pattern detection for Friday reminder reply-CTA
+    // Pattern detection for reply-CTA (all reminder types, all submitters)
     let patternLine = '';
     let isConsistent = false;
-    if (isFriday5pm || force) {
+    {
       const { data: recentTs } = await supabase
         .from('timesheets')
         .select('entries, source')
@@ -481,10 +481,7 @@ These links are valid for 7 days and are single-use.`;
         .eq('status', 'approved')
         .order('week_start', { ascending: false })
         .limit(5);
-      // Suppress reply CTA for portal-only submitters — they should use the portal or chat agent
-      const isPortalOnly = recentTs && recentTs.length >= 3 &&
-        recentTs.every((t: { source: string }) => t.source === 'direct');
-      if (recentTs && recentTs.length >= 3 && !isPortalOnly) {
+      if (recentTs && recentTs.length >= 3) {
         const weeklyHours = recentTs.map((t: { entries: Record<string, number | { hours?: string | number }>; source: string }) => {
           const entries = t.entries || {};
           return Object.values(entries).reduce((sum, e) => {
@@ -572,7 +569,7 @@ These links are valid for 7 days and are single-use.`;
 
     const bodyText = isFirst
       ? `Hi ${user.name},\n\nHope you've had a good week! Just a reminder to submit your timesheet${missing.length > 1 ? 's' : ''} before the weekend:\n\n${weekListText}${multiWeekNote}${patternTextLine}\n\n${submitLines}\n\n${helpdeskLine}${delayNote}`
-      : `Hi ${user.name},\n\nWe still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}\n\nPlease submit as soon as possible:\n  1. Log into the app: ${APP_URL}\n  2. Reply to this email with your timesheet file attached\n  3. Email your timesheet to ${TIMESHEET_EMAIL}\n\n${helpdeskLine}${delayNote}`;
+      : `Hi ${user.name},\n\nWe still haven't received your timesheet${missing.length > 1 ? 's' : ''} for:\n\n${weekListText}${patternTextLine}\n\nPlease submit as soon as possible:\n${submitLines}\n\n${helpdeskLine}${delayNote}`;
 
     const patternHtml = patternLine
       ? `<p style="color:#374151;background:#f0fdf4;border-left:3px solid #16a34a;padding:10px 14px;margin:16px 0;border-radius:0 4px 4px 0">${patternLine}</p>`
@@ -587,7 +584,7 @@ These links are valid for 7 days and are single-use.`;
       ${patternHtml}
       <p style="color:#374151;font-weight:600;margin-top:20px">${isFirst ? 'Quickest ways to submit:' : 'Please submit as soon as possible:'}</p>
       <ol style="color:#374151;line-height:2.2;padding-left:20px;margin:0">
-        ${isFirst && replyCtaHtml ? replyCtaHtml : ''}
+        ${replyCtaHtml ? replyCtaHtml : ''}
         <li>Use the button below to log into the app</li>
         <li>Reply to this email with your timesheet file attached</li>
         <li>Email your timesheet directly to <a href="mailto:${TIMESHEET_EMAIL}" style="color:#4f46e5">${TIMESHEET_EMAIL}</a></li>
