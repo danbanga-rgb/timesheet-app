@@ -1800,12 +1800,54 @@ function extractTotalHoursFromBodyProse(text) {
   return null;
 }
 
+// Gap-filler using Groq vision (free tier). Runs after any successful parse that came back
+// with missing period/hours/rate/total. Since Groq vision is zero-cost, we always try it as
+// a verification layer when the primary parse was incomplete. Only fills MISSING fields —
+// never overrides values the primary parse already found.
+async function fillGapsWithGroqVision(result, pdfBuffer, filename) {
+  if (!result || !CONFIG.groqApiKey || !pdfBuffer) return result;
+  const missingPeriod = !result.periodStart || !result.periodEnd;
+  const missingHours  = result.totalHours == null;
+  const missingRate   = result.rate == null;
+  const missingTotal  = result.totalAmount == null;
+  if (!(missingPeriod || missingHours || missingRate || missingTotal)) return result;
+
+  console.log(`  🔍 Gap-fill: running Groq vision to fill ${[missingPeriod && 'period', missingHours && 'hours', missingRate && 'rate', missingTotal && 'total'].filter(Boolean).join('+')} for ${filename}`);
+  let gv;
+  try { gv = await groqVisionExtractInvoice(pdfBuffer, filename); }
+  catch (e) { console.warn(`  ⚠️  Gap-fill Groq vision error: ${e.message}`); return result; }
+  if (!gv) return result;
+
+  const filled = [];
+  if (missingPeriod && gv.periodStart && gv.periodEnd) {
+    result.periodStart = gv.periodStart; result.periodEnd = gv.periodEnd;
+    filled.push('period');
+  }
+  if (missingHours && gv.totalHours != null) { result.totalHours = gv.totalHours; filled.push('hours'); }
+  if (missingRate && gv.rate != null) { result.rate = gv.rate; filled.push('rate'); }
+  if (missingTotal && gv.totalAmount != null) { result.totalAmount = gv.totalAmount; filled.push('total'); }
+
+  if (filled.length) {
+    result.parseMethod = (result.parseMethod || 'unknown') + '+gv';
+    result.parseNotes  = [result.parseNotes, `Groq vision filled: ${filled.join(', ')}`].filter(Boolean).join(' | ');
+    console.log(`  🔍 Gap-fill: filled ${filled.join(', ')}`);
+  }
+  return result;
+}
+
 // ─── Main invoice orchestrator ────────────────────────────────────────────────
 // 1. Regex (free, always runs on text PDFs) via parser.js
 // 2a. Regex has period + hours + payment → done, zero Claude calls
 // 2b. Regex has period + hours, missing payment → Claude for payment details only
 // 2c. Regex missing period or hours → full Claude extract, merge regex on top
+// FINAL. If ANY primary result is missing period/hours/rate/total, run Groq vision as
+//        a free gap-filler (never overrides fields the primary parse found).
 async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null) {
+  const primary = await extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText, knownTemplate);
+  return fillGapsWithGroqVision(primary, pdfBuffer, filename);
+}
+
+async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null) {
   // Fast-path: skip regex for known vision-only invoices — try Groq vision first, Claude fallback
   if (knownTemplate === 'claude_vision' || knownTemplate === 'groq_vision') {
     if (CONFIG.groqApiKey) {
