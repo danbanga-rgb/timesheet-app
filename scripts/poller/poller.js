@@ -1882,13 +1882,27 @@ async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, ema
       }
       console.log(`  👁️  Groq vision insufficient — falling back to Claude vision: ${filename}`);
     }
-    if (!CONFIG.anthropicApiKey) return null;
-    console.log(`  🤖 Claude vision (known template): ${filename}`);
-    const claudeResult = await claudeFullExtractInvoice(null, pdfBuffer, true, filename, emailBodyText);
-    if (!claudeResult) return null;
-    const r = postProcessInvoice(applyFilenamePeriodFallback(claudeResult, filename), pdfText);
-    if (r) r.parseMethod = 'claude_vision';
-    return r;
+    if (CONFIG.anthropicApiKey) {
+      console.log(`  🤖 Claude vision (known template): ${filename}`);
+      const claudeResult = await claudeFullExtractInvoice(null, pdfBuffer, true, filename, emailBodyText);
+      if (claudeResult) {
+        const r = postProcessInvoice(applyFilenamePeriodFallback(claudeResult, filename), pdfText);
+        if (r) r.parseMethod = 'claude_vision';
+        return r;
+      }
+      console.warn(`  ⚠️  Claude vision returned null (API drop or unsupported PDF) — trying filename fallback for ${filename}`);
+    }
+    // Vision fully failed. Skeleton with filename-derived period (if any) — gap-filler
+    // then runs Groq vision one more time to fill hours/rate/total. This rescues cases
+    // like Ahmet's Native Teams PDFs where Claude vision drops the connection but
+    // the filename ("Inv# NT-83e086 - Jun'26.pdf") carries a parseable period.
+    const skeleton = applyFilenamePeriodFallback({}, filename);
+    if (skeleton?.periodStart && skeleton?.periodEnd) {
+      skeleton.parseMethod = 'filename_fallback';
+      skeleton.parseNotes  = 'Vision failed — using filename-derived period';
+      return skeleton;
+    }
+    return null;
   }
 
   // ── Step 1: regex parser ───────────────────────────────────────────────────
