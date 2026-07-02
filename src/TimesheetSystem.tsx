@@ -720,6 +720,12 @@ const TimesheetSystem = () => {
   const [estimationLoading, setEstimationLoading] = useState(false);
   const [estimationError, setEstimationError] = useState<string | null>(null);
   const [estimationSort, setEstimationSort] = useState<{col: 'name' | 'rate' | 'hours' | 'amount', dir: 'asc' | 'desc'}>({col: 'name', dir: 'asc'});
+  const [estimationOverrides, setEstimationOverrides] = useState<Map<number, Map<string, number>>>(new Map());
+  const [estimationImportPreview, setEstimationImportPreview] = useState<{
+    clientId: number; clientName: string;
+    diffs: Array<{ engagementId: number; contractorName: string; weekLabel: string; weekStart: string; currentHours: number; newHours: number }>;
+  } | null>(null);
+  const [estimationImportApplying, setEstimationImportApplying] = useState(false);
   const [profileTabSearch, setProfileTabSearch] = useState('');
   const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'>('all');
   const [profileTabExcludeTest, setProfileTabExcludeTest] = useState(true);
@@ -910,7 +916,7 @@ const TimesheetSystem = () => {
 
   useEffect(() => { timesheetsRef.current = timesheets; }, [timesheets]);
 
-  // ─── Client Estimation tab: fetch clients + engagements when tab active ───
+  // ─── Client Estimation tab: fetch clients + engagements + overrides when tab or month changes ───
   useEffect(() => {
     if (accountantTab !== 'client-estimation') return;
     let cancelled = false;
@@ -918,15 +924,34 @@ const TimesheetSystem = () => {
       setEstimationLoading(true);
       setEstimationError(null);
       try {
-        const [cRes, eRes] = await Promise.all([
+        const [yr, mo] = estimationMonth.split('-').map(Number);
+        const mStart = `${estimationMonth}-01`;
+        const lastD = new Date(Date.UTC(yr, mo, 0)).getUTCDate();
+        const mEnd = `${estimationMonth}-${String(lastD).padStart(2, '0')}`;
+        // Rewind to Monday of first week to cover weeks that start before month
+        const walker0 = new Date(mStart + 'T12:00:00Z');
+        const dow0 = walker0.getUTCDay();
+        walker0.setUTCDate(walker0.getUTCDate() - (dow0 === 0 ? 6 : dow0 - 1));
+        const firstMonday = walker0.toISOString().slice(0, 10);
+
+        const [cRes, eRes, oRes] = await Promise.all([
           supabase.from('clients').select('id,name,payment_terms_days,retention_credit_pct').order('name'),
           supabase.from('client_engagements').select('id,client_id,user_id,role_title,sow_reference,bill_rate'),
+          supabase.from('hour_overrides').select('engagement_id,week_start,hours_override')
+            .gte('week_start', firstMonday).lte('week_start', mEnd),
         ]);
         if (cancelled) return;
         if (cRes.error) throw new Error(`clients: ${cRes.error.message}`);
         if (eRes.error) throw new Error(`engagements: ${eRes.error.message}`);
+        if (oRes.error) throw new Error(`overrides: ${oRes.error.message}`);
         setEstimationClients(cRes.data || []);
         setEstimationEngagements(eRes.data || []);
+        const oMap = new Map<number, Map<string, number>>();
+        for (const o of (oRes.data || [])) {
+          if (!oMap.has(o.engagement_id)) oMap.set(o.engagement_id, new Map());
+          oMap.get(o.engagement_id)!.set(o.week_start, Number(o.hours_override));
+        }
+        setEstimationOverrides(oMap);
       } catch (e) {
         if (!cancelled) setEstimationError(String((e as Error).message || e));
       } finally {
@@ -934,7 +959,7 @@ const TimesheetSystem = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [accountantTab]);
+  }, [accountantTab, estimationMonth]);
 
   // ─── Reminder interval ────────────────────────────────────────────────────
   useEffect(() => {
@@ -4952,7 +4977,7 @@ const TimesheetSystem = () => {
             };
 
             // Group weekdays into weeks (Mon-Fri buckets). Start from Monday of week containing month day 1.
-            type WeekBucket = { label: string; days: string[] };
+            type WeekBucket = { label: string; days: string[]; weekStart: string };
             const weeks: WeekBucket[] = [];
             const walker = new Date(monthStart + 'T12:00:00Z');
             // Rewind to Monday
@@ -4971,6 +4996,7 @@ const TimesheetSystem = () => {
                 const wkEnd = new Date(start); wkEnd.setUTCDate(start.getUTCDate() + 6);
                 weeks.push({
                   label: `${start.getUTCDate()}–${wkEnd.getUTCDate() > lastDay ? lastDay : wkEnd.getUTCDate()}`,
+                  weekStart: start.toISOString().slice(0, 10),
                   days: wDays,
                 });
               }
@@ -4978,7 +5004,7 @@ const TimesheetSystem = () => {
             }
 
             // For each engagement, compute per-week actual + estimated hours
-            type CellSource = 'actual' | 'estimated' | 'outside';
+            type CellSource = 'actual' | 'estimated' | 'outside' | 'override';
             type Cell = { hours: number; source: CellSource };
             const cellFor = (userId: string, day: string, actuals: Record<string, number>): Cell => {
               const profile = users.find(u => u.id === userId);
@@ -5004,6 +5030,7 @@ const TimesheetSystem = () => {
             const cellColor = (source: CellSource) => (
               source === 'actual' ? 'bg-green-50 text-green-800'
               : source === 'estimated' ? 'bg-yellow-50 text-yellow-800'
+              : source === 'override' ? 'bg-blue-50 text-blue-800'
               : 'bg-gray-100 text-gray-400'
             );
 
@@ -5061,6 +5088,7 @@ const TimesheetSystem = () => {
                   <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 bg-green-50 border border-green-300 rounded" /> actual</span>
                   <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 bg-yellow-50 border border-yellow-300 rounded" /> estimated (max(8, monthly max))</span>
                   <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 bg-gray-100 border border-gray-300 rounded" /> outside start/end</span>
+                  <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 bg-blue-50 border border-blue-300 rounded" /> override (imported)</span>
                 </div>
 
                 {estimationLoading && <div className="text-gray-500">Loading client engagement data…</div>}
@@ -5085,15 +5113,18 @@ const TimesheetSystem = () => {
                   const rowsWithTotals = engs.map(e => {
                     const profile = userById.get(e.user_id);
                     const actuals = profile ? perDayHours(e.user_id) : {};
+                    const engOverrides = estimationOverrides.get(e.id);
                     const weekTotals = weeks.map(w => {
+                      const override = engOverrides?.get(w.weekStart);
+                      if (override !== undefined) return { hours: override, source: 'override' as CellSource };
                       let sum = 0;
-                      for (const d of w.days) {
-                        const c = cellFor(e.user_id, d, actuals);
-                        if (c.source !== 'outside') sum += c.hours;
-                      }
-                      return sum;
+                      const cells = w.days.map(d => cellFor(e.user_id, d, actuals));
+                      for (const c of cells) if (c.source !== 'outside') sum += c.hours;
+                      const dominant: CellSource = cells.some(c => c.source === 'actual') ? 'actual'
+                        : cells.some(c => c.source === 'estimated') ? 'estimated' : 'outside';
+                      return { hours: sum, source: dominant };
                     });
-                    const totalH = weekTotals.reduce((a, b) => a + b, 0);
+                    const totalH = weekTotals.reduce((a, b) => a + b.hours, 0);
                     const amount = totalH * Number(e.bill_rate);
                     return { eng: e, profile, actuals, weekTotals, totalH, amount };
                   }).filter(r => r.profile);
@@ -5138,13 +5169,15 @@ const TimesheetSystem = () => {
                                 ['Generated', new Date().toISOString().slice(0, 10)],
                                 [],
                                 ['engagement_id', 'user_id', 'Contractor', 'SOW', 'Rate ($/h)', ...weeks.map(w => `Wk ${w.label}`), 'Total Hours', 'Amount ($)'],
+                                // Hidden row: week_start dates for each week column — used by importer to match columns to DB rows
+                                ['', '', '', '', '', ...weeks.map(w => w.weekStart), '', ''],
                                 ...rowsWithTotals.map(({eng, profile, weekTotals, totalH, amount}) => [
                                   eng.id,
                                   eng.user_id,
                                   profile!.name,
                                   eng.sow_reference || '',
                                   Number(eng.bill_rate),
-                                  ...weekTotals.map(h => h),
+                                  ...weekTotals.map(wt => wt.hours),
                                   totalH,
                                   Math.round(amount * 100) / 100,
                                 ]),
@@ -5152,8 +5185,9 @@ const TimesheetSystem = () => {
                                 ['', '', 'Client Total:', '', '', ...weeks.map(() => ''), clientTotalHours, Math.round(clientTotalAmount * 100) / 100],
                               ];
                               const ws = XLSX.utils.aoa_to_sheet(rows);
-                              // Hide the id columns (A, B) so accountant sees a clean sheet
+                              // Hide id columns (A, B) and the week_start metadata row (row 6, index 5)
                               ws['!cols'] = [{ hidden: true }, { hidden: true }, { wch: 26 }, { wch: 8 }, { wch: 10 }, ...weeks.map(() => ({ wch: 10 })), { wch: 12 }, { wch: 14 }];
+                              ws['!rows'] = [undefined, undefined, undefined, undefined, undefined, { hpx: 0 }] as NonNullable<typeof ws['!rows']>;
                               XLSX.utils.book_append_sheet(wb, ws, client.name.slice(0, 30).replace(/[/\\?*[\]]/g, '_'));
                               const fname = `${client.name.replace(/[^\w-]/g, '_')}_estimation_${estimationMonth}.xlsx`;
                               XLSX.writeFile(wb, fname);
@@ -5163,6 +5197,73 @@ const TimesheetSystem = () => {
                           >
                             <Download className="w-3 h-3" /> Export XLSX
                           </button>
+                          {/* Import corrected file */}
+                          <label className="cursor-pointer flex items-center gap-1 px-2 py-1 rounded text-xs bg-white border border-green-300 text-green-700 hover:bg-green-50">
+                            <UploadCloud className="w-3 h-3" /> Import corrected
+                            <input type="file" accept=".xlsx" className="hidden" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              e.target.value = '';
+                              try {
+                                const buf = await file.arrayBuffer();
+                                const wb2 = XLSX.read(new Uint8Array(buf), { type: 'array' });
+                                const ws2 = wb2.Sheets[wb2.SheetNames[0]];
+                                const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws2, { header: 1, defval: '' });
+                                // Validate month
+                                const fileMonth = String((aoa[1] as unknown[])?.[1] ?? '');
+                                if (fileMonth !== monthLabel) {
+                                  alert(`This file is for "${fileMonth}", but you're viewing ${monthLabel}. Please import the correct file.`);
+                                  return;
+                                }
+                                // Confirm header row
+                                if ((aoa[4] as unknown[])?.[0] !== 'engagement_id') {
+                                  alert('Unrecognized file format — please export a fresh copy and try again.');
+                                  return;
+                                }
+                                // Read week_start dates from hidden row 5 (index 5)
+                                const weekStartRow = (aoa[5] as string[]) || [];
+                                const weekStartsByCol = new Map<number, string>();
+                                for (let c = 5; c < weekStartRow.length - 2; c++) {
+                                  if (weekStartRow[c]) weekStartsByCol.set(c, String(weekStartRow[c]));
+                                }
+                                if (weekStartsByCol.size === 0) {
+                                  alert('This file was exported before the import feature was added. Please export a fresh copy.');
+                                  return;
+                                }
+                                // Build current totals map: engagement_id → week_start → {hours, label}
+                                const currentTotals = new Map<number, Map<string, { hours: number; label: string }>>();
+                                for (const { eng: re, weekTotals: rwt } of rowsWithTotals) {
+                                  const wm = new Map<string, { hours: number; label: string }>();
+                                  for (let i = 0; i < weeks.length; i++) {
+                                    wm.set(weeks[i].weekStart, { hours: rwt[i].hours, label: weeks[i].label });
+                                  }
+                                  currentTotals.set(re.id, wm);
+                                }
+                                // Parse data rows starting at index 6
+                                const diffs: typeof estimationImportPreview extends null ? never : NonNullable<typeof estimationImportPreview>['diffs'] = [];
+                                for (let r = 6; r < aoa.length; r++) {
+                                  const row = aoa[r] as unknown[];
+                                  const engId = Number(row[0]);
+                                  if (!engId) break;
+                                  const engRow = rowsWithTotals.find(rr => rr.eng.id === engId);
+                                  if (!engRow) continue;
+                                  weekStartsByCol.forEach((weekStart, col) => {
+                                    const importedH = Number(row[col]);
+                                    const cur = currentTotals.get(engId)?.get(weekStart);
+                                    if (!cur || Math.abs(importedH - cur.hours) < 0.01) return;
+                                    diffs.push({ engagementId: engId, contractorName: engRow.profile!.name, weekLabel: cur.label, weekStart, currentHours: cur.hours, newHours: importedH });
+                                  });
+                                }
+                                if (diffs.length === 0) {
+                                  alert('No changes detected — the imported file matches the current values.');
+                                  return;
+                                }
+                                setEstimationImportPreview({ clientId: client.id, clientName: client.name, diffs });
+                              } catch (err) {
+                                alert(`Failed to read file: ${(err as Error).message}`);
+                              }
+                            }} />
+                          </label>
                         </div>
                       </div>
                       <div className="overflow-x-auto">
@@ -5196,16 +5297,11 @@ const TimesheetSystem = () => {
                                   <td className="px-3 py-1 sticky left-0 bg-white font-medium">{profile!.name}</td>
                                   <td className="px-2 py-1 text-gray-600">{e.sow_reference || '—'}</td>
                                   <td className="px-2 py-1 text-right">${Number(e.bill_rate).toFixed(0)}</td>
-                                  {weeks.map((w, i) => {
-                                    // For color: majority source per week
-                                    const sources = w.days.map(d => cellFor(e.user_id, d, actuals).source);
-                                    const dominant: CellSource = sources.includes('actual') ? 'actual' : sources.includes('estimated') ? 'estimated' : 'outside';
-                                    return (
-                                      <td key={i} className={`px-2 py-1 text-right ${cellColor(dominant)}`}>
-                                        {weekTotals[i] > 0 ? weekTotals[i].toFixed(0) : '·'}
-                                      </td>
-                                    );
-                                  })}
+                                  {weeks.map((_w, i) => (
+                                    <td key={i} className={`px-2 py-1 text-right ${cellColor(weekTotals[i].source)}`}>
+                                      {weekTotals[i].hours > 0 ? weekTotals[i].hours.toFixed(0) : '·'}
+                                    </td>
+                                  ))}
                                   <td className="px-2 py-1 text-right font-semibold border-l border-gray-300">{totalH.toFixed(0)}</td>
                                   <td className="px-2 py-1 text-right font-semibold">{currencyFmt(amount)}</td>
                                 </tr>
@@ -5222,6 +5318,85 @@ const TimesheetSystem = () => {
                     </div>
                   );
                 })}
+
+                {/* Import preview modal */}
+                {estimationImportPreview && (
+                  <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden">
+                      <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                        <div>
+                          <div className="font-semibold text-gray-900">Import corrected hours — {estimationImportPreview.clientName}</div>
+                          <div className="text-xs text-gray-500 mt-0.5">{estimationImportPreview.diffs.length} change{estimationImportPreview.diffs.length !== 1 ? 's' : ''} detected</div>
+                        </div>
+                        <button onClick={() => setEstimationImportPreview(null)} className="text-gray-400 hover:text-gray-700 text-xl font-bold leading-none">×</button>
+                      </div>
+                      <div className="overflow-y-auto max-h-96">
+                        <table className="min-w-full text-sm">
+                          <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
+                            <tr>
+                              <th className="text-left px-4 py-2 font-medium text-gray-700">Contractor</th>
+                              <th className="text-left px-4 py-2 font-medium text-gray-700">Week</th>
+                              <th className="text-right px-4 py-2 font-medium text-gray-700">Current</th>
+                              <th className="text-right px-4 py-2 font-medium text-gray-700">Imported</th>
+                              <th className="text-right px-4 py-2 font-medium text-gray-700">Δ</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {estimationImportPreview.diffs.map((d, i) => {
+                              const delta = d.newHours - d.currentHours;
+                              return (
+                                <tr key={i} className="border-b border-gray-100">
+                                  <td className="px-4 py-2">{d.contractorName}</td>
+                                  <td className="px-4 py-2 text-gray-600">Wk {d.weekLabel}</td>
+                                  <td className="px-4 py-2 text-right text-gray-500">{d.currentHours}h</td>
+                                  <td className="px-4 py-2 text-right font-medium">{d.newHours}h</td>
+                                  <td className={`px-4 py-2 text-right font-semibold ${delta > 0 ? 'text-green-700' : 'text-red-600'}`}>
+                                    {delta > 0 ? '+' : ''}{delta}h
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
+                        <button onClick={() => setEstimationImportPreview(null)} className="px-4 py-2 rounded text-sm border border-gray-300 text-gray-700 hover:bg-gray-50" disabled={estimationImportApplying}>
+                          Cancel
+                        </button>
+                        <button
+                          onClick={async () => {
+                            setEstimationImportApplying(true);
+                            try {
+                              const rows = estimationImportPreview.diffs.map(d => ({
+                                engagement_id: d.engagementId,
+                                week_start: d.weekStart,
+                                hours_override: d.newHours,
+                                edited_by: currentUser.id,
+                              }));
+                              const { error } = await supabase.from('hour_overrides').upsert(rows, { onConflict: 'engagement_id,week_start' });
+                              if (error) throw error;
+                              const updated = new Map(estimationOverrides);
+                              for (const d of estimationImportPreview.diffs) {
+                                if (!updated.has(d.engagementId)) updated.set(d.engagementId, new Map());
+                                updated.get(d.engagementId)!.set(d.weekStart, d.newHours);
+                              }
+                              setEstimationOverrides(updated);
+                              setEstimationImportPreview(null);
+                            } catch (err) {
+                              alert(`Failed to save: ${(err as Error).message}`);
+                            } finally {
+                              setEstimationImportApplying(false);
+                            }
+                          }}
+                          className="px-4 py-2 rounded text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                          disabled={estimationImportApplying}
+                        >
+                          {estimationImportApplying ? 'Saving…' : 'Apply overrides'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}
