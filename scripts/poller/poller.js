@@ -3476,6 +3476,31 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
       if (extracted) {
         console.log(`  📭 Body From=${extracted.email} not in profiles — trying subject + forwarder-note resolution`);
       }
+      // Layer 0.5: Cc/To sweep — if the contractor is Cc'd (a common pattern when their
+      // employer/company accountant sends invoices on their behalf, e.g. Feriz Alija at OBAI
+      // sending Marta Sušek's invoice with m.susek@live.com on Cc), pick them up before the
+      // regex/Groq name-matching layers. Excludes our own internal accounting addresses.
+      const ccToAddrs = [
+        ...((parsed.cc?.value || []).map(v => (v.address || '').toLowerCase())),
+        ...((parsed.to?.value || []).map(v => (v.address || '').toLowerCase())),
+      ].filter(e => e && !isInternal(e) && e !== fromEmail && e !== extracted?.email?.toLowerCase());
+      const uniqueCcTo = [...new Set(ccToAddrs)];
+      const ccMatches = [];
+      for (const addr of uniqueCcTo) {
+        if (await isKnownContractor(addr)) ccMatches.push(addr);
+      }
+      if (ccMatches.length === 1) {
+        contractor = ccMatches[0];
+        // Look up name for logging
+        try {
+          const profRes = await fetch(`${CONFIG.supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(ccMatches[0])}&select=name&limit=1`, { headers: { apikey: CONFIG.supabaseServiceKey, Authorization: `Bearer ${CONFIG.supabaseServiceKey}` } });
+          const profs = await profRes.json();
+          contractorName = profs?.[0]?.name || ccMatches[0];
+        } catch { contractorName = ccMatches[0]; }
+        console.log(`  📨 Contractor resolved from Cc/To: ${contractorName} (${contractor})`);
+      } else if (ccMatches.length > 1) {
+        console.log(`  📨 Cc/To sweep found multiple known contractors — ambiguous, falling through: ${ccMatches.join(', ')}`);
+      }
       // Layer 1: cheap deterministic regex on subject + forwarder's prepended note.
       const forwarderNote = extractForwarderNote(bodyText);
       const searchText = forwarderNote
