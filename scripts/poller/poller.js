@@ -2642,6 +2642,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           forwardedBy:     forwardedBy || null,
           groupKey:        null,
           attachmentHash:  attHash,
+          groqVisionVerification: groqVerification,
         }, CONFIG.invoiceIngestUrl);
         const action = res.body?.action || res.body?.error || String(res.status);
         console.log(`     ✅ Ingested → ${action}`);
