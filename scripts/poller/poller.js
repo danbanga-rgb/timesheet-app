@@ -1612,6 +1612,24 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
+  // Rate consistency: if rate × hours diverges from totalAmount by MORE than 5%, the
+  // extracted rate is almost certainly wrong. Common cause: EUR rate stored on a USD-billed
+  // invoice (Kornelije Sajler 2026-07 case: rate=€28.52 stored with total=$5720; correct
+  // USD rate = $5720/176h = $32.50). Re-derive rate from totalAmount / totalHours when the
+  // result is a plausible number. Snap tolerance ($1) already handled tiny rounding mismatches.
+  if (result.totalAmount != null && result.totalHours != null && result.rate != null) {
+    const computed = result.totalHours * result.rate;
+    const divergence = Math.abs(computed - result.totalAmount) / Math.max(1, result.totalAmount);
+    if (divergence > 0.05) {
+      const derivedRate = Math.round((result.totalAmount / result.totalHours) * 100) / 100;
+      if (derivedRate >= 1 && derivedRate <= 500) {
+        const note = `Rate corrected: parsed $${result.rate}/hr × ${result.totalHours}h = $${computed.toFixed(2)} but total = $${result.totalAmount} (${(divergence*100).toFixed(1)}% off). Re-derived rate = $${derivedRate}/hr from total/hours.`;
+        console.warn(`  🧮 ${note}`);
+        result = { ...result, rate: derivedRate, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+      }
+    }
+  }
+
   // Invoice number: always prefix with "INV " if not already — contractors use dates, serials, etc.
   if (result.invoiceNumber && !/^INV/i.test(result.invoiceNumber)) {
     result = { ...result, invoiceNumber: 'INV ' + result.invoiceNumber };
