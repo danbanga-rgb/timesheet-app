@@ -185,7 +185,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
 };
 
 import { useState, useEffect, useRef, Fragment } from 'react';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronRight } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronRight, Building2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 
@@ -708,6 +708,15 @@ const TimesheetSystem = () => {
   const [timesheets, setTimesheets] = useState<Timesheet[]>([]);
   const timesheetsRef = useRef<Timesheet[]>([]);
   const [accountantTab, setAccountantTab] = useState('weekly');
+  // Client Estimation tab — default to previous month (matching how contractors bill: past month, invoiced now)
+  const [estimationMonth, setEstimationMonth] = useState(() => {
+    const d = new Date();
+    d.setDate(1); d.setMonth(d.getMonth() - 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  });
+  const [estimationClients, setEstimationClients] = useState<Array<{id:number,name:string,payment_terms_days:number,retention_credit_pct:number}>>([]);
+  const [estimationEngagements, setEstimationEngagements] = useState<Array<{id:number,client_id:number,user_id:string,role_title:string,sow_reference:string|null,bill_rate:number}>>([]);
+  const [estimationLoading, setEstimationLoading] = useState(false);
   const [profileTabSearch, setProfileTabSearch] = useState('');
   const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'>('all');
   const [profileTabExcludeTest, setProfileTabExcludeTest] = useState(true);
@@ -897,6 +906,26 @@ const TimesheetSystem = () => {
   }, []);
 
   useEffect(() => { timesheetsRef.current = timesheets; }, [timesheets]);
+
+  // ─── Client Estimation tab: fetch clients + engagements when tab active ───
+  useEffect(() => {
+    if (accountantTab !== 'client-estimation') return;
+    let cancelled = false;
+    (async () => {
+      setEstimationLoading(true);
+      const [cRes, eRes] = await Promise.all([
+        supabase.from('clients').select('id,name,payment_terms_days,retention_credit_pct').order('name'),
+        supabase.from('client_engagements').select('id,client_id,user_id,role_title,sow_reference,bill_rate'),
+      ]);
+      if (cancelled) return;
+      if (cRes.error) console.error('clients fetch:', cRes.error);
+      if (eRes.error) console.error('engagements fetch:', eRes.error);
+      setEstimationClients(cRes.data || []);
+      setEstimationEngagements(eRes.data || []);
+      setEstimationLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [accountantTab]);
 
   // ─── Reminder interval ────────────────────────────────────────────────────
   useEffect(() => {
@@ -4543,6 +4572,10 @@ const TimesheetSystem = () => {
                 <Users className="w-5 h-5 flex-shrink-0" />
                 <span className="hidden sm:inline">Timesheet </span><span>Only</span>
               </button>
+              <button onClick={() => setAccountantTab('client-estimation')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'client-estimation' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <Building2 className="w-5 h-5 flex-shrink-0" />
+                <span className="hidden sm:inline">Client </span><span>Estimation</span>
+              </button>
               <button onClick={() => setAccountantTab('invoices')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors relative ' + (accountantTab === 'invoices' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
                 <span className="relative">
                   <Receipt className="w-5 h-5 flex-shrink-0" />
@@ -4878,6 +4911,203 @@ const TimesheetSystem = () => {
                     </div>
                   )
                 }
+              </div>
+            );
+          })()}
+
+          {accountantTab === 'client-estimation' && (() => {
+            const [year, monthN] = estimationMonth.split('-').map(Number);
+            const monthStart = `${estimationMonth}-01`;
+            const lastDay = new Date(Date.UTC(year, monthN, 0)).getUTCDate();
+            const monthEnd = `${estimationMonth}-${String(lastDay).padStart(2, '0')}`;
+            const monthLabel = new Date(Date.UTC(year, monthN - 1, 1)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+            // Per-day hours from all timesheets that fall in the month
+            const perDayHours = (userId: string): Record<string, number> => {
+              const days: Record<string, number> = {};
+              for (const ts of timesheets) {
+                if (ts.userId !== userId) continue;
+                for (const [d, v] of Object.entries(ts.entries || {})) {
+                  if (d < monthStart || d > monthEnd) continue;
+                  let n = 0;
+                  if (typeof v === 'number') n = v;
+                  else if (v && typeof v === 'object') {
+                    const raw = (v as { hours?: string | number }).hours;
+                    n = typeof raw === 'number' ? raw : parseFloat(String(raw ?? 0));
+                  }
+                  if (isFinite(n) && n > 0) days[d] = (days[d] || 0) + n;
+                }
+              }
+              return days;
+            };
+
+            // Group weekdays into weeks (Mon-Fri buckets). Start from Monday of week containing month day 1.
+            type WeekBucket = { label: string; days: string[] };
+            const weeks: WeekBucket[] = [];
+            const walker = new Date(monthStart + 'T12:00:00Z');
+            // Rewind to Monday
+            const wDow = walker.getUTCDay();
+            walker.setUTCDate(walker.getUTCDate() - (wDow === 0 ? 6 : wDow - 1));
+            while (walker.toISOString().slice(0, 10) <= monthEnd) {
+              const start = new Date(walker);
+              const wDays: string[] = [];
+              for (let i = 0; i < 5; i++) {
+                const cur = new Date(start);
+                cur.setUTCDate(start.getUTCDate() + i);
+                const cs = cur.toISOString().slice(0, 10);
+                if (cs >= monthStart && cs <= monthEnd) wDays.push(cs);
+              }
+              if (wDays.length > 0) {
+                const wkEnd = new Date(start); wkEnd.setUTCDate(start.getUTCDate() + 6);
+                weeks.push({
+                  label: `${start.getUTCDate()}–${wkEnd.getUTCDate() > lastDay ? lastDay : wkEnd.getUTCDate()}`,
+                  days: wDays,
+                });
+              }
+              walker.setUTCDate(walker.getUTCDate() + 7);
+            }
+
+            // For each engagement, compute per-week actual + estimated hours
+            type CellSource = 'actual' | 'estimated' | 'outside';
+            type Cell = { hours: number; source: CellSource };
+            const cellFor = (userId: string, day: string, actuals: Record<string, number>): Cell => {
+              const profile = users.find(u => u.id === userId);
+              const start = profile?.startDate;
+              const end   = profile?.endDate;
+              if ((start && day < start) || (end && day > end)) return { hours: 0, source: 'outside' };
+              const h = actuals[day];
+              if (h != null && h > 0) return { hours: h, source: 'actual' };
+              // Estimated: max(8, contractor's monthly max day)
+              const days = Object.values(actuals);
+              const monthlyMax = days.length ? Math.max(...days) : 0;
+              return { hours: Math.max(8, monthlyMax || 0), source: 'estimated' };
+            };
+
+            const engagementsByClient = new Map<number, typeof estimationEngagements>();
+            for (const e of estimationEngagements) {
+              if (!engagementsByClient.has(e.client_id)) engagementsByClient.set(e.client_id, []);
+              engagementsByClient.get(e.client_id)!.push(e);
+            }
+
+            const userById = new Map(users.map(u => [u.id, u]));
+
+            const cellColor = (source: CellSource) => (
+              source === 'actual' ? 'bg-green-50 text-green-800'
+              : source === 'estimated' ? 'bg-yellow-50 text-yellow-800'
+              : 'bg-gray-100 text-gray-400'
+            );
+
+            const currencyFmt = (n: number) => n.toLocaleString('en-US', { style:'currency', currency:'USD', maximumFractionDigits: 0 });
+
+            return (
+              <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
+                  <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                    <Building2 className="w-6 h-6" /> Client Estimation — {monthLabel}
+                  </h2>
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm text-gray-600">Month:</label>
+                    <input
+                      type="month"
+                      value={estimationMonth}
+                      onChange={(e) => setEstimationMonth(e.target.value)}
+                      className="border border-gray-300 rounded px-2 py-1 text-sm"
+                    />
+                  </div>
+                </div>
+
+                {/* Legend */}
+                <div className="flex flex-wrap gap-3 text-xs text-gray-600 mb-4">
+                  <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 bg-green-50 border border-green-300 rounded" /> actual</span>
+                  <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 bg-yellow-50 border border-yellow-300 rounded" /> estimated (max(8, monthly max))</span>
+                  <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 bg-gray-100 border border-gray-300 rounded" /> outside start/end</span>
+                </div>
+
+                {estimationLoading && <div className="text-gray-500">Loading client engagement data…</div>}
+
+                {!estimationLoading && estimationClients.length === 0 && (
+                  <div className="text-gray-500 italic">No clients configured yet.</div>
+                )}
+
+                {!estimationLoading && estimationClients.map(client => {
+                  const engs = engagementsByClient.get(client.id) || [];
+                  if (engs.length === 0) return null;
+                  let clientTotalHours = 0;
+                  let clientTotalAmount = 0;
+
+                  return (
+                    <div key={client.id} className="mb-6 border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="bg-indigo-50 px-4 py-2 border-b border-gray-200 flex justify-between items-center">
+                        <div className="font-semibold text-indigo-900">{client.name}</div>
+                        <div className="text-xs text-indigo-700">
+                          NET {client.payment_terms_days}
+                          {client.retention_credit_pct > 0 && <span className="ml-2">· {client.retention_credit_pct}% retention</span>}
+                          <span className="ml-3">{engs.length} contractor{engs.length !== 1 ? 's' : ''}</span>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-xs">
+                          <thead className="bg-gray-50 border-b border-gray-200">
+                            <tr>
+                              <th className="text-left px-3 py-2 sticky left-0 bg-gray-50">Contractor</th>
+                              <th className="text-left px-2 py-2">SOW</th>
+                              <th className="text-right px-2 py-2">Rate</th>
+                              {weeks.map(w => (
+                                <th key={w.label} className="text-right px-2 py-2 whitespace-nowrap">Wk {w.label}</th>
+                              ))}
+                              <th className="text-right px-2 py-2 border-l border-gray-300">Hours</th>
+                              <th className="text-right px-2 py-2">Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {engs.map(e => {
+                              const profile = userById.get(e.user_id);
+                              if (!profile) return null;
+                              const actuals = perDayHours(e.user_id);
+                              // Compute per-week totals
+                              const weekTotals = weeks.map(w => {
+                                let sum = 0;
+                                for (const d of w.days) {
+                                  const c = cellFor(e.user_id, d, actuals);
+                                  if (c.source !== 'outside') sum += c.hours;
+                                }
+                                return sum;
+                              });
+                              const totalH = weekTotals.reduce((a, b) => a + b, 0);
+                              const amount = totalH * Number(e.bill_rate);
+                              clientTotalHours += totalH;
+                              clientTotalAmount += amount;
+                              return (
+                                <tr key={e.id} className="border-b border-gray-100 hover:bg-gray-50">
+                                  <td className="px-3 py-1 sticky left-0 bg-white font-medium">{profile.name}</td>
+                                  <td className="px-2 py-1 text-gray-600">{e.sow_reference || '—'}</td>
+                                  <td className="px-2 py-1 text-right">${Number(e.bill_rate).toFixed(0)}</td>
+                                  {weeks.map((w, i) => {
+                                    // For color: majority source per week
+                                    const sources = w.days.map(d => cellFor(e.user_id, d, actuals).source);
+                                    const dominant: CellSource = sources.includes('actual') ? 'actual' : sources.includes('estimated') ? 'estimated' : 'outside';
+                                    return (
+                                      <td key={i} className={`px-2 py-1 text-right ${cellColor(dominant)}`}>
+                                        {weekTotals[i] > 0 ? weekTotals[i].toFixed(0) : '·'}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="px-2 py-1 text-right font-semibold border-l border-gray-300">{totalH.toFixed(0)}</td>
+                                  <td className="px-2 py-1 text-right font-semibold">{currencyFmt(amount)}</td>
+                                </tr>
+                              );
+                            })}
+                            <tr className="bg-indigo-50 font-bold border-t-2 border-indigo-200">
+                              <td colSpan={3 + weeks.length} className="px-3 py-2 text-right text-indigo-900">Client Total:</td>
+                              <td className="px-2 py-2 text-right text-indigo-900 border-l border-indigo-300">{clientTotalHours.toFixed(0)}</td>
+                              <td className="px-2 py-2 text-right text-indigo-900">{currencyFmt(clientTotalAmount)}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             );
           })()}
