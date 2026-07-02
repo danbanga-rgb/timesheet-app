@@ -1896,6 +1896,64 @@ function extractTotalHoursFromBodyProse(text) {
   return null;
 }
 
+// Fetch the contractor's most recent successful invoice rate. Used as a strong tiebreaker
+// when the parser produces a "dirty" rate (not a multiple of $0.50). Contractors virtually
+// never change rates between months, so the previous rate is a very high-confidence signal.
+// Returns { rate: number, invoiceId: number } or null if no history / no clean historical rate.
+async function fetchContractorHistoricalRate(contractorEmail) {
+  if (!CONFIG.supabaseServiceKey || !contractorEmail) return null;
+  try {
+    // Resolve user_id first
+    const profRes = await fetch(
+      `${CONFIG.supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(contractorEmail)}&select=id&limit=1`,
+      { headers: { apikey: CONFIG.supabaseServiceKey, Authorization: `Bearer ${CONFIG.supabaseServiceKey}` } }
+    );
+    const profs = await profRes.json();
+    const uid = profs?.[0]?.id;
+    if (!uid) return null;
+    // Get most recent invoice with a non-null rate
+    const invRes = await fetch(
+      `${CONFIG.supabaseUrl}/rest/v1/invoices?user_id=eq.${uid}&rate=not.is.null&select=id,rate,period_start&order=period_start.desc&limit=1`,
+      { headers: { apikey: CONFIG.supabaseServiceKey, Authorization: `Bearer ${CONFIG.supabaseServiceKey}` } }
+    );
+    const invs = await invRes.json();
+    const inv = invs?.[0];
+    if (!inv || inv.rate == null) return null;
+    return { rate: Number(inv.rate), invoiceId: inv.id, periodStart: inv.period_start };
+  } catch (e) {
+    console.warn(`  ⚠️  fetchContractorHistoricalRate error: ${e.message}`);
+    return null;
+  }
+}
+
+// If parsed rate is dirty (not clean cents) but a historical rate exists that reconciles the
+// total to a clean integer hours count, prefer the historical rate. Contractors don't randomly
+// change rates month-to-month; a dirty derived rate + total = round-dollar is the classic
+// signature of a contractor-hours-typo (e.g. Enis Basic writing "(168h)" for "22*8*30usd").
+function applyHistoricalRateHint(parsed, hist) {
+  if (!parsed || !hist) return parsed;
+  const isCleanRate = (r) => r != null && r > 0 && Math.abs(r * 2 - Math.round(r * 2)) < 0.001;
+  if (isCleanRate(parsed.rate)) return parsed;
+  if (parsed.totalAmount == null || parsed.totalAmount !== Math.round(parsed.totalAmount)) return parsed;
+  // Try historical rate: does it divide total into a clean integer hours count?
+  const histRate = hist.rate;
+  if (!isCleanRate(histRate) || histRate <= 0) return parsed;
+  const impliedHours = parsed.totalAmount / histRate;
+  if (Math.abs(impliedHours - Math.round(impliedHours)) > 0.01) return parsed;
+  const cleanHours = Math.round(impliedHours);
+  if (cleanHours < 1 || cleanHours > 500) return parsed;
+  // Sanity: implied hours should be within ±40 of parsed hours (a work week's wiggle room)
+  if (parsed.totalHours != null && Math.abs(cleanHours - parsed.totalHours) > 40) return parsed;
+  const note = `Historical rate hint (last invoice #${hist.invoiceId}: $${histRate}/hr): reconciled ${parsed.totalHours}h × $${parsed.rate}/hr → ${cleanHours}h × $${histRate}/hr = $${parsed.totalAmount}.`;
+  console.warn(`  📜 ${note}`);
+  return {
+    ...parsed,
+    totalHours: cleanHours,
+    rate: histRate,
+    parseNotes: [note, parsed.parseNotes].filter(Boolean).join(' | '),
+  };
+}
+
 // Verification pass: runs Groq vision INDEPENDENTLY of the primary parse and compares field-by-field.
 // Zero production impact — only writes into email_invoice_log.groq_vision_verification for later
 // analysis. Enables phased migration to Groq-primary once we have data on agreement rate.
@@ -2531,6 +2589,13 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     if (knownTemplate) console.log(`  📋 Known template for ${contractorEmail}: ${knownTemplate}`);
     let parsed = await extractInvoice(att.pdfText || '', att.isImagePdf || false, att.buffer, att.name, bodyText || '', knownTemplate);
     if (parsed) parsed = applyEarlyMonthPeriodFix(parsed);
+    // Historical rate hint — pulls the contractor's most recent invoice rate and, if the
+    // current parse produced a dirty rate (has cents), tries to reconcile with the historical
+    // clean rate. Enis-class typo fix. Runs after extraction, before shadow verification.
+    if (parsed && parsed.rate != null) {
+      const hist = await fetchContractorHistoricalRate(contractorEmail);
+      if (hist) parsed = applyHistoricalRateHint(parsed, hist);
+    }
     // Shadow verification (Phase 1): run Groq vision alongside, compare, log — does NOT affect
     // the primary parse or what goes into the DB. Enables data-driven decision on flipping
     // Groq to primary in a future phase. See project-parser-verification memo.
