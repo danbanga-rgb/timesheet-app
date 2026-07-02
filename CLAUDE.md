@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 At the start of every session, immediately schedule two recurring crons using CronCreate:
 
-**1. Hourly memory save** (every session):
-- **Schedule:** `13 * * * 1-5` (every hour, weekdays)
+**1. Business-hours memory save** (every session):
+- **Schedule:** `13 9-17 * * 1-5` (hourly 9am–5pm weekdays only — silent outside business hours)
 - **Prompt:** Review `git log --oneline -10`, compare against MEMORY.md, and save any non-obvious decisions or behavioral changes to the appropriate memory file. Update MEMORY.md index if new files added. Skip anything derivable from reading code or git history.
 
 **2. Monthly invoice parser review** (durable: true — persists across sessions):
