@@ -2409,14 +2409,16 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       }
       const action = res.body?.action || String(res.status);
       results.push({
-        type:           'timesheet',
-        contractor:     contractorEmail,
-        contractorName: res.body?.userName || ts.resolvedName || contractorEmail,
-        week:           res.body?.weekStart || ts.weekStart,
-        status:         res.status,
+        type:               'timesheet',
+        contractor:         contractorEmail,
+        contractorName:     res.body?.userName || ts.resolvedName || contractorEmail,
+        week:               res.body?.weekStart || ts.weekStart,
+        status:             res.status,
         action,
-        attachmentName: ts.attachmentName || 'body',
-        notes:          res.body?.notes || '',
+        attachmentName:     ts.attachmentName || 'body',
+        notes:              res.body?.notes || '',
+        source:             'imported', // for keep-unseen decision (portal 0h is contractor intent, not a bug)
+        totalHoursIngested: Number(ts.total || 0), // 0 = blank timesheet → keep unseen for troubleshooting
       });
       console.log(`  ✅ ${contractorEmail} | ${ts.weekStart} | ${ts.attachmentName || 'body'} → ${action}`);
     } catch (e) {
@@ -3562,6 +3564,60 @@ function markEmailsSeen(uids) {
   });
 }
 
+// Mark emails Unseen (opposite of markEmailsSeen). Used by the "keep unseen on problematic
+// outcome" safety net — after fetching with markSeen:true, we re-mark specific UIDs as unseen
+// so the next poller run picks them up for retry after we push a fix.
+function markEmailsUnseen(uids) {
+  return new Promise((resolve, reject) => {
+    if (!uids || uids.length === 0) return resolve();
+    const imap = new Imap({
+      user: CONFIG.imapUser, password: CONFIG.imapPass,
+      host: CONFIG.imapHost, port: CONFIG.imapPort,
+      tls: true, tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 15000, authTimeout: 10000,
+    });
+    imap.once('error', reject);
+    imap.once('ready', () => {
+      imap.openBox('INBOX', false, (err) => {
+        if (err) return reject(err);
+        imap.delFlags(uids, '\\Seen', (err) => {
+          imap.end();
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+    });
+    imap.connect();
+  });
+}
+
+// Decide whether an email should be marked Unseen for troubleshooting/retry on the next run.
+// Returns true if ANY result is problematic. Signals we cover:
+//   - Invoice not ingested (missing period/hours — action = invoice_partial/invoice_error)
+//   - Invoice ingested but period_end is not in the "expected window" (past 60 days .. current month end).
+//     Prior-year periods, future periods, or periods > 60 days in the past → flag.
+//   - Timesheet imported with total hours = 0 (Nikolina/Marta primitive-spread class of bug).
+//     Portal 0h submissions (source='direct') stay Seen — those are contractor intent.
+function shouldKeepUnseen(emailResults, nowIso = new Date().toISOString().slice(0, 10)) {
+  const today = new Date(nowIso + 'T12:00:00Z');
+  const cutoffPast = new Date(today); cutoffPast.setUTCDate(today.getUTCDate() - 60);
+  const cutoffPastStr = cutoffPast.toISOString().slice(0, 10);
+  const currentMonthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+
+  for (const r of emailResults) {
+    // Invoice signals
+    if (r.action === 'invoice_partial' || r.action === 'invoice_error') return true;
+    if (r.action?.startsWith('invoice_') && r.parsed?.periodEnd) {
+      const pe = r.parsed.periodEnd;
+      if (pe < cutoffPastStr || pe > currentMonthEnd) return true;
+    }
+    // Timesheet signals (imported only — portal 0h is contractor intent)
+    if (r.type === 'timesheet' && r.error) return true;
+    if (r.type === 'timesheet' && r.source === 'imported' && r.totalHoursIngested === 0) return true;
+  }
+  return false;
+}
+
 // ─── Trigger weekly timesheet report ─────────────────────────────────────────
 
 async function writePollerHeartbeat(data) {
@@ -3881,6 +3937,8 @@ async function main() {
   }
 
   const dmarcUids     = [];
+  const keepUnseenUids = []; // Safety net: UIDs to mark unseen after processing when the outcome
+                             // looks problematic. Populated per-email based on shouldKeepUnseen().
 
   const summary = {
     total: rawMessages.length, dmarc: 0, forwarded: 0,
@@ -4012,6 +4070,20 @@ async function main() {
     const emailFailedAtts = [];
     await processEmail(parsed, messageId, emailResults, emailFailedAtts, summary, RUN_ID);
 
+    // Safety net: mark UID for unseen if any result signals a problem worth retrying
+    // after we push a code fix (missing invoice fields, wrong period window, or a
+    // 0h imported timesheet — the Nikolina/Marta class).
+    if (shouldKeepUnseen(emailResults)) {
+      keepUnseenUids.push(uid);
+      const flagged = emailResults.filter(r =>
+        r.action === 'invoice_partial' || r.action === 'invoice_error' ||
+        (r.action?.startsWith('invoice_') && r.parsed?.periodEnd) ||
+        (r.type === 'timesheet' && (r.error || r.totalHoursIngested === 0))
+      );
+      const why = flagged.map(r => r.action || (r.type === 'timesheet' ? '0h_ts' : 'error')).join(', ');
+      console.log(`  🔄 Keeping unseen for troubleshooting (uid=${uid}): ${why}`);
+    }
+
     // Accumulate summary counts
     emailResults.forEach(r => {
       if (r.type === 'timesheet') summary.timesheetReports.push(r);
@@ -4090,10 +4162,18 @@ async function main() {
 
   }
 
-  // IMAP operations — only DMARC deletes needed (emails already marked seen on fetch)
+  // IMAP operations — DMARC deletes + unseen-marking of problematic emails
   if (dmarcUids.length > 0) {
     try { await deleteDmarcEmails(dmarcUids); console.log(`  🗑️  Deleted ${dmarcUids.length} DMARC emails`); }
     catch (e) { console.warn(`DMARC delete failed: ${e.message}`); }
+  }
+  if (keepUnseenUids.length > 0) {
+    try {
+      await markEmailsUnseen(keepUnseenUids);
+      console.log(`  🔄 Kept ${keepUnseenUids.length} email(s) unseen for troubleshooting (uids: ${keepUnseenUids.join(', ')})`);
+    } catch (e) {
+      console.warn(`Failed to mark unseen: ${e.message}`);
+    }
   }
 
   // Console summary
@@ -4105,6 +4185,7 @@ async function main() {
   console.log(`  Created          : ${summary.created}`);
   console.log(`  Duplicates       : ${summary.duplicates}`);
   console.log(`  Corrections      : ${summary.corrections}`);
+  if (keepUnseenUids.length > 0) console.log(`  Kept unseen      : ${keepUnseenUids.length} (retry on next run after fix)`);
   console.log(`  Invoices parsed  : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? '' : ' (dry-run)'}`);
   if (summary.invoiceReports.length > 0) {
     const mc = {};
