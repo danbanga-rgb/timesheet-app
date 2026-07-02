@@ -237,6 +237,7 @@ interface Timesheet {
   source: 'direct' | 'imported' | null;
   submittedAt: string;
   approvedAt?: string | null;
+  lockedDays: string[] | null; // set on invoice approval; non-null/non-empty = week is locked
 }
 
 interface PaymentProfile {
@@ -1159,6 +1160,7 @@ const TimesheetSystem = () => {
       source: (t.source as Timesheet['source']) || null,
       submittedAt: t.submitted_at as string,
       approvedAt: (t.approved_at as string) || null,
+      lockedDays: (t.locked_days as string[]) || null,
     };
   }
 
@@ -7174,6 +7176,14 @@ const TimesheetSystem = () => {
                             </select>
                           </div>
                         </div>
+                        {inv.periodStart && inv.periodEnd && (
+                          <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 flex gap-2">
+                            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                            <div>
+                              <strong>Approving will LOCK timesheets</strong> for {inv.userName} covering {inv.periodStart} → {inv.periodEnd}. After approval, {inv.userName} will not be able to edit these weeks via the portal — they'll need to email you the correction.
+                            </div>
+                          </div>
+                        )}
                         <div className="flex gap-3">
                           <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined, undefined, pendingPaymentMethod || paymentMethod(inv), pendingPaymentTerms || undefined)} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
                           <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
@@ -7571,6 +7581,20 @@ const TimesheetSystem = () => {
             <button onClick={() => changeWeek(1)} className="px-3 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm"><span className="hidden sm:inline">Next </span>Week →</button>
           </div>
 
+          {(() => {
+            const locked = (currentTimesheet?.lockedDays?.length ?? 0) > 0;
+            if (!locked) return null;
+            return (
+              <div className="mb-4 p-4 bg-amber-50 border-2 border-amber-300 rounded-lg flex items-center gap-3">
+                <AlertTriangle className="w-5 h-5 text-amber-700 flex-shrink-0" />
+                <div>
+                  <p className="font-semibold text-amber-900">This week is locked</p>
+                  <p className="text-sm text-amber-800">The invoice covering this period has been approved. Contact the accountant to make corrections.</p>
+                </div>
+              </div>
+            );
+          })()}
+
           {hasPreviousWeekTimesheet && (!currentTimesheet || currentTimesheet.status !== 'approved') && (
             <div className="mb-4 p-4 bg-indigo-50 border-2 border-indigo-200 rounded-lg">
               <div className="flex items-center justify-between">
@@ -7590,7 +7614,7 @@ const TimesheetSystem = () => {
             {weekDates.slice(0, 5).map(date => {
               const dateKey = formatDate(date);
               const entry = timeEntries[dateKey] || { hours: '0' };
-              const isDisabled = isUserInactive || currentTimesheet?.status === 'approved';
+              const isDisabled = isUserInactive || (currentTimesheet?.lockedDays?.length ?? 0) > 0;
               return (
                 <div key={dateKey} className={'p-4 rounded-lg ' + (entry.isHoliday ? 'bg-red-50 border-2 border-red-200' : 'bg-blue-50')}>
                   <div className="flex items-center justify-between">
@@ -7615,7 +7639,7 @@ const TimesheetSystem = () => {
               weekDates.slice(5).map(date => {
                 const dateKey = formatDate(date);
                 const entry = timeEntries[dateKey] || { hours: '0' };
-                const isDisabled = isUserInactive || currentTimesheet?.status === 'approved';
+                const isDisabled = isUserInactive || (currentTimesheet?.lockedDays?.length ?? 0) > 0;
                 return (
                   <div key={dateKey} className="p-4 rounded-lg bg-gray-100 border-2 border-gray-200">
                     <div className="flex items-center justify-between">
@@ -7660,10 +7684,14 @@ const TimesheetSystem = () => {
             <div className="mt-6 p-4 bg-orange-50 border-2 border-orange-200 rounded-lg text-center">
               <p className="text-orange-800 font-medium">Timesheet submission is disabled after your end date.</p>
             </div>
-          ) : !currentTimesheet || currentTimesheet.status !== 'approved' ? (
+          ) : (currentTimesheet?.lockedDays?.length ?? 0) > 0 ? (
+            <div className="mt-6 p-4 bg-gray-100 border-2 border-gray-300 rounded-lg text-center">
+              <p className="text-gray-700 font-medium">This week is locked — contact the accountant to make changes.</p>
+            </div>
+          ) : (
             <div>
               <button onClick={submitTimesheet} className="w-full mt-6 bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2">
-                <CheckCircle className="w-5 h-5" /> Submit for Approval
+                <CheckCircle className="w-5 h-5" /> {currentTimesheet?.status === 'approved' ? 'Update Timesheet' : 'Submit for Approval'}
               </button>
               {(() => {
                 const missing = currentUser!.startDate
@@ -7690,10 +7718,6 @@ const TimesheetSystem = () => {
               <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <p className="text-sm text-blue-800"><strong>Reminder Schedule:</strong> Automated reminders are sent Friday at 5 PM and Monday at 11 AM (your local time) for any missing timesheets.</p>
               </div>
-            </div>
-          ) : (
-            <div className="mt-6 p-4 bg-green-50 border-2 border-green-200 rounded-lg text-center">
-              <p className="text-green-800 font-medium">This timesheet has been approved and cannot be modified.</p>
             </div>
           )}
         </div>
