@@ -2582,7 +2582,23 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     // Hours are optional — amount-only invoices (no hourly breakdown) are valid.
     const canIngest = !!(parsed?.periodStart && parsed?.periodEnd);
 
-    if (CONFIG.invoiceIngestEnabled && CONFIG.invoiceIngestUrl && canIngest) {
+    // Guardrail: block ingest for periods outside the plausible window. Contractors
+    // invoice for the past month or current month. A year-old period is almost always a
+    // parser/contractor error and would create a wrong invoice in the DB. Better to leave
+    // the email unseen (via the shouldKeepUnseen safety net downstream) and retry after
+    // investigating rather than silently store bad data.
+    let periodOutOfWindow = false;
+    if (canIngest) {
+      const today = new Date();
+      const prevMonthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1)).toISOString().slice(0, 10);
+      const currentMonthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+      if (parsed.periodEnd < prevMonthStart || parsed.periodEnd > currentMonthEnd) {
+        console.warn(`  ⚠️  Period ${parsed.periodStart}–${parsed.periodEnd} out of window [${prevMonthStart} .. ${currentMonthEnd}] — refusing ingest`);
+        periodOutOfWindow = true;
+      }
+    }
+
+    if (CONFIG.invoiceIngestEnabled && CONFIG.invoiceIngestUrl && canIngest && !periodOutOfWindow) {
       try {
         const res = await postToIngest({
           messageId:       `${messageId}::${att.name}`,
@@ -2626,10 +2642,14 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
       }
     } else {
-      const reason = !CONFIG.invoiceIngestEnabled ? 'dry-run mode' : !canIngest ? 'missing fields' : 'no INVOICE_INGEST_URL';
+      const reason = !CONFIG.invoiceIngestEnabled ? 'dry-run mode'
+        : !canIngest ? 'missing fields'
+        : periodOutOfWindow ? 'period_out_of_window'
+        : 'no INVOICE_INGEST_URL';
       console.log(`     ℹ️  Not ingested (${reason})`);
-      const reportAction = !canIngest ? 'invoice_partial' : 'invoice_reported';
-      results.push({ contractor: contractorEmail, attachmentName: att.name, action: reportAction, parsed });
+      // period_out_of_window uses invoice_partial so shouldKeepUnseen picks it up too
+      const reportAction = (!canIngest || periodOutOfWindow) ? 'invoice_partial' : 'invoice_reported';
+      results.push({ contractor: contractorEmail, attachmentName: att.name, action: reportAction, parsed, ingestNotes: reason });
     }
   }
 
@@ -3594,14 +3614,17 @@ function markEmailsUnseen(uids) {
 // Decide whether an email should be marked Unseen for troubleshooting/retry on the next run.
 // Returns true if ANY result is problematic. Signals we cover:
 //   - Invoice not ingested (missing period/hours — action = invoice_partial/invoice_error)
-//   - Invoice ingested but period_end is not in the "expected window" (past 60 days .. current month end).
-//     Prior-year periods, future periods, or periods > 60 days in the past → flag.
+//   - Invoice ingested but period_end is not in the "expected window" — expected is
+//     [first day of previous month, last day of current month]. Rationale: contractors
+//     invoice the past month or current month. A late April invoice arriving in July is
+//     out-of-window and should be flagged for manual review (probably a parser year mismatch
+//     like Bojan's 2025-06 case). Same for future periods — a real contractor never invoices
+//     for months that haven't happened.
 //   - Timesheet imported with total hours = 0 (Nikolina/Marta primitive-spread class of bug).
 //     Portal 0h submissions (source='direct') stay Seen — those are contractor intent.
 function shouldKeepUnseen(emailResults, nowIso = new Date().toISOString().slice(0, 10)) {
   const today = new Date(nowIso + 'T12:00:00Z');
-  const cutoffPast = new Date(today); cutoffPast.setUTCDate(today.getUTCDate() - 60);
-  const cutoffPastStr = cutoffPast.toISOString().slice(0, 10);
+  const prevMonthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1)).toISOString().slice(0, 10);
   const currentMonthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
 
   for (const r of emailResults) {
@@ -3609,7 +3632,7 @@ function shouldKeepUnseen(emailResults, nowIso = new Date().toISOString().slice(
     if (r.action === 'invoice_partial' || r.action === 'invoice_error') return true;
     if (r.action?.startsWith('invoice_') && r.parsed?.periodEnd) {
       const pe = r.parsed.periodEnd;
-      if (pe < cutoffPastStr || pe > currentMonthEnd) return true;
+      if (pe < prevMonthStart || pe > currentMonthEnd) return true;
     }
     // Timesheet signals (imported only — portal 0h is contractor intent)
     if (r.type === 'timesheet' && r.error) return true;
