@@ -1651,9 +1651,24 @@ function postProcessInvoice(result, pdfText) {
         console.warn(`  📅 Invoice future period ${result.periodStart}–${result.periodEnd} → ${swappedStart}–${swappedEnd} (MM/DD↔DD/MM swap)`);
         result = { ...result, periodStart: swappedStart, periodEnd: swappedEnd };
       } else {
-        const note = `Period ${result.periodEnd} is in the future — likely parse error, period nulled`;
-        console.warn(`  ⚠️  ${note}`);
-        result = { ...result, periodStart: null, periodEnd: null, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+        // Salvage: if periodStart is a valid first-of-month, infer periodEnd as last-of-that-month
+        // (Enis Basic #298: periodStart='2026-06-01' correct, periodEnd='2026-07-09' was invoice
+        // date bleeding in. Rather than nulling both and losing the good periodStart, keep it
+        // and infer end. Only null both if periodStart is also unusable.)
+        const startM = /^(\d{4})-(\d{2})-01$/.exec(result.periodStart || '');
+        if (startM) {
+          const [ , sy, smStr ] = startM;
+          const sm = Number(smStr);
+          const lastDay = new Date(Date.UTC(Number(sy), sm, 0)).getUTCDate();
+          const inferredEnd = `${sy}-${String(sm).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+          const note = `Period end ${result.periodEnd} in future; inferred end-of-month from periodStart (${result.periodStart}) → ${inferredEnd}`;
+          console.warn(`  📅 ${note}`);
+          result = { ...result, periodEnd: inferredEnd, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+        } else {
+          const note = `Period ${result.periodEnd} is in the future — likely parse error, period nulled`;
+          console.warn(`  ⚠️  ${note}`);
+          result = { ...result, periodStart: null, periodEnd: null, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+        }
       }
     }
   }
@@ -1911,10 +1926,27 @@ async function fillGapsWithGroqVision(result, pdfBuffer, filename) {
   catch (e) { console.warn(`  ⚠️  Gap-fill Groq vision error: ${e.message}`); return result; }
   if (!gv) return result;
 
+  // Validate date strings before accepting from any LLM. Groq occasionally hallucinates
+  // impossible dates like "2026-06-39" (Enis Basic #298 case) that then crash the ingest
+  // with a Postgres "date/time field value out of range" error. Reject anything that
+  // isn't a real calendar date.
+  const isRealDate = (s) => {
+    if (!s || typeof s !== 'string') return false;
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return false;
+    const [, y, mo, d] = m.map(Number);
+    if (mo < 1 || mo > 12) return false;
+    if (d < 1 || d > 31) return false;
+    const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    return d <= lastDay;
+  };
+
   const filled = [];
-  if (missingPeriod && gv.periodStart && gv.periodEnd) {
+  if (missingPeriod && isRealDate(gv.periodStart) && isRealDate(gv.periodEnd)) {
     result.periodStart = gv.periodStart; result.periodEnd = gv.periodEnd;
     filled.push('period');
+  } else if (missingPeriod && (gv.periodStart || gv.periodEnd)) {
+    console.warn(`  ⚠️  Groq vision returned invalid date(s) — rejected: ${gv.periodStart} → ${gv.periodEnd}`);
   }
   if (missingHours && gv.totalHours != null) { result.totalHours = gv.totalHours; filled.push('hours'); }
   if (missingRate && gv.rate != null) { result.rate = gv.rate; filled.push('rate'); }
