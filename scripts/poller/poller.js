@@ -1601,9 +1601,50 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
+  // Clean-rate preference: contractors bill at whole dollars or half dollars ($30, $52.5, etc).
+  // A rate with weird cents ($31.43, $28.52, $27.53) is almost always DERIVED — the parser
+  // trusted a wrong hours value (contractor's own typo) or wrong total. Try to recover a clean
+  // rate by adjusting hours ±8 (a work-day worth) and checking if the new (hours, rate) pair
+  // matches the total exactly with a clean rate.
+  //
+  // Enis Basic #157 today: PDF said "22d * 8h * 30usd = 5280usd" but "(168h)" was written as
+  // a typo. Parser saw 168h, derived rate = 5280/168 = $31.43. This fix would pick 176h × $30
+  // over 168h × $31.43 because 176 is a multiple of 8 and $30 is a clean rate.
+  const isCleanRate = (r) => {
+    if (r == null || r <= 0) return false;
+    // Multiple of 0.5 (common rates: 30, 30.5, 32.5, 100, 110)
+    return Math.abs(r * 2 - Math.round(r * 2)) < 0.001;
+  };
+
+  if (result.totalAmount != null && result.totalHours != null && result.rate != null
+      && !isCleanRate(result.rate) && result.totalAmount === Math.round(result.totalAmount)) {
+    const origH = result.totalHours;
+    const origR = result.rate;
+    const candidates = [];
+    // Try hours nudges of ±8 (integer workdays), also nearby exact multiples of 8
+    const nearest8 = Math.round(origH / 8) * 8;
+    for (const h of new Set([nearest8, nearest8 - 8, nearest8 + 8, nearest8 - 16, nearest8 + 16].filter(x => x > 0))) {
+      const r = result.totalAmount / h;
+      if (isCleanRate(r) && r >= 1 && r <= 500) {
+        candidates.push({ h, r: Math.round(r * 100) / 100, hoursDelta: Math.abs(h - origH) });
+      }
+    }
+    if (candidates.length > 0) {
+      // Prefer smallest hours-delta from original, then higher hours (more conservative on rate)
+      candidates.sort((a, b) => a.hoursDelta - b.hoursDelta || b.h - a.h);
+      const best = candidates[0];
+      const note = `Rate cleanup: original ${origH}h × $${origR}/hr (rate has cents) → ${best.h}h × $${best.r}/hr = $${result.totalAmount} (clean). Contractor likely had a typo on hours.`;
+      console.warn(`  🧮 ${note}`);
+      result = { ...result, totalHours: best.h, rate: best.r, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+    }
+  }
+
   // Amount snap: if parsed amount is within $1 of rate × hours, use the computed value.
   // PDFs often display a slightly rounded total; rate × hours is the source of truth.
-  if (result.totalAmount != null && result.totalHours != null && result.rate != null) {
+  // GUARD: only snap when rate is CLEAN (whole or half dollar). A dirty rate means our
+  // rate is probably wrong — snapping the total to match would compound the error.
+  if (result.totalAmount != null && result.totalHours != null && result.rate != null
+      && isCleanRate(result.rate)) {
     const computed = Math.round(result.totalHours * result.rate * 100) / 100;
     if (result.totalAmount !== computed && Math.abs(result.totalAmount - computed) <= 1) {
       const snapNote = `Amount $${result.totalAmount} snapped to $${computed} (within $1 of ${result.totalHours}h × $${result.rate}/hr)`;
