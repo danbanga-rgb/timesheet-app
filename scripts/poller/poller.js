@@ -2582,19 +2582,41 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     // Hours are optional — amount-only invoices (no hourly breakdown) are valid.
     const canIngest = !!(parsed?.periodStart && parsed?.periodEnd);
 
-    // Guardrail: block ingest for periods outside the plausible window. Contractors
-    // invoice for the past month or current month. A year-old period is almost always a
-    // parser/contractor error and would create a wrong invoice in the DB. Better to leave
-    // the email unseen (via the shouldKeepUnseen safety net downstream) and retry after
-    // investigating rather than silently store bad data.
+    // Guardrail: contractors invoice for last month or current month. If the parsed period
+    // is out of window, try a year-shift self-fix first (same month+day, adjust year).
+    // If the shifted period lands in window, use it and log a prominent note so the
+    // accountant sees the correction. If year-shift still can't land in window, refuse
+    // ingest and the shouldKeepUnseen safety net keeps the email unseen for retry.
     let periodOutOfWindow = false;
+    let periodAdjustmentNote = null;
     if (canIngest) {
       const today = new Date();
       const prevMonthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1)).toISOString().slice(0, 10);
       const currentMonthEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
       if (parsed.periodEnd < prevMonthStart || parsed.periodEnd > currentMonthEnd) {
-        console.warn(`  ⚠️  Period ${parsed.periodStart}–${parsed.periodEnd} out of window [${prevMonthStart} .. ${currentMonthEnd}] — refusing ingest`);
-        periodOutOfWindow = true;
+        // Try year-shift: replace the year(s) with plausible candidates
+        const [oy] = parsed.periodEnd.split('-').map(Number);
+        const candidates = [today.getUTCFullYear(), today.getUTCFullYear() - 1];
+        let fixed = null;
+        for (const cy of candidates) {
+          const shiftedEnd   = parsed.periodEnd.replace(String(oy), String(cy));
+          const [osy] = parsed.periodStart.split('-').map(Number);
+          const shiftedStart = parsed.periodStart.replace(String(osy), String(cy));
+          if (shiftedEnd >= prevMonthStart && shiftedEnd <= currentMonthEnd && shiftedStart <= shiftedEnd) {
+            fixed = { start: shiftedStart, end: shiftedEnd, from: parsed.periodStart, fromEnd: parsed.periodEnd };
+            break;
+          }
+        }
+        if (fixed) {
+          periodAdjustmentNote = `Period auto-adjusted year: ${fixed.from}–${fixed.fromEnd} → ${fixed.start}–${fixed.end}`;
+          console.warn(`  📅 ${periodAdjustmentNote}`);
+          parsed.periodStart = fixed.start;
+          parsed.periodEnd   = fixed.end;
+          parsed.parseNotes  = [parsed.parseNotes, periodAdjustmentNote].filter(Boolean).join(' | ');
+        } else {
+          console.warn(`  ⚠️  Period ${parsed.periodStart}–${parsed.periodEnd} out of window [${prevMonthStart} .. ${currentMonthEnd}] and year-shift didn't help — refusing ingest`);
+          periodOutOfWindow = true;
+        }
       }
     }
 
