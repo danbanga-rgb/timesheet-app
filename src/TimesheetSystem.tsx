@@ -5289,7 +5289,7 @@ const TimesheetSystem = () => {
                             </tr>
                           </thead>
                           <tbody>
-                            {rowsWithTotals.map(({eng: e, profile, actuals, weekTotals, totalH, amount}) => {
+                            {rowsWithTotals.map(({eng: e, profile, weekTotals, totalH, amount}) => {
                               clientTotalHours += totalH;
                               clientTotalAmount += amount;
                               return (
