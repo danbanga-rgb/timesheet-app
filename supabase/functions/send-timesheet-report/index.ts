@@ -229,6 +229,95 @@ function buildTimingSection(
     </div>`;
 }
 
+// ─── Contractor trend table ───────────────────────────────────────────────────
+
+function buildContractorTrendSection(
+  allTimesheets: Array<{ id: number; user_id: string; week_start: string; submitted_at: string | null; source: string }>,
+  profiles: Array<{ id: string; name: string; start_date: string | null; end_date: string | null }>,
+  channelMap: Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>,
+  timingWeeks: string[],
+  currentWeekForTimeliness: string | null,
+): string {
+  if (timingWeeks.length === 0) return '';
+
+  // Index: userId → weekStart → timesheet
+  const tsIdx = new Map<string, Map<string, { id: number; submittedAt: string | null; source: string }>>();
+  for (const ts of allTimesheets) {
+    const wk = ts.week_start.slice(0, 10);
+    if (!tsIdx.has(ts.user_id)) tsIdx.set(ts.user_id, new Map());
+    tsIdx.get(ts.user_id)!.set(wk, { id: ts.id, submittedAt: ts.submitted_at, source: ts.source });
+  }
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const CH_LABEL: Record<string, string> = { portal: 'P', direct: 'E', forwarded: 'F', auto_yes: 'A' };
+  const CH_COLOR: Record<string, string> = { portal: '#15803d', direct: '#2563eb', forwarded: '#9ca3af', auto_yes: '#0891b2' };
+  const TD = 'padding:3px 7px;border-bottom:1px solid #f3f4f6;white-space:nowrap';
+
+  const weekHeaders = timingWeeks.map(wk => {
+    const [, em, ed] = addDays(wk, 6).split('-').map(Number);
+    return `${MONTHS[em-1]} ${ed}${wk === currentWeekForTimeliness ? '●' : ''}`;
+  });
+
+  const rowHtml: string[] = [];
+
+  for (const p of profiles) {
+    // Only show contractors active in at least one of the timing weeks
+    const activeSomeWeek = timingWeeks.some(wk => {
+      const sun = addDays(wk, 6);
+      return (!p.start_date || p.start_date <= sun) && (!p.end_date || p.end_date >= wk);
+    });
+    if (!activeSomeWeek) continue;
+
+    const cells = timingWeeks.map(wk => {
+      const sun = addDays(wk, 6);
+      const eligible = (!p.start_date || p.start_date <= sun) && (!p.end_date || p.end_date >= wk);
+      if (!eligible) return `<td style="${TD}"></td>`;
+
+      const ts = tsIdx.get(p.id)?.get(wk);
+      const inProg = wk === currentWeekForTimeliness;
+
+      if (!ts) {
+        // Eligible but not submitted
+        const style = inProg ? `${TD};color:#d1d5db` : `${TD};color:#dc2626`;
+        return `<td style="${style};text-align:center">${inProg ? '' : '–'}</td>`;
+      }
+
+      const channel = channelMap.get(ts.id) ?? (ts.source === 'direct' ? 'portal' : 'direct');
+      const label = CH_LABEL[channel] ?? '?';
+      const color = CH_COLOR[channel] ?? '#374151';
+
+      let daysStr = '';
+      if (ts.submittedAt && !inProg) {
+        const [y, m, d] = wk.split('-').map(Number);
+        const weekEndMs = Date.UTC(y, m - 1, d + 6);
+        const days = Math.max(0, Math.round((new Date(ts.submittedAt).getTime() - weekEndMs) / 86400000));
+        daysStr = ` ${days}d`;
+      }
+
+      return `<td style="${TD};text-align:center;color:${color};font-weight:600">${label}${daysStr}</td>`;
+    }).join('');
+
+    const zebra = rowHtml.length % 2 === 1 ? 'background:#f9fafb' : '';
+    rowHtml.push(`<tr style="${zebra}"><td style="${TD};min-width:140px">${p.name}</td>${cells}</tr>`);
+  }
+
+  if (rowHtml.length === 0) return '';
+
+  const TH = 'padding:5px 7px;white-space:nowrap;font-weight:600;text-align:center';
+  return `
+    <div style="margin-bottom:20px">
+      <h3 style="margin:0 0 6px;color:#374151;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Contractor Trend</h3>
+      <table style="border-collapse:collapse;background:white;border-radius:6px;overflow:hidden;border:1px solid #e5e7eb;font-size:12px">
+        <thead><tr style="background:#374151;color:white">
+          <th style="${TH};text-align:left;min-width:140px">Contractor</th>
+          ${weekHeaders.map(h => `<th style="${TH}">${h}</th>`).join('')}
+        </tr></thead>
+        <tbody>${rowHtml.join('')}</tbody>
+      </table>
+      <p style="margin:4px 0 0;font-size:11px;color:#9ca3af">P=Portal · E=Email · F=Fwd · A=Auto-YES · –=missing · blank=inactive · ●=in progress</p>
+    </div>`;
+}
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 serve(async (req) => {
@@ -350,24 +439,30 @@ serve(async (req) => {
   if (mode === 'digest') {
     // Guard: only send at 9am PT (handles both PDT UTC-7 and PST UTC-8 automatically)
     // pg_cron fires at both 16:00 and 17:00 UTC; exactly one of those is 9am PT year-round.
+    const force = new URL(req.url).searchParams.get('force') === 'true';
     const ptHour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }), 10);
-    if (ptHour !== 9) {
+    if (!force && ptHour !== 9) {
       return new Response(JSON.stringify({ ok: true, skipped: 'not 9am PT', ptHour }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap, currentWeekForTimeliness);
+    const timingWeeks = completedWeeks.slice(-6);
+    if (currentWeekForTimeliness && !timingWeeks.includes(currentWeekForTimeliness)) timingWeeks.push(currentWeekForTimeliness);
+
+    const timingHtml     = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap, currentWeekForTimeliness);
+    const contractorHtml = buildContractorTrendSection(allTimesheets ?? [], profiles, channelMap, timingWeeks, currentWeekForTimeliness);
+
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'long' });
     const subject = `Timesheet Submission Digest — ${now}`;
-    const bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto;padding:20px">
+    const bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto;padding:20px">
       <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
         <h2 style="margin:0">Timesheet Submission Digest</h2>
         <p style="margin:6px 0 0;opacity:.85;font-size:14px">${now}</p>
       </div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
         ${timingHtml || '<p style="color:#6b7280">No completed weeks with data yet.</p>'}
-        <p style="margin-top:16px;font-size:12px;color:#9ca3af">Daily digest — 9am PT. Portal = web app · Email = direct email · Fwd = forwarded by staff · Auto-YES = AI auto-submitted.</p>
+        ${contractorHtml}
       </div>
     </div>`;
 
