@@ -179,6 +179,7 @@ function buildTimingSection(
   }
 
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const TD = 'padding:4px 8px;border-bottom:1px solid #e5e7eb;white-space:nowrap';
   const rows = timingWeeks.map(wk => {
     const st = stats.get(wk)!;
     if (st.total === 0) return '';
@@ -186,46 +187,45 @@ function buildTimingSection(
     const pct3d = Math.round(100 * st.within3d / st.total);
     const avg   = (st.sumDays / st.total).toFixed(1);
     const [, em, ed] = addDays(wk, 6).split('-').map(Number);
-    const c1d = pct1d >= 50 ? '#15803d' : pct1d >= 25 ? '#b45309' : '#dc2626';
-    const c3d = pct3d >= 90 ? '#15803d' : pct3d >= 70 ? '#b45309' : '#dc2626';
+    const c1d  = pct1d >= 50 ? '#15803d' : pct1d >= 25 ? '#b45309' : '#dc2626';
+    const c3d  = pct3d >= 90 ? '#15803d' : pct3d >= 70 ? '#b45309' : '#dc2626';
     const cYes = st.autoYes > 0 ? '#15803d' : '#9ca3af';
-    const isInProgress = wk === currentWeekForTimeliness;
-    const weekLabel = isInProgress
-      ? `W/E ${MONTHS[em-1]} ${ed} <span style="font-size:10px;color:#9ca3af;font-weight:400">(in progress)</span>`
-      : `W/E ${MONTHS[em-1]} ${ed}`;
+    const inProg = wk === currentWeekForTimeliness
+      ? ' <span style="font-size:9px;color:#9ca3af;font-weight:400">●</span>' : '';
     return `<tr>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb">${weekLabel}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center">${st.total}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.portal}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.direct}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;color:#6b7280">${st.forwarded}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${cYes}">${st.autoYes}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c1d}">${pct1d}%</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center;font-weight:600;color:${c3d}">${pct3d}%</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:center">${avg}d</td>
+      <td style="${TD}">${MONTHS[em-1]} ${ed}${inProg}</td>
+      <td style="${TD};text-align:center">${st.total}</td>
+      <td style="${TD};text-align:center;color:#6b7280">${st.portal}</td>
+      <td style="${TD};text-align:center;color:#6b7280">${st.direct}</td>
+      <td style="${TD};text-align:center;color:#6b7280">${st.forwarded}</td>
+      <td style="${TD};text-align:center;font-weight:600;color:${cYes}">${st.autoYes}</td>
+      <td style="${TD};text-align:center;font-weight:600;color:${c1d}">${pct1d}%</td>
+      <td style="${TD};text-align:center;font-weight:600;color:${c3d}">${pct3d}%</td>
+      <td style="${TD};text-align:center">${avg}d</td>
     </tr>`;
   }).filter(Boolean).join('');
 
   if (!rows) return '';
 
+  const TH = 'padding:6px 8px;white-space:nowrap;font-weight:600';
   return `
-    <div style="margin-bottom:24px">
-      <h3 style="margin:0 0 8px;color:#374151;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Submission Timeliness (last ${timingWeeks.length} weeks)</h3>
-      <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb">
+    <div style="margin-bottom:20px">
+      <h3 style="margin:0 0 6px;color:#374151;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Submission Timeliness — last ${timingWeeks.length} weeks</h3>
+      <table style="border-collapse:collapse;background:white;border-radius:6px;overflow:hidden;border:1px solid #e5e7eb;font-size:13px">
         <thead><tr style="background:#1e40af;color:white">
-          <th style="padding:8px 10px;text-align:left;font-weight:600">Week</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Total</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Portal</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Email</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Fwd</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Auto-YES</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">≤1 day</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">≤3 days</th>
-          <th style="padding:8px 10px;text-align:center;font-weight:600">Avg days</th>
+          <th style="${TH};text-align:left">W/E</th>
+          <th style="${TH};text-align:center">Total</th>
+          <th style="${TH};text-align:center">Portal</th>
+          <th style="${TH};text-align:center">Email</th>
+          <th style="${TH};text-align:center">Fwd</th>
+          <th style="${TH};text-align:center">Auto-YES</th>
+          <th style="${TH};text-align:center">≤1d</th>
+          <th style="${TH};text-align:center">≤3d</th>
+          <th style="${TH};text-align:center">Avg</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="margin:6px 0 0;font-size:11px;color:#9ca3af">Days after Sunday week-end. ≤1 day = by Monday; ≤3 days = by Wednesday. Portal = web app · Email = direct email · Fwd = forwarded by staff · Auto-YES = AI auto-submitted.</p>
+      <p style="margin:4px 0 0;font-size:11px;color:#9ca3af">≤1d = by Mon · ≤3d = by Wed · Avg = days after week-end · ● = in progress</p>
     </div>`;
 }
 
@@ -348,6 +348,15 @@ serve(async (req) => {
   // ─── Digest mode: timeliness-only email to leadership ────────────────────────
 
   if (mode === 'digest') {
+    // Guard: only send at 9am PT (handles both PDT UTC-7 and PST UTC-8 automatically)
+    // pg_cron fires at both 16:00 and 17:00 UTC; exactly one of those is 9am PT year-round.
+    const ptHour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }), 10);
+    if (ptHour !== 9) {
+      return new Response(JSON.stringify({ ok: true, skipped: 'not 9am PT', ptHour }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap, currentWeekForTimeliness);
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'long' });
     const subject = `Timesheet Submission Digest — ${now}`;
