@@ -117,6 +117,22 @@ function mergeEntries(
   return merged;
 }
 
+function normalizeEntriesToNumbers(raw: Record<string, unknown>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [date, val] of Object.entries(raw)) {
+    if (typeof val === 'number') {
+      out[date] = val;
+    } else if (val && typeof val === 'object' && 'hours' in val) {
+      out[date] = parseFloat(String((val as { hours: unknown }).hours)) || 0;
+    } else if (typeof val === 'string') {
+      out[date] = parseFloat(val) || 0;
+    } else {
+      out[date] = 0;
+    }
+  }
+  return out;
+}
+
 // ─── Week resolution ──────────────────────────────────────────────────────────
 // Picks the best week from content-derived and subject-derived candidates.
 // Decision order:
@@ -533,10 +549,12 @@ serve(async (req) => {
   let action = 'none';
   let upsertNotes = '';
   let parseStatus = 'success';
+  let parsedEntries: Record<string, number> = {};
 
   if (entries && resolvedWeek) {
     try {
-      let parsedEntries: Record<string, number> = typeof entries === 'string' ? JSON.parse(entries as string) : entries;
+      const rawParsed: Record<string, unknown> = typeof entries === 'string' ? JSON.parse(entries as string) : entries as Record<string, unknown>;
+      parsedEntries = normalizeEntriesToNumbers(rawParsed);
       // If week resolution shifted away from the content-derived week, shift entry date keys to match.
       const contentWeek = candidates[0];
       if (resolvedWeek !== contentWeek) {
@@ -566,14 +584,16 @@ serve(async (req) => {
           resolved_email:  contractorEmail,
           subject:         subject || null,
           attachment_name: attachmentName || null,
-          parse_status:    'period_locked',
-          parse_notes:     [parseNotes, upsertNotes, resolutionNote].filter(Boolean).join(' | '),
-          user_id:         userId,
-          user_created:    wasCreated,
-          timesheet_id:    timesheetId,
-          week_start:      resolvedWeek || weekStart || null,
-          attempt_count:   attemptCount,
-          run_id:          run_id || null,
+          parse_status:     'period_locked',
+          parse_notes:      [parseNotes, upsertNotes, resolutionNote].filter(Boolean).join(' | '),
+          user_id:          userId,
+          user_created:     wasCreated,
+          timesheet_id:     timesheetId,
+          week_start:       resolvedWeek || weekStart || null,
+          attempt_count:    attemptCount,
+          run_id:           run_id || null,
+          total_hours:      Object.values(parsedEntries).reduce((s, h) => s + h, 0),
+          contractor_name:  (contractorName as string) || null,
         });
         return new Response(JSON.stringify({
           ok:         false,
@@ -606,11 +626,13 @@ serve(async (req) => {
     user_created:    wasCreated,
     timesheet_id:    timesheetId,
     week_start:      resolvedWeek || weekStart || null,
-    raw_hours:       entries
+    raw_hours:        entries
       ? (typeof entries === 'string' ? JSON.parse(entries as string) : entries)
       : null,
-    attempt_count:   attemptCount,
-    run_id:          run_id || null,
+    attempt_count:    attemptCount,
+    run_id:           run_id || null,
+    total_hours:      Object.values(parsedEntries).reduce((s, h) => s + h, 0),
+    contractor_name:  (contractorName as string) || null,
   });
 
   return new Response(JSON.stringify({
