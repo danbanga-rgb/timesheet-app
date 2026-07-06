@@ -4095,7 +4095,14 @@ async function sendSummaryEmail(summary, leftUnseen) {
       const status = TS_STATUS[r.action] || r.action.slice(0, 14).padEnd(16);
       const file   = r.attachmentName || '(reply)';
       body += `${name}${wk}${status}  ${file}\n`;
-      if (r.notes) body += `${' '.repeat(38)}↳ ${r.notes}\n`;
+      const TS_NOTE_BOILERPLATE = [
+        'created and auto-approved',
+        'correction received — auto-approved',
+        'correction applied by internal forwarder',
+        'identical hours to portal submission',
+      ];
+      const tsNoteIsBoilerplate = r.notes && TS_NOTE_BOILERPLATE.some(b => r.notes.toLowerCase().startsWith(b));
+      if (r.notes && !tsNoteIsBoilerplate) body += `${' '.repeat(38)}↳ ${r.notes}\n`;
     }
   }
 
