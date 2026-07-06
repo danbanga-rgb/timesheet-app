@@ -2890,6 +2890,7 @@ async function classifyReply(bodyText, contractorName) {
         max_tokens: 400,
         temperature: 0,
         response_format: { type: 'json_object' },
+        thinking: { type: 'disabled' },
       }),
     });
     if (!res.ok) {
