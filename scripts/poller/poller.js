@@ -4257,7 +4257,21 @@ async function main() {
             continue;
           }
 
-          // NO or unclear — drop silently
+          // Groq API error — log to DB so the failure is visible and unprocessed_count SLO fires
+          if (classification.notes?.startsWith('groq_error') || classification.notes?.startsWith('groq_exception')) {
+            console.warn(`  ❌ Groq classification error for YES-reply from ${fromEmail}: ${classification.notes}`);
+            await postToIngest({
+              logOnly: true,
+              messageId,
+              contractorEmail: fromEmail,
+              subject,
+              parseNotes: `Auto-YES classification failed (${classification.notes}) — email consumed but no timesheet created. Re-mark unseen to retry.`,
+              run_id: RUN_ID,
+            });
+            summary.timesheetReports.push({ action: 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject, notes: classification.notes });
+            continue;
+          }
+          // Genuine NO — drop silently (contractor declined or unclear)
           summary.timesheetReports.push({ action: 'reply_no', contractorName: fromEmail, week: null, attachmentName: subject, notes: classification.notes });
           continue;
         }
