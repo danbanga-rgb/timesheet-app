@@ -19,6 +19,7 @@ const corsHeaders = {
 };
 
 const ACCOUNTING_EMAIL = 'accounting@synergietechsolutions.com';
+const LEADERSHIP_EMAIL = 'dbanga@synergietechsolutions.com';
 const FROM_EMAIL       = 'timesheets@mysynergie.net';
 const FROM_NAME        = 'Synergie Timesheet System';
 const CUTOFF           = '2026-04-27';
@@ -250,7 +251,8 @@ serve(async (req) => {
     });
   }
 
-  const db = createClient(SUPABASE_URL, SERVICE_KEY);
+  const db   = createClient(SUPABASE_URL, SERVICE_KEY);
+  const mode = new URL(req.url).searchParams.get('mode') ?? '';
 
   // ─── Weeks to cover ───────────────────────────────────────────────────────────
 
@@ -341,6 +343,47 @@ serve(async (req) => {
       }
       channelMap.set(row.timesheet_id, channel);
     }
+  }
+
+  // ─── Digest mode: timeliness-only email to leadership ────────────────────────
+
+  if (mode === 'digest') {
+    const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap, currentWeekForTimeliness);
+    const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'long' });
+    const subject = `Timesheet Submission Digest — ${now}`;
+    const bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto;padding:20px">
+      <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
+        <h2 style="margin:0">Timesheet Submission Digest</h2>
+        <p style="margin:6px 0 0;opacity:.85;font-size:14px">${now}</p>
+      </div>
+      <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
+        ${timingHtml || '<p style="color:#6b7280">No completed weeks with data yet.</p>'}
+        <p style="margin-top:16px;font-size:12px;color:#9ca3af">Daily digest — 9am PT. Portal = web app · Email = direct email · Fwd = forwarded by staff · Auto-YES = AI auto-submitted.</p>
+      </div>
+    </div>`;
+
+    const digestRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender:      { name: FROM_NAME, email: FROM_EMAIL },
+        to:          [{ email: LEADERSHIP_EMAIL, name: 'Dan' }],
+        subject,
+        htmlContent: bodyHtml,
+        textContent: `Timesheet Submission Digest — ${now}\n\nOpen in an HTML email client to view the timeliness table.`,
+      }),
+    });
+
+    if (!digestRes.ok) {
+      const errBody = await digestRes.text();
+      return new Response(JSON.stringify({ error: `Brevo send failed: ${errBody}` }), {
+        status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({ ok: true, mode: 'digest', recipient: LEADERSHIP_EMAIL }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
   }
 
   // ─── Build per-week report sections ──────────────────────────────────────────
@@ -464,7 +507,6 @@ serve(async (req) => {
   // ─── Compose email ────────────────────────────────────────────────────────────
 
   const totalMissingWeeks = weekReports.length;
-  const timingHtml = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap, currentWeekForTimeliness);
 
   let bodyHtml: string;
   let bodyText: string;
@@ -479,8 +521,7 @@ serve(async (req) => {
       </div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
         <p style="color:#16a34a;font-weight:bold;font-size:16px">✓ All contractors are up to date.</p>
-        <p style="color:#6b7280;font-size:13px;margin-bottom:20px">No outstanding timesheets for any week since ${CUTOFF}.</p>
-        ${timingHtml}
+        <p style="color:#6b7280;font-size:13px">No outstanding timesheets for any week since ${CUTOFF}.</p>
       </div>
     </div>`;
   } else {
@@ -501,7 +542,6 @@ serve(async (req) => {
         <p style="margin:6px 0 0;opacity:.85;font-size:14px">${totalMissingWeeks} week${totalMissingWeeks > 1 ? 's' : ''} with outstanding timesheets · ${totalMissing} missing in total</p>
       </div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
-        ${timingHtml}
         <p style="color:#374151;margin-top:0">Summary of all weeks with missing timesheets. CSV files attached for each week.</p>
         <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;margin-bottom:8px">
           <thead><tr style="background:#1e40af;color:white">
