@@ -2713,6 +2713,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           console.log(`    [${ci+1}] ${profile.name} → ${action}`);
           results.push({
             contractor:           profile.email,
+            userName:             profile.name,
             attachmentName:       att.name,
             action:               `invoice_${action}`,
             ingestOk:             res.body?.ok === true,
@@ -2726,7 +2727,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           }
         } catch (e) {
           console.error(`    ❌ Ingest failed for ${profile.name}: ${e.message}`);
-          results.push({ contractor: profile.email, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
+          results.push({ contractor: profile.email, userName: profile.name, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
         }
       }
       continue; // skip single-contractor path
@@ -2801,6 +2802,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         console.log(`     ✅ Ingested → ${action}`);
         results.push({
           contractor:          contractorEmail,
+          userName:            displayName,
           attachmentName:      att.name,
           action:              `invoice_${action}`,
           ingestOk:            res.body?.ok === true,
@@ -2815,7 +2817,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         }
       } catch (e) {
         console.error(`     ❌ Ingest failed: ${e.message}`);
-        results.push({ contractor: contractorEmail, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
+        results.push({ contractor: contractorEmail, userName: displayName, attachmentName: att.name, action: 'invoice_error', error: e.message, parsed });
       }
     } else {
       const reason = !CONFIG.invoiceIngestEnabled ? 'dry-run mode'
@@ -2825,7 +2827,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       console.log(`     ℹ️  Not ingested (${reason})`);
       // period_out_of_window uses invoice_partial so shouldKeepUnseen picks it up too
       const reportAction = (!canIngest || periodOutOfWindow) ? 'invoice_partial' : 'invoice_reported';
-      results.push({ contractor: contractorEmail, attachmentName: att.name, action: reportAction, parsed, ingestNotes: reason });
+      results.push({ contractor: contractorEmail, userName: displayName, attachmentName: att.name, action: reportAction, parsed, ingestNotes: reason });
     }
   }
 
@@ -4017,128 +4019,131 @@ async function sendInvoiceAccountingEmail(invoiceReports) {
 }
 
 async function sendSummaryEmail(summary, leftUnseen) {
-  const hasFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER).length > 0;
-  const status = hasFailures ? '⚠️ PARTIAL' : '✅ OK';
-  const subject = `[Timesheet Poller] ${status} — ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`;
-
-  const autoYesCount = summary.timesheetReports.filter(r => r.action === 'reply_yes_submitted').length;
-  let body = `Synergie Timesheet Poller — Run Summary
-${'='.repeat(50)}
-Run time   : ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
-Emails found: ${summary.total}
-
-RESULTS
--------
-✅ Created        : ${summary.created}${autoYesCount > 0 ? `  (incl. 🤖 ${autoYesCount} auto-YES)` : ''}
-🔁 Duplicates     : ${summary.duplicates}
-✏️  Corrections    : ${summary.corrections}
-📨 Forwarded      : ${summary.forwarded}
-🗑️  DMARC deleted  : ${summary.dmarc}
-⚠️  Parse failures : ${summary.failures.length}
-🧾 Invoices parsed : ${summary.invoiceReports.length}${CONFIG.invoiceIngestEnabled ? ' (ingested)' : ' (dry-run — not ingested)'}
-`;
-
-  if (summary.newUsers.length > 0) {
-    body += `
-NEW USERS CREATED (${summary.newUsers.length})
-${'─'.repeat(30)}
-`;
-    summary.newUsers.forEach(u => { body += `  • ${u.name} <${u.email}>
-`; });
-  }
-
   const reportableFailures = summary.failures.filter(f => f.attemptCount <= RETRY_SILENT_AFTER);
   const silentFailures     = summary.failures.filter(f => f.attemptCount > RETRY_SILENT_AFTER);
+  const hasFailures        = reportableFailures.length > 0;
+  const status             = hasFailures ? '⚠️ PARTIAL' : '✅ OK';
 
+  const autoYesCount = summary.timesheetReports.filter(r => r.action === 'reply_yes_submitted').length;
+
+  // Invoice method counts
+  const methodCounts = {};
+  for (const inv of summary.invoiceReports) {
+    const m = inv.parseMethod || 'unknown';
+    methodCounts[m] = (methodCounts[m] || 0) + 1;
+  }
+  const claudeInv = (methodCounts['regex+claude_payment'] || 0) + (methodCounts['claude_full'] || 0) + (methodCounts['claude_vision'] || 0);
+  const groqInv   = (methodCounts['groq'] || 0) + (methodCounts['groq_vision'] || 0);
+  const regexInv  = (methodCounts['regex'] || 0) + (methodCounts['regex_no_payment'] || 0) + (methodCounts['regex_partial'] || 0);
+
+  const runTime = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const subject = `[Timesheet Poller] ${status} — ${runTime} ET`;
+
+  // ── Header bar ────────────────────────────────────────────────────────────
+  let tsParts = [`${summary.created} created`];
+  if (autoYesCount > 0) tsParts[0] += ` (${autoYesCount} auto-YES)`;
+  if (summary.duplicates  > 0) tsParts.push(`${summary.duplicates} dup`);
+  if (summary.corrections > 0) tsParts.push(`${summary.corrections} correction`);
+  const tsSummary  = `TS: ${tsParts.join(' · ')}`;
+  const invSummary = summary.invoiceReports.length > 0
+    ? `INV: ${regexInv} regex · ${groqInv} groq · ${claudeInv} claude`
+    : 'INV: 0';
+  const failLabel = `Failures: ${reportableFailures.length}`;
+
+  let body = `Emails: ${summary.total}  |  ${tsSummary}  |  ${invSummary}  |  ${failLabel}\n`;
+
+  // ── New users ─────────────────────────────────────────────────────────────
+  if (summary.newUsers.length > 0) {
+    body += `\nNEW USERS (${summary.newUsers.length}): ${summary.newUsers.map(u => `${u.name} <${u.email}>`).join(', ')}\n`;
+  }
+
+  // ── Failures ──────────────────────────────────────────────────────────────
   if (reportableFailures.length > 0) {
-    body += `
-FAILURES — NEEDS ATTENTION (${reportableFailures.length})
-${'─'.repeat(30)}
-`;
-    reportableFailures.forEach(f => {
-      body += `  • ${f.contractor || '?'} | ${f.attachment || 'body'}`;
-      if (f.attemptCount > 1) body += ` (attempt ${f.attemptCount})`;
-      body += `
-    Error: ${f.error || 'parse returned no hours'}
-`;
-    });
+    body += `\nFAILURES — NEEDS ATTENTION (${reportableFailures.length})\n${'─'.repeat(70)}\n`;
+    for (const f of reportableFailures) {
+      const name  = (f.contractor || '?').padEnd(26);
+      const att   = (f.attachment || 'body').slice(0, 28).padEnd(30);
+      const err   = f.error || 'parse returned no hours';
+      const retry = f.attemptCount > 1 ? ` (attempt ${f.attemptCount})` : '';
+      body += `${name}${att}${err}${retry}\n`;
+    }
   }
-
   if (silentFailures.length > 0) {
-    body += `
-${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ attempts (still retrying silently).
-`;
+    body += `\n${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ attempts.\n`;
   }
 
+  // ── Timesheets table ──────────────────────────────────────────────────────
   if (summary.timesheetReports.length > 0) {
-    const ACTION_ICON = {
-      created:                  '✅ created    ',
-      correction_imported:      '✏️  correction ',
-      correction_pending:       '⏳ pending    ',
-      duplicate:                '🔁 duplicate  ',
-      reply_yes_submitted:      '🤖 auto-YES   ',
-      reply_yes_failed:         '❌ auto-YES?  ',
-      reply_yes_no_history:     '⚠️  YES-nohist',
-      reply_modify_pending:     '📋 modify-pend',
-      reply_no:                 '🚫 reply-no   ',
+    const TS_STATUS = {
+      created:              '✅ created    ',
+      correction_imported:  '✏️  correction ',
+      correction_pending:   '⏳ pending    ',
+      duplicate:            '🔁 duplicate  ',
+      reply_yes_submitted:  '🤖 auto-YES   ',
+      reply_yes_failed:     '❌ auto-YES?  ',
+      reply_yes_no_history: '⚠️  YES-nohist ',
+      reply_modify_pending: '📋 modify-pend',
+      reply_no:             '🚫 reply-no   ',
+      period_locked:        '🔒 locked     ',
     };
-    body += `
-TIMESHEET PROCESSING LOG (${summary.timesheetReports.length} entries)
-${'─'.repeat(50)}
-`;
+    body += `\nTIMESHEETS (${summary.timesheetReports.length})\n`;
+    body += `${'Contractor'.padEnd(26)}${'Week'.padEnd(12)}${'Status'.padEnd(16)}File\n`;
+    body += `${'─'.repeat(76)}\n`;
     for (const r of summary.timesheetReports) {
-      const icon = ACTION_ICON[r.action] || `   ${r.action.padEnd(12)}`;
-      const wk   = r.week ? r.week.slice(0, 10) : '—';
-      const file = r.attachmentName || 'body';
-      body += `  [${icon}] ${r.contractorName} | ${wk} | ${file}\n`;
-      if (r.notes) body += `              Notes: ${r.notes}\n`;
+      const name   = (r.contractorName || r.contractor || '?').slice(0, 25).padEnd(26);
+      const wk     = (r.week ? r.week.slice(0, 10) : '—').padEnd(12);
+      const status = TS_STATUS[r.action] || r.action.slice(0, 14).padEnd(16);
+      const file   = r.attachmentName || '(reply)';
+      body += `${name}${wk}${status}  ${file}\n`;
+      if (r.notes) body += `${' '.repeat(38)}↳ ${r.notes}\n`;
     }
   }
 
+  // ── Invoices table ────────────────────────────────────────────────────────
   if (summary.invoiceReports.length > 0) {
-    const methodCounts = {};
-    for (const inv of summary.invoiceReports) {
-      const m = inv.parseMethod || 'unknown';
-      methodCounts[m] = (methodCounts[m] || 0) + 1;
-    }
-    const claudeCalls = (methodCounts['regex+claude_payment'] || 0) + (methodCounts['claude_full'] || 0) + (methodCounts['claude_vision'] || 0);
-    const groqCalls   = (methodCounts['groq'] || 0) + (methodCounts['groq_vision'] || 0);
-    const regexOnly   = (methodCounts['regex'] || 0) + (methodCounts['regex_no_payment'] || 0) + (methodCounts['regex_partial'] || 0);
+    const fmtPeriod = (start, end) => {
+      if (!start) return '—';
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const parts  = start.split('-').map(Number);
+      const [sy, sm] = parts;
+      const em = (end || start).split('-').map(Number)[1];
+      return sm === em ? `${months[sm-1]} ${sy}` : `${months[sm-1]}–${months[em-1]} ${sy}`;
+    };
+    const fmtMoney = (val, currency) => {
+      if (val == null || val === '') return '—';
+      return `${Number(val).toLocaleString('en-US')} ${currency || 'USD'}`;
+    };
+    const fmtNum = val => (val != null && val !== '') ? String(val) : '—';
+    const INV_STATUS = {
+      invoice_created:    '✅ created  ',
+      invoice_updated:    '✏️  updated  ',
+      invoice_corrected:  '✏️  corrected',
+      invoice_duplicate:  '🔁 dup      ',
+      invoice_partial:    '⚠️  partial  ',
+      invoice_reported:   '📋 reported ',
+      invoice_error:      '❌ error    ',
+    };
 
-    body += `
-INVOICE PARSE REPORTS (${summary.invoiceReports.length})${CONFIG.invoiceIngestEnabled ? '' : ' — DRY RUN, nothing written to DB'}
-${'─'.repeat(50)}
-Parse method breakdown:
-  Regex-only          : ${regexOnly}  (0 Claude calls)
-  Groq text           : ${methodCounts['groq'] || 0}  (free)
-  Groq vision         : ${methodCounts['groq_vision'] || 0}  (free)
-  Regex + Claude pay  : ${methodCounts['regex+claude_payment'] || 0}  (payment details only, ~256 tokens each)
-  Claude full         : ${(methodCounts['claude_full'] || 0) + (methodCounts['claude_vision'] || 0)}  ${methodCounts['claude_vision'] ? `(${methodCounts['claude_vision']} vision)` : ''}
-  Groq total          : ${groqCalls}  Claude total: ${claudeCalls}
-`;
+    body += `\nINVOICES (${summary.invoiceReports.length})${CONFIG.invoiceIngestEnabled ? '' : ' — DRY RUN'}  —  regex:${regexInv} · groq:${groqInv} · claude:${claudeInv}\n`;
+    body += `${'Contractor'.padEnd(26)}${'Period'.padEnd(12)}${'Hours'.padEnd(7)}${'Rate'.padEnd(9)}${'Total'.padEnd(17)}Status\n`;
+    body += `${'─'.repeat(85)}\n`;
     for (const inv of summary.invoiceReports) {
-      const p = inv.parsed;
-      const pd = p?.paymentDetails || {};
-      const canIngest = p?.periodStart && p?.periodEnd;
-      const tag = (val, assumed) => val != null && val !== '' ? `${val}` : (assumed ? `(assumed: ${assumed})` : '—');
-
-      body += `
-  ${inv.email}  |  ${inv.filename}  [${inv.parseMethod || '—'}]
-  Invoice #  : ${tag(p?.invoiceNumber, 'auto-generated')}
-  Period     : ${tag(p?.periodStart)} → ${tag(p?.periodEnd)}
-  Hours      : ${tag(p?.totalHours)}   Rate: ${tag(p?.rate, '0')}   Amount: ${tag(p?.totalAmount, 'hours × rate')}   Currency: ${tag(p?.currency, 'USD')}
-  Company    : ${tag(pd.companyName)}
-  Bank       : ${tag(pd.bankName)}   Account: ${tag(pd.accountNumber)}   IBAN: ${tag(pd.iban)}
-  SWIFT      : ${tag(pd.swift)}   Sort Code: ${tag(pd.sortCode)}   Routing: ${tag(pd.routingNumber)}
-  ${p?.parseNotes ? `Notes: ${p.parseNotes}` : ''}
-  ${canIngest ? '>> OK to ingest' : '>> MISSING required fields (billing period not found)'}
-`;
+      const p      = inv.parsed || {};
+      const name   = (inv.userName || inv.email || '?').slice(0, 25).padEnd(26);
+      const period = fmtPeriod(p.periodStart, p.periodEnd).padEnd(12);
+      const hours  = fmtNum(p.totalHours).padEnd(7);
+      const rate   = (p.rate != null && p.rate !== '' ? `$${p.rate}` : '—').padEnd(9);
+      const total  = fmtMoney(p.totalAmount, p.currency).padEnd(17);
+      const st     = INV_STATUS[inv.action] || inv.action.replace('invoice_', '').slice(0, 12).padEnd(12);
+      const method = `[${(inv.parseMethod || '?').replace('regex_no_payment','regex').replace('regex_partial','regex')}]`;
+      body += `${name}${period}${hours}${rate}${total}${st}  ${method}\n`;
+      if (inv.error)       body += `${' '.repeat(26)}↳ ${inv.error}\n`;
+      if (inv.ingestNotes) body += `${' '.repeat(26)}↳ ${inv.ingestNotes}\n`;
+      if (p.parseNotes)    body += `${' '.repeat(26)}↳ ${p.parseNotes}\n`;
     }
   }
 
-  body += `
-${'='.repeat(50)}
-This is an automated message from timesheets@mysynergie.net`;
+  body += `\n${'─'.repeat(50)}\n${new Date().toISOString()} | timesheets@mysynergie.net`;
 
   await sendEmail(CONFIG.fallbackEmail, subject, body);
   console.log(`  📧 Summary email sent to ${CONFIG.fallbackEmail}`);
@@ -4332,6 +4337,7 @@ async function main() {
       else if (r.action?.startsWith('invoice_')) {
         summary.invoiceReports.push({
           email:               r.contractor,
+          userName:            r.userName || null,
           filename:            r.attachmentName,
           parsed:              r.parsed,
           action:              r.action,
