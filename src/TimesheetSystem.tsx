@@ -2802,7 +2802,9 @@ const TimesheetSystem = () => {
     const dailyData = weekDates.map(date => {
       const dateKey = formatDate(date);
       const entry = selectedTimesheetForView.entries[dateKey];
-      return { date, dateKey, dayName: date.toLocaleDateString('en-US', { weekday: 'long' }), hours: parseFloat(entry?.hours || '0'), holiday: entry?.isHoliday, holidayName: entry?.holidayName, weekend: entry?.isWeekend };
+      const holiday = user ? isHoliday(date, user.country) : undefined;
+      const weekend = isWeekend(date);
+      return { date, dateKey, dayName: date.toLocaleDateString('en-US', { weekday: 'long' }), hours: parseFloat(entry?.hours || '0'), holiday: holiday || undefined, holidayName: holiday?.name, weekend };
     });
     const totalHours = dailyData.reduce((s, d) => s + d.hours, 0);
 
@@ -7790,13 +7792,14 @@ const TimesheetSystem = () => {
               const dateKey = formatDate(date);
               const entry = timeEntries[dateKey] || { hours: '0' };
               const isDisabled = isUserInactive || (currentTimesheet?.lockedDays?.length ?? 0) > 0;
+              const holiday = isHoliday(date, currentUser!.country);
               return (
-                <div key={dateKey} className={'p-4 rounded-lg ' + (entry.isHoliday ? 'bg-red-50 border-2 border-red-200' : 'bg-blue-50')}>
+                <div key={dateKey} className={'p-4 rounded-lg ' + (holiday ? 'bg-red-50 border-2 border-red-200' : 'bg-blue-50')}>
                   <div className="flex items-center justify-between">
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
                         <div className="font-medium text-gray-800">{date.toLocaleDateString('en-US', { weekday: 'long' })}</div>
-                        {entry.isHoliday && <span className="px-2 py-1 bg-red-100 text-red-700 text-xs rounded-full font-medium">Holiday: {entry.holidayName}</span>}
+                        {holiday && <span className="px-2 py-1 bg-red-100 text-red-700 text-xs rounded-full font-medium">Holiday: {holiday.name}</span>}
                       </div>
                       <div className="text-sm text-gray-600">{date.toLocaleDateString()}</div>
                     </div>
