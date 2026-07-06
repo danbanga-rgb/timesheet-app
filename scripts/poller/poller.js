@@ -2882,7 +2882,7 @@ async function classifyReply(bodyText, contractorName) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'qwen/qwen3.6-27b',
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
         messages: [
           { role: 'system', content: GROQ_CLASSIFIER_SYSTEM },
           { role: 'user', content: `Contractor: ${contractorName}\nReply: ${strippedBody}` },
@@ -2890,7 +2890,6 @@ async function classifyReply(bodyText, contractorName) {
         max_tokens: 400,
         temperature: 0,
         response_format: { type: 'json_object' },
-        thinking: { type: 'disabled' },
       }),
     });
     if (!res.ok) {
