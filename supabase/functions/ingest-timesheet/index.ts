@@ -550,6 +550,7 @@ serve(async (req) => {
   let upsertNotes = '';
   let parseStatus = 'success';
   let parsedEntries: Record<string, number> = {};
+  let totalHoursForLog = 0;
 
   if (entries && resolvedWeek) {
     try {
@@ -571,9 +572,11 @@ serve(async (req) => {
       action       = result.action;
       upsertNotes  = result.notes;
 
+      totalHoursForLog = Object.values(parsedEntries).reduce((s, h) => s + h, 0);
       if (action === 'correction_pending') parseStatus = 'correction_pending';
       else if (action === 'correction_imported') parseStatus = 'correction';
       else if (action === 'duplicate') parseStatus = 'duplicate';
+      else if (parseStatus === 'success' && totalHoursForLog === 0) parseStatus = 'success_zero';
       else if (action === 'period_locked') {
         parseStatus = 'period_locked';
         // Return early — poller needs a distinct signal to notify accountant.
@@ -592,7 +595,7 @@ serve(async (req) => {
           week_start:       resolvedWeek || weekStart || null,
           attempt_count:    attemptCount,
           run_id:           run_id || null,
-          total_hours:      Object.values(parsedEntries).reduce((s, h) => s + h, 0),
+          total_hours:      totalHoursForLog,
           contractor_name:  (contractorName as string) || null,
         });
         return new Response(JSON.stringify({
@@ -631,7 +634,7 @@ serve(async (req) => {
       : null,
     attempt_count:    attemptCount,
     run_id:           run_id || null,
-    total_hours:      Object.values(parsedEntries).reduce((s, h) => s + h, 0),
+    total_hours:      totalHoursForLog,
     contractor_name:  (contractorName as string) || null,
   });
 

@@ -848,28 +848,23 @@ function parseXlsx(buffer, filename) {
 
       if (Object.keys(hours).length > 0 && weekStartDate) {
         if (!total) total = Object.values(hours).reduce((s, h) => s + h, 0);
-        const entries = {};
-        const base = new Date(weekStartDate + 'T12:00:00Z');
-        DAY_ORDER.forEach((d, i) => {
-          const dt = new Date(base);
-          dt.setUTCDate(base.getUTCDate() + i);
-          entries[dt.toISOString().split('T')[0]] = hours[d] || 0;
-        });
-        // Ensure all 7 days have entries (default 0 for missing days)
-        const base7 = new Date(weekStartDate + 'T12:00:00Z');
         const fullEntries = {};
+        const base7 = new Date(weekStartDate + 'T12:00:00Z');
         ['mon','tue','wed','thu','fri','sat','sun'].forEach((d, i) => {
           const dt = new Date(base7);
           dt.setUTCDate(base7.getUTCDate() + i);
           const key = dt.toISOString().split('T')[0];
-          fullEntries[key] = hours[d] !== undefined ? hours[d] : (entries[key] || 0);
+          if (hours[d] !== undefined) fullEntries[key] = hours[d];
+          // Blank cells are omitted — not defaulted to 0. Ingest treats missing weekdays as potential parse gaps.
         });
+        const blankWorkdays = ['mon','tue','wed','thu','fri'].filter(d => hours[d] === undefined);
+        const blankNote = blankWorkdays.length > 0 ? ` | Blank workday(s): ${blankWorkdays.join(',')}` : '';
         results.push({
           weekStart: weekStartDate,
           entries: fullEntries,
           total: total || Object.values(fullEntries).reduce((s, h) => s + h, 0),
           nameFromSheet,
-          notes: `Sheet: ${sheetName}`,
+          notes: `Sheet: ${sheetName}${blankNote}`,
         });
       }
     }
@@ -2271,9 +2266,11 @@ async function parsePdf(buffer, filename, cachedText, cachedIsImagePdf) {
         DAY_ORDER.forEach((d, i) => {
           const dt = new Date(base);
           dt.setUTCDate(base.getUTCDate() + i);
-          entries[dt.toISOString().split('T')[0]] = hours[d] !== undefined ? hours[d] : 0;
+          if (hours[d] !== undefined) entries[dt.toISOString().split('T')[0]] = hours[d];
         });
-        return [{ weekStart, entries, total: total || Object.values(entries).reduce((s, h) => s + h, 0), nameFromSheet: name, notes: `PDF: ${filename}` }];
+        const blankPdfDays = DAY_ORDER.slice(0, 5).filter(d => hours[d] === undefined);
+        const blankPdfNote = blankPdfDays.length > 0 ? ` | Blank workday(s): ${blankPdfDays.join(',')}` : '';
+        return [{ weekStart, entries, total: total || Object.values(entries).reduce((s, h) => s + h, 0), nameFromSheet: name, notes: `PDF: ${filename}${blankPdfNote}` }];
       }
     }
 
