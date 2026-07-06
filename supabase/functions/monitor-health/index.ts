@@ -4,13 +4,12 @@
 // when a threshold is breached, subject to per-SLO frequency caps.
 //
 // SLOs:
-//   1. poller_heartbeat     — gap > 90 min during weekday 9am-5pm ET     cap: 1/day
-//   2. claude_usage         — any Claude invoice call this week           cap: 1/week
+//   1. poller_heartbeat     — gap > 120 min (all days, all hours)         cap: 1/day
+//   2. claude_usage         — SILENCED (pending separate report)
 //   4. recon_mismatch       — any reconciliation mismatch in last 24h     cap: 1/day
 //   6. unprocessed_count    — any full parse miss (no DB record) in 7 days cap: 1/day
 //   7. edge_5xx             — any edge function 5xx in last 6h            cap: 1/6h
-//   8. zero_hour_timesheet  — 0h approved timesheet for completed week    cap: 1/day
-//                              from a contractor with non-zero history
+//   8. zero_hour_timesheet  — SILENCED
 //   9. auto_yes_zero_hour   — auto-YES submission resulted in 0h           cap: 4h
 //                              (CRITICAL — sanity gate should prevent this)
 
@@ -37,20 +36,12 @@ interface SloResult {
 async function checkPollerHeartbeat(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
   const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
     key: 'poller_heartbeat',
-    threshold: '90 min gap',
+    threshold: '120 min gap',
     capMinutes: 24 * 60,
     actionSuggestion: 'Check GitHub Actions → poll-timesheets.yml. Re-run the job manually if stalled.',
   };
 
   const now = new Date();
-  const etNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const hour = etNow.getHours();
-  const day = etNow.getDay(); // 0=Sun, 6=Sat
-
-  // Only alert during weekday business hours ET
-  if (day === 0 || day === 6 || hour < 9 || hour >= 17) {
-    return { ...base, ok: true, current: 'outside business hours', details: 'Check skipped outside 9am–5pm ET weekdays' };
-  }
 
   const { data, error } = await supabase
     .from('system_settings')
@@ -70,44 +61,15 @@ async function checkPollerHeartbeat(supabase: ReturnType<typeof createClient>): 
 
   return {
     ...base,
-    ok: gapMinutes <= 90,
+    ok: gapMinutes <= 120,
     current: `${Math.round(gapMinutes)} min since last run`,
     details: `Last run: ${lastRun.toISOString()}`,
   };
 }
 
-async function checkClaudeUsage(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
-  const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
-    key: 'claude_usage',
-    threshold: '0 Claude calls this week',
-    capMinutes: 7 * 24 * 60,
-    actionSuggestion: 'See email_invoice_log for this week\'s Claude calls. Run monthly-invoice-analysis.js to identify which contractor needs a regex template.',
-  };
-
-  // Use REST API with PostgREST JSON filter on the JSONB column
-  const weekStart = getWeekMonday(new Date()).toISOString();
-  const { data, error } = await supabase
-    .from('email_invoice_log')
-    .select('id, raw_extracted, created_at')
-    .gte('created_at', weekStart)
-    .not('raw_extracted', 'is', null);
-
-  if (error) {
-    return { ...base, ok: true, current: 'query error', details: `Could not check: ${error.message}` };
-  }
-
-  const claudeRows = (data ?? []).filter((r: { raw_extracted: { parseMethod?: string } | null }) =>
-    r.raw_extracted?.parseMethod === 'claude_full' || r.raw_extracted?.parseMethod === 'claude_vision'
-  );
-
-  return {
-    ...base,
-    ok: claudeRows.length === 0,
-    current: `${claudeRows.length} Claude call(s) this week`,
-    details: claudeRows.length > 0
-      ? `Invoice log IDs: ${claudeRows.map((r: { id: number }) => r.id).join(', ')}`
-      : 'No Claude calls this week',
-  };
+async function checkClaudeUsage(_supabase: ReturnType<typeof createClient>): Promise<SloResult> {
+  // SILENCED — pending separate Claude usage report
+  return { key: 'claude_usage', ok: true, current: 'silenced', threshold: '0 Claude calls this week', details: 'Alerting disabled — tracked via separate report', capMinutes: 7 * 24 * 60, actionSuggestion: '' };
 }
 
 async function checkReconMismatch(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
@@ -180,88 +142,9 @@ async function checkUnprocessedCount(supabase: ReturnType<typeof createClient>):
   };
 }
 
-async function checkZeroHourTimesheet(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
-  const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
-    key: 'zero_hour_timesheet',
-    threshold: '0 zero-hour timesheets for completed weeks (excluding known-inactive contractors)',
-    capMinutes: 24 * 60,
-    actionSuggestion: 'Query: SELECT id,user_id,user_name,week_start,entries FROM timesheets WHERE status IN (approved,correction_pending) AND week_start >= NOW()-INTERVAL \'30 days\'. Inspect entries JSON — likely parser or auto-YES bug (empty {} entries mean hours were silently dropped). Repair the timesheet and file a bug for the ingest path.',
-  };
-
-  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const historyStart = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const todayIso = new Date().toISOString().slice(0, 10);
-
-  // Pull recent timesheets (approved or correction_pending) whose week has completed.
-  // Exclude verified_zero_hours — accountant has already confirmed those as legitimate 0h weeks.
-  const { data: recent, error } = await supabase
-    .from('timesheets')
-    .select('id, user_id, user_name, week_start, entries, source, status')
-    .in('status', ['approved', 'correction_pending'])
-    .eq('verified_zero_hours', false)
-    .gte('week_start', since);
-
-  if (error) {
-    return { ...base, ok: true, current: 'query error', details: `Could not query timesheets: ${error.message}` };
-  }
-
-  const sumHours = (entries: unknown): number => {
-    if (!entries || typeof entries !== 'object') return 0;
-    return Object.values(entries as Record<string, unknown>).reduce((acc: number, e) => {
-      if (typeof e === 'number') return acc + e;
-      if (e && typeof e === 'object') {
-        const h = (e as { hours?: string | number }).hours;
-        const n = typeof h === 'number' ? h : parseFloat(String(h ?? 0));
-        return acc + (isFinite(n) ? n : 0);
-      }
-      return acc;
-    }, 0);
-  };
-
-  // Filter: completed weeks (week_start + 6 days < today) with 0 total hours
-  const zeros = (recent || []).filter((t: { week_start: string; entries: unknown }) => {
-    const weekEnd = new Date(t.week_start);
-    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
-    if (weekEnd.toISOString().slice(0, 10) >= todayIso) return false; // week not complete
-    return sumHours(t.entries) === 0;
-  });
-
-  if (zeros.length === 0) {
-    return { ...base, ok: true, current: '0 zero-hour timesheets flagged', details: 'All recent completed-week timesheets have hours' };
-  }
-
-  // Filter out contractors with legitimately-zero history (LOA users) — only flag if they have
-  // ≥1 timesheet in the prior 90 days with non-zero hours
-  const userIds = [...new Set(zeros.map((t) => t.user_id))];
-  const { data: history } = await supabase
-    .from('timesheets')
-    .select('user_id, entries')
-    .in('user_id', userIds)
-    .gte('week_start', historyStart);
-
-  const usersWithHistory = new Set<string>();
-  for (const h of history || []) {
-    if (sumHours((h as { entries: unknown }).entries) > 0) {
-      usersWithHistory.add((h as { user_id: string }).user_id);
-    }
-  }
-
-  const suspicious = zeros.filter((t) => usersWithHistory.has(t.user_id));
-
-  if (suspicious.length === 0) {
-    return { ...base, ok: true, current: `${zeros.length} zero-hour timesheet(s), all from inactive contractors`, details: 'No flags (contractors have no non-zero history — likely LOA)' };
-  }
-
-  const preview = suspicious.slice(0, 5)
-    .map((t) => `${t.user_name} (id ${t.id}, week ${t.week_start})`)
-    .join('; ');
-
-  return {
-    ...base,
-    ok: false,
-    current: `${suspicious.length} zero-hour timesheet(s) flagged`,
-    details: `Contractors with non-zero recent history submitted 0h for a completed week: ${preview}${suspicious.length > 5 ? ` (+${suspicious.length - 5} more)` : ''}`,
-  };
+async function checkZeroHourTimesheet(_supabase: ReturnType<typeof createClient>): Promise<SloResult> {
+  // SILENCED — too noisy; vacation weeks require manual verification each time
+  return { key: 'zero_hour_timesheet', ok: true, current: 'silenced', threshold: '0 zero-hour timesheets', details: 'Alerting disabled', capMinutes: 24 * 60, actionSuggestion: '' };
 }
 
 async function checkAutoYesZeroHour(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
