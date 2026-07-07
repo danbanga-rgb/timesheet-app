@@ -3891,15 +3891,17 @@ const RETRY_SILENT_AFTER = 10;
 
 // ─── Send email via Brevo ────────────────────────────────────────────────────
 
-async function sendEmail(to, subject, textContent) {
+async function sendEmail(to, subject, textContent, htmlContent) {
   if (!CONFIG.brevoApiKey) { console.warn('BREVO_API_KEY not set — skipping email'); return; }
   try {
-    const body = JSON.stringify({
+    const payload = {
       sender: { name: CONFIG.fromName, email: CONFIG.fromEmail },
       to: [{ email: to }],
       subject,
       textContent,
-    });
+    };
+    if (htmlContent) payload.htmlContent = htmlContent;
+    const body = JSON.stringify(payload);
     await new Promise((resolve, reject) => {
       const req = require('https').request({
         hostname: 'api.brevo.com',
@@ -4146,13 +4148,13 @@ async function sendSummaryEmail(summary, leftUnseen) {
       body += `${name}${period}${hours}${rate}${total}${st}  ${method}\n`;
       if (inv.error)       body += `${' '.repeat(26)}↳ ${inv.error}\n`;
       if (inv.ingestNotes) body += `${' '.repeat(26)}↳ ${inv.ingestNotes}\n`;
-      if (p.parseNotes)    body += `${' '.repeat(26)}↳ ${p.parseNotes}\n`;
     }
   }
 
   body += `\n${'─'.repeat(50)}\n${new Date().toISOString()} | timesheets@mysynergie.net`;
 
-  await sendEmail(CONFIG.fallbackEmail, subject, body);
+  const htmlBody = `<html><body><pre style="font-family:'Courier New',Courier,monospace;font-size:13px;line-height:1.5;color:#111">${body.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre></body></html>`;
+  await sendEmail(CONFIG.fallbackEmail, subject, body, htmlBody);
   console.log(`  📧 Summary email sent to ${CONFIG.fallbackEmail}`);
 }
 
