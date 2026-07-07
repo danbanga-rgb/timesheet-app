@@ -4153,7 +4153,72 @@ async function sendSummaryEmail(summary, leftUnseen) {
 
   body += `\n${'─'.repeat(50)}\n${new Date().toISOString()} | timesheets@mysynergie.net`;
 
-  const htmlBody = `<html><body><pre style="font-family:'Courier New',Courier,monospace;font-size:13px;line-height:1.5;color:#111">${body.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre></body></html>`;
+  // ── Build HTML email ──────────────────────────────────────────────────────
+  const H  = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const TH = 'padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#fff;white-space:nowrap';
+  const TD = 'padding:7px 12px;font-size:13px;border-bottom:1px solid #e2e8f0;vertical-align:top';
+  const NT = 'padding:0 12px 7px 28px;font-size:12px;color:#94a3b8;border-bottom:1px solid #e2e8f0;font-style:italic';
+
+  const hdrHtml = `<div style="background:#f1f5f9;border-radius:6px;padding:10px 14px;margin-bottom:20px;font-size:13px;font-family:'Courier New',monospace;color:#475569">${H(`Emails: ${summary.total}  |  ${tsSummary}  |  ${invSummary}  |  ${failLabel}`)}</div>`;
+
+  let nuHtml = '';
+  if (summary.newUsers && summary.newUsers.length > 0) {
+    nuHtml = `<p style="font-size:13px;color:#0891b2;margin:0 0 16px"><strong>New users (${summary.newUsers.length}):</strong> ${summary.newUsers.map(u => H(`${u.name} <${u.email}>`)).join(', ')}</p>`;
+  }
+
+  let flHtml = '';
+  if (reportableFailures.length > 0) {
+    const fRows = reportableFailures.map((f, i) => {
+      const bg = i % 2 === 0 ? '#fff' : '#fef2f2';
+      const retry = f.attemptCount > 1 ? ` (attempt ${f.attemptCount})` : '';
+      return `<tr style="background:${bg}"><td style="${TD}">${H(f.contractor||'?')}</td><td style="${TD};color:#64748b;font-size:12px">${H((f.attachment||'body').slice(0,40))}</td><td style="${TD};color:#dc2626">${H((f.error||'parse returned no hours')+retry)}</td></tr>`;
+    }).join('');
+    flHtml = `<p style="font-weight:700;font-size:12px;color:#dc2626;letter-spacing:.05em;margin:0 0 6px;text-transform:uppercase">Failures — Needs Attention (${reportableFailures.length})</p><table style="width:100%;border-collapse:collapse;margin-bottom:24px"><thead><tr style="background:#7f1d1d"><th style="${TH}">Contractor</th><th style="${TH}">Attachment</th><th style="${TH}">Error</th></tr></thead><tbody>${fRows}</tbody></table>`;
+  }
+  if (silentFailures.length > 0) {
+    flHtml += `<p style="font-size:12px;color:#94a3b8;margin-bottom:16px">${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ attempts.</p>`;
+  }
+
+  const TS_CLR = { created:'#15803d', correction_imported:'#d97706', correction_pending:'#d97706', duplicate:'#6b7280', reply_yes_submitted:'#0891b2', reply_yes_failed:'#dc2626', reply_yes_no_history:'#b45309', reply_modify_pending:'#6b7280', reply_no:'#6b7280', period_locked:'#dc2626' };
+  const TS_LBL = { created:'Created', correction_imported:'Correction', correction_pending:'Pending', duplicate:'Duplicate', reply_yes_submitted:'Auto-YES', reply_yes_failed:'Auto-YES ✗', reply_yes_no_history:'YES no-hist', reply_modify_pending:'Modify pend', reply_no:'Reply NO', period_locked:'Locked' };
+  const TS_BOILER = ['created and auto-approved','correction received — auto-approved','correction applied by internal forwarder','identical hours to portal submission'];
+
+  let tsHtml = '';
+  if (summary.timesheetReports.length > 0) {
+    const tsRows = summary.timesheetReports.map((r, i) => {
+      const bg  = i % 2 === 0 ? '#fff' : '#f8fafc';
+      const clr = TS_CLR[r.action] || '#334155';
+      const lbl = TS_LBL[r.action] || r.action;
+      const showNote = r.notes && !TS_BOILER.some(b => r.notes.toLowerCase().startsWith(b));
+      const noteRow = showNote ? `<tr style="background:${bg}"><td colspan="4" style="${NT}">↳ ${H(r.notes)}</td></tr>` : '';
+      return `<tr style="background:${bg}"><td style="${TD};font-weight:500">${H(r.contractorName||r.contractor||'?')}</td><td style="${TD};font-family:'Courier New',monospace;white-space:nowrap">${H(r.week?r.week.slice(0,10):'—')}</td><td style="${TD};color:${clr};font-weight:600;white-space:nowrap">${H(lbl)}</td><td style="${TD};color:#64748b;font-size:12px">${H(r.attachmentName||'(reply)')}</td></tr>${noteRow}`;
+    }).join('');
+    tsHtml = `<p style="font-weight:700;font-size:12px;color:#64748b;letter-spacing:.05em;margin:0 0 6px;text-transform:uppercase">Timesheets (${summary.timesheetReports.length})</p><table style="width:100%;border-collapse:collapse;margin-bottom:24px"><thead><tr style="background:#1e293b"><th style="${TH}">Contractor</th><th style="${TH}">Week</th><th style="${TH}">Status</th><th style="${TH}">File</th></tr></thead><tbody>${tsRows}</tbody></table>`;
+  }
+
+  const INV_CLR = { invoice_created:'#15803d', invoice_updated:'#d97706', invoice_corrected:'#d97706', invoice_duplicate:'#6b7280', invoice_partial:'#b45309', invoice_reported:'#6b7280', invoice_error:'#dc2626' };
+  const INV_LBL = { invoice_created:'Created', invoice_updated:'Updated', invoice_corrected:'Corrected', invoice_duplicate:'Duplicate', invoice_partial:'Partial', invoice_reported:'Reported', invoice_error:'Error' };
+
+  let invHtml = '';
+  if (summary.invoiceReports.length > 0) {
+    const fP = (s,e) => { if(!s)return'—'; const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; const[sy,sm]=s.split('-').map(Number); const em=(e||s).split('-').map(Number)[1]; return sm===em?`${M[sm-1]} ${sy}`:`${M[sm-1]}–${M[em-1]} ${sy}`; };
+    const fM = (v,c) => (v==null||v==='') ? '—' : `${Number(v).toLocaleString('en-US')} ${c||'USD'}`;
+    const fN = v => (v!=null&&v!=='') ? String(v) : '—';
+    const dry = !CONFIG.invoiceIngestEnabled ? ' — DRY RUN' : '';
+    const invRows = summary.invoiceReports.map((inv, i) => {
+      const bg  = i % 2 === 0 ? '#fff' : '#f8fafc';
+      const p   = inv.parsed || {};
+      const clr = INV_CLR[inv.action] || '#334155';
+      const lbl = INV_LBL[inv.action] || (inv.action||'').replace('invoice_','');
+      const mtd = (inv.parseMethod||'?').replace('regex_no_payment','regex').replace('regex_partial','regex');
+      const errRow  = inv.error       ? `<tr style="background:${bg}"><td colspan="7" style="${NT}">↳ ${H(inv.error)}</td></tr>` : '';
+      const noteRow = inv.ingestNotes ? `<tr style="background:${bg}"><td colspan="7" style="${NT}">↳ ${H(inv.ingestNotes)}</td></tr>` : '';
+      return `<tr style="background:${bg}"><td style="${TD};font-weight:500">${H(inv.userName||inv.email||'?')}</td><td style="${TD}">${H(fP(p.periodStart,p.periodEnd))}</td><td style="${TD};text-align:right;font-family:monospace">${H(fN(p.totalHours))}</td><td style="${TD};text-align:right;font-family:monospace">${H(p.rate!=null&&p.rate!==''?`$${p.rate}`:'—')}</td><td style="${TD};text-align:right;font-family:monospace">${H(fM(p.totalAmount,p.currency))}</td><td style="${TD};color:${clr};font-weight:600;white-space:nowrap">${H(lbl)}</td><td style="${TD}"><span style="background:#e2e8f0;color:#475569;font-size:11px;padding:2px 6px;border-radius:4px;font-family:monospace">${H(mtd)}</span></td></tr>${errRow}${noteRow}`;
+    }).join('');
+    invHtml = `<p style="font-weight:700;font-size:12px;color:#64748b;letter-spacing:.05em;margin:0 0 6px;text-transform:uppercase">Invoices (${summary.invoiceReports.length})${dry} <span style="font-weight:400;color:#94a3b8">regex:${regexInv} · groq:${groqInv} · claude:${claudeInv}</span></p><table style="width:100%;border-collapse:collapse;margin-bottom:24px"><thead><tr style="background:#1e293b"><th style="${TH}">Contractor</th><th style="${TH}">Period</th><th style="${TH};text-align:right">Hours</th><th style="${TH};text-align:right">Rate</th><th style="${TH};text-align:right">Total</th><th style="${TH}">Status</th><th style="${TH}">Method</th></tr></thead><tbody>${invRows}</tbody></table>`;
+  }
+
+  const htmlBody = `<html><body style="margin:0;padding:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff"><div style="max-width:900px;margin:0 auto;padding:20px 24px">${hdrHtml}${nuHtml}${flHtml}${tsHtml}${invHtml}<p style="font-size:11px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:12px;margin-top:8px">${H(new Date().toISOString())} | timesheets@mysynergie.net</p></div></body></html>`;
   await sendEmail(CONFIG.fallbackEmail, subject, body, htmlBody);
   console.log(`  📧 Summary email sent to ${CONFIG.fallbackEmail}`);
 }
