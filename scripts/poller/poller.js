@@ -2846,19 +2846,16 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 // ─── AI reply classifier ──────────────────────────────────────────────────────
 
 const GROQ_CLASSIFIER_SYSTEM = `You are classifying a contractor's reply to a timesheet reminder email.
-The contractor may be confirming they want to submit the same hours as last week, modifying their hours, or declining.
+The ONLY thing we auto-process is a bare "yes" confirmation. Everything else is forwarded to a human for review.
 
 Respond with EXACTLY one JSON object on a single line, no other text:
 {"intent":"YES","hours":null,"notes":null}
-{"intent":"MODIFY","hours":40,"notes":"took Friday off"}
-{"intent":"NO","hours":null,"notes":null}
+{"intent":"OTHER","hours":null,"notes":"took Friday off — 32 hours"}
 
 Rules:
-- intent=YES: contractor confirms submission with no changes ("yes", "ok", "go ahead", "same as last week", "correct", "please submit", affirmative in any language)
-- intent=MODIFY: contractor specifies different hours or days (extract numeric hours if mentioned)
-- intent=NO: contractor declines, says they'll submit themselves, or the message is clearly not a timesheet reply
-- When in doubt between YES and MODIFY, prefer MODIFY
-- When in doubt between MODIFY and NO, prefer NO`;
+- intent=YES: bare affirmative only ("yes", "ok", "go ahead", "confirm", "please submit", "same as last week", affirmative in any language). No hours mentioned, no day-specific notes, no questions, no complaints.
+- intent=OTHER: anything else — partial hours, day mentions, questions, complaints, "no", empty, ambiguous. Extract any numeric hours mentioned into the hours field and a short summary into notes for the human reviewer.
+- When in doubt, prefer OTHER. YES must be unambiguous.`;
 
 async function classifyReply(bodyText, contractorName) {
   if (!CONFIG.groqApiKey) return { intent: 'NO', hours: null, notes: 'no groq key' };
@@ -2893,15 +2890,20 @@ async function classifyReply(bodyText, contractorName) {
     });
     if (!res.ok) {
       console.warn(`  ⚠️  Groq API error ${res.status}: ${await res.text()}`);
-      return { intent: 'NO', hours: null, notes: `groq_error_${res.status}` };
+      return { intent: 'OTHER', hours: null, notes: `groq_error_${res.status}` };
     }
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content?.trim() || '';
     const parsed = parseQwenJson(raw);
-    return { intent: parsed.intent || 'NO', hours: parsed.hours || null, notes: parsed.notes || null };
+    // Bare-YES enforcement: a YES with any hours or notes payload is downgraded to OTHER.
+    // Only unambiguous "yes" confirmations qualify for auto-submit.
+    let intent = parsed.intent || 'OTHER';
+    if (intent === 'YES' && (parsed.hours != null || parsed.notes != null)) intent = 'OTHER';
+    if (intent !== 'YES' && intent !== 'OTHER') intent = 'OTHER';
+    return { intent, hours: parsed.hours || null, notes: parsed.notes || null };
   } catch (e) {
     console.warn(`  ⚠️  Groq classify error: ${e.message}`);
-    return { intent: 'NO', hours: null, notes: `groq_exception: ${e.message}` };
+    return { intent: 'OTHER', hours: null, notes: `groq_exception: ${e.message}` };
   }
 }
 
@@ -3195,6 +3197,20 @@ async function storeInvoiceTemplate(contractorEmail, parseMethod) {
 }
 
 // Fetch the most recently approved timesheet entries for a contractor
+// Look up a contractor's userId from profiles by email. Returns null if profile row
+// doesn't exist — after passing isKnownContractor, that indicates a race condition
+// (profile deleted mid-flight) and callers should fail closed.
+async function fetchUserIdByEmail(contractorEmail) {
+  if (!CONFIG.supabaseServiceKey || !contractorEmail) return null;
+  const authHeaders = { 'apikey': CONFIG.supabaseServiceKey, 'Authorization': `Bearer ${CONFIG.supabaseServiceKey}` };
+  const res = await fetch(
+    `${SUPABASE_REST_URL}/profiles?email=eq.${encodeURIComponent(contractorEmail)}&select=id&limit=1`,
+    { headers: authHeaders }
+  );
+  const rows = await res.json();
+  return rows?.[0]?.id || null;
+}
+
 async function fetchLastApprovedEntries(contractorEmail) {
   if (!CONFIG.supabaseServiceKey) return null;
   const authHeaders = { 'apikey': CONFIG.supabaseServiceKey, 'Authorization': `Bearer ${CONFIG.supabaseServiceKey}` };
@@ -3307,6 +3323,19 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
   const fromName  = fromAddr?.name || null;
   const subject   = parsed.subject || '(no subject)';
   const bodyText  = parsed.text || (parsed.html || '').replace(/<[^>]+>/g, ' ');
+
+  // ── Loop safeguards: drop our own auto-replies bouncing back at us ────────
+  // Matches only the exact prefixes we use for auto-generated mail (confirmation,
+  // cannot-submit notice, helpdesk forward). Legit contractor replies to reminders
+  // ("Re: Your timesheet — week ending X") do NOT match.
+  if (/^\s*(✅ Timesheet submitted|⚠️ Couldn't auto-submit|\[timesheets@ fwd\])/i.test(subject)) {
+    console.log(`  ↩︎  Skipping loopback email: "${subject.slice(0, 60)}"`);
+    return;
+  }
+  if (fromEmail === CONFIG.fromEmail.toLowerCase()) {
+    console.log(`  ↩︎  Skipping self-addressed email from ${fromEmail}`);
+    return;
+  }
 
   const attachments = (parsed.attachments || []).map(a => ({
     name:   a.filename || a.contentType?.split('/')[1] || 'unnamed',
@@ -3928,18 +3957,146 @@ async function sendEmail(to, subject, textContent, htmlContent) {
 
 // ─── Forward unrecognised email to helpdesk ───────────────────────────────────
 
-async function forwardToHelpdesk(subject, bodyText, fromEmail, reason) {
+async function forwardToHelpdesk(subject, bodyText, fromEmail, reason, classification = null) {
   const fwdSubject = `[timesheets@ fwd] ${subject || '(no subject)'}`;
+  const clsBlock = classification
+    ? `\nGroq classification:\n  Intent:  ${classification.intent}\n  Hours:   ${classification.hours ?? '(none)'}\n  Notes:   ${classification.notes ?? '(none)'}\n`
+    : '';
   const fwdBody = `This email was received at timesheets@mysynergie.net and could not be automatically processed.
 
 Reason: ${reason}
 Original From: ${fromEmail}
 Original Subject: ${subject || '(no subject)'}
-
+${clsBlock}
 --- Original Message ---
 ${(bodyText || '').slice(0, 2000)}`;
   await sendEmail(CONFIG.fallbackEmail, fwdSubject, fwdBody);
   console.log(`  📨 Forwarded to helpdesk: ${reason}`);
+}
+
+// ─── Auto-reply rate limiting (per-contractor 24h window) ────────────────────
+const AUTO_REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+async function withinAutoReplyRateLimit(userId) {
+  if (!CONFIG.supabaseServiceKey || !userId) return false; // fail closed
+  const authHeaders = { 'apikey': CONFIG.supabaseServiceKey, 'Authorization': `Bearer ${CONFIG.supabaseServiceKey}` };
+  const key = `autoreply_last_${userId}`;
+  const res = await fetch(
+    `${SUPABASE_REST_URL}/system_settings?key=eq.${encodeURIComponent(key)}&select=value`,
+    { headers: authHeaders }
+  );
+  const rows = await res.json();
+  if (!rows?.length) return true;
+  const val = typeof rows[0].value === 'string' ? JSON.parse(rows[0].value) : rows[0].value;
+  const last = val?.sent_at ? new Date(val.sent_at).getTime() : 0;
+  return (Date.now() - last) >= AUTO_REPLY_WINDOW_MS;
+}
+
+async function markAutoReplySent(userId) {
+  if (!CONFIG.supabaseServiceKey || !userId) return;
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    'apikey': CONFIG.supabaseServiceKey,
+    'Authorization': `Bearer ${CONFIG.supabaseServiceKey}`,
+    'Prefer': 'resolution=merge-duplicates',
+  };
+  try {
+    await fetch(`${SUPABASE_REST_URL}/system_settings`, {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ key: `autoreply_last_${userId}`, value: { sent_at: new Date().toISOString() } }),
+    });
+  } catch (e) {
+    console.warn(`  ⚠️  Could not write autoreply_last marker: ${e.message}`);
+  }
+}
+
+// ─── Auto-reply A: confirmation of YES auto-submit ───────────────────────────
+async function sendAutoReplyConfirmation(toEmail, contractorName, weekStart, entries) {
+  const weekSun = new Date(weekStart + 'T12:00:00Z');
+  weekSun.setUTCDate(weekSun.getUTCDate() + 6);
+  const sunLabel = weekSun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+  const daysOrder = Object.keys(entries).sort();
+  let total = 0;
+  const textRows = daysOrder.map(dateKey => {
+    const e = entries[dateKey];
+    const h = typeof e === 'number' ? e : parseFloat(e?.hours || '0') || 0;
+    total += h;
+    const d = new Date(dateKey + 'T12:00:00Z');
+    const dow = d.toLocaleDateString('en-US', { weekday: 'short' });
+    const dt  = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `  ${dow} ${dt.padEnd(8)} ${String(h.toFixed(1)).padStart(5)} h`;
+  }).join('\n');
+
+  const text = `Hi ${contractorName},
+
+Thanks for confirming. We've submitted your timesheet for the week ending ${sunLabel} with a total of ${total.toFixed(1)} hours.
+
+${textRows}
+  ${'─'.repeat(23)}
+  Total       ${String(total.toFixed(1)).padStart(5)} h
+
+If any of this is wrong, please email an updated timesheet to ${CONFIG.fromEmail} or log into the portal.
+
+— Synergie Timesheet System
+   (automated; do not reply)`;
+
+  const htmlRows = daysOrder.map(dateKey => {
+    const e = entries[dateKey];
+    const h = typeof e === 'number' ? e : parseFloat(e?.hours || '0') || 0;
+    const d = new Date(dateKey + 'T12:00:00Z');
+    const dow = d.toLocaleDateString('en-US', { weekday: 'short' });
+    const dt  = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `<tr><td style="padding:3px 12px 3px 0">${dow} ${dt}</td><td style="padding:3px 0;text-align:right">${h.toFixed(1)} h</td></tr>`;
+  }).join('');
+
+  const html = `<div style="font-family:system-ui,-apple-system,sans-serif;color:#111;max-width:600px">
+<p>Hi ${contractorName},</p>
+<p>Thanks for confirming. We've submitted your timesheet for the week ending <strong>${sunLabel}</strong> with a total of <strong>${total.toFixed(1)} hours</strong>.</p>
+<table style="border-collapse:collapse;font-family:'Courier New',monospace;font-size:13px;margin:14px 0">
+${htmlRows}
+<tr style="border-top:1px solid #cbd5e1;font-weight:700"><td style="padding:5px 12px 3px 0">Total</td><td style="padding:5px 0;text-align:right">${total.toFixed(1)} h</td></tr>
+</table>
+<p>If any of this is wrong, please email an updated timesheet to <a href="mailto:${CONFIG.fromEmail}">${CONFIG.fromEmail}</a> or log into the portal.</p>
+<p style="color:#94a3b8;font-size:12px;border-top:1px solid #e2e8f0;padding-top:12px;margin-top:20px">— Synergie Timesheet System (automated; do not reply)</p>
+</div>`;
+
+  await sendEmail(toEmail, `✅ Timesheet submitted — W/E ${sunLabel} for ${contractorName}`, text, html);
+  console.log(`  📧 Confirmation email sent to ${toEmail}`);
+}
+
+// ─── Auto-reply B: YES received but no history to extrapolate ────────────────
+async function sendAutoReplyCannotSubmit(toEmail, contractorName, weekStart) {
+  const weekSun = new Date(weekStart + 'T12:00:00Z');
+  weekSun.setUTCDate(weekSun.getUTCDate() + 6);
+  const sunLabel = weekSun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const APP_URL = 'https://time.mysynergie.net';
+
+  const text = `Hi ${contractorName},
+
+We received your YES reply for the week ending ${sunLabel}, but we don't have a consistent submission history yet, so we can't automatically extrapolate your hours.
+
+Please submit through one of these channels:
+
+  • Email your timesheet as an attachment to ${CONFIG.fromEmail}
+  • Log into the portal: ${APP_URL}
+
+— Synergie Timesheet System
+   (automated; do not reply)`;
+
+  const html = `<div style="font-family:system-ui,-apple-system,sans-serif;color:#111;max-width:600px">
+<p>Hi ${contractorName},</p>
+<p>We received your YES reply for the week ending <strong>${sunLabel}</strong>, but we don't have a consistent submission history yet, so we can't automatically extrapolate your hours.</p>
+<p style="font-weight:600;margin-top:16px">Please submit through one of these channels:</p>
+<ul style="line-height:1.9">
+  <li>Email your timesheet as an attachment to <a href="mailto:${CONFIG.fromEmail}">${CONFIG.fromEmail}</a></li>
+  <li>Log into the portal: <a href="${APP_URL}">${APP_URL}</a></li>
+</ul>
+<p style="color:#94a3b8;font-size:12px;border-top:1px solid #e2e8f0;padding-top:12px;margin-top:20px">— Synergie Timesheet System (automated; do not reply)</p>
+</div>`;
+
+  await sendEmail(toEmail, `⚠️ Couldn't auto-submit — please attach or use portal (${contractorName})`, text, html);
+  console.log(`  📧 Cannot-submit notice sent to ${toEmail}`);
 }
 
 async function sendInvoiceAccountingEmail(invoiceReports) {
@@ -4084,7 +4241,6 @@ async function sendSummaryEmail(summary, leftUnseen) {
       reply_yes_submitted:  '🤖 auto-YES   ',
       reply_yes_failed:     '❌ auto-YES?  ',
       reply_yes_no_history: '⚠️  YES-nohist ',
-      reply_modify_pending: '📋 modify-pend',
       reply_no:             '🚫 reply-no   ',
       period_locked:        '🔒 locked     ',
     };
@@ -4198,8 +4354,8 @@ async function sendSummaryEmail(summary, leftUnseen) {
     flHtml += `<p style="font-size:12px;color:#94a3b8;margin-bottom:16px">${silentFailures.length} failure(s) suppressed after ${RETRY_SILENT_AFTER}+ attempts.</p>`;
   }
 
-  const TS_CLR = { created:'#15803d', correction_imported:'#d97706', correction_pending:'#d97706', duplicate:'#6b7280', reply_yes_submitted:'#0891b2', reply_yes_failed:'#dc2626', reply_yes_no_history:'#b45309', reply_modify_pending:'#6b7280', reply_no:'#6b7280', period_locked:'#dc2626' };
-  const TS_LBL = { created:'Created', correction_imported:'Correction', correction_pending:'Pending', duplicate:'Duplicate', reply_yes_submitted:'Auto-YES', reply_yes_failed:'Auto-YES ✗', reply_yes_no_history:'YES no-hist', reply_modify_pending:'Modify pend', reply_no:'Reply NO', period_locked:'Locked' };
+  const TS_CLR = { created:'#15803d', correction_imported:'#d97706', correction_pending:'#d97706', duplicate:'#6b7280', reply_yes_submitted:'#0891b2', reply_yes_failed:'#dc2626', reply_yes_no_history:'#b45309', reply_no:'#6b7280', period_locked:'#dc2626' };
+  const TS_LBL = { created:'Created', correction_imported:'Correction', correction_pending:'Pending', duplicate:'Duplicate', reply_yes_submitted:'Auto-YES', reply_yes_failed:'Auto-YES ✗', reply_yes_no_history:'YES no-hist', reply_no:'Reply OTHER', period_locked:'Locked' };
   const TS_BOILER = ['created and auto-approved','correction received — auto-approved','correction applied by internal forwarder','identical hours to portal submission'];
 
   let tsHtml = '';
@@ -4316,7 +4472,10 @@ async function main() {
 
     const hasTimesheetContent = attachments.some(a => a.isXlsx || a.isCsv || a.isPdf || a.isDocx || a.isEml);
 
-    // No timesheet content: check for YES/MODIFY/NO reply first, then forward to helpdesk
+    // No timesheet content: classify reply as YES or OTHER, then act.
+    // - YES + history → auto-submit + confirmation email A
+    // - YES + no history → cannot-submit email B (rate-limited)
+    // - OTHER (incl. Groq errors) → forward to helpdesk with classification context
     if (!hasTimesheetContent) {
       const isReply = /^re:/i.test(subject);
       const weekStart = isReply ? parseWeekFromSubject(subject) : null;
@@ -4328,10 +4487,35 @@ async function main() {
           const classification = await classifyReply(bodyText, fromName || fromEmail);
           console.log(`  🤖 Classification: ${classification.intent} | hours: ${classification.hours} | notes: ${classification.notes}`);
 
+          // Groq error → treat as OTHER + log to DB so unprocessed_count SLO fires
+          const isGroqError = classification.notes?.startsWith('groq_error') || classification.notes?.startsWith('groq_exception');
+          if (isGroqError) {
+            console.warn(`  ❌ Groq error: ${classification.notes} — forwarding to helpdesk`);
+            await postToIngest({
+              logOnly: true, messageId, contractorEmail: fromEmail, subject,
+              parseNotes: `Classifier failed (${classification.notes}) — forwarded to helpdesk.`,
+              run_id: RUN_ID,
+            });
+            await forwardToHelpdesk(subject, bodyText, fromEmail, `classifier error: ${classification.notes}`, classification);
+            summary.timesheetReports.push({ action: 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject, notes: classification.notes });
+            continue;
+          }
+
           if (classification.intent === 'YES') {
             const lastTs = await fetchLastApprovedEntries(fromEmail);
             if (!lastTs) {
-              console.warn(`  ⚠️  YES reply but no approved timesheet found for ${fromEmail}`);
+              // No history — send email B (cannot auto-submit). Rate-limited per contractor (24h).
+              console.warn(`  ⚠️  YES reply but no approved history for ${fromEmail} — sending cannot-submit notice`);
+              const userId = await fetchUserIdByEmail(fromEmail);
+              if (!userId) {
+                console.error(`  ❌ Profile lookup failed for allowlisted email ${fromEmail} — forwarding to helpdesk (possible race)`);
+                await forwardToHelpdesk(subject, bodyText, fromEmail, 'Profile lookup inconsistency — allowlisted but profile row missing', classification);
+              } else if (await withinAutoReplyRateLimit(userId)) {
+                await sendAutoReplyCannotSubmit(fromEmail, fromName || fromEmail, weekStart);
+                await markAutoReplySent(userId);
+              } else {
+                console.log(`  🕒 Rate-limited: auto-reply already sent to ${fromEmail} within 24h`);
+              }
               summary.timesheetReports.push({ action: 'reply_yes_no_history', contractorName: fromEmail, week: null, attachmentName: subject });
               continue;
             }
@@ -4340,34 +4524,36 @@ async function main() {
             const ok = ingestRes?.ok !== false;
             console.log(`  ${ok ? '✅' : '❌'} Auto-submitted timesheet for ${fromEmail} week ${weekStart}`);
             summary.timesheetReports.push({ action: ok ? 'reply_yes_submitted' : 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject });
-            // Count auto-YES successes so heartbeat / summary email reflect reality.
-            // Without this, summary.created stays 0 even when an auto-YES creates a timesheet.
             if (ok) summary.created++;
+
+            // Send confirmation email A (rate-limited per contractor 24h)
+            if (ok && await withinAutoReplyRateLimit(lastTs.userId)) {
+              // Build target-week entries by shifting source (mirrors autoSubmitFromReply)
+              const [ty, tm, td] = weekStart.split('-').map(Number);
+              const [sy, sm, sd] = lastTs.weekStart.split('-').map(Number);
+              const deltaDays = Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(sy, sm - 1, sd)) / 86400000);
+              const targetEntries = {};
+              for (const [dk, e] of Object.entries(lastTs.entries)) {
+                const [ey, em, ed] = dk.split('-').map(Number);
+                const s = new Date(Date.UTC(ey, em - 1, ed));
+                s.setUTCDate(s.getUTCDate() + deltaDays);
+                const nk = s.toISOString().slice(0, 10);
+                const dow = s.getUTCDay();
+                const h = typeof e === 'number' ? e : parseFloat(e?.hours || '0') || 0;
+                targetEntries[nk] = (dow === 0 || dow === 6) ? 0 : h;
+              }
+              await sendAutoReplyConfirmation(fromEmail, fromName || fromEmail, weekStart, targetEntries);
+              await markAutoReplySent(lastTs.userId);
+            } else if (ok) {
+              console.log(`  🕒 Rate-limited: confirmation to ${fromEmail} suppressed (within 24h window)`);
+            }
             continue;
           }
 
-          if (classification.intent === 'MODIFY') {
-            console.log(`  📋 MODIFY reply — flagged for accountant review: ${fromEmail}`);
-            summary.timesheetReports.push({ action: 'reply_modify_pending', contractorName: fromEmail, week: weekStart, attachmentName: subject, notes: `hours=${classification.hours} | ${classification.notes}` });
-            continue;
-          }
-
-          // Groq API error — log to DB so the failure is visible and unprocessed_count SLO fires
-          if (classification.notes?.startsWith('groq_error') || classification.notes?.startsWith('groq_exception')) {
-            console.warn(`  ❌ Groq classification error for YES-reply from ${fromEmail}: ${classification.notes}`);
-            await postToIngest({
-              logOnly: true,
-              messageId,
-              contractorEmail: fromEmail,
-              subject,
-              parseNotes: `Auto-YES classification failed (${classification.notes}) — email consumed but no timesheet created. Re-mark unseen to retry.`,
-              run_id: RUN_ID,
-            });
-            summary.timesheetReports.push({ action: 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject, notes: classification.notes });
-            continue;
-          }
-          // Genuine NO — drop silently (contractor declined or unclear)
-          summary.timesheetReports.push({ action: 'reply_no', contractorName: fromEmail, week: null, attachmentName: subject, notes: classification.notes });
+          // OTHER: forward to helpdesk with Groq context. No auto-reply to contractor.
+          console.log(`  📨 Non-YES reply — forwarding to helpdesk with Groq context`);
+          await forwardToHelpdesk(subject, bodyText, fromEmail, 'Non-YES reply from contractor', classification);
+          summary.timesheetReports.push({ action: 'reply_no', contractorName: fromEmail, week: weekStart, attachmentName: subject, notes: `OTHER: ${classification.notes || '(bare)'}` });
           continue;
         }
       }
@@ -4483,7 +4669,12 @@ async function main() {
           if (classification.intent === 'YES') {
             const lastTs = await fetchLastApprovedEntries(fromEmail);
             if (!lastTs) {
-              console.warn(`  ⚠️  YES fallback but no approved timesheet history for ${fromEmail}`);
+              console.warn(`  ⚠️  YES fallback but no approved history for ${fromEmail} — sending cannot-submit notice`);
+              const userId = await fetchUserIdByEmail(fromEmail);
+              if (userId && await withinAutoReplyRateLimit(userId)) {
+                await sendAutoReplyCannotSubmit(fromEmail, fromName || fromEmail, weekStart);
+                await markAutoReplySent(userId);
+              }
             } else {
               await setReplyPendingFlag(lastTs.userId, weekStart, fromEmail);
               const ingestRes = await autoSubmitFromReply(fromEmail, fromName || fromEmail, weekStart, lastTs.entries, lastTs.weekStart, messageId, RUN_ID);
@@ -4491,6 +4682,24 @@ async function main() {
               console.log(`  ${ok ? '✅' : '❌'} YES fallback auto-submitted for ${fromEmail} week ${weekStart}`);
               summary.timesheetReports.push({ action: ok ? 'reply_yes_submitted' : 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject });
               if (ok) summary.created++;
+
+              if (ok && await withinAutoReplyRateLimit(lastTs.userId)) {
+                const [ty, tm, td] = weekStart.split('-').map(Number);
+                const [sy, sm, sd] = lastTs.weekStart.split('-').map(Number);
+                const deltaDays = Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(sy, sm - 1, sd)) / 86400000);
+                const targetEntries = {};
+                for (const [dk, e] of Object.entries(lastTs.entries)) {
+                  const [ey, em, ed] = dk.split('-').map(Number);
+                  const s = new Date(Date.UTC(ey, em - 1, ed));
+                  s.setUTCDate(s.getUTCDate() + deltaDays);
+                  const nk = s.toISOString().slice(0, 10);
+                  const dow = s.getUTCDay();
+                  const h = typeof e === 'number' ? e : parseFloat(e?.hours || '0') || 0;
+                  targetEntries[nk] = (dow === 0 || dow === 6) ? 0 : h;
+                }
+                await sendAutoReplyConfirmation(fromEmail, fromName || fromEmail, weekStart, targetEntries);
+                await markAutoReplySent(lastTs.userId);
+              }
             }
           }
         }

@@ -57,3 +57,4 @@ scripts/poller/convera-contractor-map.json
 scripts/poller/import-convera-transactions.js
 scripts/poller/mark-invoices-paid.js
 scripts/poller/match-invoices-to-transactions.js
+.vercel
