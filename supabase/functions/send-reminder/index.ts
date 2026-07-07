@@ -557,10 +557,10 @@ These links are valid for 7 days and are single-use.`;
     const multiWeekNote = missing.length > 1 ? `\n(If you have outstanding weeks from before, they're listed above too.)` : '';
 
     const patternTextLine = patternLine ? `\n${patternLine}` : '';
-    const replyCta = patternLine
-      ? (isConsistent
-        ? `  1. Reply YES to this email — we'll automatically submit the same hours for you`
-        : `  1. Reply to this email with your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")`)
+    // Reply-YES CTA only when we have a consistent submittable pattern. Inconsistent
+    // submitters must use portal/attach/email — no text-reply option (see project-ai-agent-roadmap).
+    const replyCta = (patternLine && isConsistent)
+      ? `  1. Reply YES to this email — we'll automatically submit the same hours for you`
       : null;
     const appOption   = replyCta ? `  2. Log into the app: ${APP_URL}` : `  1. Log into the app: ${APP_URL}`;
     const attachOpt   = replyCta ? `  3. Reply to this email with your timesheet file attached` : `  2. Reply to this email with your timesheet file attached`;
@@ -576,9 +576,7 @@ These links are valid for 7 days and are single-use.`;
       : '';
     const replyCtaHtml = isConsistent
       ? `<li><strong>Reply YES</strong> to this email — we'll automatically submit the same hours for you</li>`
-      : patternLine
-        ? `<li>Reply to this email with your hours (e.g. "40 hours this week" or "took Wednesday off, 32 hours")</li>`
-        : '';
+      : '';
 
     const submitOptionsHtml = `
       ${patternHtml}
