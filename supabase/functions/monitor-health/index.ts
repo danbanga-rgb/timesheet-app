@@ -77,25 +77,50 @@ async function checkReconMismatch(supabase: ReturnType<typeof createClient>): Pr
     key: 'recon_mismatch',
     threshold: '0 new mismatches in 24h',
     capMinutes: 24 * 60,
-    actionSuggestion: 'Open the Invoices tab in the accountant view and filter by reconciliation_status = mismatch. Review hours vs timesheet.',
+    actionSuggestion: 'Open the Invoices tab → filter by Mismatch. Verify hours against timesheet for each contractor listed below.',
   };
 
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { count, error } = await supabase
+  const { data, error } = await supabase
     .from('invoices')
-    .select('*', { count: 'exact', head: true })
+    .select('id, period_start, period_end, total_hours, reconciliation_delta, reconciliation_notes, profiles(name)')
     .eq('reconciliation_status', 'mismatch')
-    .gte('created_at', since);
+    .gte('created_at', since)
+    .order('created_at', { ascending: false });
 
   if (error) {
     return { ...base, ok: true, current: 'query error', details: `Could not check: ${error.message}` };
   }
 
+  const count = data?.length ?? 0;
+  if (count === 0) {
+    return { ...base, ok: true, current: '0 new mismatch(es) in last 24h', details: 'No new mismatches' };
+  }
+
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtPeriod = (start: string, end: string) => {
+    const [sy, sm] = start.split('-').map(Number);
+    const em = (end || start).split('-').map(Number)[1];
+    return sm === em ? `${months[sm-1]} ${sy}` : `${months[sm-1]}–${months[em-1]} ${sy}`;
+  };
+
+  const lines = (data ?? []).map((inv: Record<string, unknown>) => {
+    const profile = inv.profiles as { name?: string } | null;
+    const name    = profile?.name ?? '(unknown)';
+    const period  = inv.period_start ? fmtPeriod(String(inv.period_start), String(inv.period_end ?? inv.period_start)) : '?';
+    const invH    = inv.total_hours != null ? `${inv.total_hours}h` : '?h';
+    const delta   = inv.reconciliation_delta != null
+      ? ` (Δ ${Number(inv.reconciliation_delta) > 0 ? '+' : ''}${inv.reconciliation_delta}h vs TS)`
+      : '';
+    const note    = inv.reconciliation_notes ? ` — ${inv.reconciliation_notes}` : '';
+    return `  • ${name} | ${period} | Invoice ${invH}${delta}${note}`;
+  });
+
   return {
     ...base,
-    ok: (count ?? 0) === 0,
-    current: `${count ?? 0} new mismatch(es) in last 24h`,
-    details: count ? `${count} invoice(s) have reconciliation_status = 'mismatch' since ${since}` : 'No new mismatches',
+    ok: false,
+    current: `${count} new mismatch(es) in last 24h`,
+    details: `Mismatched invoices:\n${lines.join('\n')}`,
   };
 }
 
