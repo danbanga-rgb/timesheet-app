@@ -4159,7 +4159,26 @@ async function sendSummaryEmail(summary, leftUnseen) {
   const TD = 'padding:7px 12px;font-size:13px;border-bottom:1px solid #e2e8f0;vertical-align:top';
   const NT = 'padding:0 12px 7px 28px;font-size:12px;color:#94a3b8;border-bottom:1px solid #e2e8f0;font-style:italic';
 
-  const hdrHtml = `<div style="background:#f1f5f9;border-radius:6px;padding:10px 14px;margin-bottom:20px;font-size:13px;font-family:'Courier New',monospace;color:#475569">${H(`Emails: ${summary.total}  |  ${tsSummary}  |  ${invSummary}  |  ${failLabel}`)}</div>`;
+  const LBL = 'display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px';
+  const BIG = 'font-size:24px;font-weight:800;line-height:1';
+  const tsPartsHtml = [
+    summary.created   > 0 ? `<span style="color:#15803d">${summary.created} created${autoYesCount > 0 ? ` (${autoYesCount} auto-YES)` : ''}</span>` : null,
+    summary.corrections > 0 ? `<span style="color:#d97706">${summary.corrections} correction</span>` : null,
+    summary.duplicates  > 0 ? `<span style="color:#6b7280">${summary.duplicates} dup</span>` : null,
+  ].filter(Boolean).join('<span style="color:#cbd5e1"> · </span>') || '<span style="color:#94a3b8">—</span>';
+  const invPartsHtml = [
+    regexInv  > 0 ? `<span style="color:#15803d">${regexInv} regex</span>`   : `<span style="color:#94a3b8">${regexInv} regex</span>`,
+    groqInv   > 0 ? `<span style="color:#d97706">${groqInv} groq</span>`    : `<span style="color:#94a3b8">${groqInv} groq</span>`,
+    claudeInv > 0 ? `<span style="color:#dc2626">${claudeInv} claude</span>` : `<span style="color:#94a3b8">${claudeInv} claude</span>`,
+  ].join('<span style="color:#cbd5e1"> · </span>');
+  const failColor = reportableFailures.length > 0 ? '#dc2626' : '#15803d';
+  const BR = 'border-right:2px solid #e2e8f0';
+  const hdrHtml = `<table style="width:100%;border-collapse:collapse;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:24px"><tr>
+    <td style="padding:14px 20px;${BR}"><span style="${LBL}">Emails</span><span style="${BIG};color:#1e293b">${summary.total}</span></td>
+    <td style="padding:14px 20px;${BR}"><span style="${LBL}">Timesheets</span><span style="font-size:13px;font-weight:600">${tsPartsHtml}</span></td>
+    <td style="padding:14px 20px;${BR}"><span style="${LBL}">Invoices</span><span style="font-size:13px;font-weight:600">${invPartsHtml}</span></td>
+    <td style="padding:14px 20px"><span style="${LBL}">Failures</span><span style="${BIG};color:${failColor}">${reportableFailures.length}</span></td>
+  </tr></table>`;
 
   let nuHtml = '';
   if (summary.newUsers && summary.newUsers.length > 0) {
