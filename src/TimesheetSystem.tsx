@@ -258,6 +258,7 @@ interface PaymentProfile {
   combinePayments: boolean | null; // null = not yet decided; true = combine wires for this IBAN
   converaBeneficiaryId: number | null;
   converaMatchOverride: boolean;
+  qbVendorName: string | null;      // QuickBooks vendor name for IIF export; NULL = unmapped
 }
 
 interface ConveraBeneficiary {
@@ -727,8 +728,10 @@ const TimesheetSystem = () => {
   } | null>(null);
   const [estimationImportApplying, setEstimationImportApplying] = useState(false);
   const [profileTabSearch, setProfileTabSearch] = useState('');
-  const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'>('all');
+  const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'|'no-qb-vendor'>('all');
   const [profileTabExcludeTest, setProfileTabExcludeTest] = useState(true);
+  const [qbVendorEditingId, setQbVendorEditingId] = useState<number | null>(null);
+  const [qbVendorEditValue, setQbVendorEditValue] = useState<string>('');
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -862,7 +865,7 @@ const TimesheetSystem = () => {
   const emptyProfileForm = (): Omit<PaymentProfile, 'id' | 'userId'> => ({
     profileName: '', companyName: '', companyAddress: '', country: '', bankName: '',
     bankAddress: '', bankBranch: '', accountNumber: '', iban: '', swift: '', paymentEmail: '', isDefault: false, combinePayments: null,
-    converaBeneficiaryId: null, converaMatchOverride: false,
+    converaBeneficiaryId: null, converaMatchOverride: false, qbVendorName: null,
   });
   const [profileForm, setProfileForm] = useState(emptyProfileForm());
   const [passwordResetMode, setPasswordResetMode] = useState(false);
@@ -1868,6 +1871,7 @@ const TimesheetSystem = () => {
       combinePayments: r.combine_payments != null ? !!(r.combine_payments as boolean) : null,
       converaBeneficiaryId: r.convera_beneficiary_id as number | null ?? null,
       converaMatchOverride: !!(r.convera_match_override as boolean),
+      qbVendorName: (r.qb_vendor_name as string) || null,
     };
   }
 
@@ -2091,6 +2095,17 @@ const TimesheetSystem = () => {
         ? { ...inv, paymentProfile: { ...inv.paymentProfile!, combinePayments: next } }
         : inv
     ));
+  };
+
+  // Save QB vendor name inline edit. Empty string → NULL (unmap).
+  const saveQbVendorName = async (profileId: number, raw: string) => {
+    const trimmed = raw.trim();
+    const next = trimmed === '' ? null : trimmed;
+    const { error } = await supabase.from('payment_profiles').update({ qb_vendor_name: next }).eq('id', profileId);
+    if (error) { alert('Error saving QB vendor: ' + error.message); return; }
+    setPaymentProfiles(prev => prev.map(p => p.id === profileId ? { ...p, qbVendorName: next } : p));
+    setQbVendorEditingId(null);
+    setQbVendorEditValue('');
   };
 
   // Save approval status and/or pay on date without closing modal
@@ -4427,7 +4442,7 @@ const TimesheetSystem = () => {
                         </div>
                         <div className="flex gap-2">
                           {p.isDefault && <span className="px-2 py-0.5 bg-teal-100 text-teal-700 text-xs rounded-full">Default</span>}
-                          <button onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride }); setShowProfileModal(true); }}
+                          <button onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride, qbVendorName: p.qbVendorName }); setShowProfileModal(true); }}
                             className="p-1 text-indigo-600 hover:text-indigo-800"><Edit2 className="w-4 h-4" /></button>
                         </div>
                       </div>
@@ -6336,11 +6351,15 @@ const TimesheetSystem = () => {
             }
             if (profileTabFilter === 'multiple') displayed = displayed.filter(g => g.profiles.length > 1);
             else if (profileTabFilter === 'unmatched') displayed = displayed.filter(g => g.profiles.length === 0 || g.profiles.some(p => !p.converaBeneficiaryId));
+            else if (profileTabFilter === 'no-qb-vendor') displayed = displayed.filter(g => g.profiles.length === 0 || g.profiles.some(p => !p.qbVendorName));
             displayed = displayed.slice().sort((a, b) => a.user.name.localeCompare(b.user.name));
+            // Distinct QB vendor names from currently-mapped profiles, used for autocomplete datalist
+            const qbVendorSuggestions = Array.from(new Set(paymentProfiles.map(p => p.qbVendorName).filter((v): v is string => !!v))).sort();
             const counts = {
               all: groups.length,
               multiple: groups.filter(g => g.profiles.length > 1).length,
               unmatched: groups.filter(g => g.profiles.length === 0 || g.profiles.some(p => !p.converaBeneficiaryId)).length,
+              'no-qb-vendor': groups.filter(g => g.profiles.length === 0 || g.profiles.some(p => !p.qbVendorName)).length,
             };
             return (
               <div className="bg-white rounded-lg shadow-md overflow-hidden">
@@ -6352,10 +6371,10 @@ const TimesheetSystem = () => {
                     placeholder="Search contractor..."
                     className="px-3 py-2 border border-gray-300 rounded-lg text-sm flex-1 min-w-[200px] focus:ring-2 focus:ring-indigo-500"
                   />
-                  {(['all','multiple','unmatched'] as const).map(f => (
+                  {(['all','multiple','unmatched','no-qb-vendor'] as const).map(f => (
                     <button key={f} onClick={() => setProfileTabFilter(f)}
                       className={'px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ' + (profileTabFilter === f ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400')}>
-                      {f === 'all' ? 'All' : f === 'multiple' ? 'Multiple profiles' : 'Needs benef'}
+                      {f === 'all' ? 'All' : f === 'multiple' ? 'Multiple profiles' : f === 'unmatched' ? 'Needs benef' : 'Needs QB vendor'}
                       <span className="opacity-70 ml-1">({counts[f]})</span>
                     </button>
                   ))}
@@ -6373,9 +6392,13 @@ const TimesheetSystem = () => {
                         <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Contractor / Profile</th>
                         <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Bank / Acct</th>
                         <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Convera Benef</th>
+                        <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">QB Vendor</th>
                         <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-left font-semibold text-gray-600">Last Used</th>
                         <th className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 px-4 py-2 text-right font-semibold text-gray-600">Actions</th>
                       </tr>
+                      <datalist id="qb-vendor-suggestions">
+                        {qbVendorSuggestions.map(v => <option key={v} value={v} />)}
+                      </datalist>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {displayed.map(g => {
@@ -6388,7 +6411,7 @@ const TimesheetSystem = () => {
                               if (next.has(g.user.id)) next.delete(g.user.id); else next.add(g.user.id);
                               setExpandedProfileUsers(next);
                             }}>
-                              <td className="px-4 py-2 font-semibold text-indigo-900" colSpan={5}>
+                              <td className="px-4 py-2 font-semibold text-indigo-900" colSpan={6}>
                                 <div className="flex items-center gap-2 flex-wrap">
                                   {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                                   <span>{g.user.name}</span>
@@ -6430,6 +6453,35 @@ const TimesheetSystem = () => {
                                       <span className="text-gray-500">✓ linked (#{p.converaBeneficiaryId})</span>
                                     )}
                                   </td>
+                                  <td className="px-4 py-2 text-xs">
+                                    {qbVendorEditingId === p.id ? (
+                                      <div className="flex items-center gap-1">
+                                        <input
+                                          type="text"
+                                          list="qb-vendor-suggestions"
+                                          value={qbVendorEditValue}
+                                          autoFocus
+                                          onChange={e => setQbVendorEditValue(e.target.value)}
+                                          onKeyDown={e => {
+                                            if (e.key === 'Enter') saveQbVendorName(p.id, qbVendorEditValue);
+                                            if (e.key === 'Escape') { setQbVendorEditingId(null); setQbVendorEditValue(''); }
+                                          }}
+                                          placeholder="Type or pick a vendor..."
+                                          className="px-2 py-1 border border-indigo-400 rounded text-xs min-w-[220px] focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                                        />
+                                        <button onClick={() => saveQbVendorName(p.id, qbVendorEditValue)} className="text-green-600 hover:underline text-xs">✓</button>
+                                        <button onClick={() => { setQbVendorEditingId(null); setQbVendorEditValue(''); }} className="text-gray-500 hover:underline text-xs">✕</button>
+                                      </div>
+                                    ) : (
+                                      <button
+                                        onClick={() => { setQbVendorEditingId(p.id); setQbVendorEditValue(p.qbVendorName || ''); }}
+                                        className={'text-left hover:underline ' + (p.qbVendorName ? 'text-gray-700' : 'text-amber-600')}
+                                        title="Click to edit QB vendor mapping"
+                                      >
+                                        {p.qbVendorName || '⚠ Not mapped'}
+                                      </button>
+                                    )}
+                                  </td>
                                   <td className="px-4 py-2 text-xs text-gray-600">
                                     {lastInv ? (
                                       <button onClick={() => { setSelectedInvoice(lastInv); setShowInvoiceModal(true); }} className="hover:underline text-indigo-600">
@@ -6441,7 +6493,7 @@ const TimesheetSystem = () => {
                                     <button onClick={() => {
                                       setEditingProfile(p);
                                       setProfileEditUserId(p.userId);
-                                      setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride });
+                                      setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride, qbVendorName: p.qbVendorName });
                                       setShowProfileModal(true);
                                     }} className="px-2 py-1 text-indigo-700 hover:underline">Edit</button>
                                     <button onClick={() => { setBeneficiaryOverrideProfileId(p.id); loadConveraBeneficiaries(); }} className="px-2 py-1 text-blue-600 hover:underline">Re-link</button>
@@ -6452,7 +6504,7 @@ const TimesheetSystem = () => {
                             })}
                             {expanded && (
                               <tr className="bg-gray-50">
-                                <td colSpan={5} className="px-4 py-2 pl-10">
+                                <td colSpan={6} className="px-4 py-2 pl-10">
                                   <button onClick={() => {
                                     setEditingProfile(null);
                                     setProfileEditUserId(g.user.id);
@@ -6466,7 +6518,7 @@ const TimesheetSystem = () => {
                         );
                       })}
                       {displayed.length === 0 && (
-                        <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400 text-sm">No contractors match the current filter.</td></tr>
+                        <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400 text-sm">No contractors match the current filter.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -8162,7 +8214,7 @@ const TimesheetSystem = () => {
                               <div className="text-xs text-gray-500 truncate">{p.companyName} · {p.bankName}{p.accountNumber ? ' · Acct: ' + p.accountNumber : ''}</div>
                             </div>
                             <button
-                              onClick={e => { e.preventDefault(); setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride }); setShowProfileModal(true); }}
+                              onClick={e => { e.preventDefault(); setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride, qbVendorName: p.qbVendorName }); setShowProfileModal(true); }}
                               className="p-1 text-gray-400 hover:text-indigo-600"
                             ><Edit2 className="w-3.5 h-3.5" /></button>
                           </label>
@@ -8391,7 +8443,7 @@ const TimesheetSystem = () => {
                         </div>
                         <div className="flex gap-2">
                           <button
-                            onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride }); setShowProfileModal(true); }}
+                            onClick={() => { setEditingProfile(p); setProfileForm({ profileName: p.profileName, companyName: p.companyName, companyAddress: p.companyAddress, country: p.country, bankName: p.bankName, bankAddress: p.bankAddress, bankBranch: p.bankBranch, accountNumber: p.accountNumber, iban: p.iban, swift: p.swift, paymentEmail: p.paymentEmail, isDefault: p.isDefault, combinePayments: p.combinePayments, converaBeneficiaryId: p.converaBeneficiaryId, converaMatchOverride: p.converaMatchOverride, qbVendorName: p.qbVendorName }); setShowProfileModal(true); }}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 text-sm"
                           ><Edit2 className="w-3.5 h-3.5" /> Edit</button>
                           <button onClick={() => deletePaymentProfile(p.id)} className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 text-sm"><Trash2 className="w-3.5 h-3.5" /> Delete</button>
