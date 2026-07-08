@@ -317,6 +317,8 @@ interface Invoice {
   groupKey: string | null;  // shared key for multi-contractor invoices from same attachment
   corrected: boolean;        // re-submitted with different values; reset to submitted for re-approval
   paymentTerms: string | null; // NET15 / NET30 / NET45 / NET60
+  qbExportStatus: 'not_exported' | 'exported' | 'confirmed' | 'skipped';
+  qbExportStatusAt: string | null;
 }
 
 interface ConveraPaymentRow {
@@ -732,6 +734,9 @@ const TimesheetSystem = () => {
   const [profileTabExcludeTest, setProfileTabExcludeTest] = useState(true);
   const [qbVendorEditingId, setQbVendorEditingId] = useState<number | null>(null);
   const [qbVendorEditValue, setQbVendorEditValue] = useState<string>('');
+  const [showQbExportModal, setShowQbExportModal] = useState(false);
+  const [qbExportSelectedIds, setQbExportSelectedIds] = useState<Set<number>>(new Set());
+  const [qbExportSnapshot, setQbExportSnapshot] = useState<Invoice[]>([]);
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -1908,6 +1913,8 @@ const TimesheetSystem = () => {
       groupKey: (r.group_key as string) || null,
       corrected: !!(r.corrected as boolean),
       paymentTerms: (r.payment_terms as string) || null,
+      qbExportStatus: ((r.qb_export_status as string) || 'not_exported') as Invoice['qbExportStatus'],
+      qbExportStatusAt: (r.qb_export_status_at as string) || null,
     };
   }
 
@@ -5657,6 +5664,26 @@ const TimesheetSystem = () => {
                       <button onClick={() => { setShowConveraModal(true); loadConveraBeneficiaries(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><UploadCloud className="w-4 h-4" /> Import Convera PDF</button>
                       <button onClick={() => { setShowConveraMatchingModal(true); loadConveraBeneficiaries(); loadConveraLastPaymentDates(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 text-sm"><Users className="w-4 h-4" /> Convera Matching</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
+                      <button
+                        onClick={() => {
+                          // Snapshot filter view + pre-select ready (mapped + not_exported)
+                          const preSelected = new Set<number>();
+                          for (const inv of filtered) {
+                            const pp = paymentProfiles.find(p => p.id === inv.paymentProfile?.id)
+                              || (inv.paymentProfile?.iban ? paymentProfiles.find(p => p.userId === inv.userId && p.iban === inv.paymentProfile!.iban) : null)
+                              || paymentProfiles.find(p => p.userId === inv.userId && p.isDefault);
+                            const hasVendor = !!pp?.qbVendorName;
+                            const isReady = inv.qbExportStatus === 'not_exported';
+                            if (hasVendor && isReady) preSelected.add(inv.id);
+                          }
+                          setQbExportSnapshot(filtered);
+                          setQbExportSelectedIds(preSelected);
+                          setShowQbExportModal(true);
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+                      >
+                        <Download className="w-4 h-4" /> Export to QB
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -6522,6 +6549,156 @@ const TimesheetSystem = () => {
                       )}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* QB Export Modal (Chunk 2a — read-only preview) */}
+          {showQbExportModal && (() => {
+            // Build rows from the current invoice filter
+            const findLivePp = (inv: Invoice) => {
+              const pp = inv.paymentProfile;
+              if (!pp) return null;
+              if (pp.id) {
+                const byId = paymentProfiles.find(p => p.id === pp.id);
+                if (byId) return byId;
+              }
+              if (pp.iban) {
+                const byIban = paymentProfiles.find(p => p.userId === inv.userId && p.iban === pp.iban);
+                if (byIban) return byIban;
+              }
+              return paymentProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null;
+            };
+            const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            const fmtPeriod = (start: string, end: string) => {
+              if (!start) return '—';
+              const [sy, sm] = start.split('-').map(Number);
+              const em = (end || start).split('-').map(Number)[1];
+              return sm === em ? `${months[sm-1]} ${sy}` : `${months[sm-1]}–${months[em-1]} ${sy}`;
+            };
+            type Row = { inv: Invoice; livePp: PaymentProfile | null; vendorName: string | null; category: 'ready' | 'no_vendor' | 'exported' | 'confirmed' | 'skipped' };
+            const rows: Row[] = qbExportSnapshot.map(inv => {
+              const livePp = findLivePp(inv);
+              const vendorName = livePp?.qbVendorName || null;
+              let category: Row['category'] = 'ready';
+              if (inv.qbExportStatus === 'skipped') category = 'skipped';
+              else if (inv.qbExportStatus === 'confirmed') category = 'confirmed';
+              else if (inv.qbExportStatus === 'exported') category = 'exported';
+              else if (!vendorName) category = 'no_vendor';
+              return { inv, livePp, vendorName, category };
+            });
+            const selectedRows = rows.filter(r => qbExportSelectedIds.has(r.inv.id));
+            const selectedTotal = selectedRows.reduce((s, r) => s + Number(r.inv.totalAmount || 0), 0);
+            const counts = {
+              ready: rows.filter(r => r.category === 'ready').length,
+              no_vendor: rows.filter(r => r.category === 'no_vendor').length,
+              exported: rows.filter(r => r.category === 'exported').length,
+              confirmed: rows.filter(r => r.category === 'confirmed').length,
+              skipped: rows.filter(r => r.category === 'skipped').length,
+            };
+            const skippedButExcludable = rows.filter(r => r.category !== 'ready' && r.category !== 'skipped');
+            const includeAllSkipped = () => {
+              const next = new Set(qbExportSelectedIds);
+              for (const r of skippedButExcludable) next.add(r.inv.id);
+              setQbExportSelectedIds(next);
+            };
+            const toggleOne = (id: number) => {
+              const next = new Set(qbExportSelectedIds);
+              if (next.has(id)) next.delete(id); else next.add(id);
+              setQbExportSelectedIds(next);
+            };
+            const CATEGORY_BADGE: Record<Row['category'], { label: string; color: string }> = {
+              ready:     { label: 'Ready',       color: 'bg-green-100 text-green-800' },
+              no_vendor: { label: 'No QB vendor', color: 'bg-amber-100 text-amber-800' },
+              exported:  { label: 'Exported',    color: 'bg-blue-100 text-blue-800' },
+              confirmed: { label: 'Confirmed',   color: 'bg-indigo-100 text-indigo-800' },
+              skipped:   { label: 'Skipped',     color: 'bg-gray-200 text-gray-700' },
+            };
+            return (
+              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowQbExportModal(false)}>
+                <div className="bg-white rounded-lg shadow-xl w-full max-w-6xl max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                  {/* Sticky header with running tally */}
+                  <div className="p-4 border-b border-gray-200 bg-white sticky top-0 z-10">
+                    <div className="flex items-center justify-between mb-3">
+                      <h2 className="text-lg font-bold text-gray-800">Export to QuickBooks (IIF)</h2>
+                      <button onClick={() => setShowQbExportModal(false)} className="text-gray-500 hover:text-gray-700 text-xl leading-none">✕</button>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                        <div className="text-xs uppercase font-semibold text-blue-700">Selected</div>
+                        <div className="text-2xl font-bold text-blue-900">{qbExportSelectedIds.size}<span className="text-sm font-normal text-blue-500"> / {rows.length}</span></div>
+                        <div className="text-xs text-blue-600 mt-1">${selectedTotal.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                      </div>
+                      <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                        <div className="text-xs uppercase font-semibold text-green-700">Ready</div>
+                        <div className="text-2xl font-bold text-green-900">{counts.ready}</div>
+                      </div>
+                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                        <div className="text-xs uppercase font-semibold text-amber-700">No QB Vendor</div>
+                        <div className="text-2xl font-bold text-amber-900">{counts.no_vendor}</div>
+                      </div>
+                      <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                        <div className="text-xs uppercase font-semibold text-indigo-700">Already Sent</div>
+                        <div className="text-2xl font-bold text-indigo-900">{counts.exported + counts.confirmed}</div>
+                        <div className="text-xs text-indigo-600 mt-1">{counts.exported} exported · {counts.confirmed} confirmed</div>
+                      </div>
+                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                        <div className="text-xs uppercase font-semibold text-gray-600">Skipped</div>
+                        <div className="text-2xl font-bold text-gray-800">{counts.skipped}</div>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 mt-3">
+                      <button onClick={includeAllSkipped} className="text-xs px-3 py-1.5 bg-gray-100 border border-gray-300 rounded-lg hover:bg-gray-200 text-gray-700">Include Skipped/Already-Sent</button>
+                      <button onClick={() => setQbExportSelectedIds(new Set())} className="text-xs px-3 py-1.5 bg-gray-100 border border-gray-300 rounded-lg hover:bg-gray-200 text-gray-700">Clear selection</button>
+                      <div className="ml-auto text-xs text-gray-400 self-center italic">Chunk 2a preview — Generate IIF not wired yet</div>
+                    </div>
+                  </div>
+                  {/* Table */}
+                  <div className="overflow-auto flex-1">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr>
+                          <th className="px-3 py-2 text-center font-semibold text-gray-600 w-12">Include</th>
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">Contractor</th>
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">Period</th>
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">QB Vendor</th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-600">Hours</th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-600">Rate</th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-600">Total</th>
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {rows.map(r => {
+                          const badge = CATEGORY_BADGE[r.category];
+                          const isChecked = qbExportSelectedIds.has(r.inv.id);
+                          return (
+                            <tr key={r.inv.id} className={isChecked ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-gray-50'}>
+                              <td className="px-3 py-2 text-center">
+                                <input type="checkbox" checked={isChecked} onChange={() => toggleOne(r.inv.id)} className="rounded" />
+                              </td>
+                              <td className="px-3 py-2 font-medium text-gray-800">{r.inv.userName}</td>
+                              <td className="px-3 py-2 text-gray-600">{fmtPeriod(r.inv.periodStart, r.inv.periodEnd)}</td>
+                              <td className={'px-3 py-2 ' + (r.vendorName ? 'text-gray-700' : 'text-amber-600 italic')}>{r.vendorName || '(unmapped)'}</td>
+                              <td className="px-3 py-2 text-right font-mono text-gray-700">{r.inv.totalHours ?? '—'}</td>
+                              <td className="px-3 py-2 text-right font-mono text-gray-700">{r.inv.rate != null ? `$${r.inv.rate}` : '—'}</td>
+                              <td className="px-3 py-2 text-right font-mono font-semibold text-gray-800">${Number(r.inv.totalAmount).toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} {r.inv.currency}</td>
+                              <td className="px-3 py-2"><span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${badge.color}`}>{badge.label}</span></td>
+                            </tr>
+                          );
+                        })}
+                        {rows.length === 0 && (
+                          <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No invoices in the current filter.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  {/* Footer */}
+                  <div className="p-3 border-t border-gray-200 flex justify-end gap-2 bg-gray-50">
+                    <button onClick={() => setShowQbExportModal(false)} className="px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 text-sm">Close</button>
+                    <button disabled className="px-4 py-2 bg-blue-300 text-white rounded-lg text-sm cursor-not-allowed" title="Wiring comes in Chunk 2b">Generate IIF ({qbExportSelectedIds.size})</button>
+                  </div>
                 </div>
               </div>
             );
