@@ -2127,6 +2127,119 @@ const TimesheetSystem = () => {
     if (next === 'skipped') setQbExportSelectedIds(prev => { const n = new Set(prev); n.delete(invoiceId); return n; });
   };
 
+  // Bulk-mark a set of invoices to a given export status (used by Generate IIF).
+  const bulkMarkInvoiceExportStatus = async (invoiceIds: number[], next: Invoice['qbExportStatus']) => {
+    if (invoiceIds.length === 0) return;
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase.from('invoices').update({ qb_export_status: next, qb_export_status_at: nowIso }).in('id', invoiceIds);
+    if (error) { alert('Error updating export statuses: ' + error.message); return; }
+    const idSet = new Set(invoiceIds);
+    setInvoices(prev => prev.map(i => idSet.has(i.id) ? { ...i, qbExportStatus: next, qbExportStatusAt: nowIso } : i));
+    setQbExportSnapshot(prev => prev.map(i => idSet.has(i.id) ? { ...i, qbExportStatus: next, qbExportStatusAt: nowIso } : i));
+  };
+
+  // Build tab-separated QB Desktop IIF content from selected invoices.
+  // Groups by (qb_vendor_name, period_end month) so multi-contractor umbrella
+  // vendors (Teal, Cloudygon, etc.) get one bill with multiple SPL lines.
+  const buildIifContent = (invoicesToExport: Invoice[]): string => {
+    const AP_ACCOUNT      = 'Accounts Payable';
+    const EXPENSE_ACCOUNT = 'Cost of Goods Sold:Project Related Costs:Personnel Expenses:Consulting:Vendor Consultants';
+    const termsToDays: Record<string, number> = { NET15: 15, NET30: 30, NET45: 45, NET60: 60 };
+    const findLivePp = (inv: Invoice) => {
+      const pp = inv.paymentProfile;
+      if (!pp) return null;
+      if (pp.id) {
+        const byId = paymentProfiles.find(p => p.id === pp.id);
+        if (byId) return byId;
+      }
+      if (pp.iban) {
+        const byIban = paymentProfiles.find(p => p.userId === inv.userId && p.iban === pp.iban);
+        if (byIban) return byIban;
+      }
+      return paymentProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null;
+    };
+    const monthsFull = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const monthsShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const fmtDate = (yyyyMmDd: string) => {
+      const [y, m, d] = yyyyMmDd.split('-');
+      return `${m}/${d}/${y}`;
+    };
+    const lastDayOfMonth = (yyyyMm: string) => {
+      const [y, m] = yyyyMm.split('-').map(Number);
+      const d = new Date(Date.UTC(y, m, 0));
+      return d.toISOString().slice(0, 10);
+    };
+    const addDays = (yyyyMmDd: string, days: number) => {
+      const [y, m, d] = yyyyMmDd.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      dt.setUTCDate(dt.getUTCDate() + days);
+      return dt.toISOString().slice(0, 10);
+    };
+
+    // Group by (qb_vendor_name, period_end month)
+    type GroupKey = string;
+    const groups = new Map<GroupKey, { vendor: string; monthKey: string; invoices: Invoice[] }>();
+    for (const inv of invoicesToExport) {
+      const pp = findLivePp(inv);
+      const vendor = pp?.qbVendorName || null;
+      if (!vendor) continue; // safety — should not happen if UI gates properly
+      const monthKey = (inv.periodEnd || inv.periodStart || '').slice(0, 7);
+      if (!monthKey) continue;
+      const key = `${vendor}::${monthKey}`;
+      if (!groups.has(key)) groups.set(key, { vendor, monthKey, invoices: [] });
+      groups.get(key)!.invoices.push(inv);
+    }
+
+    // Header
+    const header = [
+      '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT\tDUEDATE',
+      '!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tQNTY\tPRICE',
+      '!ENDTRNS',
+    ].join('\n');
+
+    let trnsId = 1;
+    let splId = 1;
+    const blocks: string[] = [];
+    for (const g of groups.values()) {
+      const billDate = fmtDate(lastDayOfMonth(g.monthKey));
+      const groupTotal = g.invoices.reduce((s, i) => s + Number(i.totalAmount || 0), 0);
+      // Use the longest payment terms among grouped invoices as due date basis
+      const maxTermsDays = g.invoices.reduce((mx, i) => Math.max(mx, termsToDays[i.paymentTerms || 'NET30'] || 30), 0) || 30;
+      const dueDate = fmtDate(addDays(lastDayOfMonth(g.monthKey), maxTermsDays));
+      const monthLabel = monthsFull[Number(g.monthKey.split('-')[1]) - 1] + ' ' + g.monthKey.split('-')[0];
+      const monthShort = monthsShort[Number(g.monthKey.split('-')[1]) - 1] + ' ' + g.monthKey.split('-')[0];
+      // TRNS memo: aggregate if combined bill
+      const trnsMemo = g.invoices.length === 1
+        ? `${monthLabel} — ${g.invoices[0].totalHours ?? 0}h @ $${g.invoices[0].rate ?? 0} — ${g.invoices[0].userName}`
+        : `${monthLabel} — ${g.invoices.length} contractors — ${g.invoices.reduce((s, i) => s + Number(i.totalHours || 0), 0)}h total`;
+      // TRNS DOCNUM: single invoice → its number; multi → shared group tag
+      const docNum = g.invoices.length === 1 ? g.invoices[0].invoiceNumber : `MULTI-${g.monthKey}`;
+
+      const trns = [
+        'TRNS', trnsId, 'BILL', billDate, AP_ACCOUNT, g.vendor,
+        (-groupTotal).toFixed(2), docNum, trnsMemo, 'N', 'Y', dueDate,
+      ].join('\t');
+      blocks.push(trns);
+      trnsId++;
+
+      for (const inv of g.invoices) {
+        const hours = Number(inv.totalHours || 0);
+        const rate  = Number(inv.rate || 0);
+        const amt   = Number(inv.totalAmount || 0);
+        const memo  = `${monthShort} — ${hours}h @ $${rate} — ${inv.userName} — INV ${inv.invoiceNumber}`;
+        const spl = [
+          'SPL', splId, 'BILL', billDate, EXPENSE_ACCOUNT, g.vendor,
+          amt.toFixed(2), inv.invoiceNumber, memo, 'N', hours.toFixed(2), rate.toFixed(2),
+        ].join('\t');
+        blocks.push(spl);
+        splId++;
+      }
+      blocks.push('ENDTRNS');
+    }
+
+    return header + '\n' + blocks.join('\n') + '\n';
+  };
+
   // Save approval status and/or pay on date without closing modal
   const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string }) => {
     const update: Record<string, unknown> = {};
@@ -6774,6 +6887,10 @@ const TimesheetSystem = () => {
                               <td className="px-2 py-1 text-right whitespace-nowrap">
                                 {r.category === 'skipped' ? (
                                   <button onClick={() => saveInvoiceExportStatus(r.inv.id, 'not_exported')} className="text-xs text-blue-600 hover:underline">Unskip</button>
+                                ) : r.category === 'exported' ? (
+                                  <button onClick={() => saveInvoiceExportStatus(r.inv.id, 'confirmed')} className="text-xs text-indigo-700 font-semibold hover:underline">Confirm</button>
+                                ) : r.category === 'confirmed' ? (
+                                  <span className="text-xs text-gray-400">done</span>
                                 ) : r.category === 'ready' || r.category === 'no_vendor' ? (
                                   <button onClick={() => { if (confirm(`Skip invoice ${r.inv.invoiceNumber} for ${r.inv.userName}? It will be permanently excluded from future QB exports until you unskip it.`)) saveInvoiceExportStatus(r.inv.id, 'skipped'); }} className="text-xs text-gray-600 hover:text-red-700 hover:underline">Skip</button>
                                 ) : (
@@ -6792,7 +6909,37 @@ const TimesheetSystem = () => {
                   {/* Footer */}
                   <div className="p-3 border-t border-gray-200 flex justify-end gap-2 bg-gray-50">
                     <button onClick={() => setShowQbExportModal(false)} className="px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 text-sm">Close</button>
-                    <button disabled className="px-4 py-2 bg-blue-300 text-white rounded-lg text-sm cursor-not-allowed" title="Wiring comes in Chunk 2b">Generate IIF ({qbExportSelectedIds.size})</button>
+                    <button
+                      disabled={qbExportSelectedIds.size === 0}
+                      onClick={async () => {
+                        const invoicesToExport = rows.filter(r => qbExportSelectedIds.has(r.inv.id)).map(r => r.inv);
+                        // Guard: refuse to generate if any selected row lacks a QB vendor mapping
+                        const unmapped = rows.filter(r => qbExportSelectedIds.has(r.inv.id) && !r.vendorName);
+                        if (unmapped.length > 0) {
+                          alert(`Cannot generate: ${unmapped.length} selected invoice(s) have no QB vendor mapping. Uncheck them or map their vendors first.`);
+                          return;
+                        }
+                        // Build content + trigger download
+                        const iif = buildIifContent(invoicesToExport);
+                        // Filename: single-month vs cross-month
+                        const monthKeys = Array.from(new Set(invoicesToExport.map(i => (i.periodEnd || i.periodStart || '').slice(0, 7)).filter(Boolean)));
+                        const monthsFull = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+                        const filename = monthKeys.length === 1
+                          ? `Synergie_QB_Bills_${monthsFull[Number(monthKeys[0].split('-')[1]) - 1]}_${monthKeys[0].split('-')[0]}.iif`
+                          : `Synergie_QB_Bills_${new Date().toISOString().slice(0,10)}.iif`;
+                        const blob = new Blob([iif], { type: 'application/octet-stream' });
+                        const url  = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url; a.download = filename;
+                        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        // Mark all selected as exported (approved re-generate: resets confirmed→exported too)
+                        await bulkMarkInvoiceExportStatus(invoicesToExport.map(i => i.id), 'exported');
+                      }}
+                      className={'px-4 py-2 text-white rounded-lg text-sm ' + (qbExportSelectedIds.size === 0 ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700')}
+                    >
+                      Generate IIF ({qbExportSelectedIds.size})
+                    </button>
                   </div>
                 </div>
               </div>
