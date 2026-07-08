@@ -6698,18 +6698,18 @@ const TimesheetSystem = () => {
                     <datalist id="qb-vendor-suggestions-modal">
                       {qbVendorSuggestions.map(v => <option key={v} value={v} />)}
                     </datalist>
-                    <table className="w-full text-sm">
+                    <table className="w-full text-xs">
                       <thead className="bg-gray-50 sticky top-0">
                         <tr>
-                          <th className="px-3 py-2 text-center font-semibold text-gray-600 w-12">Include</th>
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">Contractor</th>
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">Period</th>
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">QB Vendor</th>
-                          <th className="px-3 py-2 text-right font-semibold text-gray-600">Hours</th>
-                          <th className="px-3 py-2 text-right font-semibold text-gray-600">Rate</th>
-                          <th className="px-3 py-2 text-right font-semibold text-gray-600">Total</th>
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">Status</th>
-                          <th className="px-3 py-2 text-right font-semibold text-gray-600 w-24">Action</th>
+                          <th className="px-2 py-1.5 text-center font-semibold text-gray-600 w-10">Inc</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-600">Contractor</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-600 whitespace-nowrap">Period</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-600">QB Vendor</th>
+                          <th className="px-2 py-1.5 text-right font-semibold text-gray-600">Hrs</th>
+                          <th className="px-2 py-1.5 text-right font-semibold text-gray-600">Rate</th>
+                          <th className="px-2 py-1.5 text-right font-semibold text-gray-600">Total</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-600">Status</th>
+                          <th className="px-2 py-1.5 text-right font-semibold text-gray-600 w-16">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -6717,14 +6717,20 @@ const TimesheetSystem = () => {
                           const badge = CATEGORY_BADGE[r.category];
                           const isChecked = qbExportSelectedIds.has(r.inv.id);
                           const isEditingVendor = r.livePp && qbVendorEditingId === r.livePp.id;
+                          const jumpToPaymentProfiles = () => {
+                            setProfileTabSearch(r.inv.userName);
+                            setProfileTabFilter('all');
+                            setShowQbExportModal(false);
+                            setAccountantTab('profiles');
+                          };
                           return (
                             <tr key={r.inv.id} className={isChecked ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-gray-50'}>
-                              <td className="px-3 py-2 text-center">
+                              <td className="px-2 py-1 text-center">
                                 <input type="checkbox" checked={isChecked} onChange={() => toggleOne(r.inv.id)} className="rounded" />
                               </td>
-                              <td className="px-3 py-2 font-medium text-gray-800">{r.inv.userName}</td>
-                              <td className="px-3 py-2 text-gray-600">{fmtPeriod(r.inv.periodStart, r.inv.periodEnd)}</td>
-                              <td className="px-3 py-2">
+                              <td className="px-2 py-1 font-medium text-gray-800 whitespace-nowrap">{r.inv.userName}</td>
+                              <td className="px-2 py-1 text-gray-600 whitespace-nowrap">{fmtPeriod(r.inv.periodStart, r.inv.periodEnd)}</td>
+                              <td className="px-2 py-1">
                                 {isEditingVendor ? (
                                   <div className="flex items-center gap-1">
                                     <input
@@ -6738,27 +6744,34 @@ const TimesheetSystem = () => {
                                         if (e.key === 'Escape') { setQbVendorEditingId(null); setQbVendorEditValue(''); }
                                       }}
                                       placeholder="Type or pick..."
-                                      className="px-2 py-1 border border-indigo-400 rounded text-xs min-w-[200px]"
+                                      className="px-2 py-0.5 border border-indigo-400 rounded text-xs min-w-[180px]"
                                     />
                                     <button onClick={() => r.livePp && saveQbVendorName(r.livePp.id, qbVendorEditValue)} className="text-green-600 hover:underline text-xs">✓</button>
                                     <button onClick={() => { setQbVendorEditingId(null); setQbVendorEditValue(''); }} className="text-gray-500 hover:underline text-xs">✕</button>
                                   </div>
+                                ) : r.livePp ? (
+                                  <button
+                                    onClick={() => { setQbVendorEditingId(r.livePp!.id); setQbVendorEditValue(r.vendorName || ''); }}
+                                    className={'text-left hover:underline ' + (r.vendorName ? 'text-gray-700' : 'text-amber-600 italic')}
+                                    title="Click to edit (persistent — updates payment profile)"
+                                  >
+                                    {r.vendorName || '(unmapped — click to set)'}
+                                  </button>
                                 ) : (
                                   <button
-                                    disabled={!r.livePp}
-                                    onClick={() => { if (r.livePp) { setQbVendorEditingId(r.livePp.id); setQbVendorEditValue(r.vendorName || ''); } }}
-                                    className={'text-left hover:underline disabled:cursor-not-allowed disabled:no-underline ' + (r.vendorName ? 'text-gray-700' : 'text-amber-600 italic')}
-                                    title={r.livePp ? 'Click to edit (persistent — updates payment profile)' : 'No live payment profile to edit'}
+                                    onClick={jumpToPaymentProfiles}
+                                    className="text-left text-red-600 italic hover:underline"
+                                    title="No payment profile for this invoice. Click to jump to Payment Profiles tab and create one."
                                   >
-                                    {r.vendorName || (r.livePp ? '(unmapped — click to set)' : '(no live profile)')}
+                                    ⚠ create payment profile →
                                   </button>
                                 )}
                               </td>
-                              <td className="px-3 py-2 text-right font-mono text-gray-700">{r.inv.totalHours ?? '—'}</td>
-                              <td className="px-3 py-2 text-right font-mono text-gray-700">{r.inv.rate != null ? `$${r.inv.rate}` : '—'}</td>
-                              <td className="px-3 py-2 text-right font-mono font-semibold text-gray-800">${Number(r.inv.totalAmount).toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} {r.inv.currency}</td>
-                              <td className="px-3 py-2"><span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${badge.color}`}>{badge.label}</span></td>
-                              <td className="px-3 py-2 text-right whitespace-nowrap">
+                              <td className="px-2 py-1 text-right font-mono text-gray-700 whitespace-nowrap">{r.inv.totalHours ?? '—'}</td>
+                              <td className="px-2 py-1 text-right font-mono text-gray-700 whitespace-nowrap">{r.inv.rate != null ? `$${r.inv.rate}` : '—'}</td>
+                              <td className="px-2 py-1 text-right font-mono font-semibold text-gray-800 whitespace-nowrap">${Number(r.inv.totalAmount).toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} {r.inv.currency}</td>
+                              <td className="px-2 py-1 whitespace-nowrap"><span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${badge.color}`}>{badge.label}</span></td>
+                              <td className="px-2 py-1 text-right whitespace-nowrap">
                                 {r.category === 'skipped' ? (
                                   <button onClick={() => saveInvoiceExportStatus(r.inv.id, 'not_exported')} className="text-xs text-blue-600 hover:underline">Unskip</button>
                                 ) : r.category === 'ready' || r.category === 'no_vendor' ? (
