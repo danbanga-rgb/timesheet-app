@@ -2976,6 +2976,10 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
 
 // ─── Groq invoice extractor (mid-tier between regex and Claude) ───────────────
 
+// Prompt v2 (2026-07-08) — encodes the 7 prod safeguards from docs/invoice-pipeline.md
+// so shadow output is apples-to-apples with prod's post-safeguard result.
+// Also fixes the "invoice date confused with billing period" pattern found in the
+// 2026-07-08 retrospective (~90% of critical shadow disagreements were this).
 const GROQ_INVOICE_SYSTEM = `You are an invoice field extractor. Read the invoice text and return ONLY a JSON object — no explanation, no markdown.
 
 {
@@ -2997,7 +3001,36 @@ const GROQ_INVOICE_SYSTEM = `You are an invoice field extractor. Read the invoic
   }
 }
 
-Rules:
+CRITICAL RULES:
+
+1a. INVOICE DATE ≠ BILLING PERIOD.
+    The date at the top of the invoice (labeled "Invoice Date", "Date of Issue", "Date") is WHEN the invoice was issued — NOT the services period. Contractors typically invoice in month N+1 for services rendered in month N.
+    Look for explicit "Period", "Billing Period", "Service Period", "Timesheet for [month]", or column headers with dates — THAT is the billing period.
+    Only fall back to (invoice date − 1 month) if no explicit period is stated on the doc.
+
+1b. NEVER INVENT A YEAR.
+    If a year isn't clearly stated on the invoice or in the filename, use the year context from other dates you see. Never output a year that has no textual basis on the document.
+
+2. FILENAME AS SECONDARY SIGNAL.
+   If the filename contains an unambiguous month/year (e.g. "05_2026", "Invoice_June_2026"), use it when invoice content is ambiguous.
+   BUT be careful with digits: "INV 4/1/1" or "INV 7-1-1" are usually sequence numbers, NOT month indicators. Only treat digits as month when paired with a valid year ("07/2026") OR the filename has an unambiguous month name.
+
+3. CURRENCY: EUR shown ≠ EUR billing.
+   Croatian/Bosnian templates often show EUR prominently but bill in USD. If "USD per hour," "TOTAL USD," "$" prefix, or a clean whole-number rate appears, currency=USD.
+
+4. CLEAN RATE + AMOUNT SANITY.
+   Rates are almost always whole dollars (20, 25, 30, 35, 45, 50, 55, 65, 75, 100). If total/hours gives 24.997, use rate=25.
+   Sanity: rate × hours ≈ total (within 2%). If not, one of the three is wrong.
+
+5. DATE FORMAT DD/MM vs MM/DD.
+   European contractors use DD/MM/YYYY. If a date's day > 12, it's DD/MM. Be consistent across the whole document.
+
+6. VALID DATES ONLY. Return null for invalid dates like "2026-06-39".
+
+7. FULL-MONTH BILLING IS THE DEFAULT.
+   Most contractor invoices bill for a full calendar month. If invoice covers a full month, periodStart = first day, periodEnd = last day.
+   DO NOT use single-day periods (e.g. "2026-07-06 to 2026-07-06") unless the invoice explicitly bills one day.
+
 - periodStart/periodEnd = billing period, NOT the invoice date
 - totalAmount = final amount due/payable (after any deductions)
 - Set unknown fields to null
