@@ -737,6 +737,7 @@ const TimesheetSystem = () => {
   const [showQbExportModal, setShowQbExportModal] = useState(false);
   const [qbExportSelectedIds, setQbExportSelectedIds] = useState<Set<number>>(new Set());
   const [qbExportSnapshot, setQbExportSnapshot] = useState<Invoice[]>([]);
+  const [qbExportCategoryFilter, setQbExportCategoryFilter] = useState<'selected' | 'ready' | 'no_vendor' | 'already_sent' | 'skipped' | null>(null);
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -2113,6 +2114,17 @@ const TimesheetSystem = () => {
     setPaymentProfiles(prev => prev.map(p => p.id === profileId ? { ...p, qbVendorName: next } : p));
     setQbVendorEditingId(null);
     setQbVendorEditValue('');
+  };
+
+  // Set invoice qb_export_status (used for Skip/Unskip in modal).
+  const saveInvoiceExportStatus = async (invoiceId: number, next: Invoice['qbExportStatus']) => {
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase.from('invoices').update({ qb_export_status: next, qb_export_status_at: nowIso }).eq('id', invoiceId);
+    if (error) { alert('Error updating export status: ' + error.message); return; }
+    setInvoices(prev => prev.map(i => i.id === invoiceId ? { ...i, qbExportStatus: next, qbExportStatusAt: nowIso } : i));
+    setQbExportSnapshot(prev => prev.map(i => i.id === invoiceId ? { ...i, qbExportStatus: next, qbExportStatusAt: nowIso } : i));
+    // If we just skipped a currently-selected invoice, drop it from selection
+    if (next === 'skipped') setQbExportSelectedIds(prev => { const n = new Set(prev); n.delete(invoiceId); return n; });
   };
 
   // Save approval status and/or pay on date without closing modal
@@ -6608,6 +6620,27 @@ const TimesheetSystem = () => {
               if (next.has(id)) next.delete(id); else next.add(id);
               setQbExportSelectedIds(next);
             };
+            // Apply category filter for the visible rows
+            const visibleRows = rows.filter(r => {
+              if (!qbExportCategoryFilter) return true;
+              if (qbExportCategoryFilter === 'selected')     return qbExportSelectedIds.has(r.inv.id);
+              if (qbExportCategoryFilter === 'ready')        return r.category === 'ready';
+              if (qbExportCategoryFilter === 'no_vendor')    return r.category === 'no_vendor';
+              if (qbExportCategoryFilter === 'already_sent') return r.category === 'exported' || r.category === 'confirmed';
+              if (qbExportCategoryFilter === 'skipped')      return r.category === 'skipped';
+              return true;
+            });
+            const toggleCategoryFilter = (cat: typeof qbExportCategoryFilter) => {
+              setQbExportCategoryFilter(prev => prev === cat ? null : cat);
+            };
+            // Distinct QB vendor suggestions from all payment profiles (autocomplete source)
+            const qbVendorSuggestions = Array.from(new Set(paymentProfiles.map(p => p.qbVendorName).filter((v): v is string => !!v))).sort();
+            const cardCls = (cat: typeof qbExportCategoryFilter, bg: string, border: string) =>
+              `text-left rounded-lg p-3 border-2 transition-all cursor-pointer ${
+                qbExportCategoryFilter === cat
+                  ? `${bg} ${border} ring-2 ring-offset-1 ring-blue-400`
+                  : `${bg} ${border} hover:brightness-95`
+              }`;
             const CATEGORY_BADGE: Record<Row['category'], { label: string; color: string }> = {
               ready:     { label: 'Ready',       color: 'bg-green-100 text-green-800' },
               no_vendor: { label: 'No QB vendor', color: 'bg-amber-100 text-amber-800' },
@@ -6625,29 +6658,35 @@ const TimesheetSystem = () => {
                       <button onClick={() => setShowQbExportModal(false)} className="text-gray-500 hover:text-gray-700 text-xl leading-none">✕</button>
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
-                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                      <button type="button" onClick={() => toggleCategoryFilter('selected')} className={cardCls('selected', 'bg-blue-50', 'border-blue-200')}>
                         <div className="text-xs uppercase font-semibold text-blue-700">Selected</div>
                         <div className="text-2xl font-bold text-blue-900">{qbExportSelectedIds.size}<span className="text-sm font-normal text-blue-500"> / {rows.length}</span></div>
                         <div className="text-xs text-blue-600 mt-1">${selectedTotal.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-                      </div>
-                      <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                      </button>
+                      <button type="button" onClick={() => toggleCategoryFilter('ready')} className={cardCls('ready', 'bg-green-50', 'border-green-200')}>
                         <div className="text-xs uppercase font-semibold text-green-700">Ready</div>
                         <div className="text-2xl font-bold text-green-900">{counts.ready}</div>
-                      </div>
-                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                      </button>
+                      <button type="button" onClick={() => toggleCategoryFilter('no_vendor')} className={cardCls('no_vendor', 'bg-amber-50', 'border-amber-200')}>
                         <div className="text-xs uppercase font-semibold text-amber-700">No QB Vendor</div>
                         <div className="text-2xl font-bold text-amber-900">{counts.no_vendor}</div>
-                      </div>
-                      <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                      </button>
+                      <button type="button" onClick={() => toggleCategoryFilter('already_sent')} className={cardCls('already_sent', 'bg-indigo-50', 'border-indigo-200')}>
                         <div className="text-xs uppercase font-semibold text-indigo-700">Already Sent</div>
                         <div className="text-2xl font-bold text-indigo-900">{counts.exported + counts.confirmed}</div>
                         <div className="text-xs text-indigo-600 mt-1">{counts.exported} exported · {counts.confirmed} confirmed</div>
-                      </div>
-                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                      </button>
+                      <button type="button" onClick={() => toggleCategoryFilter('skipped')} className={cardCls('skipped', 'bg-gray-50', 'border-gray-200')}>
                         <div className="text-xs uppercase font-semibold text-gray-600">Skipped</div>
                         <div className="text-2xl font-bold text-gray-800">{counts.skipped}</div>
-                      </div>
+                      </button>
                     </div>
+                    {qbExportCategoryFilter && (
+                      <div className="mt-2 text-xs text-gray-600 italic">
+                        Showing {visibleRows.length} of {rows.length} — filtered by <strong>{qbExportCategoryFilter.replace('_', ' ')}</strong>.
+                        <button onClick={() => setQbExportCategoryFilter(null)} className="ml-2 text-blue-600 hover:underline">Clear</button>
+                      </div>
+                    )}
                     <div className="flex gap-2 mt-3">
                       <button onClick={includeAllSkipped} className="text-xs px-3 py-1.5 bg-gray-100 border border-gray-300 rounded-lg hover:bg-gray-200 text-gray-700">Include Skipped/Already-Sent</button>
                       <button onClick={() => setQbExportSelectedIds(new Set())} className="text-xs px-3 py-1.5 bg-gray-100 border border-gray-300 rounded-lg hover:bg-gray-200 text-gray-700">Clear selection</button>
@@ -6656,6 +6695,9 @@ const TimesheetSystem = () => {
                   </div>
                   {/* Table */}
                   <div className="overflow-auto flex-1">
+                    <datalist id="qb-vendor-suggestions-modal">
+                      {qbVendorSuggestions.map(v => <option key={v} value={v} />)}
+                    </datalist>
                     <table className="w-full text-sm">
                       <thead className="bg-gray-50 sticky top-0">
                         <tr>
@@ -6667,12 +6709,14 @@ const TimesheetSystem = () => {
                           <th className="px-3 py-2 text-right font-semibold text-gray-600">Rate</th>
                           <th className="px-3 py-2 text-right font-semibold text-gray-600">Total</th>
                           <th className="px-3 py-2 text-left font-semibold text-gray-600">Status</th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-600 w-24">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {rows.map(r => {
+                        {visibleRows.map(r => {
                           const badge = CATEGORY_BADGE[r.category];
                           const isChecked = qbExportSelectedIds.has(r.inv.id);
+                          const isEditingVendor = r.livePp && qbVendorEditingId === r.livePp.id;
                           return (
                             <tr key={r.inv.id} className={isChecked ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-gray-50'}>
                               <td className="px-3 py-2 text-center">
@@ -6680,16 +6724,54 @@ const TimesheetSystem = () => {
                               </td>
                               <td className="px-3 py-2 font-medium text-gray-800">{r.inv.userName}</td>
                               <td className="px-3 py-2 text-gray-600">{fmtPeriod(r.inv.periodStart, r.inv.periodEnd)}</td>
-                              <td className={'px-3 py-2 ' + (r.vendorName ? 'text-gray-700' : 'text-amber-600 italic')}>{r.vendorName || '(unmapped)'}</td>
+                              <td className="px-3 py-2">
+                                {isEditingVendor ? (
+                                  <div className="flex items-center gap-1">
+                                    <input
+                                      type="text"
+                                      list="qb-vendor-suggestions-modal"
+                                      value={qbVendorEditValue}
+                                      autoFocus
+                                      onChange={e => setQbVendorEditValue(e.target.value)}
+                                      onKeyDown={e => {
+                                        if (e.key === 'Enter' && r.livePp) saveQbVendorName(r.livePp.id, qbVendorEditValue);
+                                        if (e.key === 'Escape') { setQbVendorEditingId(null); setQbVendorEditValue(''); }
+                                      }}
+                                      placeholder="Type or pick..."
+                                      className="px-2 py-1 border border-indigo-400 rounded text-xs min-w-[200px]"
+                                    />
+                                    <button onClick={() => r.livePp && saveQbVendorName(r.livePp.id, qbVendorEditValue)} className="text-green-600 hover:underline text-xs">✓</button>
+                                    <button onClick={() => { setQbVendorEditingId(null); setQbVendorEditValue(''); }} className="text-gray-500 hover:underline text-xs">✕</button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    disabled={!r.livePp}
+                                    onClick={() => { if (r.livePp) { setQbVendorEditingId(r.livePp.id); setQbVendorEditValue(r.vendorName || ''); } }}
+                                    className={'text-left hover:underline disabled:cursor-not-allowed disabled:no-underline ' + (r.vendorName ? 'text-gray-700' : 'text-amber-600 italic')}
+                                    title={r.livePp ? 'Click to edit (persistent — updates payment profile)' : 'No live payment profile to edit'}
+                                  >
+                                    {r.vendorName || (r.livePp ? '(unmapped — click to set)' : '(no live profile)')}
+                                  </button>
+                                )}
+                              </td>
                               <td className="px-3 py-2 text-right font-mono text-gray-700">{r.inv.totalHours ?? '—'}</td>
                               <td className="px-3 py-2 text-right font-mono text-gray-700">{r.inv.rate != null ? `$${r.inv.rate}` : '—'}</td>
                               <td className="px-3 py-2 text-right font-mono font-semibold text-gray-800">${Number(r.inv.totalAmount).toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} {r.inv.currency}</td>
                               <td className="px-3 py-2"><span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${badge.color}`}>{badge.label}</span></td>
+                              <td className="px-3 py-2 text-right whitespace-nowrap">
+                                {r.category === 'skipped' ? (
+                                  <button onClick={() => saveInvoiceExportStatus(r.inv.id, 'not_exported')} className="text-xs text-blue-600 hover:underline">Unskip</button>
+                                ) : r.category === 'ready' || r.category === 'no_vendor' ? (
+                                  <button onClick={() => { if (confirm(`Skip invoice ${r.inv.invoiceNumber} for ${r.inv.userName}? It will be permanently excluded from future QB exports until you unskip it.`)) saveInvoiceExportStatus(r.inv.id, 'skipped'); }} className="text-xs text-gray-600 hover:text-red-700 hover:underline">Skip</button>
+                                ) : (
+                                  <span className="text-xs text-gray-400">—</span>
+                                )}
+                              </td>
                             </tr>
                           );
                         })}
-                        {rows.length === 0 && (
-                          <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No invoices in the current filter.</td></tr>
+                        {visibleRows.length === 0 && (
+                          <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">{qbExportCategoryFilter ? `No rows match the ${qbExportCategoryFilter.replace('_', ' ')} filter.` : 'No invoices in the current filter.'}</td></tr>
                         )}
                       </tbody>
                     </table>
