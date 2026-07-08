@@ -1,0 +1,49 @@
+name: Send Project Consolidation Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated project identifiers (name, code, or ID). e.g. "APFM" or "APFM,GNW-104"'
+        required: true
+        default: 'APFM'
+      month:
+        description: 'Month override (YYYY-MM). Leave blank to use current month with split-week fallback.'
+        required: false
+        default: ''
+      recipients:
+        description: 'Comma-separated recipient email addresses. Blank = dbanga@synergietechsolutions.com only.'
+        required: false
+        default: ''
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Call edge function
+        env:
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          PROJECTS: ${{ github.event.inputs.projects }}
+          MONTH: ${{ github.event.inputs.month }}
+          RECIPIENTS: ${{ github.event.inputs.recipients }}
+        run: |
+          set -eu
+          BASE="https://mimlatvdwxqtgxrgcins.supabase.co/functions/v1/send-project-consolidation"
+          # URL-encode projects to allow codes with slashes/hyphens/spaces
+          PROJECTS_ENC=$(printf '%s' "$PROJECTS" | jq -sRr @uri)
+          URL="${BASE}?projects=${PROJECTS_ENC}&force=true"
+          if [ -n "${MONTH:-}" ]; then
+            URL="${URL}&month=${MONTH}"
+          fi
+          if [ -n "${RECIPIENTS:-}" ]; then
+            TO_ENC=$(printf '%s' "$RECIPIENTS" | jq -sRr @uri)
+            URL="${URL}&to=${TO_ENC}"
+          fi
+          echo "Calling: ${URL}"
+          RESPONSE=$(curl -sS -X POST "${URL}" \
+            -H "x-ingest-secret: ${INGEST_SECRET}" \
+            -H "Content-Type: application/json")
+          echo "Response: ${RESPONSE}"
+          # Fail the job if the edge function returned ok:false
+          echo "${RESPONSE}" | jq -e '.ok == true' > /dev/null || exit 1
