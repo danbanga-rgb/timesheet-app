@@ -67,6 +67,46 @@ Four parse methods, tried in order of increasing cost:
 
 ---
 
+## Post-Parse Safeguards & Auto-Corrections
+
+After ANY extractor (regex / Claude / Groq) returns raw fields, the poller runs the result through a correction chain before persisting. These safeguards catch the common failure modes each extractor is prone to. Documented here because the shadow-parse project (2026-07-08) revealed they weren't captured in docs — anyone building a replacement parser must reproduce them (or encode them in the LLM prompt) to be feature-parity.
+
+Applied in `poller.js` via `applyFilenamePeriodFallback()` followed by `postProcessInvoice()`.
+
+### 1. Filename-period fallback
+**Function:** `applyFilenamePeriodFallback(parsed, filename)` (around line 1500)
+**Rule:** If the extractor returned a plausible period (5–45 day span) but its month differs from the month in the filename, the FILENAME MONTH WINS. Reason: Claude and Groq frequently pick up the invoice-issue-date instead of the billing period. The filename (`INV 002/07/2026`, `June 2026 Invoice.pdf`, `06-2026`, etc.) is the more reliable month signal.
+**Also handled:** `parsePeriodFromFilename` recognizes `MM/YYYY`, `Month YYYY`, and `MMYYYY` formats.
+
+### 2. EUR total → USD billing detection
+**Function:** in `postProcessInvoice()`, around line 1547
+**Rule:** Croatian/Bosnian templates commonly show EUR totals prominently but bill in USD. If `currency=EUR` and the PDF text contains `\d+ USD per h` and a USD total, the invoice is normalized to USD with the USD rate and total. Preserves `EUR: X` note in `parseNotes` for audit.
+
+### 3. Historical rate hint (commit 1a5eb41)
+**Function:** in `postProcessInvoice()`
+**Rule:** If the extracted rate is "dirty" (not a whole dollar or the calculated rate doesn't match the total ÷ hours cleanly), the contractor's most-recent-invoice rate is fetched from the DB and used as a strong tiebreaker. Rate is then snapped to that clean historical value and total/hours are re-derived to match.
+
+### 4. Clean rate preference + amount snap (commit 16660f8)
+**Function:** in `postProcessInvoice()`
+**Rule:** Contractor rates are almost always whole dollars (20, 25, 30, 35, 45, 50, 55, 65, 75, 100). If a computed rate is 24.997 or 25.003, it's snapped to 25. The total is preserved as authoritative; hours or rate are adjusted to make the arithmetic clean.
+
+### 5. MM/DD ↔ DD/MM auto-swap (commit 1bba0e1)
+**Function:** in `postProcessInvoice()` for periodStart/periodEnd; also in `ingest-invoice/index.ts` as a second-line guard
+**Rule:** If a parsed date is > 14 days in the future (XLSX weekStart) or any future date (invoice periodEnd), the parser attempts a day↔month swap. If the swapped date is plausible (past/near-present), it's used silently. If the swap still produces a future date OR is ambiguous (day == month), the field is nulled with a `parseNotes` explanation. Prevents locale-format crashes on European DD/MM invoices.
+
+### 6. Invalid-date rejection (commit d1b13d0)
+**Function:** in `postProcessInvoice()` and in `fillGapsWithGroqVision()`
+**Rule:** Groq occasionally hallucinates impossible dates like `2026-06-39`. Any parsed date is validated with `new Date(str).getTime()` before being accepted. Invalid dates are nulled, never inserted (they crash Postgres with "date/time field value out of range").
+
+### 7. Groq vision gap-fill (2026-06-30, commit 83732e8)
+**Function:** `fillGapsWithGroqVision(result, pdfBuffer, filename)` (around line 2009)
+**Rule:** After the primary extractor returns, if any of period/hours/rate/total is null, Groq vision (free tier) is invoked to attempt to fill just the missing fields. Never overrides values the primary extractor already found — additive only.
+
+### Multi-contractor bill handling
+Multi-contractor invoices (Teal Crossroads, Cloudygon, TJ Consultancy) are recognized by Claude returning `isMultiContractor=true` with a `contractors` array. The poller then creates one `invoices` row per contractor, all sharing the same `attachment_path` and a shared `group_key`. Each row stores the per-contractor subtotal (hours/amount) with the poller-derived per-contractor breakdown, NOT the whole-bill total. Any downstream comparison against these rows must be aware that the source PDF represents the aggregate, not any single row.
+
+---
+
 ## Parse Method Tracking and Cost Review
 
 Monthly cost review: query `email_invoice_log` for Claude hit rate.
