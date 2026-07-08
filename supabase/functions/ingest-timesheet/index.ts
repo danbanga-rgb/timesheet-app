@@ -261,7 +261,12 @@ async function upsertTimesheet(
   // ── Locked-period gate ────────────────────────────────────────────────────
   // Days locked when accountant approves the invoice covering that period.
   // Filter them out of incoming entries; if all days are locked, hard-reject.
-  const lockedDays: string[] = (existing?.locked_days as string[] | null) ?? [];
+  // NOTE: locked_days is stored as timestamptz[] and serialized like
+  // "2026-05-04 00:00:00+00", while entry keys are plain "2026-05-04" date
+  // strings. Normalize both sides to YYYY-MM-DD before comparing — the bug
+  // that let Damir 552 be silently overwritten on 2026-07-08.
+  const lockedDaysRaw: string[] = (existing?.locked_days as string[] | null) ?? [];
+  const lockedDays: string[]    = lockedDaysRaw.map(d => String(d).slice(0, 10));
   if (lockedDays.length > 0) {
     const unlockedEntries = Object.fromEntries(
       Object.entries(entries).filter(([d]) => !lockedDays.includes(d))
