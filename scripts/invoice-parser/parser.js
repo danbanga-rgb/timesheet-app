@@ -92,6 +92,9 @@ function extractInvoiceNumber(text) {
   // Reject values that are clearly not invoice numbers (common column headers or words without digits)
   const SKIP = /^(?:date|number|amount|due|total|description|details?|page|copy)\b/i;
   const hasDigit = (s) => /\d/.test(s);
+  // Imran's format: "7/IN:906/01/2026" — N/IN:M value merged with date (two groups)
+  const imranM = text.match(/\b(\d{1,4})\/IN:?(\d{1,4})(?=\d{2}\/\d{2}\/\d{4})/i);
+  if (imranM) return `${imranM[1]}/IN${imranM[2]}`;
   const patterns = [
     // ── PDF text-extraction quirks: field labels and values get smushed together ──
     // "INVOICE NUMBER...DATE OF ISSUE" header with no column separator on value line
@@ -108,6 +111,9 @@ function extractInvoiceNumber(text) {
     // places the number next to the label but text extraction reads them on separate lines)
     /(?:^|\n)\s*(\d{2,5})\s*\n\s*INVOICE\s+NO/im,
     // ── Standard patterns ──
+    // "Invoice Number: 016/26" — NNN/YY format (Amar Cakic: sequential number / 2-digit year)
+    // Must come before the general invoice-number pattern so the /YY suffix is included.
+    /invoice\s*(?:number|num|no\.?)(?!\w)[:\s#]*(\d{1,5}\/\d{2})\b/i,
     // "Invoice Number:", "Invoice No.", "Invoice #" — (?!\w) prevents "NUM" matching in "NUMBER"
     /invoice\s*(?:number|num|no\.?)(?!\w)[:\s#]*(?!(?:date|of\s+issue|number|due)\b)([A-Z0-9][\w\-\/]{1,25})/i,
     /invoice\s*#[:\s#]*(?!(?:date|of\s+issue|number|due)\b)([A-Z0-9][\w\-\/]{1,25})/i,

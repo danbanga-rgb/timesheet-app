@@ -796,6 +796,7 @@ const TimesheetSystem = () => {
   const [pendingPayOnDate, setPendingPayOnDate] = useState('');
   const [pendingPaymentMethod, setPendingPaymentMethod] = useState('');
   const [pendingPaymentTerms, setPendingPaymentTerms] = useState('');
+  const [pendingInvoiceNumber, setPendingInvoiceNumber] = useState('');
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [pendingUsdRate, setPendingUsdRate] = useState('');
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState<Set<string>>(new Set());
@@ -996,6 +997,7 @@ const TimesheetSystem = () => {
     setPendingPayOnDate('');
     setPendingPaidDate('');
     setPendingUsdRate('');
+    setPendingInvoiceNumber('');
     const profileTerms = users.find(u => u.id === selectedInvoice.userId)?.paymentTerms || '';
     const terms = selectedInvoice.paymentTerms || profileTerms;
     setPendingPaymentTerms(terms);
@@ -2109,6 +2111,7 @@ const TimesheetSystem = () => {
     setPendingPaymentMethod('');
     setPendingPaymentTerms('');
     setPendingUsdRate('');
+    setPendingInvoiceNumber('');
   };
 
   const toggleCombinePayments = async (profileId: number, current: boolean | null) => {
@@ -2259,7 +2262,7 @@ const TimesheetSystem = () => {
   };
 
   // Save approval status and/or pay on date without closing modal
-  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string }) => {
+  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string; invoiceNumber?: string }) => {
     const update: Record<string, unknown> = {};
     if (fields.status !== undefined) {
       update.status = fields.status;
@@ -2269,6 +2272,7 @@ const TimesheetSystem = () => {
     if (fields.payOnDate !== undefined) update.pay_on_date = fields.payOnDate || null;
     if (fields.paymentMethod !== undefined) update.payment_method = fields.paymentMethod || null;
     if (fields.paymentTerms !== undefined) update.payment_terms = fields.paymentTerms || null;
+    if (fields.invoiceNumber !== undefined) update.invoice_number = fields.invoiceNumber || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error saving changes: ' + error.message); return; }
     // Cascade non-empty terms to the contractor's profile default
@@ -2286,6 +2290,7 @@ const TimesheetSystem = () => {
       ...(fields.payOnDate !== undefined ? { payOnDate: fields.payOnDate || null } : {}),
       ...(fields.paymentMethod !== undefined ? { paymentMethodOverride: fields.paymentMethod || null } : {}),
       ...(fields.paymentTerms !== undefined ? { paymentTerms: fields.paymentTerms || null } : {}),
+      ...(fields.invoiceNumber !== undefined ? { invoiceNumber: fields.invoiceNumber || '' } : {}),
     } : prev);
   };
 
@@ -7880,6 +7885,20 @@ const TimesheetSystem = () => {
                       <div className="mt-5 space-y-3">
                         <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
                           <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Invoice Number</label>
+                            <input
+                              type="text"
+                              value={pendingInvoiceNumber !== '' ? pendingInvoiceNumber : inv.invoiceNumber}
+                              onChange={e => setPendingInvoiceNumber(e.target.value)}
+                              onBlur={async e => {
+                                const v = e.target.value.trim();
+                                if (v && v !== inv.invoiceNumber) await saveInvoiceEdits(inv.id, { invoiceNumber: v });
+                              }}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm bg-white font-mono"
+                              placeholder="e.g. 016/26"
+                            />
+                          </div>
+                          <div>
                             <label className="block text-xs font-medium text-gray-600 mb-1">Payment Terms</label>
                             <select
                               value={pendingPaymentTerms}
@@ -7947,6 +7966,16 @@ const TimesheetSystem = () => {
                           <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
                             <p className="text-sm font-semibold text-amber-800 flex items-center gap-2"><Edit2 className="w-4 h-4" /> Edit Approval Details</p>
                             <div>
+                              <label className="block text-xs font-medium text-amber-700 mb-1">Invoice Number</label>
+                              <input
+                                type="text"
+                                value={pendingInvoiceNumber !== '' ? pendingInvoiceNumber : inv.invoiceNumber}
+                                onChange={e => setPendingInvoiceNumber(e.target.value)}
+                                className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-400 text-sm bg-white font-mono"
+                                placeholder="e.g. 016/26"
+                              />
+                            </div>
+                            <div>
                               <label className="block text-xs font-medium text-amber-700 mb-1">Payment Terms</label>
                               <select
                                 value={editTerms}
@@ -7986,10 +8015,12 @@ const TimesheetSystem = () => {
                             <div className="flex gap-2">
                               <button
                                 onClick={async () => {
-                                  await saveInvoiceEdits(inv.id, { payOnDate: editPayOn, paymentMethod: pendingPaymentMethod || paymentMethod(inv), paymentTerms: editTerms });
+                                  const editInvNum = pendingInvoiceNumber.trim() || inv.invoiceNumber;
+                                  await saveInvoiceEdits(inv.id, { payOnDate: editPayOn, paymentMethod: pendingPaymentMethod || paymentMethod(inv), paymentTerms: editTerms, invoiceNumber: editInvNum });
                                   setPendingPayOnDate('');
                                   setPendingPaymentMethod('');
                                   setPendingPaymentTerms('');
+                                  setPendingInvoiceNumber('');
                                   alert('Changes saved.');
                                 }}
                                 className="flex-1 flex items-center justify-center gap-2 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 font-medium text-sm"
