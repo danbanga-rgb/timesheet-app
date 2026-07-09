@@ -137,8 +137,12 @@ function extractInvoiceNumber(text) {
     /\bPR\s*NO\.?\s*:\s*(\d[\d\-]{1,25})/i,
     // "Reference No: 177811194162" — reference number in payment request docs
     /\breference\s+no\.?\s*:\s*(\d[\d\-\/\.]{1,25})/i,
+    // NET SCALE / Croatian multi-column format: "R1 račun br." label, value 3 rows below
+    // e.g. "R1 račun br.\nDatum računa\nDatum isporuke\nRok plaćanja\n10-1-1"
+    /R1\s+ra[cčćéç¢g]un\s+br\.\s*\n(?:[^\n]*\n){3}(\d+(?:-\d+){1,4})\b/im,
     // "Poziv na broj: 2026-24-1-1" (Croatian payment reference, last resort)
-    /poziv\s+na\s+broj[:\s]+([A-Z0-9][\w\-\/]{1,25})/i,
+    // Exclude bank-reference format \d-\d{1,2}-YYYY which is never an invoice number
+    /poziv\s+na\s+broj[:\s]+(?!\d-\d{1,2}-20\d\d)([A-Z0-9][\w\-\/]{1,25})/i,
     // "Invoice5/V01/0" — no space between "Invoice" and number, must contain "/" or "-"
     /invoice([0-9][\w]*[\/\-][\/\w\-\.]+)/i,
     // "000025\nFaktura" — Bosnian template where number precedes "Faktura" keyword
