@@ -2401,16 +2401,27 @@ const TimesheetSystem = () => {
     return (s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  // Resolve beneficiary: vendor code (SYN-XXXX) first, then name fallback.
+  function resolveBeneficiary(beneficiary: string, vendorCode?: string): ConveraBeneficiary | null {
+    if (vendorCode) {
+      const m = vendorCode.match(/^SYN-(\d{4})$/i);
+      if (m) {
+        const id = parseInt(m[1], 10);
+        const byCode = converaBeneficiaries.find(b => b.id === id);
+        if (byCode) return byCode;
+      }
+    }
+    const norm = normaliseBeneficiaryName(beneficiary);
+    return norm ? (converaBeneficiaries.find(b =>
+      normaliseBeneficiaryName(b.shortName) === norm ||
+      normaliseBeneficiaryName(b.beneficiaryName) === norm) ?? null) : null;
+  }
+
   // Group match: beneficiary_id → all contractors sharing that Convera account → invoices
   // within 7 days of txnDate whose sum equals amount exactly.
   // Tries unpaid invoices first; falls back to paid ones so re-imports show "already paid" not "no match".
-  function matchPaymentGroup(beneficiary: string, amount: number, txnDate: string): Invoice[] | null {
-    const normBenef = normaliseBeneficiaryName(beneficiary);
-    const matchedBenef = normBenef
-      ? converaBeneficiaries.find(b =>
-          normaliseBeneficiaryName(b.shortName) === normBenef ||
-          normaliseBeneficiaryName(b.beneficiaryName) === normBenef)
-      : null;
+  function matchPaymentGroup(beneficiary: string, amount: number, txnDate: string, vendorCode?: string): Invoice[] | null {
+    const matchedBenef = resolveBeneficiary(beneficiary, vendorCode);
     if (!matchedBenef) return null;
     const userIds = new Set(
       paymentProfiles.filter(p => p.converaBeneficiaryId === matchedBenef.id).map(p => p.userId)
@@ -2444,16 +2455,12 @@ const TimesheetSystem = () => {
     beneficiary: string,
     amount: number,
     paymentDate?: string,  // YYYY-MM-DD; undefined for PDF/QB where date isn't available
+    vendorCode?: string,
   ): { invoice: Invoice; level: number } | null {
     const normRef = normaliseRef(invoiceRef);
 
-    // Resolve Convera short name → beneficiary ID → candidate invoices for those users
-    const normBenefName = normaliseBeneficiaryName(beneficiary);
-    const matchedBenef = normBenefName
-      ? converaBeneficiaries.find(b =>
-          normaliseBeneficiaryName(b.shortName) === normBenefName ||
-          normaliseBeneficiaryName(b.beneficiaryName) === normBenefName)
-      : null;
+    // Resolve beneficiary: vendor code (SYN-XXXX) first, then name fallback
+    const matchedBenef = resolveBeneficiary(beneficiary, vendorCode);
 
     let pool: Invoice[];
     if (matchedBenef) {
@@ -2599,6 +2606,7 @@ const TimesheetSystem = () => {
       const iAmount     = col('foreign amount');
       const iRef1       = col('ref 1');
       const iValueDate  = col('value date');
+      const iVendorId   = col('your id number for beneficiary');
 
       if ([iDate, iBenef, iAmount].some(i => i < 0)) {
         setConveraError('Could not find required columns (Date of Order, Beneficiary Name, Foreign Amount). Make sure this is a Convera Transaction History export.');
@@ -2613,14 +2621,15 @@ const TimesheetSystem = () => {
         const amount      = parseFloat(String(r[iAmount]));
         const ref1        = iRef1 >= 0 ? String(r[iRef1] ?? '').trim() : '';
         const valueDate   = iValueDate >= 0 ? excelSerial(r[iValueDate] as number | string) : '';
+        const vendorCode  = iVendorId >= 0 ? String(r[iVendorId] ?? '').trim() : '';
         if (!beneficiary || isNaN(amount) || amount <= 0) continue;
 
         const invMatch   = ref1.match(/Inv#\s*([A-Za-z0-9][\w\-\/\.]+)/i);
         const invoiceRef = invMatch?.[1]?.trim() ?? '';
 
         // Try group match first (umbrella beneficiaries like Bimosoft covering multiple contractors)
-        const groupMatch = dateOfOrder ? matchPaymentGroup(beneficiary, amount, dateOfOrder) : null;
-        const m = groupMatch ? null : matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined);
+        const groupMatch = dateOfOrder ? matchPaymentGroup(beneficiary, amount, dateOfOrder, vendorCode) : null;
+        const m = groupMatch ? null : matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined, vendorCode);
 
         payments.push({
           source: 'convera',
