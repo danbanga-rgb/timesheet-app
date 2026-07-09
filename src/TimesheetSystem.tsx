@@ -2393,7 +2393,7 @@ const TimesheetSystem = () => {
   }
 
   function normaliseBeneficiaryName(s: string): string {
-    return (s || '').toUpperCase().replace(/[^A-Z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+    return (s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
   // Group match: beneficiary_id → all contractors sharing that Convera account → invoices
