@@ -2531,10 +2531,26 @@ const TimesheetSystem = () => {
       const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
 
       // Row 0 is the header; data starts at row 1.
-      // Columns: [1]=Date of Order (Excel serial), [4]=Beneficiary Name,
-      //          [5]=Foreign Amount (USD), [6]=Ref 1 ("Inv# XXX"), [9]=Value Date (Excel serial)
-      const excelSerial = (n: number) =>
-        n ? new Date((n - 25569) * 86400 * 1000).toISOString().slice(0, 10) : '';
+      // Columns: [1]=Date of Order (Excel serial or string), [4]=Beneficiary Name,
+      //          [5]=Foreign Amount (USD), [6]=Ref 1 ("Inv# XXX"), [9]=Value Date (Excel serial or string)
+      const excelSerial = (n: number | string): string => {
+        if (!n) return '';
+        if (typeof n === 'number') {
+          const d = new Date((n - 25569) * 86400 * 1000);
+          return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+        }
+        const s = String(n).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+        const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+        if (m) {
+          const [, a, b, y] = m;
+          // If first part > 12 it must be DD/MM/YYYY; otherwise assume MM/DD/YYYY
+          return parseInt(a) > 12
+            ? `${y}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`
+            : `${y}-${a.padStart(2,'0')}-${b.padStart(2,'0')}`;
+        }
+        return '';
+      };
 
       const payments: ConveraPaymentRow[] = [];
       for (let i = 1; i < rawRows.length; i++) {
