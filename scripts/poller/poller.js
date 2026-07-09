@@ -1813,6 +1813,41 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
+  // Year-hallucination guard — LLM extractors occasionally return a year that has no
+  // textual basis on the document. Rumiya #110 shadow parse returned 2023-05-01 when
+  // the real invoice was for 2026-05. Prompt v2 tells the LLM not to invent years but
+  // this belt-and-suspenders check catches any that still slip through.
+  //
+  // Rule: contractor invoices are always within the last ~18 months. Anything older
+  // is either legacy data being reprocessed (rare) or a hallucinated year. If periodEnd
+  // is > 18 months in the past, try swapping the year to the current year; if that
+  // produces a plausible past date, use it. Otherwise null both dates.
+  if (result.periodEnd) {
+    const endMs = new Date(result.periodEnd + 'T12:00:00Z').getTime();
+    const cutoffMs = Date.now() - 18 * 30 * 24 * 60 * 60 * 1000; // ~18 months
+    if (endMs < cutoffMs && !isNaN(endMs)) {
+      const currentYear = new Date().getFullYear();
+      const [, oldYear, mm, dd] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(result.periodEnd) || [];
+      if (oldYear && mm && dd) {
+        // Try current year
+        const candidate = `${currentYear}-${mm}-${dd}`;
+        const candMs = new Date(candidate + 'T12:00:00Z').getTime();
+        if (candMs <= Date.now()) {
+          const startCandidate = result.periodStart
+            ? result.periodStart.replace(/^\d{4}/, String(currentYear))
+            : `${currentYear}-${mm}-01`;
+          const note = `Year hallucination guard: period ${result.periodStart}–${result.periodEnd} > 18mo in past; year swapped ${oldYear} → ${currentYear} → ${startCandidate}–${candidate}`;
+          console.warn(`  🎯 ${note}`);
+          result = { ...result, periodStart: startCandidate, periodEnd: candidate, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+        } else {
+          const note = `Year hallucination: period ${result.periodStart}–${result.periodEnd} > 18mo in past and current-year swap didn't help — period nulled`;
+          console.warn(`  ⚠️  ${note}`);
+          result = { ...result, periodStart: null, periodEnd: null, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+        }
+      }
+    }
+  }
+
   // Period-length sanity guard — invoices are at most ~6 weeks. If we've ended up with a period
   // longer than 60 days, some field disagreement (regex/body/filename) produced a nonsensical
   // range spanning years or months. E.g. Bojan 147: PDF said "June 2025" (contractor typo),
