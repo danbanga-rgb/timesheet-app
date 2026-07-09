@@ -1788,21 +1788,26 @@ const TimesheetSystem = () => {
     setBeneficiaryImportResult(null);
     try {
       const text = await file.text();
-      const raw = JSON.parse(text) as Record<string, unknown>[];
+      // Convera exports TSV (.xls) or CSV — auto-detect delimiter from header row
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      const delim = lines[0].includes('\t') ? '\t' : ',';
+      const headers = lines[0].split(delim);
+      const col = (r: string[], name: string) => { const i = headers.indexOf(name); return i >= 0 ? r[i]?.trim() || '' : ''; };
+      const raw = lines.slice(1).map(l => l.split(delim));
       const rows = raw.map(r => ({
-        beneficiary_id: String(r['Beneficiary ID'] || ''),
-        short_name: String(r['Short Name'] || ''),
-        beneficiary_name: String(r['Beneficiary Name'] || ''),
-        beneficiary_country: r['Beneficiary Country'] ? String(r['Beneficiary Country']) : null,
-        currency: r['Currency'] ? String(r['Currency']) : null,
-        default_payment_method: r['Default Payment Method'] ? String(r['Default Payment Method']) : null,
-        vendor_id: r['Vendor ID'] ? String(r['Vendor ID']) : null,
-        bank_name: r['Bank Name'] ? String(r['Bank Name']) : null,
-        bank_country: r['Bank Country'] ? String(r['Bank Country']) : null,
-        bank_account: r['Bank Account'] ? String(r['Bank Account']) : null,
-        iban_unique: r['iban_unique'] !== false,
-        updated_by: r['Updated By'] ? String(r['Updated By']) : null,
-        updated_date: r['Updated Date'] ? String(r['Updated Date']) : null,
+        beneficiary_id: col(r, 'Beneficiary ID'),
+        short_name: col(r, 'Short Name'),
+        beneficiary_name: col(r, 'Beneficiary Name'),
+        beneficiary_country: col(r, 'Beneficiary Country') || null,
+        currency: col(r, 'Currency') || null,
+        default_payment_method: col(r, 'Default Payment Method') || null,
+        vendor_id: col(r, 'Vendor ID') || null,
+        bank_name: col(r, 'Bank Name') || null,
+        bank_country: col(r, 'Bank Country') || null,
+        bank_account: col(r, 'Bank Account') || null,
+        iban_unique: true,
+        updated_by: col(r, 'Updated By') || null,
+        updated_date: col(r, 'Updated Date') || null,
       })).filter(r => r.beneficiary_id);
       // Upsert in batches of 50
       for (let i = 0; i < rows.length; i += 50) {
@@ -7331,8 +7336,8 @@ const TimesheetSystem = () => {
                   {/* Convera Beneficiaries import */}
                   {converaRows.length === 0 && converaTab === 'beneficiaries' && (
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">Upload the Convera beneficiaries JSON export. Beneficiaries will be upserted and automatically matched to contractor payment profiles by IBAN (unique) or name prefix.</p>
-                      <p className="text-xs text-gray-400 mb-4">In Convera: Beneficiaries &rarr; Export &rarr; JSON format. Re-import anytime to refresh.</p>
+                      <p className="text-sm text-gray-600 mb-1">Upload the Convera beneficiaries XLS export. Beneficiaries will be upserted and automatically matched to contractor payment profiles by IBAN (unique) or name prefix.</p>
+                      <p className="text-xs text-gray-400 mb-4">In Convera: Beneficiaries &rarr; Export. Re-import anytime to refresh.</p>
                       <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
                         {beneficiaryImportFile ? (
                           <div className="flex items-center justify-center gap-2 text-indigo-700">
@@ -7343,8 +7348,8 @@ const TimesheetSystem = () => {
                         ) : (
                           <label className="cursor-pointer">
                             <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
-                            <p className="text-sm text-gray-600">Click to select beneficiaries JSON</p>
-                            <input type="file" accept=".json" className="hidden" onChange={e => { setBeneficiaryImportFile(e.target.files?.[0] ?? null); setBeneficiaryImportResult(null); }} />
+                            <p className="text-sm text-gray-600">Click to select beneficiaries XLS</p>
+                            <input type="file" accept=".xls,.tsv,.txt,.csv" className="hidden" onChange={e => { setBeneficiaryImportFile(e.target.files?.[0] ?? null); setBeneficiaryImportResult(null); }} />
                           </label>
                         )}
                       </div>
