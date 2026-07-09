@@ -1778,9 +1778,12 @@ const TimesheetSystem = () => {
       const ibanMatches = beneficiaries.filter(b => b.bankAccount === profileIban);
       if (ibanMatches.length === 1 && ibanMatches[0].ibanUnique) return ibanMatches[0];
     }
-    // 2. Short name prefix match
+    // 2. Short name prefix or contains match (handles "BIMOSOFT AMAR PLJEVLJAK" for contractor "Amar Pljevljak")
     const normName = normBenefName(contractorName);
-    return beneficiaries.find(b => normBenefName(b.shortName).startsWith(normName)) ?? null;
+    return beneficiaries.find(b => {
+      const sn = normBenefName(b.shortName);
+      return sn.startsWith(normName) || sn.includes(normName);
+    }) ?? null;
   }
 
   async function importConveraBeneficiaries(file: File) {
@@ -7372,48 +7375,42 @@ const TimesheetSystem = () => {
                             )}
                           </div>
                           {beneficiaryImportResult.unmatched.length > 0 && (
-                            <div className="border border-amber-200 rounded-lg divide-y divide-amber-100 max-h-60 overflow-y-auto">
+                            <div className="border border-amber-200 rounded-lg divide-y divide-amber-100">
                               {beneficiaryImportResult.unmatched.map(u => (
-                                <div key={u.profileId} className="flex items-center justify-between px-3 py-2 bg-amber-50">
-                                  <span className="text-sm text-gray-700">{u.userName}</span>
-                                  <button
-                                    onClick={() => setBeneficiaryOverrideProfileId(u.profileId)}
-                                    className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700"
-                                  >Link manually</button>
+                                <div key={u.profileId} className="bg-amber-50">
+                                  <div className="flex items-center justify-between px-3 py-2">
+                                    <span className="text-sm text-gray-700">{u.userName}</span>
+                                    {beneficiaryOverrideProfileId === u.profileId
+                                      ? <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="text-xs text-gray-500 hover:underline">Cancel</button>
+                                      : <button onClick={() => { setBeneficiaryOverrideProfileId(u.profileId); setBeneficiaryOverrideSearch(''); }} className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">Link manually</button>
+                                    }
+                                  </div>
+                                  {beneficiaryOverrideProfileId === u.profileId && (
+                                    <div className="px-3 pb-3 border-t border-amber-200 bg-indigo-50">
+                                      <input
+                                        type="text" value={beneficiaryOverrideSearch}
+                                        onChange={e => setBeneficiaryOverrideSearch(e.target.value)}
+                                        placeholder="Search Convera beneficiary…" autoFocus
+                                        className="w-full mt-2 px-3 py-1.5 border border-indigo-200 rounded text-sm mb-1 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                      />
+                                      <div className="max-h-36 overflow-y-auto divide-y divide-indigo-100 rounded border border-indigo-100">
+                                        {converaBeneficiaries
+                                          .filter(b => beneficiaryOverrideSearch === '' || b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) || b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()))
+                                          .slice(0, 20)
+                                          .map(b => (
+                                            <button key={b.id} onClick={() => setConveraOverride(u.profileId, b.id)}
+                                              className="w-full text-left px-2 py-1.5 hover:bg-indigo-100 text-sm bg-white">
+                                              <span className="font-mono text-xs text-indigo-600 mr-2">{b.shortName}</span>
+                                              <span className="text-gray-400 text-xs">{b.bankAccount}</span>
+                                            </button>
+                                          ))}
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>
                           )}
-                          {/* Manual override picker */}
-                          {beneficiaryOverrideProfileId && (() => {
-                            const unmatchedEntry = beneficiaryImportResult.unmatched.find(u => u.profileId === beneficiaryOverrideProfileId);
-                            const filtered = converaBeneficiaries.filter(b =>
-                              beneficiaryOverrideSearch === '' ||
-                              b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) ||
-                              b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase())
-                            );
-                            return (
-                              <div className="mt-3 border border-indigo-200 rounded-lg p-3 bg-indigo-50">
-                                <p className="text-sm font-medium text-indigo-800 mb-2">Link <strong>{unmatchedEntry?.userName}</strong> to a Convera beneficiary:</p>
-                                <input
-                                  type="text" value={beneficiaryOverrideSearch}
-                                  onChange={e => setBeneficiaryOverrideSearch(e.target.value)}
-                                  placeholder="Search by name..." autoFocus
-                                  className="w-full px-3 py-1.5 border border-indigo-200 rounded text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                                />
-                                <div className="max-h-40 overflow-y-auto divide-y divide-indigo-100">
-                                  {filtered.slice(0, 20).map(b => (
-                                    <button key={b.id} onClick={() => setConveraOverride(beneficiaryOverrideProfileId, b.id)}
-                                      className="w-full text-left px-2 py-1.5 hover:bg-indigo-100 text-sm">
-                                      <span className="font-mono text-xs text-indigo-600 mr-2">{b.shortName}</span>
-                                      <span className="text-gray-600 text-xs">{b.bankAccount}</span>
-                                    </button>
-                                  ))}
-                                </div>
-                                <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="mt-2 text-xs text-gray-500 hover:underline">Cancel</button>
-                              </div>
-                            );
-                          })()}
                         </div>
                       )}
                       <div className="flex justify-end">
