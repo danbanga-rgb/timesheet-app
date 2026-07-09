@@ -1823,7 +1823,7 @@ const TimesheetSystem = () => {
       // Auto-match payment profiles (skip manual overrides and already-linked profiles)
       const { data: profiles } = await supabase.from('payment_profiles').select('id, user_id, iban, convera_match_override, convera_beneficiary_id');
       const isTestName = (name: string) => { const l = (name || '').toLowerCase(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
-      const intuitUserIds = new Set(invoices.filter(inv => paymentMethod(inv) === 'Intuit').map(inv => inv.userId));
+      const intuitUserIds = new Set(invoices.filter(inv => paymentMethod(inv).toLowerCase() === 'intuit').map(inv => inv.userId));
       const unmatched: { profileId: number; userId: string; userName: string }[] = [];
       let matchedCount = 0;
       for (const profile of profiles || []) {
