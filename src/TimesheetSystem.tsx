@@ -1823,13 +1823,14 @@ const TimesheetSystem = () => {
       // Auto-match payment profiles (skip manual overrides and already-linked profiles)
       const { data: profiles } = await supabase.from('payment_profiles').select('id, user_id, iban, convera_match_override, convera_beneficiary_id');
       const isTestName = (name: string) => { const l = (name || '').toLowerCase(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
+      const intuitUserIds = new Set(invoices.filter(inv => paymentMethod(inv) === 'Intuit').map(inv => inv.userId));
       const unmatched: { profileId: number; userId: string; userName: string }[] = [];
       let matchedCount = 0;
       for (const profile of profiles || []) {
         if (profile.convera_match_override) continue;
         const user = users.find(u => u.id === profile.user_id);
-        // Skip test/admin accounts and US contractors (paid via Intuit, not in Convera)
-        if (!user || isTestName(user.name) || user.country === 'US') continue;
+        // Skip test/admin accounts and Intuit-paid contractors (not in Convera)
+        if (!user || isTestName(user.name) || intuitUserIds.has(profile.user_id)) continue;
         // Already linked via vendor code / previous import — re-confirm the link is still valid, keep it
         if (profile.convera_beneficiary_id) {
           const stillExists = normBenefs.find(b => b.id === profile.convera_beneficiary_id);
