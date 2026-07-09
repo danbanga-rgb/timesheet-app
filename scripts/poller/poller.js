@@ -2792,15 +2792,25 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     }
     // Subject hint overrides extracted period — e.g. "[Invoice 05/26]" beats a June date
     // parsed from the PDF when the contractor invoices for the previous month.
+    // Guard: only apply if the subject period is within the ingest window — stale forwarded
+    // subjects (e.g. Nikolina "FW: Invoice - December'25" forwarded with a June attachment)
+    // must not clobber the filename-derived period.
     if (parsed) {
       const subjectPeriod = parsePeriodFromSubject(subject);
       if (subjectPeriod) {
         const extractedYM = parsed.periodStart?.slice(0, 7);
         const subjectYM   = subjectPeriod.periodStart.slice(0, 7);
         if (extractedYM !== subjectYM) {
-          console.warn(`  📧 Period override from subject: ${extractedYM} → ${subjectYM} (${subject})`);
-          parsed.periodStart = subjectPeriod.periodStart;
-          parsed.periodEnd   = subjectPeriod.periodEnd;
+          const _today = new Date();
+          const _winStart = new Date(Date.UTC(_today.getUTCFullYear(), _today.getUTCMonth() - 1, 1)).toISOString().slice(0, 10);
+          const _winEnd   = new Date(Date.UTC(_today.getUTCFullYear(), _today.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+          if (subjectPeriod.periodEnd >= _winStart && subjectPeriod.periodEnd <= _winEnd) {
+            console.warn(`  📧 Period override from subject: ${extractedYM} → ${subjectYM} (${subject})`);
+            parsed.periodStart = subjectPeriod.periodStart;
+            parsed.periodEnd   = subjectPeriod.periodEnd;
+          } else {
+            console.warn(`  📧 Subject period ${subjectYM} out of window — ignoring override (${subject})`);
+          }
         }
       }
     }
