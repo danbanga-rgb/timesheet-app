@@ -1714,6 +1714,24 @@ function postProcessInvoice(result, pdfText) {
     }
   }
 
+  // Sanity guard — total replacement when rate & hours are both clean.
+  // Catches parse errors like Juran Dadić INV 5-P01-1 (2026-06): total parsed as
+  // $6.16 when rate=$35 × hours=176 = $6,160. The rate-consistency check above
+  // can't rescue this (derived rate = 0.035 < $1 cap → skipped). But when BOTH
+  // rate and hours look clean/authoritative, trust their product over an off
+  // total by a wide margin (>10%). Belt-and-suspenders with the earlier snap.
+  const isCleanHours = (h) => h != null && h > 0 && h <= 500 && Math.abs(h - Math.round(h)) < 0.001;
+  if (result.totalAmount != null && result.totalHours != null && result.rate != null
+      && isCleanRate(result.rate) && isCleanHours(result.totalHours)) {
+    const computed = Math.round(result.totalHours * result.rate * 100) / 100;
+    const divergence = Math.abs(computed - result.totalAmount) / Math.max(1, computed);
+    if (divergence > 0.10) {
+      const note = `Total sanity: $${result.totalAmount} replaced with $${computed} (clean $${result.rate}/hr × ${result.totalHours}h; total off by ${(divergence*100).toFixed(0)}% — likely decimal/truncation error)`;
+      console.warn(`  🛡  ${note}`);
+      result = { ...result, totalAmount: computed, parseNotes: [note, result.parseNotes].filter(Boolean).join(' | ') };
+    }
+  }
+
   // Invoice number: always prefix with "INV " if not already — contractors use dates, serials, etc.
   if (result.invoiceNumber && !/^INV/i.test(result.invoiceNumber)) {
     result = { ...result, invoiceNumber: 'INV ' + result.invoiceNumber };
