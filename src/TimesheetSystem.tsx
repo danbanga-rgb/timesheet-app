@@ -1820,12 +1820,17 @@ const TimesheetSystem = () => {
       const { data: benefs } = await supabase.from('convera_beneficiaries').select('*').order('short_name');
       const normBenefs = (benefs || []).map(normaliseConveraBeneficiary);
       setConveraBeneficiaries(normBenefs);
-      // Auto-match payment profiles (skip manual overrides)
-      const { data: profiles } = await supabase.from('payment_profiles').select('id, user_id, iban, convera_match_override');
+      // Auto-match payment profiles (skip manual overrides and already-linked profiles)
+      const { data: profiles } = await supabase.from('payment_profiles').select('id, user_id, iban, convera_match_override, convera_beneficiary_id');
       const unmatched: { profileId: number; userId: string; userName: string }[] = [];
       let matchedCount = 0;
       for (const profile of profiles || []) {
         if (profile.convera_match_override) continue;
+        // Already linked via vendor code / previous import — re-confirm the link is still valid, keep it
+        if (profile.convera_beneficiary_id) {
+          const stillExists = normBenefs.find(b => b.id === profile.convera_beneficiary_id);
+          if (stillExists) { matchedCount++; continue; }
+        }
         const user = users.find(u => u.id === profile.user_id);
         const match = autoMatchBeneficiary(user?.name || '', profile.iban || '', normBenefs);
         if (match) {
