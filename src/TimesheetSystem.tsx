@@ -2530,9 +2530,6 @@ const TimesheetSystem = () => {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
 
-      // Row 0 is the header; data starts at row 1.
-      // Columns: [1]=Date of Order (Excel serial or string), [4]=Beneficiary Name,
-      //          [5]=Foreign Amount (USD), [6]=Ref 1 ("Inv# XXX"), [9]=Value Date (Excel serial or string)
       const excelSerial = (n: number | string): string => {
         if (!n) return '';
         if (typeof n === 'number') {
@@ -2544,7 +2541,6 @@ const TimesheetSystem = () => {
         const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
         if (m) {
           const [, a, b, y] = m;
-          // If first part > 12 it must be DD/MM/YYYY; otherwise assume MM/DD/YYYY
           return parseInt(a) > 12
             ? `${y}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`
             : `${y}-${a.padStart(2,'0')}-${b.padStart(2,'0')}`;
@@ -2552,14 +2548,28 @@ const TimesheetSystem = () => {
         return '';
       };
 
+      // Detect columns from header row — robust to Convera export format changes
+      const hdrs = rawRows[0].map(h => String(h).trim().toLowerCase());
+      const col = (name: string) => hdrs.indexOf(name.toLowerCase());
+      const iDate       = col('date of order');
+      const iBenef      = col('beneficiary name');
+      const iAmount     = col('foreign amount');
+      const iRef1       = col('ref 1');
+      const iValueDate  = col('value date');
+
+      if ([iDate, iBenef, iAmount].some(i => i < 0)) {
+        setConveraError('Could not find required columns (Date of Order, Beneficiary Name, Foreign Amount). Make sure this is a Convera Transaction History export.');
+        return;
+      }
+
       const payments: ConveraPaymentRow[] = [];
       for (let i = 1; i < rawRows.length; i++) {
         const r = rawRows[i];
-        const dateOfOrder = excelSerial(r[1] as number);
-        const beneficiary = String(r[4] ?? '').trim();
-        const amount      = parseFloat(String(r[5]));
-        const ref1        = String(r[6] ?? '').trim();
-        const valueDate   = excelSerial(r[9] as number);
+        const dateOfOrder = excelSerial(r[iDate] as number | string);
+        const beneficiary = String(r[iBenef] ?? '').trim();
+        const amount      = parseFloat(String(r[iAmount]));
+        const ref1        = iRef1 >= 0 ? String(r[iRef1] ?? '').trim() : '';
+        const valueDate   = iValueDate >= 0 ? excelSerial(r[iValueDate] as number | string) : '';
         if (!beneficiary || isNaN(amount) || amount <= 0) continue;
 
         const invMatch   = ref1.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
