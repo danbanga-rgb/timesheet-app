@@ -152,9 +152,9 @@ function buildTimingSection(
     profileEndDate.set(p.id, p.end_date ?? '');
   }
 
-  type WeekStat = { total: number; portal: number; direct: number; forwarded: number; autoYes: number; within1d: number; within3d: number; sumDays: number };
+  type WeekStat = { total: number; eligible: number; portal: number; direct: number; forwarded: number; autoYes: number; within1d: number; within3d: number; sumDays: number };
   const stats = new Map<string, WeekStat>();
-  for (const wk of timingWeeks) stats.set(wk, { total: 0, portal: 0, direct: 0, forwarded: 0, autoYes: 0, within1d: 0, within3d: 0, sumDays: 0 });
+  for (const wk of timingWeeks) stats.set(wk, { total: 0, eligible: 0, portal: 0, direct: 0, forwarded: 0, autoYes: 0, within1d: 0, within3d: 0, sumDays: 0 });
 
   for (const ts of allTimesheets) {
     const wk = ts.week_start.slice(0, 10);
@@ -178,6 +178,15 @@ function buildTimingSection(
     st.sumDays += Math.max(daysAfter, 0);
   }
 
+  // Count eligible contractors per week (active during that week, not test accounts)
+  for (const p of profiles) {
+    for (const wk of timingWeeks) {
+      const sun = addDays(wk, 6);
+      const active = (!p.start_date || p.start_date <= sun) && (!p.end_date || p.end_date >= wk);
+      if (active) stats.get(wk)!.eligible++;
+    }
+  }
+
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const TD = 'padding:4px 8px;border-bottom:1px solid #e5e7eb;white-space:nowrap';
   const rows = timingWeeks.map(wk => {
@@ -192,9 +201,12 @@ function buildTimingSection(
     const cYes = st.autoYes > 0 ? '#15803d' : '#9ca3af';
     const inProg = wk === currentWeekForTimeliness
       ? ' <span style="font-size:9px;color:#9ca3af;font-weight:400">●</span>' : '';
+    const missing = st.eligible - st.total;
+    const cTotal = missing === 0 ? '#15803d' : missing <= 3 ? '#b45309' : '#dc2626';
+    const totalLabel = st.eligible > 0 ? `${st.total}/${st.eligible}` : String(st.total);
     return `<tr>
       <td style="${TD}">${MONTHS[em-1]} ${ed}${inProg}</td>
-      <td style="${TD};text-align:center">${st.total}</td>
+      <td style="${TD};text-align:center;font-weight:600;color:${cTotal}">${totalLabel}</td>
       <td style="${TD};text-align:center;color:#6b7280">${st.portal}</td>
       <td style="${TD};text-align:center;color:#6b7280">${st.direct}</td>
       <td style="${TD};text-align:center;color:#6b7280">${st.forwarded}</td>
@@ -214,7 +226,7 @@ function buildTimingSection(
       <table style="border-collapse:collapse;background:white;border-radius:6px;overflow:hidden;border:1px solid #e5e7eb;font-size:13px">
         <thead><tr style="background:#1e40af;color:white">
           <th style="${TH};text-align:left">W/E</th>
-          <th style="${TH};text-align:center">Total</th>
+          <th style="${TH};text-align:center">Sub/Elig</th>
           <th style="${TH};text-align:center">Portal</th>
           <th style="${TH};text-align:center">Email</th>
           <th style="${TH};text-align:center">Fwd</th>
