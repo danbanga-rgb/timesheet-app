@@ -330,6 +330,7 @@ interface ConveraPaymentRow {
   invoiceRef: string;       // from "Re: Inv#" for Convera; empty for Intuit
   suggestedDate: string;    // date from Intuit email; empty for Convera
   matchedInvoice: Invoice | null;
+  matchedInvoices?: Invoice[];  // set for umbrella beneficiaries (Bimosoft etc.) — all paid together
   matchLevel?: number;      // 1-4: confidence (1=highest); undefined=no match
   selected: boolean;
 }
@@ -2395,6 +2396,33 @@ const TimesheetSystem = () => {
     return (s || '').toUpperCase().replace(/[^A-Z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  // Group match: beneficiary_id → all contractors sharing that Convera account → invoices
+  // within 7 days of txnDate whose sum equals amount exactly. Returns null if no exact sum.
+  function matchPaymentGroup(beneficiary: string, amount: number, txnDate: string): Invoice[] | null {
+    const normBenef = normaliseBeneficiaryName(beneficiary);
+    const matchedBenef = normBenef
+      ? converaBeneficiaries.find(b =>
+          normaliseBeneficiaryName(b.shortName) === normBenef ||
+          normaliseBeneficiaryName(b.beneficiaryName) === normBenef)
+      : null;
+    if (!matchedBenef) return null;
+    const userIds = new Set(
+      paymentProfiles.filter(p => p.converaBeneficiaryId === matchedBenef.id).map(p => p.userId)
+    );
+    if (!userIds.size) return null;
+    const parseYMD = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+    const txMs = parseYMD(txnDate);
+    const candidates = invoices.filter(inv =>
+      userIds.has(inv.userId) &&
+      inv.status !== 'paid' &&
+      inv.payOnDate != null &&
+      Math.abs(parseYMD(inv.payOnDate) - txMs) / 86400000 <= 7
+    );
+    if (!candidates.length) return null;
+    const total = candidates.reduce((s, inv) => s + inv.totalAmount, 0);
+    return Math.abs(total - amount) < 0.02 ? candidates : null;
+  }
+
   // 5-level payment matching:
   // Resolves Convera beneficiary name → converaBeneficiaryId → user IDs → candidate invoices.
   // Then applies: L1=ref, L2=+amount, L3=+date proximity, L4=amount-only, L5=flag (null).
@@ -2409,7 +2437,9 @@ const TimesheetSystem = () => {
     // Resolve Convera short name → beneficiary ID → candidate invoices for those users
     const normBenefName = normaliseBeneficiaryName(beneficiary);
     const matchedBenef = normBenefName
-      ? converaBeneficiaries.find(b => normaliseBeneficiaryName(b.shortName) === normBenefName)
+      ? converaBeneficiaries.find(b =>
+          normaliseBeneficiaryName(b.shortName) === normBenefName ||
+          normaliseBeneficiaryName(b.beneficiaryName) === normBenefName)
       : null;
 
     let pool: Invoice[];
@@ -2575,7 +2605,9 @@ const TimesheetSystem = () => {
         const invMatch   = ref1.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
         const invoiceRef = invMatch?.[1]?.trim() ?? '';
 
-        const m = matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined);
+        // Try group match first (umbrella beneficiaries like Bimosoft covering multiple contractors)
+        const groupMatch = dateOfOrder ? matchPaymentGroup(beneficiary, amount, dateOfOrder) : null;
+        const m = groupMatch ? null : matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined);
 
         payments.push({
           source: 'convera',
@@ -2585,9 +2617,10 @@ const TimesheetSystem = () => {
           currency: 'USD',
           invoiceRef,
           suggestedDate: valueDate,
-          matchedInvoice: m?.invoice ?? null,
-          matchLevel: m?.level,
-          selected: !!m && m.invoice.status !== 'paid',
+          matchedInvoice: groupMatch ? groupMatch[0] : (m?.invoice ?? null),
+          matchedInvoices: groupMatch ?? undefined,
+          matchLevel: groupMatch ? 1 : m?.level,
+          selected: groupMatch ? true : (!!m && m.invoice.status !== 'paid'),
         });
       }
 
@@ -2730,21 +2763,23 @@ const TimesheetSystem = () => {
   };
 
   const applyConveraPayments = async () => {
-    const selected = converaRows.filter(r => r.selected && r.matchedInvoice);
+    const selected = converaRows.filter(r => r.selected && (r.matchedInvoices?.length || r.matchedInvoice));
     if (!selected.length) return;
     if (!converaPaidDate) { alert('Please enter the payment date.'); return; }
     setConveraApplying(true);
     let ok = 0, failed = 0;
     for (const row of selected) {
-      const inv = row.matchedInvoice!;
+      const invoicesToMark = row.matchedInvoices ?? (row.matchedInvoice ? [row.matchedInvoice] : []);
       const paidDate = converaPaidDate || row.suggestedDate;
-      const { error } = await supabase.from('invoices').update({
-        status: 'paid',
-        paid_date: paidDate,
-        reviewed_at: new Date().toISOString(),
-        reviewed_by: currentUser!.name,
-      }).eq('id', inv.id);
-      if (error) failed++; else ok++;
+      for (const inv of invoicesToMark) {
+        const { error } = await supabase.from('invoices').update({
+          status: 'paid',
+          paid_date: paidDate,
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: currentUser!.name,
+        }).eq('id', inv.id);
+        if (error) failed++; else ok++;
+      }
     }
     await fetchInvoices();
     setConveraApplying(false);
@@ -7373,9 +7408,9 @@ const TimesheetSystem = () => {
 
                   {/* Step 2: Review and apply (shared for both sources) */}
                   {converaRows.length > 0 && (() => {
-                    const matched      = converaRows.filter(r => r.matchedInvoice);
-                    const alreadyPaid  = converaRows.filter(r => r.matchedInvoice?.status === 'paid');
-                    const unmatched    = converaRows.filter(r => !r.matchedInvoice);
+                    const matched      = converaRows.filter(r => r.matchedInvoices?.length || r.matchedInvoice);
+                    const alreadyPaid  = converaRows.filter(r => !r.matchedInvoices?.length && r.matchedInvoice?.status === 'paid');
+                    const unmatched    = converaRows.filter(r => !r.matchedInvoices?.length && !r.matchedInvoice);
                     const selectedCount = converaRows.filter(r => r.selected).length;
                     const totalSelected = converaRows.filter(r => r.selected).reduce((s, r) => s + r.amount, 0);
                     const hasInvRefs   = converaRows.some(r => r.invoiceRef);
@@ -7401,9 +7436,9 @@ const TimesheetSystem = () => {
                               <tr>
                                 <th className="px-3 py-2 text-center w-8">
                                   <input type="checkbox"
-                                    checked={converaRows.filter(r => r.matchedInvoice && r.matchedInvoice.status !== 'paid').every(r => r.selected)}
+                                    checked={converaRows.filter(r => (r.matchedInvoices?.length || r.matchedInvoice) && r.matchedInvoice?.status !== 'paid').every(r => r.selected)}
                                     onChange={e => setConveraRows(prev => prev.map(r =>
-                                      r.matchedInvoice && r.matchedInvoice.status !== 'paid' ? { ...r, selected: e.target.checked } : r
+                                      (r.matchedInvoices?.length || r.matchedInvoice) && r.matchedInvoice?.status !== 'paid' ? { ...r, selected: e.target.checked } : r
                                     ))}
                                   />
                                 </th>
@@ -7416,12 +7451,14 @@ const TimesheetSystem = () => {
                             </thead>
                             <tbody>
                               {converaRows.map((row, idx) => {
-                                const isPaid = row.matchedInvoice?.status === 'paid';
-                                const rowBg = !row.matchedInvoice ? 'bg-red-50' : isPaid ? 'bg-blue-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50';
+                                const isGroup = (row.matchedInvoices?.length ?? 0) > 1;
+                                const isPaid = !isGroup && row.matchedInvoice?.status === 'paid';
+                                const hasMatch = isGroup || !!row.matchedInvoice;
+                                const rowBg = !hasMatch ? 'bg-red-50' : isPaid ? 'bg-blue-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50';
                                 return (
                                   <tr key={idx} className={rowBg}>
                                     <td className="px-3 py-2 text-center">
-                                      {row.matchedInvoice && !isPaid
+                                      {hasMatch && !isPaid
                                         ? <input type="checkbox" checked={row.selected} onChange={e => setConveraRows(prev => prev.map((r, i) => i === idx ? { ...r, selected: e.target.checked } : r))} />
                                         : <span className="text-gray-300">—</span>}
                                     </td>
@@ -7429,17 +7466,24 @@ const TimesheetSystem = () => {
                                     <td className="px-3 py-2 text-right font-mono text-gray-700">${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                                     {hasInvRefs && <td className="px-3 py-2 text-xs text-gray-500 font-mono">{row.invoiceRef || '—'}</td>}
                                     <td className="px-3 py-2 text-xs">
-                                      {row.matchedInvoice
+                                      {isGroup
                                         ? <span className="text-gray-800">
-                                            {row.matchedInvoice.invoiceNumber} <span className="text-gray-400">· {row.matchedInvoice.userName}</span>
-                                            {(row.matchLevel ?? 0) >= 3 && <span className="ml-1.5 px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs font-medium" title={`Weak match (level ${row.matchLevel}) — verify before applying`}>weak</span>}
+                                            <span className="font-medium">{row.matchedInvoices!.length} invoices</span>
+                                            <span className="text-gray-400"> · {row.matchedInvoices!.map(i => i.userName).join(', ')}</span>
                                           </span>
-                                        : <span className="text-red-500 italic">No match</span>}
+                                        : row.matchedInvoice
+                                          ? <span className="text-gray-800">
+                                              {row.matchedInvoice.invoiceNumber} <span className="text-gray-400">· {row.matchedInvoice.userName}</span>
+                                              {(row.matchLevel ?? 0) >= 3 && <span className="ml-1.5 px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs font-medium" title={`Weak match (level ${row.matchLevel}) — verify before applying`}>weak</span>}
+                                            </span>
+                                          : <span className="text-red-500 italic">No match</span>}
                                     </td>
                                     <td className="px-3 py-2 text-center">
-                                      {row.matchedInvoice
-                                        ? <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[row.matchedInvoice.status] || ''}`}>{row.matchedInvoice.status}</span>
-                                        : <span className="text-gray-300 text-xs">—</span>}
+                                      {isGroup
+                                        ? <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">group</span>
+                                        : row.matchedInvoice
+                                          ? <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[row.matchedInvoice.status] || ''}`}>{row.matchedInvoice.status}</span>
+                                          : <span className="text-gray-300 text-xs">—</span>}
                                     </td>
                                   </tr>
                                 );
