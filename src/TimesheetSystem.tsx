@@ -2397,7 +2397,8 @@ const TimesheetSystem = () => {
   }
 
   // Group match: beneficiary_id → all contractors sharing that Convera account → invoices
-  // within 7 days of txnDate whose sum equals amount exactly. Returns null if no exact sum.
+  // within 7 days of txnDate whose sum equals amount exactly.
+  // Tries unpaid invoices first; falls back to paid ones so re-imports show "already paid" not "no match".
   function matchPaymentGroup(beneficiary: string, amount: number, txnDate: string): Invoice[] | null {
     const normBenef = normaliseBeneficiaryName(beneficiary);
     const matchedBenef = normBenef
@@ -2412,15 +2413,22 @@ const TimesheetSystem = () => {
     if (!userIds.size) return null;
     const parseYMD = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
     const txMs = parseYMD(txnDate);
-    const candidates = invoices.filter(inv =>
+    const inWindow = invoices.filter(inv =>
       userIds.has(inv.userId) &&
-      inv.status !== 'paid' &&
       inv.payOnDate != null &&
       Math.abs(parseYMD(inv.payOnDate) - txMs) / 86400000 <= 7
     );
-    if (!candidates.length) return null;
-    const total = candidates.reduce((s, inv) => s + inv.totalAmount, 0);
-    return Math.abs(total - amount) < 0.02 ? candidates : null;
+    // Prefer unpaid; fall back to paid (re-import detection)
+    for (const statusFilter of [
+      (inv: Invoice) => inv.status !== 'paid',
+      (inv: Invoice) => inv.status === 'paid',
+    ]) {
+      const group = inWindow.filter(statusFilter);
+      if (!group.length) continue;
+      const total = group.reduce((s, inv) => s + inv.totalAmount, 0);
+      if (Math.abs(total - amount) < 0.02) return group;
+    }
+    return null;
   }
 
   // 5-level payment matching:
@@ -2602,7 +2610,7 @@ const TimesheetSystem = () => {
         const valueDate   = iValueDate >= 0 ? excelSerial(r[iValueDate] as number | string) : '';
         if (!beneficiary || isNaN(amount) || amount <= 0) continue;
 
-        const invMatch   = ref1.match(/Inv#?\s*([A-Za-z0-9][\w\-\/\.]+)/i);
+        const invMatch   = ref1.match(/Inv#\s*([A-Za-z0-9][\w\-\/\.]+)/i);
         const invoiceRef = invMatch?.[1]?.trim() ?? '';
 
         // Try group match first (umbrella beneficiaries like Bimosoft covering multiple contractors)
@@ -2620,7 +2628,7 @@ const TimesheetSystem = () => {
           matchedInvoice: groupMatch ? groupMatch[0] : (m?.invoice ?? null),
           matchedInvoices: groupMatch ?? undefined,
           matchLevel: groupMatch ? 1 : m?.level,
-          selected: groupMatch ? true : (!!m && m.invoice.status !== 'paid'),
+          selected: groupMatch ? groupMatch[0].status !== 'paid' : (!!m && m.invoice.status !== 'paid'),
         });
       }
 
