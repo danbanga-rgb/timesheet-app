@@ -335,6 +335,47 @@ interface ConveraPaymentRow {
   selected: boolean;
 }
 
+// ─── Payments tab (2026-07-10) ────────────────────────────────────────────────
+type ImportBatchState  = 'pending' | 'processed' | 'rolled_back';
+type MatchState        = 'unreviewed' | 'matched' | 'no_invoice' | 'flagged';
+type MatchConfidence   = 'strong' | 'weak' | 'none';
+
+interface ImportBatch {
+  id: number;
+  source: string;                    // 'convera_xls' for MVP
+  sourceFilename: string | null;
+  importedAt: string;
+  importedBy: string | null;
+  rowCount: number;
+  state: ImportBatchState;
+}
+
+interface ConveraTransaction {
+  id: number;
+  confirmationNumber: string;
+  lineItem: number;
+  dateOfOrder: string;               // YYYY-MM-DD
+  beneficiaryName: string;
+  subtotal: number | null;
+  serviceCharges: number | null;
+  grandTotal: number | null;
+  foreignAmount: number | null;
+  ref1: string | null;
+  itemType: string | null;
+  converaBeneficiaryId: number | null;
+  // Payments tab match state
+  importBatchId: number | null;
+  matchedInvoiceId: number | null;
+  matchState: MatchState;
+  matchConfidence: MatchConfidence | null;
+  matchLevel: number | null;
+  matchedAt: string | null;
+  matchedBy: string | null;
+  notes: string | null;
+  // For umbrella payments (many-to-many)
+  matchedInvoiceIds?: number[];
+}
+
 interface ReminderEmail {
   id: number;
   userId: string;
@@ -819,6 +860,30 @@ const TimesheetSystem = () => {
   const [converaError, setConveraError] = useState('');
   // Convera beneficiaries
   const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
+
+  // ── Payments tab state ──────────────────────────────────────────────────────
+  const [converaTransactions, setConveraTransactions] = useState<ConveraTransaction[]>([]);
+  const [importBatches, setImportBatches] = useState<ImportBatch[]>([]);
+  const [selectedBatchId, setSelectedBatchId] = useState<number | 'all'>('all');
+  const [paymentsStateFilter, setPaymentsStateFilter] = useState<MatchState | 'all'>('all');
+  const [paymentsSortKey, setPaymentsSortKey] = useState<'date' | 'beneficiary' | 'amount' | 'confidence'>('date');
+  const [paymentsSortDir, setPaymentsSortDir] = useState<'asc' | 'desc'>('desc');
+  const [paymentsImportFile, setPaymentsImportFile] = useState<File | null>(null);
+  const [paymentsImporting, setPaymentsImporting] = useState(false);
+  const [paymentsImportError, setPaymentsImportError] = useState('');
+  const [showProcessPreview, setShowProcessPreview] = useState(false);
+  // Staged edits (transient — only committed to DB on Process): map txn id → chosen invoice id(s) or 'no_invoice'
+  const [stagedMatches, setStagedMatches] = useState<Record<number, number[] | 'no_invoice'>>({});
+  const [paymentsImportSummary, setPaymentsImportSummary] = useState<{
+    newCount: number;
+    refreshedCount: number;
+    skippedCount: number;
+    amountChangedRows: { key: string; oldAmount: number; newAmount: number; state: string }[];
+    batchId: number | null;
+  } | null>(null);
+  // Bumped after every import/rollback to force the file <input> to re-mount fresh —
+  // avoids the "browser suppresses onChange for same file" problem without touching the DOM.
+  const [paymentsFileInputKey, setPaymentsFileInputKey] = useState(0);
   const [converaLastPaymentDates, setConveraLastPaymentDates] = useState<Map<number, string>>(new Map());
   const [beneficiaryImportFile, setBeneficiaryImportFile] = useState<File | null>(null);
   const [beneficiaryImporting, setBeneficiaryImporting] = useState(false);
@@ -1751,6 +1816,72 @@ const TimesheetSystem = () => {
     if (data) setConveraBeneficiaries(data.map(normaliseConveraBeneficiary));
   }
 
+  // ── Payments tab loaders ────────────────────────────────────────────────────
+  function normaliseConveraTransaction(r: Record<string, unknown>, umbrellaMap?: Record<number, number[]>): ConveraTransaction {
+    return {
+      id:                   r.id as number,
+      confirmationNumber:   r.confirmation_number as string,
+      lineItem:             r.line_item as number,
+      dateOfOrder:          r.date_of_order as string,
+      beneficiaryName:      r.beneficiary_name as string,
+      subtotal:             (r.subtotal as number) ?? null,
+      serviceCharges:       (r.service_charges as number) ?? null,
+      grandTotal:           (r.grand_total as number) ?? null,
+      foreignAmount:        (r.foreign_amount as number) ?? null,
+      ref1:                 (r.ref1 as string) ?? null,
+      itemType:             (r.item_type as string) ?? null,
+      converaBeneficiaryId: (r.convera_beneficiary_id as number) ?? null,
+      importBatchId:        (r.import_batch_id as number) ?? null,
+      matchedInvoiceId:     (r.matched_invoice_id as number) ?? null,
+      matchState:           (r.match_state as MatchState) ?? 'unreviewed',
+      matchConfidence:      (r.match_confidence as MatchConfidence) ?? null,
+      matchLevel:           (r.match_level as number) ?? null,
+      matchedAt:            (r.matched_at as string) ?? null,
+      matchedBy:            (r.matched_by as string) ?? null,
+      notes:                (r.notes as string) ?? null,
+      matchedInvoiceIds:    umbrellaMap?.[r.id as number],
+    };
+  }
+
+  function normaliseImportBatch(r: Record<string, unknown>): ImportBatch {
+    return {
+      id:              r.id as number,
+      source:          r.source as string,
+      sourceFilename:  (r.source_filename as string) ?? null,
+      importedAt:      r.imported_at as string,
+      importedBy:      (r.imported_by as string) ?? null,
+      rowCount:        (r.row_count as number) ?? 0,
+      state:           (r.state as ImportBatchState) ?? 'pending',
+    };
+  }
+
+  async function fetchImportBatches() {
+    const { data } = await supabase.from('import_batches').select('*').order('imported_at', { ascending: false });
+    if (data) setImportBatches(data.map(normaliseImportBatch));
+  }
+
+  async function fetchConveraTransactions() {
+    const [txnRes, umbrellaRes] = await Promise.all([
+      supabase.from('convera_transactions').select('*').order('date_of_order', { ascending: false }),
+      supabase.from('convera_transaction_invoices').select('transaction_id, invoice_id'),
+    ]);
+    const umbrellaMap: Record<number, number[]> = {};
+    (umbrellaRes.data || []).forEach((r: { transaction_id: number; invoice_id: number }) => {
+      (umbrellaMap[r.transaction_id] ||= []).push(r.invoice_id);
+    });
+    if (txnRes.data) setConveraTransactions(txnRes.data.map((r: Record<string, unknown>) => normaliseConveraTransaction(r, umbrellaMap)));
+  }
+
+  // Load Payments tab data lazily when tab is opened
+  useEffect(() => {
+    if (accountantTab !== 'payments') return;
+    if (currentUser?.role !== 'accountant') return;
+    fetchImportBatches();
+    fetchConveraTransactions();
+    loadConveraBeneficiaries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountantTab, currentUser?.role]);
+
   async function loadConveraLastPaymentDates() {
     if (converaLastPaymentDates.size > 0) return;
     const { data } = await supabase
@@ -2411,7 +2542,11 @@ const TimesheetSystem = () => {
   // ─── Convera import ───────────────────────────────────────────────────────────
 
   function normaliseRef(s: string): string {
-    return (s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+    return (s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .replace(/^inv(oice)?/, '');   // strip the common "INV" / "Invoice" prefix so
+                                     // "07" (Convera ref) matches "INV 07" (invoice number)
   }
 
   function normaliseBeneficiaryName(s: string): string {
@@ -2437,18 +2572,23 @@ const TimesheetSystem = () => {
   // Group match: beneficiary_id → all contractors sharing that Convera account → invoices
   // within 7 days of txnDate whose sum equals amount exactly.
   // Tries unpaid invoices first; falls back to paid ones so re-imports show "already paid" not "no match".
-  function matchPaymentGroup(beneficiary: string, amount: number, txnDate: string, vendorCode?: string): Invoice[] | null {
+  function matchPaymentGroup(beneficiary: string, amount: number, txnDate: string, vendorCode?: string, invoicesOverride?: Invoice[], profilesOverride?: PaymentProfile[]): Invoice[] | null {
+    const invs = invoicesOverride ?? invoices;
+    const profs = profilesOverride ?? paymentProfiles;
     const matchedBenef = resolveBeneficiary(beneficiary, vendorCode);
     if (!matchedBenef) return null;
     const userIds = new Set(
-      paymentProfiles.filter(p => p.converaBeneficiaryId === matchedBenef.id).map(p => p.userId)
+      profs.filter(p => p.converaBeneficiaryId === matchedBenef.id).map(p => p.userId)
     );
     if (!userIds.size) return null;
     const parseYMD = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
     const txMs = parseYMD(txnDate);
-    const inWindow = invoices.filter(inv =>
+    // Same period-floor + approval-guard safeguards as matchPaymentToInvoice.
+    const inWindow = invs.filter(inv =>
       userIds.has(inv.userId) &&
+      inv.paymentProfile !== null &&
       inv.payOnDate != null &&
+      inv.periodStart >= '2026-05-01' &&
       Math.abs(parseYMD(inv.payOnDate) - txMs) / 86400000 <= 7
     );
     // Prefer unpaid; fall back to paid (re-import detection)
@@ -2467,71 +2607,120 @@ const TimesheetSystem = () => {
   // 5-level payment matching:
   // Resolves Convera beneficiary name → converaBeneficiaryId → user IDs → candidate invoices.
   // Then applies: L1=ref, L2=+amount, L3=+date proximity, L4=amount-only, L5=flag (null).
+  // Only invoices from May 2026 onward participate in Payments matching.
+  // Pre-May was reconciled by a one-off historical script (scripts/poller/mark-invoices-paid.js).
+  // Anything below this floor in the auto-match path is noise.
+  const PAYMENTS_INVOICE_PERIOD_FLOOR = '2026-05-01';
+
   function matchPaymentToInvoice(
     invoiceRef: string,
     beneficiary: string,
     amount: number,
     paymentDate?: string,  // YYYY-MM-DD; undefined for PDF/QB where date isn't available
     vendorCode?: string,
-  ): { invoice: Invoice; level: number } | null {
+    invoicesOverride?: Invoice[],
+    profilesOverride?: PaymentProfile[],
+  ): { invoice: Invoice; level: number; confidence: MatchConfidence } | null {
+    const invs = invoicesOverride ?? invoices;
+    const profs = profilesOverride ?? paymentProfiles;
     const normRef = normaliseRef(invoiceRef);
 
     // Resolve beneficiary: vendor code (SYN-XXXX) first, then name fallback
     const matchedBenef = resolveBeneficiary(beneficiary, vendorCode);
 
-    let pool: Invoice[];
+    // ── Two candidate pools ───────────────────────────────────────────────────
+    // Ref-based matches (Level 1-2) are unambiguous — an invoice number match is a unique
+    // identifier and should succeed even for pre-May invoices or already-paid invoices
+    // (reconciling a Convera payment against an already-paid invoice IS the whole point).
+    //
+    // Amount-only matches (Level 4) are the risky path — that's where the July 9 fiasco
+    // happened. Those get the full safeguard treatment:
+    //   1. Approval guard: invoice must have BOTH payment_profile snapshot AND pay_on_date
+    //   2. Period floor: only May 2026+ invoices
+    //   3. Exclude already-paid invoices
+    //
+    // The approval guard (payment_profile) applies to BOTH pools — an invoice without a
+    // payment profile isn't real enough to match against.
+    const isBroadEligible = (inv: Invoice): boolean =>
+      inv.paymentProfile !== null;
+    const isStrictEligible = (inv: Invoice): boolean =>
+      isBroadEligible(inv) &&
+      inv.status !== 'paid' &&
+      inv.payOnDate !== null &&
+      inv.periodStart >= PAYMENTS_INVOICE_PERIOD_FLOOR;
+
+    let broadPool: Invoice[];
     if (matchedBenef) {
       const userIds = new Set(
-        paymentProfiles
+        profs
           .filter(p => p.converaBeneficiaryId === matchedBenef.id)
           .map(p => p.userId)
       );
-      pool = invoices.filter(inv => userIds.has(inv.userId) && inv.status !== 'paid');
+      broadPool = invs.filter(inv => userIds.has(inv.userId) && isBroadEligible(inv));
     } else {
-      pool = invoices.filter(inv => inv.status !== 'paid');
+      broadPool = invs.filter(isBroadEligible);
     }
+    const strictPool = broadPool.filter(isStrictEligible);
 
     const parseYMD = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
-    // Keep if no payOnDate on invoice (no date to compare); reject if set and >15 days from payment
-    const withinWindow = (inv: Invoice): boolean => {
-      if (!paymentDate || !inv.payOnDate) return true;
-      return Math.abs(parseYMD(paymentDate) - parseYMD(inv.payOnDate)) / 86400000 <= 15;
+    // Asymmetric date windows around invoice pay_on_date, derived from real payment data:
+    // payments almost always arrive ON or BEFORE pay_on_date, rarely later.
+    //   Tight (-7/+3): on-time payment — used for Level 4 strong (no ref, amount + close date)
+    //   Wide  (-14/+7): mild early/late — used for Level 5 weak (no ref, amount + broader date)
+    //   Legacy withinWindow (±15) — used for ref-based tiebreaks only
+    const dateDelta = (inv: Invoice): number | null => {
+      if (!paymentDate || !inv.payOnDate) return null;
+      return (parseYMD(paymentDate) - parseYMD(inv.payOnDate)) / 86400000;
+    };
+    const withinTight = (inv: Invoice): boolean => {
+      const d = dateDelta(inv);
+      return d !== null && d >= -7 && d <= 3;
+    };
+    const withinWide = (inv: Invoice): boolean => {
+      const d = dateDelta(inv);
+      return d !== null && d >= -14 && d <= 7;
+    };
+    // For ref-based tiebreak (Level 3) — permissive, no auto-reject if a date is missing
+    const withinRefWindow = (inv: Invoice): boolean => {
+      const d = dateDelta(inv);
+      return d === null || (d >= -15 && d <= 15);
     };
     const closestDate = (a: Invoice, b: Invoice): number => {
-      if (paymentDate && a.payOnDate && b.payOnDate) {
-        const da = Math.abs(parseYMD(paymentDate) - parseYMD(a.payOnDate));
-        const db = Math.abs(parseYMD(paymentDate) - parseYMD(b.payOnDate));
-        if (da !== db) return da - db;
-      }
+      const da = dateDelta(a);
+      const db = dateDelta(b);
+      if (da !== null && db !== null && da !== db) return Math.abs(da) - Math.abs(db);
       return a.periodStart.localeCompare(b.periodStart);
     };
 
     if (normRef) {
-      // Level 1: pool + ref → exactly 1
-      const byRef = pool.filter(inv => normaliseRef(inv.invoiceNumber) === normRef);
-      if (byRef.length === 1) return { invoice: byRef[0], level: 1 };
+      // Ref-based matches (L1-L3) use the BROAD pool; ref is unambiguous, safeguards N/A.
+      const byRef = broadPool.filter(inv => normaliseRef(inv.invoiceNumber) === normRef);
+      if (byRef.length === 1) return { invoice: byRef[0], level: 1, confidence: 'strong' };
 
       if (byRef.length > 1) {
-        // Level 2: + amount
         const byRefAmt = byRef.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
-        if (byRefAmt.length === 1) return { invoice: byRefAmt[0], level: 2 };
+        if (byRefAmt.length === 1) return { invoice: byRefAmt[0], level: 2, confidence: 'strong' };
 
         if (byRefAmt.length > 1) {
-          // Level 3: + date proximity; pick closest, fall through if all outside window
-          const byRefAmtDate = byRefAmt.filter(withinWindow);
-          if (byRefAmtDate.length >= 1) return { invoice: [...byRefAmtDate].sort(closestDate)[0], level: 3 };
+          const byRefAmtDate = byRefAmt.filter(withinRefWindow);
+          if (byRefAmtDate.length >= 1) return { invoice: [...byRefAmtDate].sort(closestDate)[0], level: 3, confidence: 'strong' };
         }
       }
     }
 
-    // Level 4: ref didn't resolve — pool + amount [+ date proximity]
-    const byAmt = pool.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
-    if (byAmt.length === 1) return { invoice: byAmt[0], level: 4 };
-    if (byAmt.length > 1) {
-      const byAmtDate = byAmt.filter(withinWindow);
-      if (byAmtDate.length === 1) return { invoice: byAmtDate[0], level: 4 };
-      // Multiple candidates even after date filter → Level 5: flag, never guess
-    }
+    // Non-ref path uses the STRICT pool (period floor + not paid + payment approval snapshot).
+    // Split by date proximity into strong (tight) vs weak (wide).
+    const amountCandidates = strictPool.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
+
+    // Level 4 STRONG: amount + tight date window (-7/+3 days). Requires both dates present.
+    const tight = amountCandidates.filter(withinTight);
+    if (tight.length === 1) return { invoice: tight[0], level: 4, confidence: 'strong' };
+    if (tight.length > 1)  return { invoice: [...tight].sort(closestDate)[0], level: 4, confidence: 'strong' };
+
+    // Level 5 WEAK: amount + wide date window (-14/+7). Requires both dates present.
+    const wide = amountCandidates.filter(withinWide);
+    if (wide.length === 1) return { invoice: wide[0], level: 5, confidence: 'weak' };
+    if (wide.length > 1)  return { invoice: [...wide].sort(closestDate)[0], level: 5, confidence: 'weak' };
 
     return null;
   }
@@ -2641,7 +2830,7 @@ const TimesheetSystem = () => {
         const vendorCode  = iVendorId >= 0 ? String(r[iVendorId] ?? '').trim() : '';
         if (!beneficiary || isNaN(amount) || amount <= 0) continue;
 
-        const invMatch   = ref1.match(/Inv#\s*([A-Za-z0-9][\w\-\/\.]+)/i);
+        const invMatch   = ref1.match(/Inv#\s*([A-Za-z0-9][\w\-\/\.]*)/i);
         const invoiceRef = invMatch?.[1]?.trim() ?? '';
 
         // Try group match first (umbrella beneficiaries like Bimosoft covering multiple contractors)
@@ -2675,6 +2864,546 @@ const TimesheetSystem = () => {
       setConveraError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setConveraParsing(false);
+    }
+  };
+
+  // ─── Payments tab: XLS import → DB ────────────────────────────────────────
+  // Parses a Convera transaction XLS and upserts every row into convera_transactions
+  // as a new batch. Runs 5-level match once per row and stores the result — no invoice
+  // status changes yet. Accountant reviews and hits Process to commit.
+  const handlePaymentsImport = async () => {
+    if (!paymentsImportFile) return;
+    setPaymentsImporting(true);
+    setPaymentsImportError('');
+    try {
+      // Always fetch fresh invoices + payment_profiles so matching uses current DB state,
+      // not React state that could be stale (e.g., after a direct DB fix outside the UI).
+      const [invsRes, profsRes] = await Promise.all([
+        supabase.from('invoices').select('*').order('submitted_at', { ascending: false }),
+        supabase.from('payment_profiles').select('*'),
+      ]);
+      const freshInvoices: Invoice[] = (invsRes.data || []).map(normaliseInvoice);
+      const freshProfiles: PaymentProfile[] = (profsRes.data || []).map(normalisePaymentProfile);
+      // Also push into state so the rest of the UI reflects the latest data
+      setInvoices(freshInvoices);
+      setPaymentProfiles(freshProfiles);
+      const buffer = await paymentsImportFile.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+
+      // Convera exports are ambiguous — "xls" extension can mean:
+      //   • Real BIFF binary (starts D0 CF) — SheetJS handles encoding
+      //   • Real XLSX zip (starts PK)      — SheetJS handles encoding
+      //   • TSV text file with .xls extension — needs manual decoding
+      //
+      // For the TSV case we don't know the encoding. Try UTF-8 first; if that produces
+      // Unicode replacement chars (U+FFFD), the file isn't UTF-8 — fall back to cp1250
+      // (Central European, covers Croatian Ž Š Ć Đ Č) before defaulting to cp1252.
+      const isBinaryXls  = bytes[0] === 0xD0 && bytes[1] === 0xCF;
+      const isBinaryXlsx = bytes[0] === 0x50 && bytes[1] === 0x4B;
+
+      let wb;
+      if (isBinaryXls || isBinaryXlsx) {
+        wb = XLSX.read(buffer, { type: 'array' });
+      } else {
+        // Text file — sniff encoding
+        const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+        const hasReplChar = utf8.includes('�');
+        let text: string;
+        if (!hasReplChar) {
+          text = utf8;
+        } else {
+          // Try cp1250 (Central European — covers Ž Š Ć Đ Č)
+          try {
+            const cp1250 = new TextDecoder('windows-1250').decode(buffer);
+            text = cp1250;
+          } catch {
+            // Fall back to cp1252
+            text = new TextDecoder('windows-1252').decode(buffer);
+          }
+        }
+        wb = XLSX.read(text, { type: 'string' });
+      }
+
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
+
+      const excelSerial = (n: number | string): string => {
+        if (!n) return '';
+        if (typeof n === 'number') {
+          const d = new Date((n - 25569) * 86400 * 1000);
+          return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+        }
+        const s = String(n).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+        const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+        if (m) {
+          const [, a, b, y] = m;
+          return parseInt(a) > 12
+            ? `${y}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`
+            : `${y}-${a.padStart(2,'0')}-${b.padStart(2,'0')}`;
+        }
+        return '';
+      };
+
+      const hdrs = rawRows[0].map(h => String(h).trim().toLowerCase());
+      // Flexible column resolver — first tries exact match, then falls back to substring match
+      // (avoids the silent-synthetic-key bug when Convera tweaks column names)
+      const col = (...aliases: string[]): number => {
+        const lowered = aliases.map(a => a.toLowerCase());
+        // Pass 1: exact match
+        for (const a of lowered) {
+          const i = hdrs.indexOf(a);
+          if (i >= 0) return i;
+        }
+        // Pass 2: header includes any alias as a substring (only for the LONGEST alias
+        // — avoids "line" false-matching "settlement line" etc.)
+        const longest = lowered.slice().sort((a, b) => b.length - a.length)[0];
+        for (let i = 0; i < hdrs.length; i++) {
+          if (hdrs[i] && hdrs[i].includes(longest)) return i;
+        }
+        return -1;
+      };
+      const iConf       = col('confirmation number', 'confirmation no', 'confirmation #', 'payment order number', 'order number', 'order no', 'otr number', 'otr #');
+      const iLine       = col('line item number', 'line item', 'line number', 'item number', 'line', 'item');
+      const iDate       = col('date of order', 'order date', 'transaction date', 'date');
+      const iBenef      = col('beneficiary name', 'beneficiary', 'payee');
+      const iAmount     = col('foreign amount', 'amount', 'payment amount');
+      const iSubtotal   = col('subtotal');
+      const iCharges    = col('service charges', 'service charge', 'fees');
+      const iGrand      = col('grand total', 'total');
+      const iType       = col('item type', 'type');
+      const iRef1       = col('ref 1', 'reference 1', 'reference', 'memo');
+      const iVendorId   = col('your id number for beneficiary', 'vendor id', 'vendor code');
+
+      const missing: string[] = [];
+      if (iDate   < 0) missing.push('Date of Order');
+      if (iBenef  < 0) missing.push('Beneficiary Name');
+      if (iAmount < 0) missing.push('Foreign Amount');
+      if (missing.length) {
+        setPaymentsImportError(`Missing required columns: ${missing.join(', ')}. Found columns: ${hdrs.filter(h => h).join(' | ')}`);
+        return;
+      }
+      // Confirmation + Line are optional — if missing, synthesize a stable key from row content
+      // so re-import of the same file remains idempotent.
+      const synthesizeKey = iConf < 0 || iLine < 0;
+      if (synthesizeKey) {
+        console.warn('Payments import: no Confirmation/Line columns found. Using synthetic keys derived from row content.');
+      }
+
+      // Build parsed rows (unchanged fields regardless of new/refresh/skip decision)
+      type IncomingRow = {
+        confirmation_number: string;
+        line_item: number;
+        date_of_order: string | null;
+        beneficiary_name: string;
+        foreign_amount: number | null;
+        subtotal: number | null;
+        service_charges: number | null;
+        grand_total: number | null;
+        item_type: string | null;
+        ref1: string | null;
+        convera_beneficiary_id: number | null;
+        matched_invoice_id: number | null;
+        match_confidence: MatchConfidence | null;
+        match_level: number | null;
+        umbrellaGroup?: Invoice[];
+      };
+      const incomingRows: IncomingRow[] = [];
+
+      // Simple stable string hash for synthetic keys
+      const strHash = (s: string): number => {
+        let h = 0;
+        for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+        return Math.abs(h);
+      };
+
+      for (let i = 1; i < rawRows.length; i++) {
+        const r = rawRows[i];
+        const dateOfOrder  = excelSerial(r[iDate] as number | string);
+        const beneficiary  = String(r[iBenef] ?? '').trim();
+        const amount       = parseFloat(String(r[iAmount]));
+        const rawRef       = iRef1 >= 0 ? String(r[iRef1] ?? '').trim() : '';
+        if (!beneficiary || isNaN(amount) || amount <= 0) continue;
+
+        // Confirmation + Line: real if present, otherwise synthesized from stable row content
+        let confirmation: string;
+        let lineItem: number;
+        if (synthesizeKey) {
+          confirmation = `SYN-${paymentsImportFile!.name}`;
+          lineItem = strHash(`${dateOfOrder}|${beneficiary}|${amount}|${rawRef}`) % 2_000_000_000;
+        } else {
+          confirmation = String(r[iConf] ?? '').trim();
+          lineItem     = parseInt(String(r[iLine] ?? ''));
+          if (!confirmation || isNaN(lineItem)) continue;
+        }
+
+        const subtotal = iSubtotal >= 0 ? parseFloat(String(r[iSubtotal])) || null : null;
+        const charges  = iCharges  >= 0 ? parseFloat(String(r[iCharges]))  || null : null;
+        const grand    = iGrand    >= 0 ? parseFloat(String(r[iGrand]))    || null : null;
+        const itemType = iType     >= 0 ? String(r[iType] ?? '').trim()    || null : null;
+        const ref1     = iRef1     >= 0 ? String(r[iRef1] ?? '').trim()    || null : null;
+        const vendorCode = iVendorId >= 0 ? String(r[iVendorId] ?? '').trim() : '';
+
+        const invMatch   = ref1?.match(/Inv#\s*([A-Za-z0-9][\w\-\/\.]*)/i);
+        const invoiceRef = invMatch?.[1]?.trim() ?? '';
+
+        const groupMatch  = dateOfOrder ? matchPaymentGroup(beneficiary, amount, dateOfOrder, vendorCode, freshInvoices, freshProfiles) : null;
+        const isUmbrella  = !!groupMatch && groupMatch.length > 1;
+        const m = isUmbrella ? null : matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined, vendorCode, freshInvoices, freshProfiles);
+
+        const resolvedBenef = resolveBeneficiary(beneficiary, vendorCode);
+
+        incomingRows.push({
+          confirmation_number: confirmation,
+          line_item: lineItem,
+          date_of_order: dateOfOrder || null,
+          beneficiary_name: beneficiary,
+          foreign_amount: amount,
+          subtotal, service_charges: charges, grand_total: grand, item_type: itemType, ref1,
+          convera_beneficiary_id: resolvedBenef?.id ?? null,
+          matched_invoice_id: isUmbrella ? null : (m?.invoice.id ?? null),
+          match_confidence: isUmbrella ? 'strong' : (m?.confidence ?? null),
+          match_level: isUmbrella ? 1 : (m?.level ?? null),
+          umbrellaGroup: isUmbrella ? groupMatch! : undefined,
+        });
+      }
+
+      if (!incomingRows.length) {
+        setPaymentsImportError('No payment rows found in the XLS.');
+        return;
+      }
+
+      // ── Dedup: fetch existing rows and partition into new / refresh / skip ──
+      const uniqueConfs = [...new Set(incomingRows.map(r => r.confirmation_number))];
+      const { data: existingRowsRaw, error: fetchErr } = await supabase
+        .from('convera_transactions')
+        .select('id, confirmation_number, line_item, foreign_amount, match_state, import_batch_id')
+        .in('confirmation_number', uniqueConfs);
+      if (fetchErr) { setPaymentsImportError(`Failed to check for existing rows: ${fetchErr.message}`); return; }
+
+      type ExistingRow = { id: number; confirmation_number: string; line_item: number; foreign_amount: number | null; match_state: MatchState; import_batch_id: number | null };
+      const existingMap = new Map<string, ExistingRow>();
+      for (const r of (existingRowsRaw || []) as ExistingRow[]) {
+        existingMap.set(`${r.confirmation_number}::${r.line_item}`, r);
+      }
+
+      const newRows: IncomingRow[] = [];
+      const refreshRows: { id: number; incoming: IncomingRow }[] = [];
+      let skippedCount = 0;
+      const amountChanged: { key: string; oldAmount: number; newAmount: number; state: string }[] = [];
+
+      for (const inc of incomingRows) {
+        const key = `${inc.confirmation_number}::${inc.line_item}`;
+        const existing = existingMap.get(key);
+        if (!existing) { newRows.push(inc); continue; }
+
+        const oldAmt = Number(existing.foreign_amount) || 0;
+        const newAmt = inc.foreign_amount || 0;
+        if (Math.abs(oldAmt - newAmt) > 0.01) {
+          amountChanged.push({ key, oldAmount: oldAmt, newAmount: newAmt, state: existing.match_state });
+        }
+
+        if (existing.match_state !== 'unreviewed') {
+          skippedCount++;
+          continue;
+        }
+        refreshRows.push({ id: existing.id, incoming: inc });
+      }
+
+      // ── Only create a batch if there are truly new rows ──
+      let batchId: number | null = null;
+      if (newRows.length > 0) {
+        const { data: batchRow, error: batchErr } = await supabase
+          .from('import_batches')
+          .insert({
+            source: 'convera_xls',
+            source_filename: paymentsImportFile.name,
+            imported_by: currentUser?.name || 'unknown',
+            row_count: newRows.length,
+            state: 'pending',
+          })
+          .select('id')
+          .single();
+        if (batchErr || !batchRow) { setPaymentsImportError(`Failed to create batch: ${batchErr?.message || 'unknown'}`); return; }
+        batchId = batchRow.id as number;
+
+        // Insert new rows
+        const insertPayload = newRows.map(inc => ({
+          confirmation_number: inc.confirmation_number,
+          line_item: inc.line_item,
+          date_of_order: inc.date_of_order,
+          beneficiary_name: inc.beneficiary_name,
+          foreign_amount: inc.foreign_amount,
+          subtotal: inc.subtotal,
+          service_charges: inc.service_charges,
+          grand_total: inc.grand_total,
+          item_type: inc.item_type,
+          ref1: inc.ref1,
+          convera_beneficiary_id: inc.convera_beneficiary_id,
+          import_batch_id: batchId,
+          match_state: 'unreviewed' as const,
+          matched_invoice_id: inc.matched_invoice_id,
+          match_confidence: inc.match_confidence,
+          match_level: inc.match_level,
+        }));
+
+        const { data: insertedRows, error: insertErr } = await supabase
+          .from('convera_transactions')
+          .insert(insertPayload)
+          .select('id, confirmation_number, line_item');
+        if (insertErr) {
+          await supabase.from('import_batches').delete().eq('id', batchId);
+          setPaymentsImportError(`Insert failed: ${insertErr.message}`);
+          return;
+        }
+
+        // Write umbrella links for newly inserted umbrella rows
+        const umbrellaLinks: { transaction_id: number; invoice_id: number; amount_share: number }[] = [];
+        for (const inserted of (insertedRows || [])) {
+          const key = `${inserted.confirmation_number}::${inserted.line_item}`;
+          const inc = newRows.find(r => `${r.confirmation_number}::${r.line_item}` === key);
+          if (inc?.umbrellaGroup) {
+            for (const invUm of inc.umbrellaGroup) {
+              umbrellaLinks.push({ transaction_id: inserted.id, invoice_id: invUm.id, amount_share: invUm.totalAmount });
+            }
+          }
+        }
+        if (umbrellaLinks.length) {
+          const { error: linkErr } = await supabase.from('convera_transaction_invoices').insert(umbrellaLinks);
+          if (linkErr) { setPaymentsImportError(`Umbrella link insert failed: ${linkErr.message}`); return; }
+        }
+      }
+
+      // ── Refresh existing unreviewed rows in place (keep their original batch_id) ──
+      for (const rr of refreshRows) {
+        const { error } = await supabase
+          .from('convera_transactions')
+          .update({
+            date_of_order: rr.incoming.date_of_order,
+            foreign_amount: rr.incoming.foreign_amount,
+            subtotal: rr.incoming.subtotal,
+            service_charges: rr.incoming.service_charges,
+            grand_total: rr.incoming.grand_total,
+            item_type: rr.incoming.item_type,
+            ref1: rr.incoming.ref1,
+            convera_beneficiary_id: rr.incoming.convera_beneficiary_id,
+            matched_invoice_id: rr.incoming.matched_invoice_id,
+            match_confidence: rr.incoming.match_confidence,
+            match_level: rr.incoming.match_level,
+          })
+          .eq('id', rr.id);
+        if (error) { console.warn(`Refresh row ${rr.id} failed: ${error.message}`); }
+        // Refresh umbrella links too
+        if (rr.incoming.umbrellaGroup) {
+          await supabase.from('convera_transaction_invoices').delete().eq('transaction_id', rr.id);
+          const links = rr.incoming.umbrellaGroup.map(inv => ({ transaction_id: rr.id, invoice_id: inv.id, amount_share: inv.totalAmount }));
+          await supabase.from('convera_transaction_invoices').insert(links);
+        }
+      }
+
+      // Refresh state
+      await fetchImportBatches();
+      await fetchConveraTransactions();
+      if (batchId !== null) {
+        setSelectedBatchId(batchId);
+        setPaymentsStateFilter('unreviewed');
+      }
+      setPaymentsImportFile(null);
+      setPaymentsFileInputKey(k => k + 1);
+      setPaymentsImportSummary({
+        newCount: newRows.length,
+        refreshedCount: refreshRows.length,
+        skippedCount,
+        amountChangedRows: amountChanged,
+        batchId,
+      });
+    } catch (e: unknown) {
+      setPaymentsImportError(e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setPaymentsImporting(false);
+    }
+  };
+
+  // ─── Payments tab: commit staged matches ────────────────────────────────────
+  // Reads stagedMatches, applies to convera_transactions + invoices in DB, then clears.
+  // Also marks the batch (if a single batch is selected) as 'processed' when all its rows
+  // in the visible view are covered.
+  const handleProcess = async () => {
+    const stagedIds = Object.keys(stagedMatches).map(Number);
+    if (!stagedIds.length) return;
+    const now = new Date().toISOString();
+    const actor = currentUser?.name || 'unknown';
+
+    // Split into matched (with invoice id) and no_invoice
+    const matchedUpdates: { id: number; matched_invoice_id: number | null; }[] = [];
+    const noInvoiceIds: number[] = [];
+    const umbrellaLinksToWrite: { transaction_id: number; invoice_id: number; amount_share: number }[] = [];
+    const invoicesToMarkPaid: { id: number; paid_date: string }[] = [];
+
+    for (const tid of stagedIds) {
+      const t = converaTransactions.find(x => x.id === tid);
+      if (!t) continue;
+      const staged = stagedMatches[tid];
+      if (staged === 'no_invoice') {
+        noInvoiceIds.push(tid);
+        continue;
+      }
+      if (Array.isArray(staged) && staged.length > 0) {
+        // Multiple → umbrella. Single → simple match.
+        if (staged.length === 1) {
+          matchedUpdates.push({ id: tid, matched_invoice_id: staged[0] });
+        } else {
+          matchedUpdates.push({ id: tid, matched_invoice_id: null });
+          for (const invId of staged) {
+            const inv = invoices.find(i => i.id === invId);
+            umbrellaLinksToWrite.push({ transaction_id: tid, invoice_id: invId, amount_share: inv?.totalAmount ?? 0 });
+          }
+        }
+        // Every matched invoice → mark paid at date_of_order
+        for (const invId of staged) {
+          if (!invoicesToMarkPaid.find(i => i.id === invId)) {
+            invoicesToMarkPaid.push({ id: invId, paid_date: t.dateOfOrder });
+          }
+        }
+      }
+    }
+
+    try {
+      // 1. Update transaction states
+      for (const upd of matchedUpdates) {
+        const { error } = await supabase
+          .from('convera_transactions')
+          .update({ match_state: 'matched', matched_invoice_id: upd.matched_invoice_id, matched_at: now, matched_by: actor })
+          .eq('id', upd.id);
+        if (error) { alert(`Failed to update transaction #${upd.id}: ${error.message}`); return; }
+      }
+      if (noInvoiceIds.length) {
+        const { error } = await supabase
+          .from('convera_transactions')
+          .update({ match_state: 'no_invoice', matched_invoice_id: null, matched_at: now, matched_by: actor })
+          .in('id', noInvoiceIds);
+        if (error) { alert(`Failed to update no-invoice transactions: ${error.message}`); return; }
+      }
+
+      // 2. Write umbrella links (clear existing first for idempotency)
+      if (umbrellaLinksToWrite.length) {
+        const txnIds = [...new Set(umbrellaLinksToWrite.map(l => l.transaction_id))];
+        await supabase.from('convera_transaction_invoices').delete().in('transaction_id', txnIds);
+        const { error } = await supabase.from('convera_transaction_invoices').insert(umbrellaLinksToWrite);
+        if (error) { alert(`Failed to write umbrella links: ${error.message}`); return; }
+      }
+
+      // 3. Mark invoices paid
+      for (const inv of invoicesToMarkPaid) {
+        const { error } = await supabase
+          .from('invoices')
+          .update({ status: 'paid', paid_date: inv.paid_date, reviewed_at: now, reviewed_by: actor })
+          .eq('id', inv.id);
+        if (error) { alert(`Failed to mark invoice #${inv.id} paid: ${error.message}`); return; }
+      }
+
+      // 4. If a batch is selected and all its pending rows are now processed, mark batch processed
+      if (selectedBatchId !== 'all') {
+        const batchRows = converaTransactions.filter(t => t.importBatchId === selectedBatchId);
+        const unreviewedIdsInBatch = batchRows.filter(t => t.matchState === 'unreviewed').map(t => t.id);
+        const processedIds = new Set([...matchedUpdates.map(u => u.id), ...noInvoiceIds]);
+        const allProcessed = unreviewedIdsInBatch.every(id => processedIds.has(id));
+        if (allProcessed) {
+          await supabase.from('import_batches').update({ state: 'processed' }).eq('id', selectedBatchId);
+        }
+      }
+
+      // Refresh
+      setStagedMatches({});
+      setShowProcessPreview(false);
+      await fetchImportBatches();
+      await fetchConveraTransactions();
+      await fetchInvoices();
+    } catch (e: unknown) {
+      alert(`Process failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+  };
+
+  // ─── Payments tab: reopen a processed batch ─────────────────────────────────
+  // Reverses invoice paid status for all matched rows in this batch, sets rows back
+  // to 'unreviewed', and marks the batch 'pending' so edits are allowed again.
+  const handleReopenBatch = async (batchId: number) => {
+    if (!window.confirm('Reopen this batch? All invoices marked paid from this batch will be reverted to approved status, and rows will be editable again.')) return;
+    setPaymentsImportSummary(null);
+    setPaymentsImportError('');
+    setPaymentsImportFile(null);
+    setPaymentsFileInputKey(k => k + 1);
+    setShowProcessPreview(false);
+    setStagedMatches({});
+    const rows = converaTransactions.filter(t => t.importBatchId === batchId && t.matchState === 'matched');
+    const invoiceIds = new Set<number>();
+    for (const r of rows) {
+      if (r.matchedInvoiceId) invoiceIds.add(r.matchedInvoiceId);
+      (r.matchedInvoiceIds || []).forEach(id => invoiceIds.add(id));
+    }
+    try {
+      // Revert invoice statuses
+      if (invoiceIds.size) {
+        const { error } = await supabase
+          .from('invoices')
+          .update({ status: 'approved', paid_date: null })
+          .in('id', [...invoiceIds]);
+        if (error) { alert(`Failed to revert invoices: ${error.message}`); return; }
+      }
+      // Reset transaction states in this batch
+      await supabase
+        .from('convera_transactions')
+        .update({ match_state: 'unreviewed', matched_at: null, matched_by: null })
+        .eq('import_batch_id', batchId);
+      // Clear umbrella links for this batch's transactions
+      const txnIds = rows.map(r => r.id);
+      if (txnIds.length) await supabase.from('convera_transaction_invoices').delete().in('transaction_id', txnIds);
+      // Batch back to pending
+      await supabase.from('import_batches').update({ state: 'pending' }).eq('id', batchId);
+      await fetchImportBatches();
+      await fetchConveraTransactions();
+      await fetchInvoices();
+    } catch (e: unknown) {
+      alert(`Reopen failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+  };
+
+  // ─── Payments tab: full rollback (delete batch and its rows) ────────────────
+  // First reverses any invoice paid status (same as Reopen), then deletes the batch
+  // record and all its transaction rows from the ledger. Use with care.
+  const handleRollbackBatch = async (batchId: number) => {
+    if (!window.confirm('Rollback & DELETE this batch? This will revert any invoices paid via this batch AND remove all its transaction rows from the ledger. Cannot be undone.')) return;
+    // Clear any transient UI that could block or confuse the next interaction
+    setPaymentsImportSummary(null);
+    setPaymentsImportError('');
+    setPaymentsImportFile(null);
+    setPaymentsFileInputKey(k => k + 1);
+    setShowProcessPreview(false);
+    setStagedMatches({});
+    const rows = converaTransactions.filter(t => t.importBatchId === batchId && t.matchState === 'matched');
+    const invoiceIds = new Set<number>();
+    for (const r of rows) {
+      if (r.matchedInvoiceId) invoiceIds.add(r.matchedInvoiceId);
+      (r.matchedInvoiceIds || []).forEach(id => invoiceIds.add(id));
+    }
+    try {
+      if (invoiceIds.size) {
+        const { error } = await supabase
+          .from('invoices')
+          .update({ status: 'approved', paid_date: null })
+          .in('id', [...invoiceIds]);
+        if (error) { alert(`Failed to revert invoices: ${error.message}`); return; }
+      }
+      // Delete transactions (cascades to convera_transaction_invoices)
+      await supabase.from('convera_transactions').delete().eq('import_batch_id', batchId);
+      // Delete batch
+      await supabase.from('import_batches').delete().eq('id', batchId);
+      if (selectedBatchId === batchId) setSelectedBatchId('all');
+      await fetchImportBatches();
+      await fetchConveraTransactions();
+      await fetchInvoices();
+    } catch (e: unknown) {
+      alert(`Rollback failed: ${e instanceof Error ? e.message : 'unknown'}`);
     }
   };
 
@@ -4871,6 +5600,17 @@ const TimesheetSystem = () => {
                 </span>
                 <span>Invoices</span>
               </button>
+              <button onClick={() => setAccountantTab('payments')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors relative ' + (accountantTab === 'payments' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <span className="relative">
+                  <DollarSign className="w-5 h-5 flex-shrink-0" />
+                  {converaTransactions.filter(t => t.matchState === 'unreviewed' && importBatches.find(b => b.id === t.importBatchId)?.state === 'pending').length > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-yellow-400 text-white rounded-full text-[10px] font-bold flex items-center justify-center leading-none">
+                      {converaTransactions.filter(t => t.matchState === 'unreviewed' && importBatches.find(b => b.id === t.importBatchId)?.state === 'pending').length}
+                    </span>
+                  )}
+                </span>
+                <span>Payments</span>
+              </button>
               <button onClick={() => setAccountantTab('profiles')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'profiles' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
                 <CreditCard className="w-5 h-5 flex-shrink-0" />
                 <span>Payment Profiles</span>
@@ -6581,6 +7321,425 @@ const TimesheetSystem = () => {
                     </>
                   )}
                 </div>
+              </div>
+            );
+          })()}
+
+          {accountantTab === 'payments' && (() => {
+            // Filter rows by batch + state
+            let rows = converaTransactions;
+            if (selectedBatchId !== 'all') rows = rows.filter(t => t.importBatchId === selectedBatchId);
+            if (paymentsStateFilter !== 'all') rows = rows.filter(t => t.matchState === paymentsStateFilter);
+
+            // Candidate invoices for a transaction. Three sources unioned:
+            //   1. Beneficiary pool (invoices for the linked contractor)
+            //   2. Any currently-matched invoice (single or umbrella) — always shown even if not in pool
+            //   3. Wider fallback: any invoice with matching amount AND pay_on_date within ±30 days
+            //      of the transaction — helps when beneficiary FK is missing/unresolved
+            const parseYMDLocal = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+            const candidatesFor = (t: ConveraTransaction): Invoice[] => {
+              const pool = new Map<number, Invoice>();
+
+              // 1. Beneficiary pool
+              if (t.converaBeneficiaryId) {
+                const userIds = new Set(paymentProfiles.filter(p => p.converaBeneficiaryId === t.converaBeneficiaryId).map(p => p.userId));
+                for (const inv of invoices) if (userIds.has(inv.userId)) pool.set(inv.id, inv);
+              }
+
+              // 2. Currently matched (never hide these from the dropdown)
+              const alreadyMatched = [
+                ...(t.matchedInvoiceId ? [t.matchedInvoiceId] : []),
+                ...(t.matchedInvoiceIds || []),
+              ];
+              for (const id of alreadyMatched) {
+                if (pool.has(id)) continue;
+                const inv = invoices.find(i => i.id === id);
+                if (inv) pool.set(inv.id, inv);
+              }
+
+              // 3. Wider fallback by amount + pay_on_date proximity (±30 days)
+              if (t.dateOfOrder && t.foreignAmount) {
+                const txnMs = parseYMDLocal(t.dateOfOrder);
+                for (const inv of invoices) {
+                  if (pool.has(inv.id)) continue;
+                  if (!inv.payOnDate) continue;
+                  if (Math.abs(parseYMDLocal(inv.payOnDate) - txnMs) / 86400000 > 30) continue;
+                  if (Math.abs(inv.totalAmount - t.foreignAmount) < 0.02) {
+                    pool.set(inv.id, inv);
+                  }
+                }
+              }
+
+              return [...pool.values()].sort((a, b) => b.periodStart.localeCompare(a.periodStart));
+            };
+
+            // Contractor name(s) linked to this beneficiary — informational, shown even when no invoices exist
+            const contractorsFor = (t: ConveraTransaction): string[] => {
+              if (!t.converaBeneficiaryId) return [];
+              const userIds = paymentProfiles.filter(p => p.converaBeneficiaryId === t.converaBeneficiaryId).map(p => p.userId);
+              return [...new Set(userIds.map(uid => users.find(u => u.id === uid)?.name).filter(Boolean) as string[])];
+            };
+
+            // Effective selection: staged if present, else DB.
+            // Prefer umbrella links (multi-invoice) over single matched_invoice_id if both exist.
+            const effectiveMatch = (t: ConveraTransaction): number[] | 'no_invoice' | null => {
+              if (stagedMatches[t.id] !== undefined) return stagedMatches[t.id];
+              if (t.matchState === 'no_invoice') return 'no_invoice';
+              if (t.matchedInvoiceIds?.length) return t.matchedInvoiceIds;
+              if (t.matchedInvoiceId) return [t.matchedInvoiceId];
+              return null;
+            };
+
+            // A row is editable if its batch is pending
+            const batchOf = (bid: number | null) => bid ? importBatches.find(b => b.id === bid) : null;
+            const isEditable = (t: ConveraTransaction): boolean => {
+              const b = batchOf(t.importBatchId);
+              return b?.state === 'pending' && t.matchState !== 'matched';
+            };
+
+            const sortedRows = [...rows].sort((a, b) => {
+              const dir = paymentsSortDir === 'asc' ? 1 : -1;
+              if (paymentsSortKey === 'date') return (a.dateOfOrder || '').localeCompare(b.dateOfOrder || '') * dir;
+              if (paymentsSortKey === 'beneficiary') return (a.beneficiaryName || '').localeCompare(b.beneficiaryName || '') * dir;
+              if (paymentsSortKey === 'amount') return ((a.foreignAmount ?? 0) - (b.foreignAmount ?? 0)) * dir;
+              const rank = (c: MatchConfidence | null) => c === 'strong' ? 0 : c === 'weak' ? 1 : 2;
+              return (rank(a.matchConfidence) - rank(b.matchConfidence)) * dir;
+            });
+
+            const stateCounts = rows.reduce<Record<string, number>>((acc, t) => {
+              acc[t.matchState] = (acc[t.matchState] || 0) + 1;
+              return acc;
+            }, {});
+
+            const invById = (id: number | null) => id ? invoices.find(i => i.id === id) ?? null : null;
+
+            const toggleSort = (k: typeof paymentsSortKey) => {
+              if (paymentsSortKey === k) setPaymentsSortDir(paymentsSortDir === 'asc' ? 'desc' : 'asc');
+              else { setPaymentsSortKey(k); setPaymentsSortDir('desc'); }
+            };
+
+            const sortArrow = (k: typeof paymentsSortKey) => paymentsSortKey === k ? (paymentsSortDir === 'asc' ? ' ↑' : ' ↓') : '';
+
+            const stagedChangeCount = Object.keys(stagedMatches).length;
+
+            return (
+              <div className="bg-white rounded-lg shadow-md p-3 sm:p-6 mb-6">
+                {/* Header */}
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><DollarSign className="w-6 h-6" /> Contractor Payments</h2>
+                    <p className="text-xs text-gray-500 mt-1">Convera transaction ledger — review, match, and process payments.</p>
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <label className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm cursor-pointer">
+                      <UploadCloud className="w-4 h-4" />
+                      Import Convera XLS
+                      <input
+                        key={paymentsFileInputKey}
+                        type="file"
+                        accept=".xls,.xlsx"
+                        className="hidden"
+                        onChange={e => setPaymentsImportFile(e.target.files?.[0] ?? null)}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {paymentsImportFile && (
+                  <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center justify-between">
+                    <span className="text-sm text-indigo-900 flex items-center gap-2"><Paperclip className="w-4 h-4" /> {paymentsImportFile.name}</span>
+                    <div className="flex gap-2">
+                      <button onClick={() => { setPaymentsImportFile(null); setPaymentsImportError(''); }} className="text-xs px-3 py-1 text-gray-600 hover:text-gray-800">Cancel</button>
+                      <button onClick={handlePaymentsImport} disabled={paymentsImporting} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">{paymentsImporting ? 'Importing…' : 'Import'}</button>
+                    </div>
+                  </div>
+                )}
+                {paymentsImportError && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">{paymentsImportError}</div>}
+
+                {/* Post-import summary */}
+                {paymentsImportSummary && (
+                  <div className="mb-4 p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="font-semibold text-indigo-900 text-sm">Import complete</div>
+                      <button onClick={() => setPaymentsImportSummary(null)} className="text-indigo-500 hover:text-indigo-700 text-xs">✕</button>
+                    </div>
+                    <ul className="space-y-1 text-sm text-indigo-900">
+                      {paymentsImportSummary.batchId !== null && (
+                        <li>✅ <strong>{paymentsImportSummary.newCount}</strong> new row{paymentsImportSummary.newCount === 1 ? '' : 's'} added to batch #{paymentsImportSummary.batchId}</li>
+                      )}
+                      {paymentsImportSummary.batchId === null && paymentsImportSummary.newCount === 0 && (
+                        <li className="text-indigo-700">ℹ️ No new rows in this file — no batch created</li>
+                      )}
+                      {paymentsImportSummary.refreshedCount > 0 && (
+                        <li>🔄 <strong>{paymentsImportSummary.refreshedCount}</strong> row{paymentsImportSummary.refreshedCount === 1 ? '' : 's'} already existed as <em>unreviewed</em> — match data refreshed in place (kept in original batch)</li>
+                      )}
+                      {paymentsImportSummary.skippedCount > 0 && (
+                        <li>⏭️ <strong>{paymentsImportSummary.skippedCount}</strong> row{paymentsImportSummary.skippedCount === 1 ? '' : 's'} already processed (matched / no-invoice / flagged) — skipped. Reopen their original batch to change them.</li>
+                      )}
+                      {paymentsImportSummary.amountChangedRows.length > 0 && (
+                        <li className="text-amber-700">
+                          ⚠️ <strong>{paymentsImportSummary.amountChangedRows.length}</strong> row{paymentsImportSummary.amountChangedRows.length === 1 ? '' : 's'} had a <strong>changed amount</strong> since last import:
+                          <ul className="ml-6 mt-1 text-xs list-disc">
+                            {paymentsImportSummary.amountChangedRows.slice(0, 8).map((c, i) => (
+                              <li key={i}>{c.key.split('::')[0]} line {c.key.split('::')[1]}: ${c.oldAmount.toFixed(2)} → ${c.newAmount.toFixed(2)} ({c.state})</li>
+                            ))}
+                            {paymentsImportSummary.amountChangedRows.length > 8 && <li>… and {paymentsImportSummary.amountChangedRows.length - 8} more</li>}
+                          </ul>
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Batch selector */}
+                <div className="mb-3 flex flex-wrap gap-1.5 items-center">
+                  <span className="text-xs font-semibold text-gray-500 mr-1">Batch:</span>
+                  <button onClick={() => setSelectedBatchId('all')} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedBatchId === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>All ({converaTransactions.length})</button>
+                  {importBatches.map(b => {
+                    const stateBadge = b.state === 'pending' ? 'bg-yellow-100 text-yellow-700' : b.state === 'processed' ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600';
+                    return (
+                      <button key={b.id} onClick={() => setSelectedBatchId(b.id)} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors flex items-center gap-1.5 ${selectedBatchId === b.id ? 'ring-2 ring-indigo-400 bg-white' : 'bg-gray-100 hover:bg-gray-200'}`}>
+                        <span>#{b.id}</span>
+                        <span className="text-gray-500 max-w-[180px] truncate">{b.sourceFilename || b.source}</span>
+                        <span className={`px-1.5 py-0.5 rounded ${stateBadge}`}>{b.state}</span>
+                        <span className="text-gray-400">·  {b.rowCount}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Batch action buttons — only when a specific batch is selected */}
+                {selectedBatchId !== 'all' && (() => {
+                  const b = importBatches.find(x => x.id === selectedBatchId);
+                  if (!b) return null;
+                  return (
+                    <div className="mb-3 p-3 bg-slate-50 border border-slate-200 rounded-lg flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs text-slate-700">
+                        <strong>Batch #{b.id}</strong> · {b.sourceFilename || b.source} · imported {b.importedAt.slice(0, 10)}{b.importedBy ? ` by ${b.importedBy}` : ''} · <span className="font-semibold">{b.state}</span>
+                      </div>
+                      <div className="flex gap-2">
+                        {b.state === 'processed' && (
+                          <button onClick={() => handleReopenBatch(b.id)} className="px-3 py-1 text-xs bg-amber-100 text-amber-700 rounded hover:bg-amber-200 font-medium border border-amber-200">Reopen batch</button>
+                        )}
+                        {b.state === 'pending' && (
+                          <button onClick={() => handleRollbackBatch(b.id)} className="px-3 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200 font-medium border border-red-200">Rollback & Delete</button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* State filter pills */}
+                <div className="mb-4 flex flex-wrap gap-1.5 items-center">
+                  <span className="text-xs font-semibold text-gray-500 mr-1">Show:</span>
+                  {([
+                    { key: 'all' as const,        label: 'All',        count: rows.length,                 color: 'bg-gray-100 text-gray-700' },
+                    { key: 'unreviewed' as const, label: 'Unreviewed', count: stateCounts.unreviewed || 0, color: 'bg-yellow-100 text-yellow-700' },
+                    { key: 'matched' as const,    label: 'Matched',    count: stateCounts.matched    || 0, color: 'bg-green-100 text-green-700' },
+                    { key: 'no_invoice' as const, label: 'No invoice', count: stateCounts.no_invoice || 0, color: 'bg-gray-100 text-gray-700' },
+                    { key: 'flagged' as const,    label: 'Flagged',    count: stateCounts.flagged    || 0, color: 'bg-red-100 text-red-700' },
+                  ]).map(f => (
+                    <button key={f.key} onClick={() => setPaymentsStateFilter(f.key)} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${paymentsStateFilter === f.key ? 'ring-2 ring-indigo-400 ' + f.color : f.color + ' hover:opacity-80'}`}>
+                      {f.label} ({f.count})
+                    </button>
+                  ))}
+                </div>
+
+                {/* Table */}
+                {sortedRows.length === 0 ? (
+                  <div className="p-12 text-center text-gray-400 border-2 border-dashed border-gray-200 rounded-lg">
+                    <DollarSign className="w-12 h-12 mx-auto mb-3 text-gray-300" />
+                    <p className="text-sm">No transactions in this view</p>
+                    <p className="text-xs mt-1">Import a Convera XLS to add transactions to the ledger</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto border border-gray-200 rounded-lg">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr>
+                          <th onClick={() => toggleSort('date')}        className="px-3 py-2 text-left font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Date{sortArrow('date')}</th>
+                          <th onClick={() => toggleSort('beneficiary')} className="px-3 py-2 text-left font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Beneficiary{sortArrow('beneficiary')}</th>
+                          <th onClick={() => toggleSort('amount')}      className="px-3 py-2 text-right font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Amount{sortArrow('amount')}</th>
+                          <th className="px-3 py-2 text-left font-medium text-gray-600">Ref</th>
+                          <th className="px-3 py-2 text-left font-medium text-gray-600 min-w-[220px]">Match</th>
+                          <th onClick={() => toggleSort('confidence')}  className="px-3 py-2 text-center font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Confidence{sortArrow('confidence')}</th>
+                          <th className="px-3 py-2 text-center font-medium text-gray-600">State</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedRows.map(t => {
+                          const dbState  = t.matchState;
+                          const editable = isEditable(t);
+                          const effMatch = effectiveMatch(t);
+                          const staged   = stagedMatches[t.id] !== undefined;
+
+                          // Effective color reflects staged edits when present
+                          const effState: MatchState =
+                            effMatch === 'no_invoice' ? 'no_invoice' :
+                            Array.isArray(effMatch) && effMatch.length > 0 ? 'matched' :
+                            dbState;
+
+                          const conf = t.matchConfidence;
+                          const bg = effState === 'matched'    ? 'bg-green-50'  :
+                                     effState === 'no_invoice' ? 'bg-gray-50'   :
+                                     effState === 'flagged'    ? 'bg-red-50'    :
+                                     conf === 'strong'         ? 'bg-green-50'  :
+                                     conf === 'weak'           ? 'bg-yellow-50' :
+                                     'bg-white';
+
+                          const cands = candidatesFor(t);
+                          const contractors = contractorsFor(t);
+                          const selectedIds = Array.isArray(effMatch) ? effMatch : [];
+                          const selectedInvs = selectedIds.map(id => invById(id)).filter(Boolean) as Invoice[];
+
+                          // Match cell content
+                          const matchCell = editable ? (
+                            <select
+                              className={`w-full px-2 py-1 rounded border text-xs ${staged ? 'border-indigo-400 ring-1 ring-indigo-200' : 'border-gray-300'}`}
+                              value={effMatch === 'no_invoice' ? '__no_invoice__' : (selectedIds[0] ? String(selectedIds[0]) : '__none__')}
+                              onChange={e => {
+                                const v = e.target.value;
+                                setStagedMatches(prev => {
+                                  const next = { ...prev };
+                                  if (v === '__no_invoice__') next[t.id] = 'no_invoice';
+                                  else if (v === '__none__') delete next[t.id];
+                                  else next[t.id] = [parseInt(v)];
+                                  return next;
+                                });
+                              }}
+                            >
+                              <option value="__none__">— select match —</option>
+                              {cands.length === 0 && contractors.length > 0 && (
+                                <option disabled>Beneficiary → {contractors.join(', ')} (no invoices yet)</option>
+                              )}
+                              {cands.length === 0 && contractors.length === 0 && (
+                                <option disabled>No candidates — beneficiary unresolved</option>
+                              )}
+                              {cands.map(inv => (
+                                <option key={inv.id} value={inv.id}>
+                                  {inv.userName} · {inv.invoiceNumber} · {inv.periodStart.slice(0,7)} · ${inv.totalAmount.toLocaleString()} {inv.status === 'paid' ? '(paid)' : ''}
+                                </option>
+                              ))}
+                              <option value="__no_invoice__">— No invoice (leave in ledger) —</option>
+                            </select>
+                          ) : (
+                            selectedInvs.length > 0
+                              ? <span className="text-xs">{selectedInvs.map(inv => `${inv.userName} · ${inv.invoiceNumber}`).join('  +  ')}</span>
+                              : dbState === 'no_invoice' ? <span className="text-xs text-gray-500 italic">No invoice</span>
+                              : <span className="text-gray-400">—</span>
+                          );
+
+                          return (
+                            <tr key={t.id} className={`${bg} border-t border-gray-100 transition-all ${staged ? 'ring-1 ring-inset ring-indigo-300' : ''}`}>
+                              <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{t.dateOfOrder}</td>
+                              <td className="px-3 py-2 text-gray-800">{t.beneficiaryName}</td>
+                              <td className="px-3 py-2 text-right font-medium text-gray-800 whitespace-nowrap">${(t.foreignAmount ?? 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                              <td className="px-3 py-2 text-gray-600 font-mono text-xs">{t.ref1 || '—'}</td>
+                              <td className="px-3 py-2 text-gray-800 min-w-[240px]">{matchCell}</td>
+                              <td className="px-3 py-2 text-center">
+                                {conf === 'strong' && <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">strong</span>}
+                                {conf === 'weak'   && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium">weak</span>}
+                                {!conf             && <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-xs">—</span>}
+                              </td>
+                              <td className="px-3 py-2 text-center">
+                                <span className={'px-2 py-0.5 rounded-full text-xs font-medium ' + (
+                                  effState === 'matched'    ? 'bg-green-100 text-green-800' :
+                                  effState === 'no_invoice' ? 'bg-gray-200 text-gray-700'   :
+                                  effState === 'flagged'    ? 'bg-red-100 text-red-800'     :
+                                  'bg-yellow-100 text-yellow-800'
+                                )}>{effState.replace('_', ' ')}</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Sticky bottom bar — Process action (only when there are staged changes) */}
+                {stagedChangeCount > 0 && (
+                  <div className="sticky bottom-0 mt-4 -mx-3 sm:-mx-6 px-3 sm:px-6 py-3 bg-white border-t-2 border-indigo-200 shadow-lg flex items-center justify-between">
+                    <span className="text-sm text-gray-700"><strong>{stagedChangeCount}</strong> staged change{stagedChangeCount > 1 ? 's' : ''}</span>
+                    <div className="flex gap-2">
+                      <button onClick={() => setStagedMatches({})} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Discard</button>
+                      <button onClick={() => setShowProcessPreview(true)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium">Process</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Process preview modal */}
+                {showProcessPreview && (() => {
+                  const stagedIds = Object.keys(stagedMatches).map(Number);
+                  const previewMatched: { t: ConveraTransaction; invIds: number[] }[] = [];
+                  const previewNoInvoice: ConveraTransaction[] = [];
+                  for (const tid of stagedIds) {
+                    const t = converaTransactions.find(x => x.id === tid);
+                    if (!t) continue;
+                    const s = stagedMatches[tid];
+                    if (s === 'no_invoice') previewNoInvoice.push(t);
+                    else if (Array.isArray(s) && s.length > 0) previewMatched.push({ t, invIds: s });
+                  }
+                  const invById2 = (id: number) => invoices.find(i => i.id === id);
+                  const alreadyPaidWarnings = previewMatched.flatMap(({ t, invIds }) =>
+                    invIds
+                      .map(id => invById2(id))
+                      .filter((inv): inv is Invoice => !!inv && inv.status === 'paid')
+                      .map(inv => ({ txn: t, inv }))
+                  );
+
+                  return (
+                    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowProcessPreview(false)}>
+                      <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
+                        <div className="p-6 border-b border-gray-200">
+                          <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2"><AlertTriangle className="w-5 h-5 text-amber-500" /> Confirm Process</h3>
+                          <p className="text-sm text-gray-600 mt-1">Review before committing. This will mark invoices paid and update the transaction ledger.</p>
+                        </div>
+                        <div className="p-6 space-y-4">
+                          <div className="grid grid-cols-3 gap-3">
+                            <div className="p-3 bg-green-50 border border-green-200 rounded"><div className="text-xs text-green-600">Invoices to mark paid</div><div className="text-2xl font-bold text-green-800">{new Set(previewMatched.flatMap(p => p.invIds)).size}</div></div>
+                            <div className="p-3 bg-gray-50 border border-gray-200 rounded"><div className="text-xs text-gray-600">Rows → No invoice</div><div className="text-2xl font-bold text-gray-800">{previewNoInvoice.length}</div></div>
+                            <div className="p-3 bg-indigo-50 border border-indigo-200 rounded"><div className="text-xs text-indigo-600">Total transactions</div><div className="text-2xl font-bold text-indigo-800">{stagedIds.length}</div></div>
+                          </div>
+
+                          {alreadyPaidWarnings.length > 0 && (
+                            <div className="p-3 bg-amber-50 border border-amber-200 rounded text-sm text-amber-900">
+                              <div className="font-semibold mb-1 flex items-center gap-1"><AlertTriangle className="w-4 h-4" /> {alreadyPaidWarnings.length} invoice(s) already have paid_date set:</div>
+                              <ul className="ml-5 list-disc text-xs space-y-1">
+                                {alreadyPaidWarnings.map(({ inv }, i) => <li key={i}>{inv.userName} · {inv.invoiceNumber} · paid {inv.paidDate}</li>)}
+                              </ul>
+                              <div className="mt-2 text-xs">Confirm will overwrite their paid_date with this transaction's date.</div>
+                            </div>
+                          )}
+
+                          {previewMatched.length > 0 && (
+                            <div>
+                              <div className="text-xs font-semibold text-gray-500 mb-2">MATCHES</div>
+                              <div className="border border-gray-200 rounded max-h-64 overflow-auto">
+                                <table className="w-full text-xs">
+                                  <tbody>
+                                    {previewMatched.map(({ t, invIds }) => (
+                                      <tr key={t.id} className="border-b border-gray-100">
+                                        <td className="px-2 py-1.5 text-gray-500">{t.dateOfOrder}</td>
+                                        <td className="px-2 py-1.5">{t.beneficiaryName}</td>
+                                        <td className="px-2 py-1.5 text-right font-medium">${(t.foreignAmount ?? 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                                        <td className="px-2 py-1.5 text-gray-700">→ {invIds.map(id => { const inv = invById2(id); return inv ? `${inv.userName}·${inv.invoiceNumber}` : `#${id}`; }).join(' + ')}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-6 border-t border-gray-200 flex justify-end gap-2">
+                          <button onClick={() => setShowProcessPreview(false)} className="px-4 py-2 text-gray-600 hover:text-gray-800">Cancel</button>
+                          <button onClick={handleProcess} className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium">Confirm & Process</button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             );
           })()}
