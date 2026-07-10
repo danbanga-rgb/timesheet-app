@@ -6085,9 +6085,13 @@ const TimesheetSystem = () => {
                                           </>
                                         )}
                                         {inv.status === 'approved' && (
-                                          <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
+                                          <>
+                                            <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
+                                            {!inv.paidDate && <button onClick={() => { if (!window.confirm(`Reject ${inv.userName}'s invoice?`)) return; handleInvoiceAction(inv.id, 'rejected'); }} className="px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Reject</button>}
+                                          </>
                                         )}
-                                        {(inv.status === 'paid' || inv.status === 'rejected') && <span className="text-gray-400 text-xs">—</span>}
+                                        {inv.status === 'rejected' && <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">Re-approve</button>}
+                                        {inv.status === 'paid' && <span className="text-gray-400 text-xs">—</span>}
                                       </div>
                                     </td>
                                   </tr>
@@ -6280,9 +6284,13 @@ const TimesheetSystem = () => {
                                             </>
                                           )}
                                           {inv.status === 'approved' && (
-                                            <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Paid</button>
+                                            <>
+                                              <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Paid</button>
+                                              {!inv.paidDate && <button onClick={() => { if (!window.confirm(`Reject ${inv.userName}'s invoice?`)) return; handleInvoiceAction(inv.id, 'rejected'); }} className="px-2 py-0.5 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">✕</button>}
+                                            </>
                                           )}
-                                          {(inv.status === 'paid' || inv.status === 'rejected') && <span className="text-gray-400 text-xs">—</span>}
+                                          {inv.status === 'rejected' && <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-0.5 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">↩</button>}
+                                          {inv.status === 'paid' && <span className="text-gray-400 text-xs">—</span>}
                                         </div>
                                       </td>
                                     </tr>
@@ -7953,6 +7961,24 @@ const TimesheetSystem = () => {
                           <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined, undefined, pendingPaymentMethod || paymentMethod(inv), pendingPaymentTerms || undefined)} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
                           <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
                         </div>
+                      </div>
+                    )}
+
+                    {/* ── Rejected: re-approve option ── */}
+                    {inv.status === 'rejected' && (
+                      <div className="mt-5">
+                        {inv.periodStart && inv.periodEnd && (
+                          <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 flex gap-2">
+                            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                            <div><strong>Re-approving will LOCK timesheets</strong> for {inv.userName} covering {inv.periodStart} → {inv.periodEnd}.</div>
+                          </div>
+                        )}
+                        <button
+                          onClick={() => handleInvoiceAction(inv.id, 'approved', inv.payOnDate || undefined, undefined, paymentMethod(inv), undefined)}
+                          className="w-full flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"
+                        >
+                          <CheckCircle className="w-5 h-5" /> Re-approve Invoice
+                        </button>
                       </div>
                     )}
 
