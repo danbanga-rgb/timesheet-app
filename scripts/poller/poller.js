@@ -3027,7 +3027,7 @@ async function classifyReply(bodyText, contractorName) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: 'qwen/qwen3.6-27b',
         messages: [
           { role: 'system', content: GROQ_CLASSIFIER_SYSTEM },
           { role: 'user', content: `Contractor: ${contractorName}\nReply: ${strippedBody}` },
@@ -3273,7 +3273,7 @@ async function groqVisionExtractInvoice(pdfBuffer, filename) {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: 'qwen/qwen3.6-27b',
         messages: [{
           role: 'user',
           content: [
