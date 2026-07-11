@@ -209,6 +209,7 @@ interface UserProfile {
   vendorManagerId: string | null;
   lastLogin: string | null;
   paymentTerms: string | null;
+  locationType: 'onshore' | 'offshore' | null;
 }
 
 interface Project {
@@ -407,6 +408,7 @@ interface UserForm {
   reminders_enabled: boolean;
   vendor_manager_id: string | null;
   payment_terms: string;
+  location_type: string;
 }
 
 interface ProjectForm {
@@ -846,7 +848,7 @@ const TimesheetSystem = () => {
   const [showQuickAddModal, setShowQuickAddModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: ''
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: '', location_type: ''
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -1271,6 +1273,7 @@ const TimesheetSystem = () => {
       vendorManagerId: (p.vendor_manager_id as string) || null,
       lastLogin: null,
       paymentTerms: (p.payment_terms as string) || null,
+      locationType: (p.location_type as 'onshore' | 'offshore' | null) || null,
     };
   }
 
@@ -1638,18 +1641,18 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, reminders_enabled: user.remindersEnabled !== false, vendor_manager_id: user.vendorManagerId || null, payment_terms: user.paymentTerms || '' });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, reminders_enabled: user.remindersEnabled !== false, vendor_manager_id: user.vendorManagerId || null, payment_terms: user.paymentTerms || '', location_type: user.locationType || '' });
     } else {
       setEditingUser(null);
       const autoPassword = generatePassword();
-      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: '' });
+      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: '', location_type: '' });
     }
     setShowUserModal(true);
   };
 
   const openQuickAddModal = () => {
     setEditingUser(null);
-    setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: '' });
+    setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: true, reminders_enabled: true, vendor_manager_id: null, payment_terms: '', location_type: '' });
     setShowQuickAddModal(true);
   };
 
@@ -1678,6 +1681,7 @@ const TimesheetSystem = () => {
         reminders_enabled: userForm.reminders_enabled,
         vendor_manager_id: userForm.vendor_manager_id || null,
         payment_terms: userForm.payment_terms || null,
+        location_type: userForm.role === 'timesheetuser' ? (userForm.location_type || null) : null,
       };
       const { data: updated, error } = await supabase.from('profiles').update(updates).eq('id', editingUser.id).select('id');
       if (error) { alert('Error updating user: ' + error.message); return; }
@@ -2257,6 +2261,7 @@ const TimesheetSystem = () => {
   }
 
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
+    const invoice = invoices.find(i => i.id === invoiceId);
     const update: Record<string, unknown> = {
       status,
       reviewed_at: new Date().toISOString(),
@@ -2268,13 +2273,25 @@ const TimesheetSystem = () => {
     if (paymentTerms !== undefined) update.payment_terms = paymentTerms || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error updating invoice: ' + error.message); return; }
-    // Cascade non-empty terms to the contractor's profile default
-    if (paymentTerms && selectedInvoice?.userId) {
-      await supabase.from('profiles').update({ payment_terms: paymentTerms }).eq('id', selectedInvoice.userId);
-      setUsers(prev => prev.map(u => u.id === selectedInvoice.userId ? { ...u, paymentTerms } : u));
+    // Cascade payment terms to profile default on approval:
+    //   - explicit accountant change → overwrite profile
+    //   - parser-populated on invoice, profile still null → seed-once
+    if (status === 'approved' && invoice?.userId) {
+      let cascadeTerms: string | null = null;
+      if (paymentTerms) {
+        cascadeTerms = paymentTerms;
+      } else if (invoice.paymentTerms) {
+        const currentProfile = users.find(u => u.id === invoice.userId);
+        if (!currentProfile?.paymentTerms) cascadeTerms = invoice.paymentTerms;
+      }
+      if (cascadeTerms) {
+        const terms = cascadeTerms;
+        await supabase.from('profiles').update({ payment_terms: terms }).eq('id', invoice.userId);
+        setUsers(prev => prev.map(u => u.id === invoice.userId ? { ...u, paymentTerms: terms } : u));
+      }
     }
-    if (status === 'approved' && selectedInvoice?.userId && selectedInvoice?.periodStart && selectedInvoice?.periodEnd) {
-      await lockTimesheetDaysForInvoice(selectedInvoice.userId, selectedInvoice.periodStart, selectedInvoice.periodEnd);
+    if (status === 'approved' && invoice?.userId && invoice?.periodStart && invoice?.periodEnd) {
+      await lockTimesheetDaysForInvoice(invoice.userId, invoice.periodStart, invoice.periodEnd);
     }
     await fetchInvoices();
     setShowInvoiceModal(false);
@@ -2435,6 +2452,7 @@ const TimesheetSystem = () => {
 
   // Save approval status and/or pay on date without closing modal
   const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string; invoiceNumber?: string }) => {
+    const invoice = invoices.find(i => i.id === invoiceId);
     const update: Record<string, unknown> = {};
     if (fields.status !== undefined) {
       update.status = fields.status;
@@ -2447,13 +2465,25 @@ const TimesheetSystem = () => {
     if (fields.invoiceNumber !== undefined) update.invoice_number = fields.invoiceNumber || null;
     const { error } = await supabase.from('invoices').update(update).eq('id', invoiceId);
     if (error) { alert('Error saving changes: ' + error.message); return; }
-    // Cascade non-empty terms to the contractor's profile default
-    if (fields.paymentTerms && selectedInvoice?.userId) {
-      await supabase.from('profiles').update({ payment_terms: fields.paymentTerms }).eq('id', selectedInvoice.userId);
-      setUsers(prev => prev.map(u => u.id === selectedInvoice.userId ? { ...u, paymentTerms: fields.paymentTerms! } : u));
+    // Cascade payment terms to profile default when approving
+    //   - explicit accountant change → overwrite profile
+    //   - parser-populated on invoice, profile still null → seed-once
+    if (fields.status === 'approved' && invoice?.userId) {
+      let cascadeTerms: string | null = null;
+      if (fields.paymentTerms) {
+        cascadeTerms = fields.paymentTerms;
+      } else if (invoice.paymentTerms) {
+        const currentProfile = users.find(u => u.id === invoice.userId);
+        if (!currentProfile?.paymentTerms) cascadeTerms = invoice.paymentTerms;
+      }
+      if (cascadeTerms) {
+        const terms = cascadeTerms;
+        await supabase.from('profiles').update({ payment_terms: terms }).eq('id', invoice.userId);
+        setUsers(prev => prev.map(u => u.id === invoice.userId ? { ...u, paymentTerms: terms } : u));
+      }
     }
-    if (fields.status === 'approved' && selectedInvoice?.userId && selectedInvoice?.periodStart && selectedInvoice?.periodEnd) {
-      await lockTimesheetDaysForInvoice(selectedInvoice.userId, selectedInvoice.periodStart, selectedInvoice.periodEnd);
+    if (fields.status === 'approved' && invoice?.userId && invoice?.periodStart && invoice?.periodEnd) {
+      await lockTimesheetDaysForInvoice(invoice.userId, invoice.periodStart, invoice.periodEnd);
     }
     await fetchInvoices();
     setSelectedInvoice(prev => prev ? {
@@ -4367,6 +4397,7 @@ const TimesheetSystem = () => {
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Phone</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Role</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Location</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Type</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Start Date</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">End Date</th>
                       <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Manager</th>
@@ -4395,6 +4426,17 @@ const TimesheetSystem = () => {
                               <span title="Timezone not mapped — add to tzMap" className="text-amber-500"><AlertTriangle className="w-3 h-3 inline" /></span>
                             )}
                           </div>
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          {user.role === 'timesheetuser' ? (
+                            user.locationType === 'onshore' ? (
+                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">Onshore</span>
+                            ) : user.locationType === 'offshore' ? (
+                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">Offshore</span>
+                            ) : (
+                              <span className="text-gray-400 italic">Unclassified</span>
+                            )
+                          ) : <span className="text-gray-300">—</span>}
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.startDate ? parseLocalDate(user.startDate).toLocaleDateString() : <span className="text-gray-400 italic">Not set</span>}</td>
                         <td className="px-4 py-3 text-sm text-gray-600">
@@ -4856,6 +4898,14 @@ const TimesheetSystem = () => {
                           <select value={userForm.project_id || ''} onChange={e => setUserForm({...userForm, project_id: e.target.value ? parseInt(e.target.value) : null})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                             <option value="">Select Project</option>
                             {projects.filter(p => p.status === 'active').map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Location Type</label>
+                          <select value={userForm.location_type} onChange={e => setUserForm({...userForm, location_type: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                            <option value="">— unclassified —</option>
+                            <option value="onshore">Onshore</option>
+                            <option value="offshore">Offshore</option>
                           </select>
                         </div>
                         <div>

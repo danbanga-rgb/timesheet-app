@@ -22,14 +22,9 @@ const corsHeaders = {
 const DEFAULT_RECIPIENT = 'dbanga@synergietechsolutions.com';
 const FROM = { name: 'Synergie Timesheet System', email: 'timesheets@mysynergie.net' };
 
-// ─── Country helpers ─────────────────────────────────────────────────────────
-const COUNTRY_NAME: Record<string, string> = {
-  US: 'United States', CA: 'Canada', GB: 'United Kingdom', UK: 'United Kingdom',
-  IN: 'India', HR: 'Croatia', RS: 'Serbia', BA: 'Bosnia and Herzegovina',
-  SI: 'Slovenia', MK: 'North Macedonia', AU: 'Australia', UA: 'Ukraine',
-  MK2: 'North Macedonia', ME: 'Montenegro',
-};
-const countryName = (c: string | null) => c ? (COUNTRY_NAME[c] || c) : '—';
+// ─── Location type helper ───────────────────────────────────────────────────
+const locationLabel = (t: string | null) =>
+  t === 'onshore' ? 'Onshore' : t === 'offshore' ? 'Offshore' : '—';
 
 const isTestAccount = (name: string) => {
   const l = (name || '').toLowerCase().trim();
@@ -56,7 +51,7 @@ function addDays(d: Date, n: number): Date { const r = new Date(d); r.setDate(d.
 // ─── Consolidated report builder (one project) ───────────────────────────────
 interface EmployeeRow {
   name: string;
-  country: string;
+  locationType: string;
   project: string;
   hours: Record<string, number | null>;
   statuses: Record<string, string>;
@@ -74,7 +69,7 @@ interface ConsolidatedReport {
 
 function buildConsolidatedReport(
   project: { id: number; name: string; code: string },
-  users: Array<{ id: string; name: string; country: string | null; projectId: number | null; startDate: string | null; endDate: string | null }>,
+  users: Array<{ id: string; name: string; locationType: string | null; projectId: number | null; startDate: string | null; endDate: string | null }>,
   timesheets: Array<{ userId: string; weekStart: string; entries: Record<string, unknown>; status: string; projectId: number | null }>,
   projects: Array<{ id: number; name: string; code: string }>,
   monthStart: string,
@@ -134,7 +129,7 @@ function buildConsolidatedReport(
     const projectRef = projects.find(p => p.id === (latestTs?.projectId ?? user.projectId));
     return {
       name: user.name,
-      country: countryName(user.country),
+      locationType: locationLabel(user.locationType),
       project: projectRef ? `${projectRef.name} (${projectRef.code})` : 'Not Assigned',
       hours, statuses, rowTotal,
     };
@@ -181,7 +176,7 @@ function renderReportHtml(report: ConsolidatedReport, monthLabel: string): strin
     const totalCellBg = (i % 2 === 0 ? '#f0fdf4' : '#dcfce7');
     return `<tr>
       <td style="background:${bg};border:1px solid #e5e7eb;padding:8px 12px;font-weight:700;font-size:13px">${escapeHtml(row.name)}</td>
-      <td style="background:${bg};border:1px solid #e5e7eb;padding:8px 12px;color:#6b7280;font-size:13px">${escapeHtml(row.country)}</td>
+      <td style="background:${bg};border:1px solid #e5e7eb;padding:8px 12px;color:#6b7280;font-size:13px">${escapeHtml(row.locationType)}</td>
       <td style="background:${bg};border:1px solid #e5e7eb;padding:8px 12px;color:#4f46e5;font-size:12px">${escapeHtml(row.project)}</td>
       ${cells}
       <td style="background:${totalCellBg};border:1px solid #e5e7eb;padding:8px 12px;text-align:center;color:#166534;font-weight:700;font-size:13px">${row.rowTotal.toFixed(1)}</td>
@@ -207,7 +202,7 @@ function renderReportHtml(report: ConsolidatedReport, monthLabel: string): strin
         ${partialBanner}
         <tr>
           <th style="background:#16a34a;border:1px solid #15803d;padding:10px 12px;color:#fff;text-align:left;font-size:13px">Employee</th>
-          <th style="background:#16a34a;border:1px solid #15803d;padding:10px 12px;color:#fff;text-align:left;font-size:13px">Country</th>
+          <th style="background:#16a34a;border:1px solid #15803d;padding:10px 12px;color:#fff;text-align:left;font-size:13px">Location Type</th>
           <th style="background:#16a34a;border:1px solid #15803d;padding:10px 12px;color:#fff;text-align:left;font-size:13px">Project</th>
           ${weekHeaderCells}
           <th style="background:#15803d;border:1px solid #14532d;padding:10px 12px;color:#fff;text-align:center;font-size:13px">Total</th>
@@ -312,10 +307,10 @@ serve(async (req) => {
   const projectIds = projects.map(p => p.id);
 
   // Fetch users assigned to any of the target projects (and users on OTHER projects — used for reference lookup only in `project` column)
-  const { data: userRows, error: uErr } = await supabase.from('profiles').select('id, name, country, project_id, start_date, end_date, role');
+  const { data: userRows, error: uErr } = await supabase.from('profiles').select('id, name, location_type, project_id, start_date, end_date, role');
   if (uErr) return errorResponse(uErr.message);
   const users = (userRows ?? []).filter(u => u.role === 'timesheetuser').map(u => ({
-    id: u.id as string, name: (u.name as string) || '', country: (u.country as string) || null,
+    id: u.id as string, name: (u.name as string) || '', locationType: (u.location_type as string) || null,
     projectId: (u.project_id as number) ?? null,
     startDate: (u.start_date as string) || null, endDate: (u.end_date as string) || null,
   }));
@@ -356,7 +351,7 @@ serve(async (req) => {
     </p>
   </div></body></html>`;
   const text = `Consolidated Monthly Report — ${monthLabel}\n\n${reports.map(r => {
-    return `${r.projectName} (${r.projectCode})\n${'─'.repeat(60)}\n${r.employeeRows.map(row => `  ${row.name.padEnd(28)} ${row.country.padEnd(18)} ${row.rowTotal.toFixed(1)}h`).join('\n')}\n  Total: ${r.grandTotal.toFixed(1)}h\n`;
+    return `${r.projectName} (${r.projectCode})\n${'─'.repeat(60)}\n${r.employeeRows.map(row => `  ${row.name.padEnd(28)} ${row.locationType.padEnd(12)} ${row.rowTotal.toFixed(1)}h`).join('\n')}\n  Total: ${r.grandTotal.toFixed(1)}h\n`;
   }).join('\n')}\n\n${new Date().toISOString()} · timesheets@mysynergie.net`;
 
   // Send via Brevo — one Brevo call with multiple `to` addresses
