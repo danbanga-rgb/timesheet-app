@@ -269,6 +269,7 @@ interface ConveraBeneficiary {
   beneficiaryCountry: string | null;
   currency: string;
   defaultPaymentMethod: string;
+  vendorId: string | null;           // SYN-XXXX code used in Convera batch upload CSV
   bankName: string | null;
   bankCountry: string | null;
   bankAccount: string;
@@ -780,6 +781,45 @@ const TimesheetSystem = () => {
   const [qbExportSelectedIds, setQbExportSelectedIds] = useState<Set<number>>(new Set());
   const [qbExportSnapshot, setQbExportSnapshot] = useState<Invoice[]>([]);
   const [qbExportCategoryFilter, setQbExportCategoryFilter] = useState<'selected' | 'ready' | 'no_vendor' | 'already_sent' | 'skipped' | null>(null);
+
+  // Convera Batch preview modal — one card per beneficiary. Each invoice inside carries its own IBAN.
+  // Same-IBAN groups auto-default to combined; mixed-IBAN groups surface as candidates the accountant
+  // can force-combine (e.g., Bimosoft contractors whose old IBANs are still on file but who all now
+  // route through the same Convera account).
+  type InvoiceWithIban = { inv: Invoice; iban: string };
+  type ConveraBatchGroup = {
+    key: string;                  // benef.id.toString()
+    vendorId: string;
+    shortName: string;
+    fullName: string;
+    entries: InvoiceWithIban[];   // one per invoice, with the IBAN it currently routes to
+    distinctIbans: number;
+    anyIndia: boolean;
+  };
+  type ConveraBatchSkip = {
+    invoice: Invoice;
+    reason: 'no vendor code assigned' | 'no Convera beneficiary linked';
+    // Payment profile fields (used for the "Create Convera Beneficiary" panel)
+    companyName: string;      // Beneficiary long name
+    country: string;
+    bankName: string;
+    bankAddress: string;
+    iban: string;
+    swift: string;
+    accountNumber: string;
+    paymentEmail: string;
+    contractorName: string;   // used to seed a suggested short name
+    // Set when the linked beneficiary lacks a vendor_id but a sibling record with same
+    // beneficiary_name DOES have one — accountant likely picked the wrong beneficiary
+    linkedBeneficiary?: { id: number; shortName: string; fullName: string };
+    suggestedBeneficiary?: { id: number; shortName: string; vendorId: string };
+    // Pre-computed SYN-XXXX for new beneficiaries (grouped by IBAN → same suggested number)
+    suggestedVendorId?: string;
+  };
+  const [showConveraBatchModal, setShowConveraBatchModal] = useState(false);
+  const [converaBatchGroups, setConveraBatchGroups] = useState<ConveraBatchGroup[]>([]);
+  const [converaBatchCombine, setConveraBatchCombine] = useState<Record<string, boolean>>({});
+  const [converaBatchSkipped, setConveraBatchSkipped] = useState<ConveraBatchSkip[]>([]);
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -1801,6 +1841,7 @@ const TimesheetSystem = () => {
       shortName: r.short_name as string,
       beneficiaryName: r.beneficiary_name as string,
       beneficiaryCountry: r.beneficiary_country as string | null ?? null,
+      vendorId: (r.vendor_id as string | null) ?? null,
       currency: (r.currency as string) || '',
       defaultPaymentMethod: (r.default_payment_method as string) || '',
       bankName: r.bank_name as string | null ?? null,
@@ -3638,6 +3679,210 @@ const TimesheetSystem = () => {
       csv += row.join(',') + '\n';
     });
     triggerDownload(csv, `invoices_export_${Date.now()}.csv`);
+  };
+
+  // ─── Convera Batch Payment File export ─────────────────────────────────────
+  // Generates the CSV that gets uploaded to Convera's GlobalPay portal to initiate
+  // a batch payment. Uses the SAME filters as the current invoice view, further
+  // restricted to status='approved' + payment method = Convera (excludes Intuit).
+  //
+  // Column layout per Convera's Ale (2026-07-11):
+  //   VendorID       required — must exactly match the beneficiary code we assigned
+  //   BeneName       optional but recommended (troubleshooting aid)
+  //   TargetAmount   required
+  //   Ref1           optional; we use invoice number
+  //   Ref2           optional; reserved for per-contractor regulatory notes (e.g. India P0802)
+  //   POP            optional; always "Trade Related" for our contractor payments
+  // Step 1: build the preview groups and open the modal. Groups are formed by
+  // (convera_beneficiary_id + IBAN) — profiles sharing the same shared IBAN under the same
+  // beneficiary are candidates for combining. Multi-invoice groups get a "Combine" checkbox
+  // in the modal (default checked); accountant unchecks to split back to per-invoice rows.
+  const openConveraBatchPreview = async (list: Invoice[]) => {
+    const eligible = list.filter(inv => inv.status === 'approved' && paymentMethod(inv) === 'Convera');
+    if (eligible.length === 0) {
+      alert('No approved Convera invoices in the current filter view.');
+      return;
+    }
+
+    // Fetch fresh payment_profiles + convera_beneficiaries so vendor codes and beneficiary
+    // links are current even if the accountant just edited them without a page refresh.
+    const [profsRes, benefsRes] = await Promise.all([
+      supabase.from('payment_profiles').select('*'),
+      supabase.from('convera_beneficiaries').select('*'),
+    ]);
+    const freshProfiles: PaymentProfile[] = (profsRes.data || []).map(normalisePaymentProfile);
+    const freshBenefs: ConveraBeneficiary[] = (benefsRes.data || []).map(normaliseConveraBeneficiary);
+    setPaymentProfiles(freshProfiles);
+    setConveraBeneficiaries(freshBenefs);
+
+    const findLiveProfile = (inv: Invoice) => {
+      const pp = inv.paymentProfile;
+      if (!pp) return null;
+      if (pp.id) {
+        const byId = freshProfiles.find(p => p.id === pp.id);
+        if (byId) return byId;
+      }
+      if (pp.iban) {
+        const byIban = freshProfiles.find(p => p.userId === inv.userId && p.iban === pp.iban);
+        if (byIban) return byIban;
+      }
+      return freshProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null;
+    };
+
+    const groups = new Map<string, ConveraBatchGroup>();
+    const skipped: ConveraBatchSkip[] = [];
+
+    for (const inv of eligible) {
+      const liveProfile = findLiveProfile(inv);
+      const benef = liveProfile?.converaBeneficiaryId
+        ? freshBenefs.find(b => b.id === liveProfile.converaBeneficiaryId)
+        : null;
+      const vendorId = (benef?.vendorId || '').trim();
+
+      if (!vendorId) {
+        // If a sibling beneficiary with the SAME beneficiary_name exists and has a vendor_id,
+        // it's a strong signal the accountant linked the wrong (older) beneficiary record.
+        let suggested: ConveraBatchSkip['suggestedBeneficiary'] | undefined;
+        if (benef) {
+          const targetName = (benef.beneficiaryName || '').trim().toLowerCase();
+          const siblings = freshBenefs.filter(b =>
+            b.id !== benef.id &&
+            (b.vendorId || '').trim() &&
+            (b.beneficiaryName || '').trim().toLowerCase() === targetName
+          );
+          if (siblings.length === 1) {
+            suggested = { id: siblings[0].id, shortName: siblings[0].shortName || '', vendorId: siblings[0].vendorId!.trim() };
+          }
+        }
+        skipped.push({
+          invoice: inv,
+          reason: benef ? 'no vendor code assigned' : 'no Convera beneficiary linked',
+          companyName: liveProfile?.companyName || '',
+          country: liveProfile?.country || '',
+          bankName: liveProfile?.bankName || '',
+          bankAddress: liveProfile?.bankAddress || '',
+          iban: liveProfile?.iban || '',
+          swift: liveProfile?.swift || '',
+          accountNumber: liveProfile?.accountNumber || '',
+          paymentEmail: liveProfile?.paymentEmail || '',
+          contractorName: inv.userName || '',
+          linkedBeneficiary: benef ? { id: benef.id, shortName: benef.shortName || '', fullName: benef.beneficiaryName || '' } : undefined,
+          suggestedBeneficiary: suggested,
+        });
+        continue;
+      }
+
+      const country = (liveProfile?.country || '').toLowerCase();
+      const isIndia = country === 'india' || country === 'in';
+      const iban = liveProfile?.iban || '';
+      const key = benef!.id.toString();
+
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          key,
+          vendorId,
+          shortName: benef?.shortName || '',
+          fullName: benef?.beneficiaryName || '',
+          entries: [],
+          distinctIbans: 0,
+          anyIndia: false,
+        };
+        groups.set(key, group);
+      }
+      group.entries.push({ inv, iban });
+      if (isIndia) group.anyIndia = true;
+    }
+
+    // Finalise distinct IBAN counts per group
+    for (const g of groups.values()) {
+      g.distinctIbans = new Set(g.entries.map(e => e.iban)).size;
+    }
+
+    // Pre-compute suggested vendor IDs for "no Convera beneficiary linked" skips.
+    // Group by IBAN — two skipped invoices with the same IBAN are almost certainly the
+    // same new beneficiary and should share a vendor code.
+    const maxIdRes = await supabase.from('convera_beneficiaries').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
+    let nextSyn = ((maxIdRes.data?.id as number) || 0) + 1;
+    const synByIban = new Map<string, string>();
+    for (const s of skipped) {
+      if (s.reason !== 'no Convera beneficiary linked') continue;
+      const groupKey = s.iban || `no-iban:${s.invoice.id}`;   // rows without an IBAN each get their own code
+      let syn = synByIban.get(groupKey);
+      if (!syn) {
+        syn = `SYN-${String(nextSyn).padStart(4, '0')}`;
+        synByIban.set(groupKey, syn);
+        nextSyn++;
+      }
+      s.suggestedVendorId = syn;
+    }
+
+    const groupList = [...groups.values()].sort((a, b) =>
+      (b.entries.length - a.entries.length) || a.shortName.localeCompare(b.shortName)
+    );
+    // Default combine choice:
+    //   • Multi-invoice, all same IBAN → CHECKED (safe auto-combine, e.g. Bimosoft CurrencyCloud four)
+    //   • Multi-invoice, mixed IBANs   → UNCHECKED (accountant reviews; enable only if beneficiary
+    //                                    actually settles as one payment despite the stale IBANs on file)
+    //   • Single invoice               → not eligible
+    const combineChoices: Record<string, boolean> = {};
+    for (const g of groupList) {
+      if (g.entries.length > 1) combineChoices[g.key] = g.distinctIbans === 1;
+    }
+
+    setConveraBatchGroups(groupList);
+    setConveraBatchCombine(combineChoices);
+    setConveraBatchSkipped(skipped);
+    setShowConveraBatchModal(true);
+  };
+
+  // Step 2: called by the modal's "Download CSV" button. Applies the accountant's combine
+  // choices to generate the final Convera batch CSV.
+  const downloadConveraBatchCSV = () => {
+    const csvEscape = (v: string) => /[,"\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+
+    type OutRow = { vendorId: string; beneName: string; amount: number; ref1: string; ref2: string };
+    const outRows: OutRow[] = [];
+
+    for (const g of converaBatchGroups) {
+      const combined = g.entries.length > 1 && converaBatchCombine[g.key];
+      const beneName = (g.shortName || g.fullName).slice(0, 100);
+      const ref2 = g.anyIndia ? 'PURPOSE OF FUNDS P0802' : '';
+      if (combined) {
+        const amount = g.entries.reduce((s, e) => s + e.inv.totalAmount, 0);
+        // Ref1 is "Multiple Invoices" for a true 2+ combine; if a single-entry group somehow reaches
+        // here it uses the actual invoice number
+        const ref1 = g.entries.length === 1 ? g.entries[0].inv.invoiceNumber.slice(0, 100) : 'Multiple Invoices';
+        outRows.push({ vendorId: g.vendorId, beneName, amount, ref1, ref2 });
+      } else {
+        for (const e of g.entries) {
+          outRows.push({ vendorId: g.vendorId, beneName, amount: e.inv.totalAmount, ref1: e.inv.invoiceNumber.slice(0, 100), ref2 });
+        }
+      }
+    }
+
+    if (outRows.length === 0) { alert('Nothing to export.'); return; }
+
+    // Filename date = most-common pay_on_date across all invoices being included
+    const allInvoices = converaBatchGroups.flatMap(g => g.entries.map(e => e.inv));
+    const dates = allInvoices.map(i => i.payOnDate).filter(Boolean) as string[];
+    const dateCounts = dates.reduce<Record<string, number>>((acc, d) => { acc[d] = (acc[d] || 0) + 1; return acc; }, {});
+    const mostCommon = Object.entries(dateCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+    const filenameDate = (mostCommon || formatDate(new Date())).replace(/-/g, '');
+
+    let csv = 'VendorID,BeneName,TargetAmount,Ref1,Ref2,POP\n';
+    for (const r of outRows) {
+      csv += [
+        csvEscape(r.vendorId),
+        csvEscape(r.beneName),
+        r.amount.toFixed(2),
+        csvEscape(r.ref1),
+        csvEscape(r.ref2),
+        csvEscape('Trade Related'),
+      ].join(',') + '\n';
+    }
+    triggerDownload(csv, `SynergiePayments_${filenameDate}.csv`);
+    setShowConveraBatchModal(false);
   };
 
   // ─── WEEK NAVIGATION ──────────────────────────────────────────────────────
@@ -6629,6 +6874,7 @@ const TimesheetSystem = () => {
                       <button onClick={() => { setShowConveraModal(true); loadConveraBeneficiaries(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><UploadCloud className="w-4 h-4" /> Import Convera PDF</button>
                       <button onClick={() => { setShowConveraMatchingModal(true); loadConveraBeneficiaries(); loadConveraLastPaymentDates(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 text-sm"><Users className="w-4 h-4" /> Convera Matching</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
+                      <button onClick={() => openConveraBatchPreview(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 text-sm"><Download className="w-4 h-4" /> Convera Batch</button>
                       <button
                         onClick={() => {
                           // Snapshot filter view + pre-select ready (mapped + not_exported)
@@ -7946,6 +8192,153 @@ const TimesheetSystem = () => {
             );
           })()}
 
+          {/* Convera Batch Preview Modal */}
+          {showConveraBatchModal && (() => {
+            const rowCount = converaBatchGroups.reduce((n, g) =>
+              n + ((g.entries.length > 1 && converaBatchCombine[g.key]) ? 1 : g.entries.length), 0);
+            const grandTotal = converaBatchGroups.reduce((s, g) => s + g.entries.reduce((si, e) => si + e.inv.totalAmount, 0), 0);
+            const skippedTotal = converaBatchSkipped.reduce((s, k) => s + k.invoice.totalAmount, 0);
+            return (
+              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowConveraBatchModal(false)}>
+                <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                  <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Download className="w-5 h-5 text-indigo-500" /> Preview Convera Batch</h3>
+                      <p className="text-sm text-gray-600 mt-1"><strong>{rowCount}</strong> payment {rowCount === 1 ? 'row' : 'rows'} will be exported.</p>
+                    </div>
+                    <button onClick={() => setShowConveraBatchModal(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+                  </div>
+                  <div className="p-5 overflow-auto flex-1 space-y-2.5">
+                    {converaBatchGroups.map(g => {
+                      const isMulti = g.entries.length > 1;
+                      const combined = isMulti && converaBatchCombine[g.key];
+                      const total = g.entries.reduce((s, e) => s + e.inv.totalAmount, 0);
+                      const mixedIbans = g.distinctIbans > 1;
+                      return (
+                        <div key={g.key} className={`p-3 rounded-lg border ${combined ? 'bg-indigo-50 border-indigo-200' : mixedIbans ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'}`}>
+                          <div className="flex items-start gap-3">
+                            {isMulti ? (
+                              <label className="flex items-center gap-2 cursor-pointer flex-shrink-0 mt-0.5">
+                                <input
+                                  type="checkbox"
+                                  checked={!!converaBatchCombine[g.key]}
+                                  onChange={e => setConveraBatchCombine(prev => ({ ...prev, [g.key]: e.target.checked }))}
+                                  className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500"
+                                />
+                                <span className="text-xs font-medium text-indigo-700">Combine</span>
+                              </label>
+                            ) : (
+                              <div className="w-16 flex-shrink-0" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                                <div className="text-sm font-semibold text-gray-800">{g.shortName || g.fullName}</div>
+                                <div className="text-xs text-gray-500 font-mono">{g.vendorId}</div>
+                              </div>
+                              <div className="text-xs text-gray-600 mt-0.5">
+                                {combined && <>Sum: <strong>${total.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</strong> · Ref1: <span className="font-mono">Multiple Invoices</span></>}
+                                {!combined && isMulti && <>Will split into <strong>{g.entries.length}</strong> separate rows (total <strong>${total.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</strong>)</>}
+                                {!isMulti && <>${g.entries[0].inv.totalAmount.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})} · Ref1: <span className="font-mono">{g.entries[0].inv.invoiceNumber}</span></>}
+                                {g.anyIndia && <> · <span className="text-amber-700">Ref2: PURPOSE OF FUNDS P0802</span></>}
+                              </div>
+                              {isMulti && mixedIbans && (
+                                <div className="mt-1.5 text-xs text-amber-800 bg-amber-100/60 rounded px-2 py-1 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Multiple IBANs on file — enable "Combine" only if this beneficiary really settles as one payment.</div>
+                              )}
+                              {isMulti && (
+                                <ul className="mt-2 text-xs text-gray-700 space-y-0.5 pl-3 border-l-2 border-gray-200">
+                                  {g.entries.map(e => {
+                                    const ibanTail = e.iban ? `${e.iban.slice(0, 6)}…${e.iban.slice(-4)}` : '(no IBAN)';
+                                    return (
+                                      <li key={e.inv.id} className="flex justify-between gap-2">
+                                        <span className="truncate">{e.inv.userName} · <span className="font-mono">{e.inv.invoiceNumber}</span></span>
+                                        <span className="flex items-center gap-2 flex-shrink-0">
+                                          <span className="font-mono text-[10px] text-gray-400">{ibanTail}</span>
+                                          <span className="text-gray-500">${e.inv.totalAmount.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</span>
+                                        </span>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {converaBatchSkipped.length > 0 && (
+                      <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                        <div className="text-xs font-semibold text-amber-800 mb-2 flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" /> {converaBatchSkipped.length} SKIPPED (won't be exported) — total ${skippedTotal.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</div>
+                        <div className="space-y-2.5">
+                          {converaBatchSkipped.map((s, i) => (
+                            <div key={i} className="text-xs bg-white rounded-lg p-2.5 border border-amber-200">
+                              <div className="flex justify-between items-baseline gap-2 mb-1">
+                                <div className="font-semibold text-gray-800">{s.invoice.userName} · <span className="font-mono">{s.invoice.invoiceNumber}</span></div>
+                                <div className="font-mono text-gray-700">${s.invoice.totalAmount.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</div>
+                              </div>
+
+                              {s.reason === 'no vendor code assigned' && (
+                                <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded">
+                                  <div className="text-amber-900">
+                                    <strong>Verify beneficiary selection.</strong> Linked to <span className="font-mono">{s.linkedBeneficiary?.shortName}</span> which has no Convera vendor code.
+                                  </div>
+                                  {s.suggestedBeneficiary ? (
+                                    <div className="mt-1.5 p-2 bg-emerald-50 border border-emerald-300 rounded">
+                                      <div className="text-emerald-900 flex items-center gap-1"><strong>Suggested match:</strong> <span className="font-mono">{s.suggestedBeneficiary.shortName}</span> · <span className="font-mono text-emerald-700">{s.suggestedBeneficiary.vendorId}</span></div>
+                                      <div className="text-emerald-800 mt-0.5 italic">Same beneficiary name, has a vendor code — the accountant may have picked an older record. Re-link this contractor's payment profile in the Payment Profiles tab.</div>
+                                    </div>
+                                  ) : (
+                                    <div className="mt-1.5 text-amber-800 italic">
+                                      Either assign a vendor code to <span className="font-mono">{s.linkedBeneficiary?.shortName}</span> in Convera, or verify this is the correct beneficiary.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {s.reason === 'no Convera beneficiary linked' && (() => {
+                                const suggestedShort = `${(s.contractorName.split(' ')[0] || '').toUpperCase()}${s.companyName ? ' ' + s.companyName.split(/\s+/).slice(0, 2).join(' ').toUpperCase() : ''}`.trim().slice(0, 40);
+                                return (
+                                  <div className="mt-1.5 p-2 bg-indigo-50 border border-indigo-200 rounded">
+                                    <div className="text-indigo-900 mb-1.5"><strong>Create Convera beneficiary with these details:</strong></div>
+                                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-indigo-900 font-mono text-[11px]">
+                                      <div><span className="text-indigo-500 not-italic">Short Name:</span> {suggestedShort || <span className="text-indigo-400 italic">—</span>}</div>
+                                      <div><span className="text-indigo-500 not-italic">Long Name:</span> {s.companyName || <span className="text-indigo-400 italic">—</span>}</div>
+                                      <div><span className="text-indigo-500 not-italic">Country:</span> {s.country || <span className="text-indigo-400 italic">—</span>}</div>
+                                      <div><span className="text-indigo-500 not-italic">Currency:</span> USD</div>
+                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">Bank:</span> {s.bankName || <span className="text-indigo-400 italic">—</span>}</div>
+                                      {s.bankAddress && <div className="col-span-2"><span className="text-indigo-500 not-italic">Bank Address:</span> {s.bankAddress}</div>}
+                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">IBAN:</span> {s.iban || <span className="text-indigo-400 italic">—</span>}</div>
+                                      {s.swift && <div><span className="text-indigo-500 not-italic">SWIFT:</span> {s.swift}</div>}
+                                      {s.accountNumber && <div><span className="text-indigo-500 not-italic">Acct#:</span> {s.accountNumber}</div>}
+                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">Notification Email:</span> {s.paymentEmail || <span className="text-indigo-400 italic">—</span>}</div>
+                                    </div>
+                                    <div className="mt-2 pt-2 border-t border-indigo-200 text-indigo-900">
+                                      <strong>Vendor ID:</strong> <span className="font-mono text-base bg-white px-2 py-0.5 rounded border border-indigo-300">{s.suggestedVendorId ?? 'SYN-XXXX'}</span>
+                                      <div className="text-indigo-700 italic mt-1 text-[11px]">Enter exactly this code in Convera's UI. If two skipped rows share the same IBAN they'll show the same suggested code (same beneficiary). If Convera says the code is taken on submit, increment by one and try again — the collision will be reconciled when we re-import beneficiaries.</div>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="p-4 border-t border-gray-200 flex justify-between items-center gap-2">
+                    <div className="text-sm">
+                      <span className="text-gray-500">Total to export:</span> <strong className="text-gray-800 text-base">${grandTotal.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</strong>
+                      <span className="text-gray-400 ml-2">({rowCount} {rowCount === 1 ? 'row' : 'rows'})</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => setShowConveraBatchModal(false)} className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">Cancel</button>
+                      <button onClick={downloadConveraBatchCSV} className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium text-sm flex items-center gap-2"><Download className="w-4 h-4" /> Download CSV</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* QB Export Modal (Chunk 2a — read-only preview) */}
           {showQbExportModal && (() => {
             // Build rows from the current invoice filter
@@ -8864,14 +9257,19 @@ const TimesheetSystem = () => {
                                     <div className="max-h-36 overflow-y-auto divide-y divide-indigo-100">
                                       {converaBeneficiaries
                                         .filter(b => !beneficiaryOverrideSearch || b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) || b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()))
+                                        // Sort beneficiaries with vendor codes first so accountant sees exportable ones at the top
+                                        .sort((a, b) => (a.vendorId ? 0 : 1) - (b.vendorId ? 0 : 1))
                                         .slice(0, 15)
-                                        .map(b => (
+                                        .map(b => {
+                                          const hasVendorCode = !!(b.vendorId && b.vendorId.trim());
+                                          return (
                                           <button key={b.id} onClick={() => setConveraOverride(profile.id, b.id)}
-                                            className="w-full text-left px-2 py-1 hover:bg-indigo-100 text-xs">
-                                            <span className="font-mono text-indigo-600 mr-2">{b.shortName}</span>
+                                            className={`w-full text-left px-2 py-1 hover:bg-indigo-100 text-xs ${hasVendorCode ? '' : 'opacity-60'}`}>
+                                            <span className={`font-mono mr-2 ${hasVendorCode ? 'text-indigo-600' : 'text-gray-500'}`}>{b.shortName}</span>
                                             <span className="text-gray-500">{b.bankAccount}</span>
-                                          </button>
-                                        ))}
+                                            {!hasVendorCode && <span className="ml-2 text-[10px] text-amber-600 font-medium">(no Convera code)</span>}
+                                          </button>);
+                                        })}
                                     </div>
                                     <div className="flex gap-2 mt-1">
                                       {benef && <button onClick={() => setConveraOverride(profile.id, null)} className="text-xs text-red-500 hover:underline">Clear match</button>}
