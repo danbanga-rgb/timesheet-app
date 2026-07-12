@@ -3922,6 +3922,43 @@ function fetchEmails() {
   });
 }
 
+// ─── Sweep DMARC emails regardless of \Seen flag ─────────────────────────────
+// Runs at the start of every poll. The main unseen-fetch path only deletes
+// DMARC messages it finds among fresh UNSEEN mail; anything already marked
+// \Seen (by a prior failed expunge, a manual mark-unseen test, or an IMAP
+// client viewing them) stays in the inbox forever. IMAP substring FROM search
+// catches noreply-dmarc-support@google.com, dmarcreport@, etc.
+
+function sweepDmarcEmails() {
+  return new Promise((resolve) => {
+    const imap = new Imap({
+      user: CONFIG.imapUser, password: CONFIG.imapPass,
+      host: CONFIG.imapHost, port: CONFIG.imapPort,
+      tls: true, tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 15000, authTimeout: 10000,
+    });
+    imap.once('error', (e) => { console.warn(`  ⚠️  DMARC sweep connect failed: ${e.message}`); resolve(0); });
+    imap.once('ready', () => {
+      imap.openBox('INBOX', false, (err) => {
+        if (err) { imap.end(); console.warn(`  ⚠️  DMARC sweep openBox failed: ${err.message}`); return resolve(0); }
+        imap.search([['FROM', 'dmarc']], (err, uids) => {
+          if (err) { imap.end(); console.warn(`  ⚠️  DMARC sweep search failed: ${err.message}`); return resolve(0); }
+          if (!uids || uids.length === 0) { imap.end(); return resolve(0); }
+          imap.addFlags(uids, '\\Deleted', (err) => {
+            if (err) { imap.end(); console.warn(`  ⚠️  DMARC sweep flag failed: ${err.message}`); return resolve(0); }
+            imap.expunge((err) => {
+              imap.end();
+              if (err) { console.warn(`  ⚠️  DMARC sweep expunge failed: ${err.message}`); return resolve(0); }
+              resolve(uids.length);
+            });
+          });
+        });
+      });
+    });
+    imap.connect();
+  });
+}
+
 // ─── Delete DMARC emails via fresh connection ────────────────────────────────
 
 function deleteDmarcEmails(uids) {
@@ -4570,6 +4607,11 @@ async function main() {
   console.log(`   Ingest: ${CONFIG.ingestUrl}\n`);
 
   const RUN_ID = randomUUID();
+
+  // Sweep any lingering DMARC noise (read or unread) before the normal fetch,
+  // so leftover reports don't pile up in the inbox.
+  const swept = await sweepDmarcEmails();
+  if (swept > 0) console.log(`🧹 Swept ${swept} lingering DMARC email(s) from inbox\n`);
 
   const rawMessages = await fetchEmails();
   if (!rawMessages || rawMessages.length === 0) {
