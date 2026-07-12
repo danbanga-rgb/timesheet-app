@@ -3007,9 +3007,18 @@ const YES_TOKEN = '(?:yes|yeah|yep|yup|yess+|ok|okay|okey|kk|confirm(?:ed)?|appr
 const BARE_YES_RE = new RegExp(`^${YES_TOKEN}(?:\\s*[,]\\s*|\\s+and\\s+|\\s+)*(?:${YES_TOKEN}(?:\\s*[,]\\s*|\\s+and\\s+|\\s+)*)*[.,!\\s]*$`, 'i');
 
 async function classifyReply(bodyText, _contractorName) {
-  // Strip quoted reply lines (any line starting with ">") so the classifier sees
-  // only the contractor's own words, not the reminder they replied to.
-  const withoutQuotes = (bodyText || '')
+  // Cut at inline reply headers first. HTML clients (Apple Mail, Gmail) emit
+  // <blockquote>-style quoting that flattens to text WITHOUT ">"-prefix lines,
+  // so a bare "Yes" reply looks like "Yes\n\nOn Fri, 10 Jul 2026 at 19:00, ...".
+  // Amar 2026-07-12: real body was literally "Yes" but the "> " filter alone
+  // let the entire quoted reminder body through and blew the length cap.
+  const replyHeaderCut = (bodyText || '')
+    .split(/\n[>\s]*On\s+.{5,160}?\s+wrote:(?:\s|$)/im)[0]
+    .split(/\n\s*-{2,}\s*Original\s+Message\s*-{2,}/i)[0]
+    .split(/\n\s*From:\s+.{3,160}\n\s*(?:Sent|Date):/i)[0];
+
+  // Strip any remaining ">"-prefixed lines (plain-text clients).
+  const withoutQuotes = replyHeaderCut
     .split('\n')
     .filter(line => !line.trimStart().startsWith('>'))
     .join('\n');
