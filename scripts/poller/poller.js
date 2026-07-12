@@ -2994,66 +2994,39 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
 // ─── AI reply classifier ──────────────────────────────────────────────────────
 
-const GROQ_CLASSIFIER_SYSTEM = `You are classifying a contractor's reply to a timesheet reminder email.
-The ONLY thing we auto-process is a bare "yes" confirmation. Everything else is forwarded to a human for review.
+// Deterministic bare-YES matcher. Replaces the Groq LLM classifier (Phase A),
+// which repeatedly broke on model deprecations, JSON-mode quirks, and thinking-param
+// churn. The domain problem is trivially simple — "did they say yes?" — and every
+// failure mode of the LLM path was consumed emails with no timesheet created.
+// If a reply doesn't cleanly match the whitelist, we return OTHER and forward to
+// helpdesk (same fallback the LLM path used for anything non-YES).
+const YES_TOKEN = '(?:yes|yeah|yep|yup|yess+|ok|okay|okey|kk|confirm(?:ed)?|approv(?:e|ed)|please\\s+submit|submit\\s+it|go\\s+ahead|proceed|same\\s+as\\s+last\\s+week|da|да|sí|si|sim|oui|ja|aprovado|подтверждаю)';
+// Whole string is one or more YES tokens separated by comma / "and" / whitespace,
+// optionally followed by trailing punctuation. Chains like "yes, please submit"
+// or "ok confirmed" pass; anything with hours, day names, or extra prose does not.
+const BARE_YES_RE = new RegExp(`^${YES_TOKEN}(?:\\s*[,]\\s*|\\s+and\\s+|\\s+)*(?:${YES_TOKEN}(?:\\s*[,]\\s*|\\s+and\\s+|\\s+)*)*[.,!\\s]*$`, 'i');
 
-Respond with EXACTLY one JSON object on a single line, no other text:
-{"intent":"YES","hours":null,"notes":null}
-{"intent":"OTHER","hours":null,"notes":"took Friday off — 32 hours"}
-
-Rules:
-- intent=YES: bare affirmative only ("yes", "ok", "go ahead", "confirm", "please submit", "same as last week", affirmative in any language). No hours mentioned, no day-specific notes, no questions, no complaints.
-- intent=OTHER: anything else — partial hours, day mentions, questions, complaints, "no", empty, ambiguous. Extract any numeric hours mentioned into the hours field and a short summary into notes for the human reviewer.
-- When in doubt, prefer OTHER. YES must be unambiguous.`;
-
-async function classifyReply(bodyText, contractorName) {
-  if (!CONFIG.groqApiKey) return { intent: 'NO', hours: null, notes: 'no groq key' };
-
-  // Strip quoted reply text (lines starting with ">") to focus on what the contractor wrote
-  const strippedBody = bodyText
+async function classifyReply(bodyText, _contractorName) {
+  // Strip quoted reply lines (any line starting with ">") so the classifier sees
+  // only the contractor's own words, not the reminder they replied to.
+  const withoutQuotes = (bodyText || '')
     .split('\n')
     .filter(line => !line.trimStart().startsWith('>'))
-    .join('\n')
-    .trim()
-    .slice(0, 500);
+    .join('\n');
 
-  if (!strippedBody) return { intent: 'NO', hours: null, notes: 'empty body after stripping quotes' };
+  // Cut at common signature separators so mobile footers ("Sent from my iPhone",
+  // "Best, John") don't inflate length past the bare-YES cap.
+  const sigCut = withoutQuotes
+    .split(/\n\s*(?:--\s*$|Sent\s+from\b|Best\b|Regards\b|Thanks\b|Cheers\b|Kind\s+regards\b|Sincerely\b)/im)[0];
 
-  try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${CONFIG.groqApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'qwen/qwen3.6-27b',
-        messages: [
-          { role: 'system', content: GROQ_CLASSIFIER_SYSTEM },
-          { role: 'user', content: `Contractor: ${contractorName}\nReply: ${strippedBody}` },
-        ],
-        max_tokens: 400,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-      }),
-    });
-    if (!res.ok) {
-      console.warn(`  ⚠️  Groq API error ${res.status}: ${await res.text()}`);
-      return { intent: 'OTHER', hours: null, notes: `groq_error_${res.status}` };
-    }
-    const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = parseQwenJson(raw);
-    // Bare-YES enforcement: a YES with any hours or notes payload is downgraded to OTHER.
-    // Only unambiguous "yes" confirmations qualify for auto-submit.
-    let intent = parsed.intent || 'OTHER';
-    if (intent === 'YES' && (parsed.hours != null || parsed.notes != null)) intent = 'OTHER';
-    if (intent !== 'YES' && intent !== 'OTHER') intent = 'OTHER';
-    return { intent, hours: parsed.hours || null, notes: parsed.notes || null };
-  } catch (e) {
-    console.warn(`  ⚠️  Groq classify error: ${e.message}`);
-    return { intent: 'OTHER', hours: null, notes: `groq_exception: ${e.message}` };
-  }
+  const normalized = sigCut.replace(/\s+/g, ' ').trim();
+
+  if (!normalized) return { intent: 'NO', hours: null, notes: 'empty body after stripping quotes' };
+  if (normalized.length > 60) return { intent: 'OTHER', hours: null, notes: null };
+
+  return BARE_YES_RE.test(normalized)
+    ? { intent: 'YES', hours: null, notes: null }
+    : { intent: 'OTHER', hours: null, notes: null };
 }
 
 // ─── Groq week resolver (pre-ingest) ──────────────────────────────────────────
@@ -4667,21 +4640,7 @@ async function main() {
           const fromName = fromAddr?.name || null;
           console.log(`  🤖 Reply from known contractor — classifying with Groq: ${subject}`);
           const classification = await classifyReply(bodyText, fromName || fromEmail);
-          console.log(`  🤖 Classification: ${classification.intent} | hours: ${classification.hours} | notes: ${classification.notes}`);
-
-          // Groq error → treat as OTHER + log to DB so unprocessed_count SLO fires
-          const isGroqError = classification.notes?.startsWith('groq_error') || classification.notes?.startsWith('groq_exception');
-          if (isGroqError) {
-            console.warn(`  ❌ Groq error: ${classification.notes} — forwarding to helpdesk`);
-            await postToIngest({
-              logOnly: true, messageId, contractorEmail: fromEmail, subject,
-              parseNotes: `Classifier failed (${classification.notes}) — forwarded to helpdesk.`,
-              run_id: RUN_ID,
-            });
-            await forwardToHelpdesk(subject, bodyText, fromEmail, `classifier error: ${classification.notes}`, classification);
-            summary.timesheetReports.push({ action: 'reply_yes_failed', contractorName: fromEmail, week: weekStart, attachmentName: subject, notes: classification.notes });
-            continue;
-          }
+          console.log(`  🤖 Classification: ${classification.intent}`);
 
           if (classification.intent === 'YES') {
             const lastTs = await fetchLastApprovedEntries(fromEmail);
