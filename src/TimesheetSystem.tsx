@@ -1968,7 +1968,18 @@ const TimesheetSystem = () => {
     setBeneficiaryImporting(true);
     setBeneficiaryImportResult(null);
     try {
-      const text = await file.text();
+      // Convera exports the file as cp1250 (Central European) so Croatian/Bosnian
+      // diacritics (Ž Š Ć Đ Č) survive. file.text() assumes UTF-8 and mangles them
+      // to U+FFFD. Sniff: try UTF-8, fall back to cp1250, then cp1252.
+      const buffer = await file.arrayBuffer();
+      const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+      let text: string;
+      if (!utf8.includes('�')) {
+        text = utf8;
+      } else {
+        try { text = new TextDecoder('windows-1250').decode(buffer); }
+        catch { text = new TextDecoder('windows-1252').decode(buffer); }
+      }
       // Convera exports TSV (.xls) or CSV — auto-detect delimiter from header row
       const lines = text.split(/\r?\n/).filter(l => l.trim());
       const delim = lines[0].includes('\t') ? '\t' : ',';
