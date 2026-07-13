@@ -749,7 +749,15 @@ const TimesheetSystem = () => {
 
   const countryName = (code: string) => countries.find(c => c.code === code)?.name || code;
   const paymentMethod = (inv: Invoice) => {
-    if (inv.paymentMethodOverride) return inv.paymentMethodOverride;
+    const override = inv.paymentMethodOverride;
+    if (override) {
+      // Older data has lowercase 'intuit'/'convera' overrides; canonicalise so
+      // downstream === comparisons match consistently.
+      const lc = override.toLowerCase();
+      if (lc === 'intuit') return 'Intuit';
+      if (lc === 'convera') return 'Convera';
+      return override;
+    }
     const country = inv.paymentProfile?.country || '';
     return (country === 'United States' || country === 'US') ? 'Intuit' : 'Convera';
   };
@@ -824,6 +832,11 @@ const TimesheetSystem = () => {
   const [converaBatchGroups, setConveraBatchGroups] = useState<ConveraBatchGroup[]>([]);
   const [converaBatchCombine, setConveraBatchCombine] = useState<Record<string, boolean>>({});
   const [converaBatchSkipped, setConveraBatchSkipped] = useState<ConveraBatchSkip[]>([]);
+  // Invoices from the caller's filter view that were excluded from the batch outright
+  // (not approved, or not Convera). Shown as a compact info panel so the accountant can
+  // see why the batch total differs from the on-screen filter total.
+  type ConveraBatchExcluded = { invoice: Invoice; reason: 'not approved' | 'not Convera' };
+  const [converaBatchExcluded, setConveraBatchExcluded] = useState<ConveraBatchExcluded[]>([]);
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -3750,7 +3763,13 @@ const TimesheetSystem = () => {
   // beneficiary are candidates for combining. Multi-invoice groups get a "Combine" checkbox
   // in the modal (default checked); accountant unchecks to split back to per-invoice rows.
   const openConveraBatchPreview = async (list: Invoice[]) => {
-    const eligible = list.filter(inv => inv.status === 'approved' && paymentMethod(inv) === 'Convera');
+    const eligible: Invoice[] = [];
+    const excluded: ConveraBatchExcluded[] = [];
+    for (const inv of list) {
+      if (inv.status !== 'approved') { excluded.push({ invoice: inv, reason: 'not approved' }); continue; }
+      if (paymentMethod(inv) !== 'Convera') { excluded.push({ invoice: inv, reason: 'not Convera' }); continue; }
+      eligible.push(inv);
+    }
     if (eligible.length === 0) {
       alert('No approved Convera invoices in the current filter view.');
       return;
@@ -3907,6 +3926,7 @@ const TimesheetSystem = () => {
     setConveraBatchGroups(groupList);
     setConveraBatchCombine(combineChoices);
     setConveraBatchSkipped(skipped);
+    setConveraBatchExcluded(excluded);
     setShowConveraBatchModal(true);
   };
 
@@ -8359,6 +8379,7 @@ const TimesheetSystem = () => {
               n + ((g.entries.length > 1 && converaBatchCombine[g.key]) ? 1 : g.entries.length), 0);
             const grandTotal = converaBatchGroups.reduce((s, g) => s + g.entries.reduce((si, e) => si + e.inv.totalAmount, 0), 0);
             const skippedTotal = converaBatchSkipped.reduce((s, k) => s + k.invoice.totalAmount, 0);
+            const excludedTotal = converaBatchExcluded.reduce((s, e) => s + (e.invoice.totalAmount || 0), 0);
             return (
               <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowConveraBatchModal(false)}>
                 <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
@@ -8426,6 +8447,31 @@ const TimesheetSystem = () => {
                         </div>
                       );
                     })}
+                    {converaBatchExcluded.length > 0 && (() => {
+                      const byReason: Record<string, ConveraBatchExcluded[]> = {};
+                      for (const e of converaBatchExcluded) (byReason[e.reason] ||= []).push(e);
+                      return (
+                        <div className="mt-4 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                          <div className="text-xs font-semibold text-gray-700 mb-2">
+                            {converaBatchExcluded.length} excluded from batch — total ${excludedTotal.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}
+                            <span className="font-normal text-gray-500 ml-1">(not approved, or not a Convera payment)</span>
+                          </div>
+                          {Object.entries(byReason).map(([reason, rows]) => (
+                            <div key={reason} className="mt-1.5">
+                              <div className="text-[11px] font-medium text-gray-600 uppercase tracking-wide">{reason} · {rows.length}</div>
+                              <ul className="text-xs text-gray-700 mt-0.5 space-y-0.5 pl-3 border-l-2 border-gray-200">
+                                {rows.map((e, i) => (
+                                  <li key={i} className="flex justify-between gap-2">
+                                    <span className="truncate">{e.invoice.userName} · <span className="font-mono">{e.invoice.invoiceNumber}</span></span>
+                                    <span className="font-mono text-gray-500 flex-shrink-0">${(e.invoice.totalAmount || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     {converaBatchSkipped.length > 0 && (
                       <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
                         <div className="text-xs font-semibold text-amber-800 mb-2 flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" /> {converaBatchSkipped.length} SKIPPED (won't be exported) — total ${skippedTotal.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</div>
