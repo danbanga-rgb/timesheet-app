@@ -2080,6 +2080,21 @@ const TimesheetSystem = () => {
     await fetchPaymentProfiles();
     setBeneficiaryOverrideProfileId(null);
     setBeneficiaryOverrideSearch('');
+    // Also drop this profile from the last-import unmatched snapshot so the amber
+    // row disappears immediately. Without this, the frozen snapshot keeps showing
+    // the profile as unmatched even after the DB is updated.
+    if (beneficiaryId !== null) {
+      setBeneficiaryImportResult(prev => {
+        if (!prev) return prev;
+        const wasUnmatched = prev.unmatched.some(u => u.profileId === profileId);
+        if (!wasUnmatched) return prev;
+        return {
+          ...prev,
+          matched: prev.matched + 1,
+          unmatched: prev.unmatched.filter(u => u.profileId !== profileId),
+        };
+      });
+    }
   }
 
   function normalisePaymentProfile(r: Record<string, unknown>): PaymentProfile {
