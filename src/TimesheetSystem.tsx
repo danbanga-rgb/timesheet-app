@@ -8502,7 +8502,11 @@ const TimesheetSystem = () => {
                               )}
 
                               {s.reason === 'no Convera beneficiary linked' && (() => {
-                                const suggestedShort = `${(s.contractorName.split(' ')[0] || '').toUpperCase()}${s.companyName ? ' ' + s.companyName.split(/\s+/).slice(0, 2).join(' ').toUpperCase() : ''}`.trim().slice(0, 40);
+                                // Full contractor name + first two words of company (e.g.
+                                // "NEJRA MUZAFERIJA NATIVE TEAMS"). autoMatchBeneficiary
+                                // does a substring match on the full contractor name, so
+                                // first-name-only breaks the auto-link on next import.
+                                const suggestedShort = `${(s.contractorName || '').toUpperCase()}${s.companyName ? ' ' + s.companyName.split(/\s+/).slice(0, 2).join(' ').toUpperCase() : ''}`.trim().slice(0, 40);
                                 return (
                                   <div className="mt-1.5 p-2 bg-indigo-50 border border-indigo-200 rounded">
                                     <div className="text-indigo-900 mb-1.5"><strong>Create Convera beneficiary with these details:</strong></div>
