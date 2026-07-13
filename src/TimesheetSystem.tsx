@@ -803,13 +803,15 @@ const TimesheetSystem = () => {
     reason: 'no vendor code assigned' | 'no Convera beneficiary linked';
     // Payment profile fields (used for the "Create Convera Beneficiary" panel)
     companyName: string;      // Beneficiary long name
-    country: string;
+    country: string;          // payment_profile.country (rarely set)
+    bankCountry?: string;     // Derived from IBAN prefix — Convera requires bank country to match IBAN
     bankName: string;
     bankAddress: string;
     iban: string;
     swift: string;
     accountNumber: string;
-    paymentEmail: string;
+    paymentEmail: string;      // payment_profile.payment_email (rarely set — will come from template form)
+    contractorEmail?: string;  // users.email fallback so accountant has *something* to enter
     contractorName: string;   // used to seed a suggested short name
     // Set when the linked beneficiary lacks a vendor_id but a sibling record with same
     // beneficiary_name DOES have one — accountant likely picked the wrong beneficiary
@@ -3779,11 +3781,31 @@ const TimesheetSystem = () => {
       return freshProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null;
     };
 
+    // IBAN prefix → full country name. Covers everywhere our beneficiaries actually bank.
+    // Convera enforces bank country = IBAN country; showing anything else on the setup form
+    // would produce a beneficiary Convera then rejects on submit.
+    const IBAN_COUNTRY: Record<string, string> = {
+      GB: 'United Kingdom', IE: 'Ireland',       NL: 'Netherlands',    DE: 'Germany',
+      BA: 'Bosnia and Herzegovina',              HR: 'Croatia',         RS: 'Serbia',
+      SI: 'Slovenia',       MK: 'North Macedonia', ME: 'Montenegro',   LT: 'Lithuania',
+      LV: 'Latvia',         EE: 'Estonia',       AT: 'Austria',        CH: 'Switzerland',
+      FR: 'France',         IT: 'Italy',         ES: 'Spain',          PT: 'Portugal',
+      SE: 'Sweden',         NO: 'Norway',        DK: 'Denmark',        FI: 'Finland',
+      PL: 'Poland',         CZ: 'Czech Republic',SK: 'Slovakia',       HU: 'Hungary',
+      BG: 'Bulgaria',       RO: 'Romania',       GR: 'Greece',         UA: 'Ukraine',
+      MD: 'Moldova',
+    };
+    const countryFromIban = (iban: string): string | undefined => {
+      const p = (iban || '').replace(/\s+/g, '').slice(0, 2).toUpperCase();
+      return p && IBAN_COUNTRY[p] ? IBAN_COUNTRY[p] : undefined;
+    };
+
     const groups = new Map<string, ConveraBatchGroup>();
     const skipped: ConveraBatchSkip[] = [];
 
     for (const inv of eligible) {
       const liveProfile = findLiveProfile(inv);
+      const contractorUser = users.find(u => u.id === inv.userId);
       const benef = liveProfile?.converaBeneficiaryId
         ? freshBenefs.find(b => b.id === liveProfile.converaBeneficiaryId)
         : null;
@@ -3809,12 +3831,14 @@ const TimesheetSystem = () => {
           reason: benef ? 'no vendor code assigned' : 'no Convera beneficiary linked',
           companyName: liveProfile?.companyName || '',
           country: liveProfile?.country || '',
+          bankCountry: countryFromIban(liveProfile?.iban || ''),
           bankName: liveProfile?.bankName || '',
           bankAddress: liveProfile?.bankAddress || '',
           iban: liveProfile?.iban || '',
           swift: liveProfile?.swift || '',
           accountNumber: liveProfile?.accountNumber || '',
           paymentEmail: liveProfile?.paymentEmail || '',
+          contractorEmail: contractorUser?.email || '',
           contractorName: inv.userName || '',
           linkedBeneficiary: benef ? { id: benef.id, shortName: benef.shortName || '', fullName: benef.beneficiaryName || '' } : undefined,
           suggestedBeneficiary: suggested,
@@ -8439,14 +8463,32 @@ const TimesheetSystem = () => {
                                     <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-indigo-900 font-mono text-[11px]">
                                       <div><span className="text-indigo-500 not-italic">Short Name:</span> {suggestedShort || <span className="text-indigo-400 italic">—</span>}</div>
                                       <div><span className="text-indigo-500 not-italic">Long Name:</span> {s.companyName || <span className="text-indigo-400 italic">—</span>}</div>
-                                      <div><span className="text-indigo-500 not-italic">Country:</span> {s.country || <span className="text-indigo-400 italic">—</span>}</div>
+                                      <div><span className="text-indigo-500 not-italic">Country:</span> {
+                                        s.bankCountry ? (
+                                          <>
+                                            {s.bankCountry}
+                                            <span className="text-indigo-400 not-italic ml-1">(from IBAN)</span>
+                                          </>
+                                        ) : s.country
+                                          ? s.country
+                                          : <span className="text-indigo-400 italic">—</span>
+                                      }</div>
                                       <div><span className="text-indigo-500 not-italic">Currency:</span> USD</div>
                                       <div className="col-span-2"><span className="text-indigo-500 not-italic">Bank:</span> {s.bankName || <span className="text-indigo-400 italic">—</span>}</div>
                                       {s.bankAddress && <div className="col-span-2"><span className="text-indigo-500 not-italic">Bank Address:</span> {s.bankAddress}</div>}
                                       <div className="col-span-2"><span className="text-indigo-500 not-italic">IBAN:</span> {s.iban || <span className="text-indigo-400 italic">—</span>}</div>
                                       {s.swift && <div><span className="text-indigo-500 not-italic">SWIFT:</span> {s.swift}</div>}
                                       {s.accountNumber && <div><span className="text-indigo-500 not-italic">Acct#:</span> {s.accountNumber}</div>}
-                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">Notification Email:</span> {s.paymentEmail || <span className="text-indigo-400 italic">—</span>}</div>
+                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">Notification Email:</span> {
+                                        s.paymentEmail ? s.paymentEmail
+                                          : s.contractorEmail ? (
+                                            <>
+                                              {s.contractorEmail}
+                                              <span className="text-indigo-400 not-italic ml-1">(contractor login)</span>
+                                            </>
+                                          )
+                                          : <span className="text-indigo-400 italic">—</span>
+                                      }</div>
                                     </div>
                                     <div className="mt-2 pt-2 border-t border-indigo-200 text-indigo-900">
                                       <strong>Vendor ID:</strong> <span className="font-mono text-base bg-white px-2 py-0.5 rounded border border-indigo-300">{s.suggestedVendorId ?? 'SYN-XXXX'}</span>
