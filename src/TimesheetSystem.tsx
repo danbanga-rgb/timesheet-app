@@ -916,6 +916,8 @@ const TimesheetSystem = () => {
   const [showProcessPreview, setShowProcessPreview] = useState(false);
   // Staged edits (transient — only committed to DB on Process): map txn id → chosen invoice id(s) or 'no_invoice'
   const [stagedMatches, setStagedMatches] = useState<Record<number, number[] | 'no_invoice'>>({});
+  // Which transaction row currently has the "+ Add invoice" picker open (single popover at a time)
+  const [addInvoicePickerFor, setAddInvoicePickerFor] = useState<number | null>(null);
   const [paymentsImportSummary, setPaymentsImportSummary] = useState<{
     newCount: number;
     refreshedCount: number;
@@ -3367,10 +3369,17 @@ const TimesheetSystem = () => {
         if (error) { alert(`Failed to update no-invoice transactions: ${error.message}`); return; }
       }
 
-      // 2. Write umbrella links (clear existing first for idempotency)
+      // 2. Rewrite umbrella links: clear any existing links on every touched txn
+      // (covers umbrella→single-invoice edits and no_invoice edits, not just umbrella→umbrella),
+      // then insert the new set.
+      const touchedTxnIds = [
+        ...matchedUpdates.map(u => u.id),
+        ...noInvoiceIds,
+      ];
+      if (touchedTxnIds.length) {
+        await supabase.from('convera_transaction_invoices').delete().in('transaction_id', touchedTxnIds);
+      }
       if (umbrellaLinksToWrite.length) {
-        const txnIds = [...new Set(umbrellaLinksToWrite.map(l => l.transaction_id))];
-        await supabase.from('convera_transaction_invoices').delete().in('transaction_id', txnIds);
         const { error } = await supabase.from('convera_transaction_invoices').insert(umbrellaLinksToWrite);
         if (error) { alert(`Failed to write umbrella links: ${error.message}`); return; }
       }
@@ -7899,39 +7908,106 @@ const TimesheetSystem = () => {
                           const selectedIds = Array.isArray(effMatch) ? effMatch : [];
                           const selectedInvs = selectedIds.map(id => invById(id)).filter(Boolean) as Invoice[];
 
+                          // Current staged/effective invoice id list — helper for chip mutations
+                          const currentIdsFor = (): number[] => {
+                            const s = stagedMatches[t.id];
+                            if (Array.isArray(s)) return s;
+                            if (s === 'no_invoice') return [];
+                            return Array.isArray(effMatch) ? effMatch : [];
+                          };
+
                           // Match cell content
                           const matchCell = editable ? (
-                            <select
-                              className={`w-full px-2 py-1 rounded border text-xs ${staged ? 'border-indigo-400 ring-1 ring-indigo-200' : 'border-gray-300'}`}
-                              value={effMatch === 'no_invoice' ? '__no_invoice__' : (selectedIds[0] ? String(selectedIds[0]) : '__none__')}
-                              onChange={e => {
-                                const v = e.target.value;
-                                setStagedMatches(prev => {
-                                  const next = { ...prev };
-                                  if (v === '__no_invoice__') next[t.id] = 'no_invoice';
-                                  else if (v === '__none__') delete next[t.id];
-                                  else next[t.id] = [parseInt(v)];
-                                  return next;
-                                });
-                              }}
-                            >
-                              <option value="__none__">— select match —</option>
-                              {cands.length === 0 && contractors.length > 0 && (
-                                <option disabled>Beneficiary → {contractors.join(', ')} (no invoices yet)</option>
-                              )}
-                              {cands.length === 0 && contractors.length === 0 && (
-                                <option disabled>No candidates — beneficiary unresolved</option>
-                              )}
-                              {cands.map(inv => (
-                                <option key={inv.id} value={inv.id}>
-                                  {inv.userName} · {inv.invoiceNumber} · {inv.periodStart.slice(0,7)} · ${inv.totalAmount.toLocaleString()} {inv.status === 'paid' ? '(paid)' : ''}
-                                </option>
-                              ))}
-                              <option value="__no_invoice__">— No invoice (leave in ledger) —</option>
-                            </select>
+                            effMatch === 'no_invoice' ? (
+                              <div className={`flex items-center gap-2 ${staged ? 'ring-1 ring-indigo-200 rounded p-1' : ''}`}>
+                                <span className="text-xs text-gray-600 italic">— No invoice (leave in ledger) —</span>
+                                <button
+                                  onClick={() => setStagedMatches(prev => { const next = { ...prev }; delete next[t.id]; return next; })}
+                                  className="text-xs text-indigo-600 hover:text-indigo-800 underline"
+                                >Undo</button>
+                              </div>
+                            ) : (
+                              <div className={`space-y-1 ${staged ? 'ring-1 ring-indigo-200 rounded p-1' : ''}`}>
+                                {selectedInvs.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {selectedInvs.map(inv => (
+                                      <span
+                                        key={inv.id}
+                                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs ${inv.status === 'paid' ? 'bg-gray-100 text-gray-700' : 'bg-green-100 text-green-800'}`}
+                                        title={`${inv.userName} · ${inv.invoiceNumber} · ${inv.periodStart.slice(0,7)} · $${inv.totalAmount.toLocaleString()}${inv.status === 'paid' ? ' · already paid' : ''}`}
+                                      >
+                                        {inv.userName} · {inv.invoiceNumber} · ${inv.totalAmount.toLocaleString()}{inv.status === 'paid' ? ' (paid)' : ''}
+                                        <button
+                                          onClick={() => {
+                                            setStagedMatches(prev => {
+                                              const nextIds = currentIdsFor().filter(id => id !== inv.id);
+                                              const next = { ...prev };
+                                              if (nextIds.length === 0) delete next[t.id];
+                                              else next[t.id] = nextIds;
+                                              return next;
+                                            });
+                                          }}
+                                          className="hover:text-red-700 font-bold leading-none"
+                                          title="Remove this invoice from the match"
+                                        >×</button>
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="flex items-center gap-3 relative">
+                                  {(() => {
+                                    const availableToAdd = cands.filter(inv => !selectedIds.includes(inv.id));
+                                    if (availableToAdd.length === 0 && selectedIds.length === 0) {
+                                      if (contractors.length > 0) return <span className="text-xs text-gray-500 italic">Beneficiary → {contractors.join(', ')} (no invoices yet)</span>;
+                                      return <span className="text-xs text-gray-500 italic">No candidates — beneficiary unresolved</span>;
+                                    }
+                                    if (availableToAdd.length === 0) return null;
+                                    return (
+                                      <>
+                                        <button
+                                          onClick={() => setAddInvoicePickerFor(addInvoicePickerFor === t.id ? null : t.id)}
+                                          className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                                        >
+                                          + Add invoice ▾
+                                        </button>
+                                        {addInvoicePickerFor === t.id && (
+                                          <div className="absolute left-0 top-6 z-20 bg-white border border-gray-300 rounded shadow-lg max-h-56 overflow-y-auto min-w-[300px]">
+                                            {availableToAdd.map(inv => (
+                                              <button
+                                                key={inv.id}
+                                                onClick={() => {
+                                                  setStagedMatches(prev => ({ ...prev, [t.id]: [...currentIdsFor(), inv.id] }));
+                                                  setAddInvoicePickerFor(null);
+                                                }}
+                                                className="block w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50"
+                                              >
+                                                {inv.userName} · {inv.invoiceNumber} · {inv.periodStart.slice(0,7)} · ${inv.totalAmount.toLocaleString()}{inv.status === 'paid' ? ' (paid)' : ''}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </>
+                                    );
+                                  })()}
+                                  <button
+                                    onClick={() => setStagedMatches(prev => ({ ...prev, [t.id]: 'no_invoice' }))}
+                                    className="text-xs text-gray-500 hover:text-gray-700 ml-auto"
+                                    title="Leave this transaction in the ledger without a matched invoice"
+                                  >No invoice</button>
+                                </div>
+                              </div>
+                            )
                           ) : (
                             selectedInvs.length > 0
-                              ? <span className="text-xs">{selectedInvs.map(inv => `${inv.userName} · ${inv.invoiceNumber}`).join('  +  ')}</span>
+                              ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {selectedInvs.map(inv => (
+                                    <span key={inv.id} className="inline-flex px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">
+                                      {inv.userName} · {inv.invoiceNumber}
+                                    </span>
+                                  ))}
+                                </div>
+                              )
                               : dbState === 'no_invoice' ? <span className="text-xs text-gray-500 italic">No invoice</span>
                               : <span className="text-gray-400">—</span>
                           );
