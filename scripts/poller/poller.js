@@ -2707,6 +2707,9 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         run_id:          runId,
         forwardedBy:     forwardedBy || null,
       });
+      const sourceBuffer = ts.attachmentName
+        ? attachments.find(a => a.name === ts.attachmentName)?.buffer
+        : undefined;
       if (res.body?.error === 'period_locked') {
         const contractorName = res.body?.userName || ts.resolvedName || contractorEmail;
         const lockedDays     = res.body?.lockedDays ?? [];
@@ -2715,12 +2718,14 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           : ts.weekStart;
         console.log(`  🔒 PERIOD LOCKED | ${contractorEmail} | ${ts.attachmentName || 'body'} | ${periodLabel}`);
         results.push({ type: 'timesheet', contractor: contractorEmail, contractorName, week: ts.weekStart, status: res.status, action: 'period_locked', attachmentName: ts.attachmentName || 'body', notes: res.body?.notes || '' });
-        await sendEmail(
-          CONFIG.accountingEmail,
-          `Timesheet rejected — invoice period locked: ${contractorName}`,
-          `${contractorName} (${contractorEmail}) submitted a timesheet that was rejected because the invoice period is already approved.\n\nFile: ${ts.attachmentName || '(body)'}\nLocked period: ${periodLabel}\n\nIf this is a legitimate correction, un-approve the invoice first, then reprocess the email.`
-        );
+        await sendLockedAlert({ contractorName, contractorEmail, subject, bodyText, ts, sourceBuffer, lockedDays, mode: 'full' });
         continue;
+      }
+      const droppedDays = res.body?.droppedDays ?? [];
+      if (droppedDays.length > 0) {
+        const contractorName = res.body?.userName || ts.resolvedName || contractorEmail;
+        console.log(`  🔒 PARTIAL LOCK | ${contractorEmail} | ${ts.attachmentName || 'body'} | dropped ${droppedDays.join(',')}`);
+        await sendLockedAlert({ contractorName, contractorEmail, subject, bodyText, ts, sourceBuffer, droppedDays, mode: 'partial' });
       }
       const action = res.body?.action || String(res.status);
       results.push({
@@ -4151,7 +4156,7 @@ const RETRY_SILENT_AFTER = 10;
 
 // ─── Send email via Brevo ────────────────────────────────────────────────────
 
-async function sendEmail(to, subject, textContent, htmlContent) {
+async function sendEmail(to, subject, textContent, htmlContent, attachments) {
   if (!CONFIG.brevoApiKey) { console.warn('BREVO_API_KEY not set — skipping email'); return; }
   try {
     const payload = {
@@ -4161,6 +4166,12 @@ async function sendEmail(to, subject, textContent, htmlContent) {
       textContent,
     };
     if (htmlContent) payload.htmlContent = htmlContent;
+    if (attachments?.length) {
+      payload.attachment = attachments.map(a => ({
+        name:    a.name,
+        content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
+      }));
+    }
     const body = JSON.stringify(payload);
     await new Promise((resolve, reject) => {
       const req = require('https').request({
@@ -4184,6 +4195,43 @@ async function sendEmail(to, subject, textContent, htmlContent) {
   } catch (e) {
     console.warn(`Email send failed: ${e.message}`);
   }
+}
+
+// ─── Accountant alert for locked-period rejections ────────────────────────────
+
+async function sendLockedAlert({ contractorName, contractorEmail, subject, bodyText, ts, sourceBuffer, lockedDays, droppedDays, mode }) {
+  const isFullLock = mode === 'full';
+  const dayList = isFullLock ? lockedDays : droppedDays;
+  const periodLabel = dayList?.length
+    ? `${dayList[0]} → ${dayList[dayList.length - 1]}`
+    : (ts?.weekStart || '(unknown)');
+  const alertSubject = isFullLock
+    ? `Timesheet rejected — invoice period locked: ${contractorName}`
+    : `Timesheet partial lock — ${droppedDays.length} day(s) dropped: ${contractorName}`;
+  const headline = isFullLock
+    ? `${contractorName} (${contractorEmail}) submitted a timesheet that was rejected because the invoice period is already approved.`
+    : `${contractorName} (${contractorEmail}) submitted a timesheet where ${droppedDays.length} day(s) hit already-approved invoice locks and were dropped. The rest were written.`;
+  const bodyPreview = (bodyText || '').replace(/\r/g, '').trim().slice(0, 1500);
+  const attachments = (sourceBuffer && ts?.attachmentName)
+    ? [{ name: ts.attachmentName, content: sourceBuffer }]
+    : undefined;
+  const text = [
+    headline,
+    '',
+    `Locked days:  ${dayList.join(', ')}`,
+    `Week posted:  ${ts?.weekStart || '(unknown)'}`,
+    `Source file:  ${ts?.attachmentName || '(body only)'}`,
+    '',
+    `Original subject: ${subject || '(no subject)'}`,
+    '',
+    '--- Original email body (first 1500 chars) ---',
+    bodyPreview || '(empty)',
+    '',
+    isFullLock
+      ? 'If this is a legitimate correction, un-approve the invoice first, then reprocess the email.'
+      : 'The dropped days already have an approved invoice. If the contractor is genuinely correcting those days, un-approve the affected invoice and reprocess.',
+  ].join('\n');
+  await sendEmail(CONFIG.accountingEmail, alertSubject, text, null, attachments);
 }
 
 // ─── Forward unrecognised email to helpdesk ───────────────────────────────────

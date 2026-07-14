@@ -250,6 +250,7 @@ async function upsertTimesheet(
   action: 'created' | 'updated' | 'correction_imported' | 'correction_pending' | 'duplicate' | 'period_locked';
   notes: string;
   lockedDays?: string[];
+  droppedDays?: string[];
 }> {
   const { data: existing } = await supabase
     .from('timesheets')
@@ -267,16 +268,19 @@ async function upsertTimesheet(
   // that let Damir 552 be silently overwritten on 2026-07-08.
   const lockedDaysRaw: string[] = (existing?.locked_days as string[] | null) ?? [];
   const lockedDays: string[]    = lockedDaysRaw.map(d => String(d).slice(0, 10));
+  const droppedDays: string[]   = [];
   if (lockedDays.length > 0) {
     const unlockedEntries = Object.fromEntries(
       Object.entries(entries).filter(([d]) => !lockedDays.includes(d))
     );
+    droppedDays.push(...Object.keys(entries).filter(d => lockedDays.includes(d)));
     if (Object.keys(unlockedEntries).length === 0) {
       return {
         timesheetId: existing!.id,
         action: 'period_locked',
         notes: `All submitted days (${Object.keys(entries).join(', ')}) are locked — invoice approved for this period`,
         lockedDays,
+        droppedDays,
       };
     }
     entries = unlockedEntries;
@@ -292,12 +296,14 @@ async function upsertTimesheet(
           timesheetId: existing.id,
           action: 'duplicate',
           notes: 'Identical hours to portal submission — redundant email, no changes needed',
+          droppedDays: droppedDays.length ? droppedDays : undefined,
         };
       }
       return {
         timesheetId: existing.id,
         action: 'correction_pending',
         notes: 'Native submission exists — emailed correction flagged for admin review',
+        droppedDays: droppedDays.length ? droppedDays : undefined,
       };
     }
     // Internal forwarder — apply correction as authoritative (hours may go up or down)
@@ -312,6 +318,7 @@ async function upsertTimesheet(
       timesheetId: existing.id,
       action: 'correction_imported',
       notes: `Correction applied by internal forwarder (${forwardedBy}) — auto-approved`,
+      droppedDays: droppedDays.length ? droppedDays : undefined,
     };
   }
 
@@ -331,6 +338,7 @@ async function upsertTimesheet(
       timesheetId: existing.id,
       action: 'correction_imported',
       notes: 'Correction received — auto-approved (imported source)',
+      droppedDays: droppedDays.length ? droppedDays : undefined,
     };
   }
 
@@ -354,6 +362,7 @@ async function upsertTimesheet(
     timesheetId: inserted?.id ?? null,
     action: 'created',
     notes: 'Created and auto-approved',
+    droppedDays: droppedDays.length ? droppedDays : undefined,
   };
 }
 
@@ -556,6 +565,8 @@ serve(async (req) => {
   let parseStatus = 'success';
   let parsedEntries: Record<string, number> = {};
   let totalHoursForLog = 0;
+  let droppedDaysForResponse: string[] | undefined;
+  let lockedDaysForResponse: string[] | undefined;
 
   if (entries && resolvedWeek) {
     try {
@@ -576,6 +587,8 @@ serve(async (req) => {
       timesheetId  = result.timesheetId;
       action       = result.action;
       upsertNotes  = result.notes;
+      droppedDaysForResponse = result.droppedDays;
+      lockedDaysForResponse = result.lockedDays;
 
       totalHoursForLog = Object.values(parsedEntries).reduce((s, h) => s + h, 0);
       if (action === 'correction_pending') parseStatus = 'correction_pending';
@@ -655,5 +668,7 @@ serve(async (req) => {
     weekStart:    resolvedWeek,
     notes:        upsertNotes,
     attemptCount,
+    droppedDays:  droppedDaysForResponse,
+    lockedDays:   lockedDaysForResponse,
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
