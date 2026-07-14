@@ -756,6 +756,36 @@ function parseXlsx(buffer, filename) {
       let total = null;
       let nameFromSheet = null;
 
+      // Pre-pass: find a labeled "Week Ending Date" row and grab its date. This must run
+      // BEFORE the main loop so the bare-date fallback (which locks onto the first cell
+      // that looks like a date) can't win when a stray template date sits above the real
+      // Week Ending Date. Marinela Sumanjski Jul 12 2026: R4 J4 held a leftover template
+      // date 2026-04-12 with no label; the bare-date branch picked it and 40h landed on
+      // a locked April week.
+      for (let i = 0; i < json.length && !weekStartDate; i++) {
+        const rawCells = jsonRaw[i] || [];
+        const cells = json[i].map((c, ci) => {
+          if (typeof rawCells[ci] === 'number') {
+            const asDate = xlsxSerialToDate(rawCells[ci]);
+            if (asDate) return (asDate.getUTCMonth() + 1) + '/' + asDate.getUTCDate() + '/' + asDate.getUTCFullYear();
+          }
+          return String(c instanceof Date ? c.toLocaleDateString() : c).trim();
+        });
+        const rowText = cells.map(c => c.toLowerCase()).join(' ');
+        if (!rowText.includes('week ending date')) continue;
+        for (const cell of cells) {
+          const normalised = normaliseDate(cell);
+          if (!normalised.includes('/') || normalised.split('/').length < 3) continue;
+          const d = new Date(normalised);
+          if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) {
+            const end = new Date(d);
+            end.setDate(end.getDate() - 6);
+            weekStartDate = end.toISOString().split('T')[0];
+            break;
+          }
+        }
+      }
+
       for (let i = 0; i < json.length; i++) {
         const rawCells = jsonRaw[i] || [];
         const cells = json[i].map((c, ci) => {

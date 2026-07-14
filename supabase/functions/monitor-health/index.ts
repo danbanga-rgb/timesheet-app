@@ -140,12 +140,14 @@ async function checkUnprocessedCount(supabase: ReturnType<typeof createClient>):
       .select('*', { count: 'exact', head: true })
       .in('parse_status', ['failed', 'partial'])
       .is('timesheet_id', null)
+      .not('parse_notes', 'ilike', '%Resolved by retry%')
       .gte('received_at', since),  // email_import_log uses received_at not created_at
     supabase
       .from('email_invoice_log')
       .select('*', { count: 'exact', head: true })
       .in('parse_status', ['failed', 'partial'])
       .is('invoice_id', null)
+      .not('parse_notes', 'ilike', '%Resolved by retry%')
       .gte('created_at', since),
   ]);
 
