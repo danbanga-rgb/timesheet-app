@@ -3970,9 +3970,14 @@ const TimesheetSystem = () => {
       const ref2 = g.anyIndia ? 'PURPOSE OF FUNDS P0802' : '';
       if (combined) {
         const amount = g.entries.reduce((s, e) => s + e.inv.totalAmount, 0);
-        // Ref1 is "Multiple Invoices" for a true 2+ combine; if a single-entry group somehow reaches
-        // here it uses the actual invoice number
-        const ref1 = g.entries.length === 1 ? g.entries[0].inv.invoiceNumber.slice(0, 100) : 'Multiple Invoices';
+        // Ref1 for a combined group: if every entry shares the same invoice_number
+        // (TEAL umbrella pattern — one invoice covers N contractors, we split by
+        // contractor for our books but Convera sees one payment), use that shared
+        // number. Otherwise fall back to "Multiple Invoices".
+        const distinctInvNums = new Set(g.entries.map(e => e.inv.invoiceNumber));
+        const ref1 = distinctInvNums.size === 1
+          ? [...distinctInvNums][0].slice(0, 100)
+          : 'Multiple Invoices';
         outRows.push({ vendorId: g.vendorId, beneName, amount, ref1, ref2 });
       } else {
         for (const e of g.entries) {
@@ -4002,10 +4007,12 @@ const TimesheetSystem = () => {
     const mostCommon = Object.entries(dateCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
     const filenameDate = (mostCommon || formatDate(new Date())).replace(/-/g, '');
 
-    // Amount format: integer for whole dollars, .XX for cents. Convera rejects the
-    // .00 suffix on whole-dollar USD amounts — 2026-07-15 Jul batch was silently
-    // rejected by Convera; they returned a corrected file with all `.00` stripped.
-    // No trailing newline for the same reason (their working file omitted it).
+    // Convera format contract (learned by comparing our rejected file to their
+    // working file, 2026-07-15):
+    //   - TargetAmount integer for whole dollars, .XX only for real cents
+    //   - CRLF line endings (\r\n) not LF — Convera's parser rejects LF
+    //   - No trailing newline
+    //   - No UTF-8 BOM (their working file had none)
     const fmtAmount = (n: number) => Number.isInteger(n) ? String(n) : n.toFixed(2);
     const lines = ['VendorID,BeneName,TargetAmount,Ref1,Ref2,POP'];
     for (const r of outRows) {
@@ -4018,7 +4025,7 @@ const TimesheetSystem = () => {
         csvEscape('Trade Related'),
       ].join(','));
     }
-    const csv = lines.join('\n');
+    const csv = lines.join('\r\n');
     triggerDownload(csv, `SynergiePayments_${filenameDate}.csv`);
     setShowConveraBatchModal(false);
     setConveraBatchManualRows([]);
