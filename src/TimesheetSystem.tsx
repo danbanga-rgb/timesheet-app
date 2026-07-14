@@ -837,6 +837,11 @@ const TimesheetSystem = () => {
   // see why the batch total differs from the on-screen filter total.
   type ConveraBatchExcluded = { invoice: Invoice; reason: 'not approved' | 'not Convera' };
   const [converaBatchExcluded, setConveraBatchExcluded] = useState<ConveraBatchExcluded[]>([]);
+  // Manual rows appended to the batch export for beneficiaries paid outside the invoice flow
+  // (e.g. Monolith, Arpit one-offs). Not persisted — cleared when the modal closes.
+  type ConveraBatchManualRow = { id: string; beneficiaryId: number; shortName: string; vendorId: string; country: string; amount: number; ref1: string };
+  const [converaBatchManualRows, setConveraBatchManualRows] = useState<ConveraBatchManualRow[]>([]);
+  const [converaBatchManualEditor, setConveraBatchManualEditor] = useState<{ open: boolean; search: string; benef: ConveraBeneficiary | null; amount: string; ref1: string }>({ open: false, search: '', benef: null, amount: '', ref1: '' });
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -902,6 +907,8 @@ const TimesheetSystem = () => {
   const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState<Set<string>>(new Set()); // empty=all
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
+  const [converaMatchingView, setConveraMatchingView] = useState<'profiles' | 'beneficiaries'>('profiles');
+  const [copiedVendorId, setCopiedVendorId] = useState<string | null>(null);
   // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
   const [showConveraModal, setShowConveraModal] = useState(false);
   const [converaTab, setConveraTab] = useState<'convera' | 'quickbooks' | 'intuit' | 'beneficiaries'>('quickbooks');
@@ -3970,6 +3977,18 @@ const TimesheetSystem = () => {
       }
     }
 
+    // Manual rows (added via the "+ Add manual row" button) — indistinguishable from invoice-driven
+    // rows in the CSV; the yellow highlight in the preview was for the accountant's review only.
+    for (const r of converaBatchManualRows) {
+      outRows.push({
+        vendorId: r.vendorId,
+        beneName: r.shortName.slice(0, 100),
+        amount:   r.amount,
+        ref1:     r.ref1.slice(0, 100),
+        ref2:     r.country === 'India' ? 'PURPOSE OF FUNDS P0802' : '',
+      });
+    }
+
     if (outRows.length === 0) { alert('Nothing to export.'); return; }
 
     // Filename date = most-common pay_on_date across all invoices being included
@@ -3998,6 +4017,8 @@ const TimesheetSystem = () => {
     const csv = lines.join('\n');
     triggerDownload(csv, `SynergiePayments_${filenameDate}.csv`);
     setShowConveraBatchModal(false);
+    setConveraBatchManualRows([]);
+    setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' });
   };
 
   // ─── WEEK NAVIGATION ──────────────────────────────────────────────────────
@@ -8396,20 +8417,22 @@ const TimesheetSystem = () => {
 
           {/* Convera Batch Preview Modal */}
           {showConveraBatchModal && (() => {
-            const rowCount = converaBatchGroups.reduce((n, g) =>
+            const invoiceRowCount = converaBatchGroups.reduce((n, g) =>
               n + ((g.entries.length > 1 && converaBatchCombine[g.key]) ? 1 : g.entries.length), 0);
-            const grandTotal = converaBatchGroups.reduce((s, g) => s + g.entries.reduce((si, e) => si + e.inv.totalAmount, 0), 0);
+            const rowCount = invoiceRowCount + converaBatchManualRows.length;
+            const grandTotal = converaBatchGroups.reduce((s, g) => s + g.entries.reduce((si, e) => si + e.inv.totalAmount, 0), 0)
+              + converaBatchManualRows.reduce((s, r) => s + r.amount, 0);
             const skippedTotal = converaBatchSkipped.reduce((s, k) => s + k.invoice.totalAmount, 0);
             const excludedTotal = converaBatchExcluded.reduce((s, e) => s + (e.invoice.totalAmount || 0), 0);
             return (
-              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowConveraBatchModal(false)}>
+              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => { setShowConveraBatchModal(false); setConveraBatchManualRows([]); setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' }); }}>
                 <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
                   <div className="p-5 border-b border-gray-200 flex items-center justify-between">
                     <div>
                       <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Download className="w-5 h-5 text-indigo-500" /> Preview Convera Batch</h3>
                       <p className="text-sm text-gray-600 mt-1"><strong>{rowCount}</strong> payment {rowCount === 1 ? 'row' : 'rows'} will be exported.</p>
                     </div>
-                    <button onClick={() => setShowConveraBatchModal(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+                    <button onClick={() => { setShowConveraBatchModal(false); setConveraBatchManualRows([]); setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' }); }} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
                   </div>
                   <div className="p-5 overflow-auto flex-1 space-y-2.5">
                     {converaBatchGroups.map(g => {
@@ -8468,6 +8491,108 @@ const TimesheetSystem = () => {
                         </div>
                       );
                     })}
+
+                    {/* Manual rows — for beneficiaries paid outside the invoice flow (Monolith, Arpit one-offs, etc.) */}
+                    {converaBatchManualRows.map(r => (
+                      <div key={r.id} className="p-3 rounded-lg border bg-yellow-50 border-yellow-300">
+                        <div className="flex items-start gap-3">
+                          <div className="w-16 flex-shrink-0 text-xs font-medium text-yellow-800 mt-0.5">Manual</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex flex-wrap items-baseline justify-between gap-2">
+                              <div className="text-sm font-semibold text-gray-800">{r.shortName}</div>
+                              <div className="flex items-center gap-2">
+                                <div className="text-xs text-gray-500 font-mono">{r.vendorId}</div>
+                                <button onClick={() => setConveraBatchManualRows(rows => rows.filter(x => x.id !== r.id))}
+                                  className="text-xs text-red-500 hover:underline">Remove</button>
+                              </div>
+                            </div>
+                            <div className="text-xs text-gray-600 mt-0.5">
+                              ${r.amount.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})} · Ref1: <span className="font-mono">{r.ref1}</span>
+                              {r.country === 'India' && <> · <span className="text-amber-700">Ref2: PURPOSE OF FUNDS P0802</span></>}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {converaBatchManualEditor.open ? (
+                      <div className="p-3 rounded-lg border border-yellow-300 bg-yellow-50 space-y-2">
+                        <div className="text-xs font-semibold text-yellow-800">Add manual row</div>
+                        <input type="text" value={converaBatchManualEditor.search}
+                          onChange={e => setConveraBatchManualEditor(prev => ({ ...prev, search: e.target.value, benef: null }))}
+                          placeholder="Search beneficiary by name or vendor ID…"
+                          className="w-full px-2 py-1.5 border border-yellow-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-yellow-400" />
+                        {!converaBatchManualEditor.benef && converaBatchManualEditor.search && (() => {
+                          const q = converaBatchManualEditor.search.toLowerCase();
+                          const matches = converaBeneficiaries
+                            .filter(b => (b.shortName || '').toLowerCase().includes(q)
+                              || (b.beneficiaryName || '').toLowerCase().includes(q)
+                              || (b.vendorId || '').toLowerCase().includes(q))
+                            .filter(b => !!b.vendorId)  // manual rows require a vendor_id
+                            .slice(0, 8);
+                          if (matches.length === 0) return <div className="text-xs text-gray-500 px-1">No beneficiaries with a vendor ID match "{converaBatchManualEditor.search}".</div>;
+                          return (
+                            <div className="max-h-40 overflow-y-auto divide-y divide-yellow-100 border border-yellow-200 rounded bg-white">
+                              {matches.map(b => (
+                                <button key={b.id} onClick={() => setConveraBatchManualEditor(prev => ({ ...prev, benef: b, search: b.shortName }))}
+                                  className="w-full text-left px-2 py-1.5 hover:bg-yellow-50 text-xs">
+                                  <span className="font-medium text-gray-800">{b.shortName}</span>
+                                  <span className="text-gray-400 font-mono ml-2">{b.vendorId}</span>
+                                  <div className="text-gray-400 font-mono">{b.bankAccount}</div>
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                        {converaBatchManualEditor.benef && (
+                          <div className="text-xs bg-white border border-yellow-200 rounded px-2 py-1.5 flex items-center justify-between">
+                            <div>
+                              <span className="font-medium text-gray-800">{converaBatchManualEditor.benef.shortName}</span>
+                              <span className="text-gray-400 font-mono ml-2">{converaBatchManualEditor.benef.vendorId}</span>
+                            </div>
+                            <button onClick={() => setConveraBatchManualEditor(prev => ({ ...prev, benef: null, search: '' }))}
+                              className="text-xs text-gray-500 hover:underline">Change</button>
+                          </div>
+                        )}
+                        <div className="grid grid-cols-2 gap-2">
+                          <input type="number" step="0.01" value={converaBatchManualEditor.amount}
+                            onChange={e => setConveraBatchManualEditor(prev => ({ ...prev, amount: e.target.value }))}
+                            placeholder="Amount (USD)"
+                            className="px-2 py-1.5 border border-yellow-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-yellow-400" />
+                          <input type="text" value={converaBatchManualEditor.ref1}
+                            onChange={e => setConveraBatchManualEditor(prev => ({ ...prev, ref1: e.target.value }))}
+                            placeholder="Invoice reference (Ref1)"
+                            className="px-2 py-1.5 border border-yellow-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-yellow-400" />
+                        </div>
+                        <div className="flex justify-end gap-2 pt-1">
+                          <button onClick={() => setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' })}
+                            className="text-xs text-gray-500 hover:underline px-2 py-1">Cancel</button>
+                          <button
+                            disabled={!converaBatchManualEditor.benef || !parseFloat(converaBatchManualEditor.amount) || !converaBatchManualEditor.ref1.trim()}
+                            onClick={() => {
+                              const b = converaBatchManualEditor.benef!;
+                              const amount = parseFloat(converaBatchManualEditor.amount);
+                              setConveraBatchManualRows(rows => [...rows, {
+                                id: `manual-${Date.now()}`,
+                                beneficiaryId: b.id,
+                                shortName: b.shortName || b.beneficiaryName || '',
+                                vendorId: b.vendorId || '',
+                                country: b.beneficiaryCountry || '',
+                                amount,
+                                ref1: converaBatchManualEditor.ref1.trim(),
+                              }]);
+                              setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' });
+                            }}
+                            className="text-xs bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600 disabled:bg-gray-300 disabled:cursor-not-allowed">Add row</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button onClick={() => setConveraBatchManualEditor({ open: true, search: '', benef: null, amount: '', ref1: '' })}
+                        className="w-full py-2 border border-dashed border-yellow-400 rounded-lg text-sm text-yellow-700 hover:bg-yellow-50 transition-colors">
+                        + Add manual row (for beneficiaries outside the invoice flow)
+                      </button>
+                    )}
+
                     {converaBatchExcluded.length > 0 && (() => {
                       const byReason: Record<string, ConveraBatchExcluded[]> = {};
                       for (const e of converaBatchExcluded) (byReason[e.reason] ||= []).push(e);
@@ -8580,7 +8705,7 @@ const TimesheetSystem = () => {
                       <span className="text-gray-400 ml-2">({rowCount} {rowCount === 1 ? 'row' : 'rows'})</span>
                     </div>
                     <div className="flex gap-2">
-                      <button onClick={() => setShowConveraBatchModal(false)} className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">Cancel</button>
+                      <button onClick={() => { setShowConveraBatchModal(false); setConveraBatchManualRows([]); setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' }); }} className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">Cancel</button>
                       <button onClick={downloadConveraBatchCSV} className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium text-sm flex items-center gap-2"><Download className="w-4 h-4" /> Download CSV</button>
                     </div>
                   </div>
@@ -8926,13 +9051,27 @@ const TimesheetSystem = () => {
                       className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
                   </div>
 
+                  <div className="px-6 pt-3 pb-2 border-b border-gray-100 flex items-center gap-1">
+                    <button onClick={() => setConveraMatchingView('profiles')}
+                      className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${converaMatchingView === 'profiles' ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'}`}>
+                      Profile Matching
+                    </button>
+                    <button onClick={() => setConveraMatchingView('beneficiaries')}
+                      className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${converaMatchingView === 'beneficiaries' ? 'bg-indigo-100 text-indigo-700' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'}`}>
+                      All Beneficiaries
+                    </button>
+                  </div>
+
                   <div className="px-6 py-3 border-b border-gray-100">
                     <input type="text" value={converaMatchingSearch} onChange={e => setConveraMatchingSearch(e.target.value)}
-                      placeholder="Search by contractor, profile name, short name, or IBAN…"
+                      placeholder={converaMatchingView === 'profiles'
+                        ? 'Search by contractor, profile name, short name, or IBAN…'
+                        : 'Search by short name, beneficiary name, vendor ID, or bank account…'}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
                   </div>
 
                   <div className="overflow-y-auto flex-1">
+                    {converaMatchingView === 'profiles' && (
                     <table className="w-full text-sm border-collapse">
                       <thead className="bg-gray-50 sticky top-0 z-10">
                         <tr>
@@ -9026,6 +9165,102 @@ const TimesheetSystem = () => {
                         ))}
                       </tbody>
                     </table>
+                    )}
+
+                    {converaMatchingView === 'beneficiaries' && (() => {
+                      const q = converaMatchingSearch.toLowerCase();
+                      const beneRows = converaBeneficiaries
+                        .filter(b => {
+                          if (!q) return true;
+                          return (b.shortName || '').toLowerCase().includes(q)
+                            || (b.beneficiaryName || '').toLowerCase().includes(q)
+                            || (b.vendorId || '').toLowerCase().includes(q)
+                            || (b.bankAccount || '').toLowerCase().includes(q)
+                            || (b.beneficiaryCountry || '').toLowerCase().includes(q);
+                        })
+                        .map(b => {
+                          const linkedProfiles = paymentProfiles.filter(p => p.converaBeneficiaryId === b.id);
+                          const lastUsed = converaLastPaymentDates.get(b.id);
+                          return { b, linkedProfiles, lastUsed };
+                        })
+                        .sort((a, b) => {
+                          // Recent transactions first, then unmapped, then alpha
+                          const la = a.lastUsed || '';
+                          const lb = b.lastUsed || '';
+                          if (la !== lb) return lb.localeCompare(la);
+                          return (a.b.shortName || '').localeCompare(b.b.shortName || '');
+                        });
+                      const withVendor = beneRows.filter(r => r.b.vendorId).length;
+                      const withoutVendor = beneRows.length - withVendor;
+                      return (
+                        <div>
+                          <div className="px-6 py-2 bg-gray-50 text-xs text-gray-600 border-b border-gray-200">
+                            {beneRows.length} beneficiaries · <span className="text-indigo-700 font-medium">{withVendor} with vendor ID</span>
+                            {withoutVendor > 0 && <span className="text-gray-400 ml-1">· {withoutVendor} without</span>}
+                          </div>
+                          <table className="w-full text-sm border-collapse">
+                            <thead className="bg-gray-50 sticky top-0 z-10">
+                              <tr>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200">Short Name / Beneficiary</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-32">Vendor ID</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-56">Bank Account</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-40">Country / Currency</th>
+                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-20">Last Used</th>
+                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-24">Linked</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {beneRows.map(({ b, linkedProfiles, lastUsed }) => (
+                                <tr key={b.id} className={`border-b border-gray-100 ${lastUsed ? 'hover:bg-gray-50' : 'bg-gray-50/40 hover:bg-gray-100'}`}>
+                                  <td className="px-4 py-2.5">
+                                    <div className="font-medium text-gray-800 text-sm">{b.shortName || '—'}</div>
+                                    {b.beneficiaryName && b.beneficiaryName !== b.shortName && (
+                                      <div className="text-xs text-gray-500 mt-0.5">{b.beneficiaryName}</div>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-2.5">
+                                    {b.vendorId ? (
+                                      <button
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(b.vendorId!);
+                                          setCopiedVendorId(b.vendorId);
+                                          setTimeout(() => setCopiedVendorId(prev => prev === b.vendorId ? null : prev), 1500);
+                                        }}
+                                        className="font-mono text-xs px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-colors"
+                                        title="Click to copy">
+                                        {copiedVendorId === b.vendorId ? '✓ copied' : b.vendorId}
+                                      </button>
+                                    ) : (
+                                      <span className="text-xs text-gray-400">—</span>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-2.5 font-mono text-xs text-gray-600">{b.bankAccount || '—'}</td>
+                                  <td className="px-4 py-2.5 text-xs text-gray-600">
+                                    <div>{b.beneficiaryCountry || '—'}</div>
+                                    <div className="text-gray-400">{b.currency}</div>
+                                  </td>
+                                  <td className="px-4 py-2.5 text-center text-xs text-gray-500">
+                                    {fmtDate(lastUsed) || <span className="text-gray-300">—</span>}
+                                  </td>
+                                  <td className="px-4 py-2.5 text-center">
+                                    {linkedProfiles.length > 0 ? (
+                                      <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs" title={linkedProfiles.map(p => users.find(u => u.id === p.userId)?.name || p.userId).join(', ')}>
+                                        {linkedProfiles.length}
+                                      </span>
+                                    ) : (
+                                      <span className="text-xs text-gray-300">0</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                              {beneRows.length === 0 && (
+                                <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">No beneficiaries match your search.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
