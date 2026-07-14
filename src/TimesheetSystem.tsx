@@ -3979,17 +3979,23 @@ const TimesheetSystem = () => {
     const mostCommon = Object.entries(dateCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
     const filenameDate = (mostCommon || formatDate(new Date())).replace(/-/g, '');
 
-    let csv = 'VendorID,BeneName,TargetAmount,Ref1,Ref2,POP\n';
+    // Amount format: integer for whole dollars, .XX for cents. Convera rejects the
+    // .00 suffix on whole-dollar USD amounts — 2026-07-15 Jul batch was silently
+    // rejected by Convera; they returned a corrected file with all `.00` stripped.
+    // No trailing newline for the same reason (their working file omitted it).
+    const fmtAmount = (n: number) => Number.isInteger(n) ? String(n) : n.toFixed(2);
+    const lines = ['VendorID,BeneName,TargetAmount,Ref1,Ref2,POP'];
     for (const r of outRows) {
-      csv += [
+      lines.push([
         csvEscape(r.vendorId),
         csvEscape(r.beneName),
-        r.amount.toFixed(2),
+        fmtAmount(r.amount),
         csvEscape(r.ref1),
         csvEscape(r.ref2),
         csvEscape('Trade Related'),
-      ].join(',') + '\n';
+      ].join(','));
     }
+    const csv = lines.join('\n');
     triggerDownload(csv, `SynergiePayments_${filenameDate}.csv`);
     setShowConveraBatchModal(false);
   };
