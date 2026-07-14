@@ -3922,7 +3922,17 @@ function fetchEmails() {
     imap.once('ready', () => {
       imap.openBox('INBOX', false, (err, box) => {
         if (err) return reject(err);
-        imap.search(['UNSEEN'], (err, uids) => {
+        // Age gate — only fetch emails that arrived in the last 7 days. Any real
+        // submission gets processed within one hourly cycle. IONOS occasionally
+        // re-serves months-old Exchange-forwarded emails as UNSEEN even though
+        // their \Seen flag is correctly set on the server (verified 2026-07-14
+        // via IMAP FETCH — flags said \Seen but SEARCH UNSEEN returned the UID).
+        // Fadil Jun 18 and Haris Jun 1 got re-processed weeks later this way;
+        // dedup absorbed it but wasted round-trips and made Dan nervous. The
+        // age gate is a defense against those phantoms. Trade-off: mark-emails-
+        // unseen manual workflow can only reprocess emails from the last 7 days.
+        const sinceCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        imap.search(['UNSEEN', ['SINCE', sinceCutoff]], (err, uids) => {
           if (err) return reject(err);
           if (!uids || uids.length === 0) { imap.end(); return resolve([]); }
 
