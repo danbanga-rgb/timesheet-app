@@ -909,6 +909,10 @@ const TimesheetSystem = () => {
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
   const [converaMatchingView, setConveraMatchingView] = useState<'profiles' | 'beneficiaries'>('profiles');
   const [copiedVendorId, setCopiedVendorId] = useState<string | null>(null);
+  type BeneficiaryFilter = 'all' | 'with_vendor' | 'without_vendor';
+  const [beneficiaryFilter, setBeneficiaryFilter] = useState<BeneficiaryFilter>('all');
+  type BeneficiarySortKey = 'shortName' | 'vendorId' | 'bankAccount' | 'country' | 'lastUsed' | 'linked';
+  const [beneficiarySort, setBeneficiarySort] = useState<{ key: BeneficiarySortKey; dir: 'asc' | 'desc' }>({ key: 'shortName', dir: 'asc' });
   // Payment import (Convera PDF + QuickBooks XLSX + Intuit emails)
   const [showConveraModal, setShowConveraModal] = useState(false);
   const [converaTab, setConveraTab] = useState<'convera' | 'quickbooks' | 'intuit' | 'beneficiaries'>('quickbooks');
@@ -8538,21 +8542,37 @@ const TimesheetSystem = () => {
                             </div>
                           );
                         })()}
-                        {converaBatchManualEditor.benef && (
-                          <div className="text-xs bg-white border border-yellow-200 rounded px-2 py-1.5 flex items-center justify-between">
-                            <div>
-                              <span className="font-medium text-gray-800">{converaBatchManualEditor.benef.shortName}</span>
-                              <span className="text-gray-400 font-mono ml-2">{converaBatchManualEditor.benef.vendorId}</span>
+                        {converaBatchManualEditor.benef && (() => {
+                          const b = converaBatchManualEditor.benef;
+                          const isIndia = b.beneficiaryCountry === 'India';
+                          return (
+                            <div className="text-xs bg-white border border-yellow-200 rounded px-2 py-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <span className="font-medium text-gray-800">{b.shortName}</span>
+                                  <span className="text-gray-400 font-mono ml-2">{b.vendorId}</span>
+                                </div>
+                                <button onClick={() => setConveraBatchManualEditor(prev => ({ ...prev, benef: null, search: '' }))}
+                                  className="text-xs text-gray-500 hover:underline">Change</button>
+                              </div>
+                              <div className="flex items-center gap-3 text-gray-500">
+                                <span>Country: <span className={isIndia ? 'text-amber-700 font-medium' : 'text-gray-700'}>{b.beneficiaryCountry || '(unknown)'}</span></span>
+                                <span>·</span>
+                                <span>Ref2: {isIndia
+                                  ? <span className="text-amber-700 font-mono">PURPOSE OF FUNDS P0802 (auto)</span>
+                                  : <span className="text-gray-400">(none)</span>}</span>
+                              </div>
                             </div>
-                            <button onClick={() => setConveraBatchManualEditor(prev => ({ ...prev, benef: null, search: '' }))}
-                              className="text-xs text-gray-500 hover:underline">Change</button>
-                          </div>
-                        )}
+                          );
+                        })()}
                         <div className="grid grid-cols-2 gap-2">
-                          <input type="number" step="0.01" value={converaBatchManualEditor.amount}
-                            onChange={e => setConveraBatchManualEditor(prev => ({ ...prev, amount: e.target.value }))}
-                            placeholder="Amount (USD)"
-                            className="px-2 py-1.5 border border-yellow-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-yellow-400" />
+                          <div className="relative">
+                            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm text-gray-400">$</span>
+                            <input type="number" step="0.01" value={converaBatchManualEditor.amount}
+                              onChange={e => setConveraBatchManualEditor(prev => ({ ...prev, amount: e.target.value }))}
+                              placeholder="Amount"
+                              className="w-full pl-5 pr-2 py-1.5 border border-yellow-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-yellow-400" />
+                          </div>
                           <input type="text" value={converaBatchManualEditor.ref1}
                             onChange={e => setConveraBatchManualEditor(prev => ({ ...prev, ref1: e.target.value }))}
                             placeholder="Invoice reference (Ref1)"
@@ -9163,8 +9183,14 @@ const TimesheetSystem = () => {
 
                     {converaMatchingView === 'beneficiaries' && (() => {
                       const q = converaMatchingSearch.toLowerCase();
+                      // Total counts (pre-filter) for the pills
+                      const totalAll = converaBeneficiaries.length;
+                      const totalWithVendor = converaBeneficiaries.filter(b => !!b.vendorId).length;
+                      const totalWithoutVendor = totalAll - totalWithVendor;
                       const beneRows = converaBeneficiaries
                         .filter(b => {
+                          if (beneficiaryFilter === 'with_vendor' && !b.vendorId) return false;
+                          if (beneficiaryFilter === 'without_vendor' && b.vendorId) return false;
                           if (!q) return true;
                           return (b.shortName || '').toLowerCase().includes(q)
                             || (b.beneficiaryName || '').toLowerCase().includes(q)
@@ -9176,31 +9202,53 @@ const TimesheetSystem = () => {
                           const linkedProfiles = paymentProfiles.filter(p => p.converaBeneficiaryId === b.id);
                           const lastUsed = converaLastPaymentDates.get(b.id);
                           return { b, linkedProfiles, lastUsed };
-                        })
-                        .sort((a, b) => {
-                          // Recent transactions first, then unmapped, then alpha
-                          const la = a.lastUsed || '';
-                          const lb = b.lastUsed || '';
-                          if (la !== lb) return lb.localeCompare(la);
-                          return (a.b.shortName || '').localeCompare(b.b.shortName || '');
                         });
-                      const withVendor = beneRows.filter(r => r.b.vendorId).length;
-                      const withoutVendor = beneRows.length - withVendor;
+                      // Sort by the column the user selected
+                      const dir = beneficiarySort.dir === 'asc' ? 1 : -1;
+                      const vendorNum = (v: string | null) => {
+                        const m = (v || '').match(/^SYN-(\d+)$/i);
+                        return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER; // unvendored sorts last on asc
+                      };
+                      beneRows.sort((a, b) => {
+                        switch (beneficiarySort.key) {
+                          case 'shortName': return dir * (a.b.shortName || '').localeCompare(b.b.shortName || '');
+                          case 'vendorId':  return dir * (vendorNum(a.b.vendorId) - vendorNum(b.b.vendorId));
+                          case 'bankAccount': return dir * (a.b.bankAccount || '').localeCompare(b.b.bankAccount || '');
+                          case 'country':   return dir * (a.b.beneficiaryCountry || '').localeCompare(b.b.beneficiaryCountry || '');
+                          case 'lastUsed':  return dir * ((a.lastUsed || '').localeCompare(b.lastUsed || ''));
+                          case 'linked':    return dir * (a.linkedProfiles.length - b.linkedProfiles.length);
+                        }
+                      });
+                      const toggleSort = (key: BeneficiarySortKey) => {
+                        setBeneficiarySort(prev => prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'lastUsed' || key === 'linked' ? 'desc' : 'asc' });
+                      };
+                      const sortIndicator = (key: BeneficiarySortKey) => beneficiarySort.key === key ? (beneficiarySort.dir === 'asc' ? ' ↑' : ' ↓') : '';
                       return (
                         <div>
-                          <div className="px-6 py-2 bg-gray-50 text-xs text-gray-600 border-b border-gray-200">
-                            {beneRows.length} beneficiaries · <span className="text-indigo-700 font-medium">{withVendor} with vendor ID</span>
-                            {withoutVendor > 0 && <span className="text-gray-400 ml-1">· {withoutVendor} without</span>}
+                          <div className="px-6 py-2.5 bg-gray-50 border-b border-gray-200 flex items-center gap-2 flex-wrap">
+                            <button onClick={() => setBeneficiaryFilter('all')}
+                              className={`px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700 ${beneficiaryFilter === 'all' ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}>
+                              All: {totalAll}
+                            </button>
+                            <button onClick={() => setBeneficiaryFilter('with_vendor')}
+                              className={`px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700 ${beneficiaryFilter === 'with_vendor' ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}>
+                              With Vendor ID: {totalWithVendor}
+                            </button>
+                            <button onClick={() => setBeneficiaryFilter('without_vendor')}
+                              className={`px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-700 ${beneficiaryFilter === 'without_vendor' ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}>
+                              Without: {totalWithoutVendor}
+                            </button>
+                            <span className="ml-auto text-xs text-gray-500">Showing {beneRows.length}</span>
                           </div>
                           <table className="w-full text-sm border-collapse">
                             <thead className="bg-gray-50 sticky top-0 z-10">
                               <tr>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200">Short Name / Beneficiary</th>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-32">Vendor ID</th>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-56">Bank Account</th>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-40">Country / Currency</th>
-                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-20">Last Used</th>
-                                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-24">Linked</th>
+                                <th onClick={() => toggleSort('shortName')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 cursor-pointer hover:bg-gray-100 select-none">Short Name / Beneficiary{sortIndicator('shortName')}</th>
+                                <th onClick={() => toggleSort('vendorId')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-32 cursor-pointer hover:bg-gray-100 select-none">Vendor ID{sortIndicator('vendorId')}</th>
+                                <th onClick={() => toggleSort('bankAccount')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-56 cursor-pointer hover:bg-gray-100 select-none">Bank Account{sortIndicator('bankAccount')}</th>
+                                <th onClick={() => toggleSort('country')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-40 cursor-pointer hover:bg-gray-100 select-none">Country / Currency{sortIndicator('country')}</th>
+                                <th onClick={() => toggleSort('lastUsed')} className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-20 cursor-pointer hover:bg-gray-100 select-none">Last Used{sortIndicator('lastUsed')}</th>
+                                <th onClick={() => toggleSort('linked')} className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-24 cursor-pointer hover:bg-gray-100 select-none">Linked{sortIndicator('linked')}</th>
                               </tr>
                             </thead>
                             <tbody>
