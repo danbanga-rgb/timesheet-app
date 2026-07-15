@@ -535,6 +535,49 @@ function reconcileInvoiceLive(
   return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours, rows, missingWeeks };
 }
 
+// Parses a contractor's pasted bank-details reply into structured fields.
+// Two real-world variants seen (see memory: project_template_form_profile_creation):
+//   - `Label:- Value` (Bhavani / India)
+//   - `Label: Value` (Enis / Bosnia, follows Lucien's exact label list)
+// Fields may be empty. Labels vary in wording; we match a small set of aliases per field.
+function parseProfileTemplate(text: string): {
+  companyName: string; companyAddress: string; country: string;
+  bankName: string; bankAddress: string; bankBranch: string;
+  accountNumber: string; iban: string; swift: string; paymentEmail: string;
+} {
+  const out = {
+    companyName: '', companyAddress: '', country: '',
+    bankName: '', bankAddress: '', bankBranch: '',
+    accountNumber: '', iban: '', swift: '', paymentEmail: '',
+  };
+  const patterns: [RegExp, keyof typeof out][] = [
+    [/^\s*(full\s+company\s+name|account\s+holder'?s?\s+name|company\s+name)\s*$/i, 'companyName'],
+    [/^\s*company\s+address\s*$/i, 'companyAddress'],
+    [/^\s*country\s*$/i, 'country'],
+    [/^\s*bank\s+name\s*$/i, 'bankName'],
+    [/^\s*bank\s+address\s*$/i, 'bankAddress'],
+    [/^\s*bank\s+branch\s*$/i, 'bankBranch'],
+    [/^\s*account\s+(number|no\.?|#)\s*$/i, 'accountNumber'],
+    [/^\s*(iban(\s*\/\s*ifsc)?|ifsc(\s+code)?)\s*$/i, 'iban'],
+    [/^\s*(swift(\s+code)?|bic)\s*$/i, 'swift'],
+    [/^\s*(email\s+address\s+for\s+payment\s+notification|payment\s+notification\s+email|payment\s+email)\s*$/i, 'paymentEmail'],
+  ];
+  for (const rawLine of text.split(/\r?\n/)) {
+    // Accept "Label:- value", "Label: value", "Label : value" (any whitespace / dash after colon)
+    const m = rawLine.match(/^([^:]+?)\s*:\s*-?\s*(.*?)\s*$/);
+    if (!m) continue;
+    const label = m[1];
+    const value = m[2];
+    for (const [pat, field] of patterns) {
+      if (pat.test(label)) {
+        if (value) out[field] = value;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 const TimesheetSystem = () => {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const loadedUserIdRef = useRef<string | null>(null); // guard against duplicate SIGNED_IN from gotrue lock recovery
@@ -1014,6 +1057,16 @@ const TimesheetSystem = () => {
     converaBeneficiaryId: null, converaMatchOverride: false, qbVendorName: null,
   });
   const [profileForm, setProfileForm] = useState(emptyProfileForm());
+  // Template-form profile creation (2026-07-15). Parses contractor's pasted bank-details
+  // reply into a payment_profile. Convera beneficiary is NOT inserted here — accountant
+  // creates it in Convera using the surfaced SYN vendor code, then next beneficiary
+  // import closes the loop via SYN match (or IBAN+name fallback).
+  const [showTemplateProfileModal, setShowTemplateProfileModal] = useState(false);
+  const [templateProfileText, setTemplateProfileText] = useState('');
+  const [templateProfileUserId, setTemplateProfileUserId] = useState<string | null>(null);
+  const [templateProfilePreview, setTemplateProfilePreview] = useState<ReturnType<typeof parseProfileTemplate> | null>(null);
+  const [templateProfileError, setTemplateProfileError] = useState('');
+  const [templateProfileSaving, setTemplateProfileSaving] = useState(false);
   const [passwordResetMode, setPasswordResetMode] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
@@ -1980,14 +2033,22 @@ const TimesheetSystem = () => {
       .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
-  function autoMatchBeneficiary(contractorName: string, profileIban: string, beneficiaries: ConveraBeneficiary[]): ConveraBeneficiary | null {
+  function autoMatchBeneficiary(contractorName: string, profileIban: string, beneficiaries: ConveraBeneficiary[], expectedSynCode?: string): ConveraBeneficiary | null {
+    // 1. SYN vendor code match — if the accountant entered our generated SYN-XXXX in
+    // Convera, the beneficiary import carries it back on `vendor_id`. This is the
+    // deliberate, no-ambiguity primary link. Used for template-form profiles that were
+    // pending Convera setup. Falls through to legacy matching if not set or not matched.
+    if (expectedSynCode) {
+      const bySyn = beneficiaries.find(b => (b.vendorId || '').trim().toUpperCase() === expectedSynCode.toUpperCase());
+      if (bySyn) return bySyn;
+    }
     if (!contractorName) return null;
-    // 1. Unique IBAN match
+    // 2. Unique IBAN match
     if (profileIban) {
       const ibanMatches = beneficiaries.filter(b => b.bankAccount === profileIban);
       if (ibanMatches.length === 1 && ibanMatches[0].ibanUnique) return ibanMatches[0];
     }
-    // 2. Short name prefix or contains match (handles "BIMOSOFT AMAR PLJEVLJAK" for contractor "Amar Pljevljak")
+    // 3. Short name prefix or contains match (handles "BIMOSOFT AMAR PLJEVLJAK" for contractor "Amar Pljevljak")
     const normName = normBenefName(contractorName);
     return beneficiaries.find(b => {
       const sn = normBenefName(b.shortName);
@@ -2056,7 +2117,8 @@ const TimesheetSystem = () => {
           const stillExists = normBenefs.find(b => b.id === profile.convera_beneficiary_id);
           if (stillExists) { matchedCount++; continue; }
         }
-        const match = autoMatchBeneficiary(user.name, profile.iban || '', normBenefs);
+        const expectedSyn = `SYN-${String(profile.id as number).padStart(4, '0')}`;
+        const match = autoMatchBeneficiary(user.name, profile.iban || '', normBenefs, expectedSyn);
         if (match) {
           await supabase.from('payment_profiles').update({ convera_beneficiary_id: match.id }).eq('id', profile.id);
           matchedCount++;
@@ -2619,6 +2681,66 @@ const TimesheetSystem = () => {
       setSelectedInvoice(prev => prev ? { ...prev, paymentProfile: null } : prev);
       setInvoices(prev => prev.map(i => i.id === selectedInvoice.id ? { ...i, paymentProfile: null } : i));
     }
+  };
+
+  // ─── Template-form profile creation ──────────────────────────────────────
+  // Accountant pastes the contractor's bank-details reply; parser extracts fields.
+  // A new payment_profiles row is inserted; convera_beneficiary_id stays NULL.
+  // Accountant then creates the beneficiary in Convera using the surfaced SYN code,
+  // and the next beneficiary import closes the loop via SYN match.
+  const openTemplateProfileModal = (userId: string) => {
+    setTemplateProfileUserId(userId);
+    setTemplateProfileText('');
+    setTemplateProfilePreview(null);
+    setTemplateProfileError('');
+    setShowTemplateProfileModal(true);
+  };
+
+  const parseTemplateForPreview = () => {
+    setTemplateProfileError('');
+    const parsed = parseProfileTemplate(templateProfileText);
+    if (!parsed.companyName && !parsed.iban && !parsed.swift) {
+      setTemplateProfileError('Could not find Company Name, IBAN, or SWIFT in the pasted text. Check the format and try again.');
+      setTemplateProfilePreview(null);
+      return;
+    }
+    setTemplateProfilePreview(parsed);
+  };
+
+  const saveTemplateProfile = async () => {
+    if (!templateProfilePreview || !templateProfileUserId) return;
+    const p = templateProfilePreview;
+    // Minimum required per feature spec: Company + IBAN + SWIFT.
+    if (!p.companyName || !p.iban || !p.swift) {
+      setTemplateProfileError('Company Name, IBAN, and SWIFT are required. Fill in any missing fields before saving.');
+      return;
+    }
+    setTemplateProfileSaving(true);
+    const user = users.find(u => u.id === templateProfileUserId);
+    const payload = {
+      user_id: templateProfileUserId,
+      profile_name: p.companyName.slice(0, 60) || (user?.name ?? 'Imported'),
+      company_name: p.companyName,
+      company_address: p.companyAddress,
+      country: p.country,
+      bank_name: p.bankName,
+      bank_address: p.bankAddress,
+      bank_branch: p.bankBranch,
+      account_number: p.accountNumber,
+      iban: p.iban,
+      swift: p.swift,
+      payment_email: p.paymentEmail,
+      is_default: paymentProfiles.filter(pp => pp.userId === templateProfileUserId).length === 0,
+      convera_beneficiary_id: null,
+    };
+    const { error } = await supabase.from('payment_profiles').insert(payload);
+    setTemplateProfileSaving(false);
+    if (error) { setTemplateProfileError('Save failed: ' + error.message); return; }
+    await fetchPaymentProfiles();
+    setShowTemplateProfileModal(false);
+    setTemplateProfileText('');
+    setTemplateProfilePreview(null);
+    setTemplateProfileUserId(null);
   };
 
   // ─── PDF Attachment helpers ───────────────────────────────────────────────
@@ -3584,7 +3706,6 @@ const TimesheetSystem = () => {
       alert(`${ok} invoice${ok !== 1 ? 's' : ''} marked as paid on ${converaPaidDate}.`);
       setShowConveraModal(false);
       setConveraRows([]);
-      setConveraFile(null);
       setIntuitText('');
       setConveraError('');
     }
@@ -8379,6 +8500,8 @@ const TimesheetSystem = () => {
                                     setProfileForm(emptyProfileForm());
                                     setShowProfileModal(true);
                                   }} className="text-xs text-indigo-600 hover:underline">+ New profile for {g.user.name}</button>
+                                  <span className="text-xs text-gray-400 mx-2">·</span>
+                                  <button onClick={() => openTemplateProfileModal(g.user.id)} className="text-xs text-indigo-600 hover:underline" title="Paste the contractor's bank-details reply from the template form">From template ▾</button>
                                 </td>
                               </tr>
                             )}
@@ -8390,6 +8513,73 @@ const TimesheetSystem = () => {
                       )}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Template-form profile creation modal */}
+          {showTemplateProfileModal && (() => {
+            const user = users.find(u => u.id === templateProfileUserId);
+            return (
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setShowTemplateProfileModal(false)}>
+                <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                  <div className="p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-xl font-bold text-gray-900">New profile from template — {user?.name}</h2>
+                      <button onClick={() => setShowTemplateProfileModal(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+                    </div>
+                    <p className="text-sm text-gray-600 mb-3">Paste the contractor's bank-details reply. The parser accepts <code>Label: value</code> and <code>Label :- value</code>. Empty values are fine.</p>
+                    <textarea
+                      value={templateProfileText}
+                      onChange={e => setTemplateProfileText(e.target.value)}
+                      rows={12}
+                      placeholder={`Full Company Name: ...\nCompany Address: ...\nCountry: ...\nBank Name: ...\nBank Address: ...\nBank Branch:\nAccount Number:\nIBAN/IFSC: ...\nSWIFT: ...\nEmail Address for Payment Notification: ...`}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-indigo-500 mb-3"
+                    />
+                    {!templateProfilePreview && (
+                      <div className="flex justify-end mb-3">
+                        <button onClick={parseTemplateForPreview} disabled={!templateProfileText.trim()} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm font-medium">Parse</button>
+                      </div>
+                    )}
+                    {templateProfileError && <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-800">{templateProfileError}</div>}
+                    {templateProfilePreview && (
+                      <div className="mb-3">
+                        <div className="text-xs font-semibold text-gray-500 mb-2">PARSED — edit before saving if needed</div>
+                        <div className="grid grid-cols-2 gap-3 text-sm">
+                          {([
+                            ['Company Name *', 'companyName'],
+                            ['Company Address', 'companyAddress'],
+                            ['Country', 'country'],
+                            ['Bank Name', 'bankName'],
+                            ['Bank Address', 'bankAddress'],
+                            ['Bank Branch', 'bankBranch'],
+                            ['Account Number', 'accountNumber'],
+                            ['IBAN / IFSC *', 'iban'],
+                            ['SWIFT *', 'swift'],
+                            ['Payment Email', 'paymentEmail'],
+                          ] as const).map(([label, key]) => (
+                            <label key={key} className="block">
+                              <span className="text-xs text-gray-500">{label}</span>
+                              <input
+                                type="text"
+                                value={templateProfilePreview[key]}
+                                onChange={e => setTemplateProfilePreview({ ...templateProfilePreview, [key]: e.target.value })}
+                                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm mt-0.5 font-mono focus:ring-1 focus:ring-indigo-400"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                        <div className="mt-4 flex justify-end gap-2">
+                          <button onClick={() => setTemplateProfilePreview(null)} className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">Re-parse</button>
+                          <button onClick={saveTemplateProfile} disabled={templateProfileSaving} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm font-medium">
+                            {templateProfileSaving ? 'Saving…' : 'Create profile'}
+                          </button>
+                        </div>
+                        <p className="mt-3 text-xs text-gray-400">After saving, the profile appears in the "Awaiting Convera setup" panel (Import Payments → Convera Beneficiaries) with a generated SYN vendor code. Enter that in Convera when adding the beneficiary, then re-import to close the loop.</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -9363,7 +9553,72 @@ const TimesheetSystem = () => {
                   {/* Convera Beneficiaries import */}
                   {converaRows.length === 0 && converaTab === 'beneficiaries' && (
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">Upload the Convera beneficiaries XLS export. Beneficiaries will be upserted and automatically matched to contractor payment profiles by IBAN (unique) or name prefix.</p>
+                      {/* Awaiting Convera setup — profiles created from templates but not yet in Convera */}
+                      {(() => {
+                        const awaiting = paymentProfiles.filter(p => {
+                          if (p.converaBeneficiaryId) return false;
+                          if (!p.country || p.country.trim().toUpperCase() === 'US' || p.country.trim().toLowerCase() === 'united states') return false;
+                          const owner = users.find(u => u.id === p.userId);
+                          if (owner?.locationType === 'onshore') return false;
+                          return !!(p.iban && p.swift);
+                        });
+                        if (awaiting.length === 0) return null;
+                        // Deterministic SYN code: SYN-{payment_profiles.id:04d}. Stable per
+                        // profile — Dan enters this in Convera, next beneficiary import
+                        // matches vendor_id on the way back. Panels shown here and matcher
+                        // in importConveraBeneficiaries use the same formula.
+                        const synFor = (profileId: number): string => `SYN-${String(profileId).padStart(4, '0')}`;
+                        return (
+                          <div className="mb-5 border border-amber-300 rounded-lg overflow-hidden">
+                            <div className="bg-amber-50 px-4 py-2 border-b border-amber-200 text-xs font-semibold text-amber-800 flex items-center justify-between">
+                              <span>⏳ Awaiting Convera setup — {awaiting.length} profile{awaiting.length === 1 ? '' : 's'}</span>
+                              <span className="text-[10px] text-amber-600 font-normal">Add these in Convera with the SYN vendor code shown, then re-import to link.</span>
+                            </div>
+                            <div className="divide-y divide-amber-100">
+                              {awaiting.map(p => {
+                                const owner = users.find(u => u.id === p.userId);
+                                const synCode = synFor(p.id);
+                                const detailLines = [
+                                  `Vendor ID: ${synCode}`,
+                                  `Full Company Name: ${p.companyName}`,
+                                  p.companyAddress && `Company Address: ${p.companyAddress}`,
+                                  p.country && `Country: ${p.country}`,
+                                  p.bankName && `Bank Name: ${p.bankName}`,
+                                  p.bankAddress && `Bank Address: ${p.bankAddress}`,
+                                  p.bankBranch && `Bank Branch: ${p.bankBranch}`,
+                                  p.accountNumber && `Account Number: ${p.accountNumber}`,
+                                  `IBAN: ${p.iban}`,
+                                  `SWIFT: ${p.swift}`,
+                                  p.paymentEmail && `Payment Email: ${p.paymentEmail}`,
+                                ].filter(Boolean).join('\n');
+                                return (
+                                  <div key={p.id} className="p-3 bg-white">
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <div className="text-sm font-medium text-gray-800">{owner?.name || '—'}</div>
+                                        <div className="text-xs text-gray-500 mt-0.5">{p.companyName}</div>
+                                        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] font-mono text-gray-600">
+                                          <span><span className="text-amber-700 font-semibold">{synCode}</span></span>
+                                          <span>IBAN {p.iban}</span>
+                                          <span>SWIFT {p.swift}</span>
+                                          {p.country && <span>{p.country}</span>}
+                                        </div>
+                                      </div>
+                                      <button
+                                        onClick={async () => {
+                                          try { await navigator.clipboard.writeText(detailLines); } catch { /* clipboard may fail in insecure contexts */ }
+                                        }}
+                                        className="text-xs px-2 py-1 bg-indigo-100 text-indigo-700 rounded hover:bg-indigo-200 whitespace-nowrap"
+                                      >Copy details</button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      <p className="text-sm text-gray-600 mb-1">Upload the Convera beneficiaries XLS export. Beneficiaries will be upserted and automatically matched to contractor payment profiles by Vendor ID (SYN code), IBAN, or name prefix.</p>
                       <p className="text-xs text-gray-400 mb-4">In Convera: Beneficiaries &rarr; Export. Re-import anytime to refresh.</p>
                       <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
                         {beneficiaryImportFile ? (
@@ -9529,7 +9784,7 @@ const TimesheetSystem = () => {
                         {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
 
                         <div className="flex items-center justify-between">
-                          <button onClick={() => { setConveraRows([]); setConveraFile(null); setQbFile(null); setIntuitText(''); setConveraError(''); }} className="text-sm text-gray-500 hover:text-gray-700">← Start over</button>
+                          <button onClick={() => { setConveraRows([]); setQbFile(null); setIntuitText(''); setConveraError(''); }} className="text-sm text-gray-500 hover:text-gray-700">← Start over</button>
                           <div className="flex items-center gap-3">
                             {selectedCount > 0 && <span className="text-sm text-gray-600">{selectedCount} selected · ${totalSelected.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
                             <button onClick={applyConveraPayments} disabled={selectedCount === 0 || !converaPaidDate || converaApplying} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm">
