@@ -933,7 +933,7 @@ const TimesheetSystem = () => {
   const [converaTransactions, setConveraTransactions] = useState<ConveraTransaction[]>([]);
   const [importBatches, setImportBatches] = useState<ImportBatch[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<number | 'all'>('all');
-  const [paymentsStateFilter, setPaymentsStateFilter] = useState<MatchState | 'all'>('all');
+  const [paymentsStateFilter, setPaymentsStateFilter] = useState<MatchState | 'all' | 'processed'>('all');
   const [paymentsSortKey, setPaymentsSortKey] = useState<'date' | 'beneficiary' | 'amount' | 'confidence'>('date');
   const [paymentsSortDir, setPaymentsSortDir] = useState<'asc' | 'desc'>('desc');
   const [paymentsImportFile, setPaymentsImportFile] = useState<File | null>(null);
@@ -950,6 +950,12 @@ const TimesheetSystem = () => {
     skippedCount: number;
     amountChangedRows: { key: string; oldAmount: number; newAmount: number; state: string }[];
     batchId: number | null;
+  } | null>(null);
+  const [paymentsProcessResult, setPaymentsProcessResult] = useState<{
+    matchedCount: number;
+    noInvoiceCount: number;
+    invoicesPaid: number;
+    batchFullyProcessed: boolean;
   } | null>(null);
   // Bumped after every import/rollback to force the file <input> to re-mount fresh —
   // avoids the "browser suppresses onChange for same file" problem without touching the DOM.
@@ -3435,6 +3441,7 @@ const TimesheetSystem = () => {
       }
 
       // 4. If a batch is selected and all its pending rows are now processed, mark batch processed
+      let batchFullyProcessed = false;
       if (selectedBatchId !== 'all') {
         const batchRows = converaTransactions.filter(t => t.importBatchId === selectedBatchId);
         const unreviewedIdsInBatch = batchRows.filter(t => t.matchState === 'unreviewed').map(t => t.id);
@@ -3442,12 +3449,20 @@ const TimesheetSystem = () => {
         const allProcessed = unreviewedIdsInBatch.every(id => processedIds.has(id));
         if (allProcessed) {
           await supabase.from('import_batches').update({ state: 'processed' }).eq('id', selectedBatchId);
+          batchFullyProcessed = true;
         }
       }
 
       // Refresh
       setStagedMatches({});
       setShowProcessPreview(false);
+      setPaymentsImportSummary(null);
+      setPaymentsProcessResult({
+        matchedCount: matchedUpdates.length,
+        noInvoiceCount: noInvoiceIds.length,
+        invoicesPaid: invoicesToMarkPaid.length,
+        batchFullyProcessed,
+      });
       await fetchImportBatches();
       await fetchConveraTransactions();
       await fetchInvoices();
@@ -3462,6 +3477,7 @@ const TimesheetSystem = () => {
   const handleReopenBatch = async (batchId: number) => {
     if (!window.confirm('Reopen this batch? All invoices marked paid from this batch will be reverted to approved status, and rows will be editable again.')) return;
     setPaymentsImportSummary(null);
+    setPaymentsProcessResult(null);
     setPaymentsImportError('');
     setPaymentsImportFile(null);
     setPaymentsFileInputKey(k => k + 1);
@@ -3507,6 +3523,7 @@ const TimesheetSystem = () => {
     if (!window.confirm('Rollback & DELETE this batch? This will revert any invoices paid via this batch AND remove all its transaction rows from the ledger. Cannot be undone.')) return;
     // Clear any transient UI that could block or confuse the next interaction
     setPaymentsImportSummary(null);
+    setPaymentsProcessResult(null);
     setPaymentsImportError('');
     setPaymentsImportFile(null);
     setPaymentsFileInputKey(k => k + 1);
@@ -7742,7 +7759,11 @@ const TimesheetSystem = () => {
             // Filter rows by batch + state
             let rows = converaTransactions;
             if (selectedBatchId !== 'all') rows = rows.filter(t => t.importBatchId === selectedBatchId);
-            if (paymentsStateFilter !== 'all') rows = rows.filter(t => t.matchState === paymentsStateFilter);
+            if (paymentsStateFilter === 'processed') {
+              rows = rows.filter(t => t.matchState === 'matched' || t.matchState === 'no_invoice');
+            } else if (paymentsStateFilter !== 'all') {
+              rows = rows.filter(t => t.matchState === paymentsStateFilter);
+            }
 
             // Candidate invoices for a transaction. Three sources unioned:
             //   1. Beneficiary pool (invoices for the linked contractor)
@@ -7904,6 +7925,30 @@ const TimesheetSystem = () => {
                   </div>
                 )}
 
+                {/* Post-process summary */}
+                {paymentsProcessResult && (
+                  <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="font-semibold text-green-900 text-sm flex items-center gap-1.5"><CheckCircle className="w-4 h-4" /> Process complete</div>
+                      <button onClick={() => setPaymentsProcessResult(null)} className="text-green-600 hover:text-green-800 text-xs">✕</button>
+                    </div>
+                    <ul className="space-y-1 text-sm text-green-900">
+                      {paymentsProcessResult.matchedCount > 0 && (
+                        <li>✅ <strong>{paymentsProcessResult.matchedCount}</strong> transaction{paymentsProcessResult.matchedCount === 1 ? '' : 's'} matched · <strong>{paymentsProcessResult.invoicesPaid}</strong> invoice{paymentsProcessResult.invoicesPaid === 1 ? '' : 's'} marked paid</li>
+                      )}
+                      {paymentsProcessResult.noInvoiceCount > 0 && (
+                        <li>➖ <strong>{paymentsProcessResult.noInvoiceCount}</strong> transaction{paymentsProcessResult.noInvoiceCount === 1 ? '' : 's'} set to <em>no invoice</em></li>
+                      )}
+                      {paymentsProcessResult.batchFullyProcessed && (
+                        <li className="text-green-700">🎉 Batch fully processed — moved to processed state.</li>
+                      )}
+                      {!paymentsProcessResult.batchFullyProcessed && selectedBatchId !== 'all' && (
+                        <li className="text-green-700">Batch stays <em>pending</em> — unreviewed rows remain. Use the state filter pills to see what's left.</li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+
                 {/* Batch selector */}
                 <div className="mb-3 flex flex-wrap gap-1.5 items-center">
                   <span className="text-xs font-semibold text-gray-500 mr-1">Batch:</span>
@@ -7934,6 +7979,34 @@ const TimesheetSystem = () => {
                         {b.state === 'processed' && (
                           <button onClick={() => handleReopenBatch(b.id)} className="px-3 py-1 text-xs bg-amber-100 text-amber-700 rounded hover:bg-amber-200 font-medium border border-amber-200">Reopen batch</button>
                         )}
+                        {b.state === 'pending' && (() => {
+                          const autoMatchable = converaTransactions.filter(t =>
+                            t.importBatchId === b.id &&
+                            t.matchState === 'unreviewed' &&
+                            stagedMatches[t.id] === undefined &&
+                            ((t.matchedInvoiceIds?.length ?? 0) > 0 || t.matchedInvoiceId != null)
+                          );
+                          const count = autoMatchable.length;
+                          return (
+                            <button
+                              onClick={() => {
+                                setStagedMatches(prev => {
+                                  const next = { ...prev };
+                                  for (const t of autoMatchable) {
+                                    const ids = t.matchedInvoiceIds?.length
+                                      ? t.matchedInvoiceIds
+                                      : (t.matchedInvoiceId ? [t.matchedInvoiceId] : []);
+                                    if (ids.length) next[t.id] = ids;
+                                  }
+                                  return next;
+                                });
+                              }}
+                              disabled={count === 0}
+                              className={`px-3 py-1 text-xs rounded font-medium border ${count > 0 ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200 border-indigo-200' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}`}
+                              title={count > 0 ? `Stage ${count} auto-matched row${count === 1 ? '' : 's'} for processing. Rows without an auto-match still need manual review.` : 'No unreviewed rows with auto-matches available'}
+                            >Accept auto-matches ({count})</button>
+                          );
+                        })()}
                         {b.state === 'pending' && (
                           <button onClick={() => handleRollbackBatch(b.id)} className="px-3 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200 font-medium border border-red-200">Rollback & Delete</button>
                         )}
@@ -7942,21 +8015,39 @@ const TimesheetSystem = () => {
                   );
                 })()}
 
-                {/* State filter pills */}
-                <div className="mb-4 flex flex-wrap gap-1.5 items-center">
-                  <span className="text-xs font-semibold text-gray-500 mr-1">Show:</span>
-                  {([
-                    { key: 'all' as const,        label: 'All',        count: rows.length,                 color: 'bg-gray-100 text-gray-700' },
-                    { key: 'unreviewed' as const, label: 'Unreviewed', count: stateCounts.unreviewed || 0, color: 'bg-yellow-100 text-yellow-700' },
-                    { key: 'matched' as const,    label: 'Matched',    count: stateCounts.matched    || 0, color: 'bg-green-100 text-green-700' },
-                    { key: 'no_invoice' as const, label: 'No invoice', count: stateCounts.no_invoice || 0, color: 'bg-gray-100 text-gray-700' },
-                    { key: 'flagged' as const,    label: 'Flagged',    count: stateCounts.flagged    || 0, color: 'bg-red-100 text-red-700' },
-                  ]).map(f => (
-                    <button key={f.key} onClick={() => setPaymentsStateFilter(f.key)} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${paymentsStateFilter === f.key ? 'ring-2 ring-indigo-400 ' + f.color : f.color + ' hover:opacity-80'}`}>
-                      {f.label} ({f.count})
-                    </button>
-                  ))}
-                </div>
+                {/* State filter pills — grouped by lifecycle stage (Pending · Processed · Issues) */}
+                {(() => {
+                  const pillClass = (key: typeof paymentsStateFilter, color: string) =>
+                    `px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${paymentsStateFilter === key ? 'ring-2 ring-indigo-400 ' + color : color + ' hover:opacity-80'}`;
+                  const groupLabel = <span className="text-[10px] uppercase tracking-wider font-semibold text-gray-400 mb-0.5">&nbsp;</span>;
+                  const divider = <div className="h-6 w-px bg-gray-300 self-end mb-1.5" aria-hidden="true" />;
+                  return (
+                    <div className="mb-4 flex flex-wrap items-end gap-x-3 gap-y-2">
+                      <span className="text-xs font-semibold text-gray-500 mr-1 self-end mb-1.5">Show:</span>
+                      <div className="flex flex-col items-start">
+                        {groupLabel}
+                        <button onClick={() => setPaymentsStateFilter('all')} className={pillClass('all', 'bg-gray-100 text-gray-700')}>All ({rows.length})</button>
+                      </div>
+                      <div className="flex flex-col items-start">
+                        <span className="text-[10px] uppercase tracking-wider font-semibold text-gray-400 mb-0.5 pl-2">Pending</span>
+                        <button onClick={() => setPaymentsStateFilter('unreviewed')} className={pillClass('unreviewed', 'bg-yellow-100 text-yellow-700')}>Unreviewed ({stateCounts.unreviewed || 0})</button>
+                      </div>
+                      {divider}
+                      <div className="flex flex-col items-start">
+                        <span className="text-[10px] uppercase tracking-wider font-semibold text-gray-400 mb-0.5 pl-2">Processed</span>
+                        <div className="flex gap-1.5">
+                          <button onClick={() => setPaymentsStateFilter('matched')} className={pillClass('matched', 'bg-green-100 text-green-700')}>Matched ({stateCounts.matched || 0})</button>
+                          <button onClick={() => setPaymentsStateFilter('no_invoice')} className={pillClass('no_invoice', 'bg-gray-100 text-gray-700')}>No invoice ({stateCounts.no_invoice || 0})</button>
+                        </div>
+                      </div>
+                      {divider}
+                      <div className="flex flex-col items-start">
+                        <span className="text-[10px] uppercase tracking-wider font-semibold text-gray-400 mb-0.5 pl-2">Issues</span>
+                        <button onClick={() => setPaymentsStateFilter('flagged')} className={pillClass('flagged', 'bg-red-100 text-red-700')}>Flagged ({stateCounts.flagged || 0})</button>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Table */}
                 {sortedRows.length === 0 ? (
