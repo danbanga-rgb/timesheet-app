@@ -535,6 +535,19 @@ function reconcileInvoiceLive(
   return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours, rows, missingWeeks };
 }
 
+// Deterministic vendor code Dan enters in Convera when creating a beneficiary.
+// Shared-IBAN groups (Bimosoft, etc.) share ONE code so Dan only enters one SYN
+// in Convera; on beneficiary import the matcher then SYN-links whichever profile's
+// id matches the code, and every other profile in the group is linked via IBAN
+// fallback. Empty IBAN → per-profile code.
+function computeSynVendorCode(profileId: number, iban: string, allProfiles: { id: number; iban: string }[]): string {
+  const cleanIban = (iban || '').trim();
+  if (!cleanIban) return `SYN-${String(profileId).padStart(4, '0')}`;
+  const sameIbanIds = allProfiles.filter(p => (p.iban || '').trim() === cleanIban).map(p => p.id);
+  const minId = sameIbanIds.length ? Math.min(...sameIbanIds) : profileId;
+  return `SYN-${String(minId).padStart(4, '0')}`;
+}
+
 // Parses a contractor's pasted bank-details reply into structured fields.
 // Two real-world variants seen (see memory: project_template_form_profile_creation):
 //   - `Label:- Value` (Bhavani / India)
@@ -1004,7 +1017,7 @@ const TimesheetSystem = () => {
   const [beneficiaryImporting, setBeneficiaryImporting] = useState(false);
   const [beneficiaryImportResult, setBeneficiaryImportResult] = useState<{
     imported: number; matched: number;
-    unmatched: { profileId: number; userId: string; userName: string }[];
+    unmatched: { profileId: number; userId: string; userName: string; suggested?: { beneficiaryId: number; level: 'iban' | 'name'; shortName: string; incomingVendorId: string | null } }[];
   } | null>(null);
   const [beneficiaryOverrideProfileId, setBeneficiaryOverrideProfileId] = useState<number | null>(null);
   const [beneficiaryOverrideSearch, setBeneficiaryOverrideSearch] = useState('');
@@ -2032,27 +2045,27 @@ const TimesheetSystem = () => {
       .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
-  function autoMatchBeneficiary(contractorName: string, profileIban: string, beneficiaries: ConveraBeneficiary[], expectedSynCode?: string): ConveraBeneficiary | null {
-    // 1. SYN vendor code match — if the accountant entered our generated SYN-XXXX in
-    // Convera, the beneficiary import carries it back on `vendor_id`. This is the
-    // deliberate, no-ambiguity primary link. Used for template-form profiles that were
-    // pending Convera setup. Falls through to legacy matching if not set or not matched.
+  function autoMatchBeneficiary(contractorName: string, profileIban: string, beneficiaries: ConveraBeneficiary[], expectedSynCode?: string): { beneficiary: ConveraBeneficiary; level: 'syn' | 'iban' | 'name' } | null {
+    // 1. SYN vendor code match — deliberate no-ambiguity primary link. When present,
+    // auto-linked silently. IBAN/name matches are downgraded to "suggested" and
+    // surfaced as amber rows so the accountant confirms before the FK is written.
     if (expectedSynCode) {
       const bySyn = beneficiaries.find(b => (b.vendorId || '').trim().toUpperCase() === expectedSynCode.toUpperCase());
-      if (bySyn) return bySyn;
+      if (bySyn) return { beneficiary: bySyn, level: 'syn' };
     }
     if (!contractorName) return null;
     // 2. Unique IBAN match
     if (profileIban) {
       const ibanMatches = beneficiaries.filter(b => b.bankAccount === profileIban);
-      if (ibanMatches.length === 1 && ibanMatches[0].ibanUnique) return ibanMatches[0];
+      if (ibanMatches.length === 1 && ibanMatches[0].ibanUnique) return { beneficiary: ibanMatches[0], level: 'iban' };
     }
     // 3. Short name prefix or contains match (handles "BIMOSOFT AMAR PLJEVLJAK" for contractor "Amar Pljevljak")
     const normName = normBenefName(contractorName);
-    return beneficiaries.find(b => {
+    const byName = beneficiaries.find(b => {
       const sn = normBenefName(b.shortName);
       return sn.startsWith(normName) || sn.includes(normName);
-    }) ?? null;
+    });
+    return byName ? { beneficiary: byName, level: 'name' } : null;
   }
 
   async function importConveraBeneficiaries(file: File) {
@@ -2104,8 +2117,9 @@ const TimesheetSystem = () => {
       const { data: profiles } = await supabase.from('payment_profiles').select('id, user_id, iban, convera_match_override, convera_beneficiary_id');
       const isTestName = (name: string) => { const l = (name || '').toLowerCase(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
       const intuitUserIds = new Set(invoices.filter(inv => paymentMethod(inv).toLowerCase() === 'intuit').map(inv => inv.userId));
-      const unmatched: { profileId: number; userId: string; userName: string }[] = [];
+      const unmatched: { profileId: number; userId: string; userName: string; suggested?: { beneficiaryId: number; level: 'iban' | 'name'; shortName: string; incomingVendorId: string | null } }[] = [];
       let matchedCount = 0;
+      const allForSyn = (profiles || []).map(pp => ({ id: pp.id as number, iban: (pp.iban as string) || '' }));
       for (const profile of profiles || []) {
         if (profile.convera_match_override) continue;
         const user = users.find(u => u.id === profile.user_id);
@@ -2116,11 +2130,25 @@ const TimesheetSystem = () => {
           const stillExists = normBenefs.find(b => b.id === profile.convera_beneficiary_id);
           if (stillExists) { matchedCount++; continue; }
         }
-        const expectedSyn = `SYN-${String(profile.id as number).padStart(4, '0')}`;
+        const expectedSyn = computeSynVendorCode(profile.id as number, (profile.iban as string) || '', allForSyn);
         const match = autoMatchBeneficiary(user.name, profile.iban || '', normBenefs, expectedSyn);
-        if (match) {
-          await supabase.from('payment_profiles').update({ convera_beneficiary_id: match.id }).eq('id', profile.id);
+        if (match?.level === 'syn') {
+          // Deliberate primary match — auto-link.
+          await supabase.from('payment_profiles').update({ convera_beneficiary_id: match.beneficiary.id }).eq('id', profile.id);
           matchedCount++;
+        } else if (match) {
+          // IBAN or name fallback — surface for accountant confirmation before writing FK.
+          // Guards against silent auto-link of shared-IBAN cases where SYN would have been the
+          // definitive signal but Convera returned a different code (collision or manual edit).
+          unmatched.push({
+            profileId: profile.id, userId: profile.user_id, userName: user.name,
+            suggested: {
+              beneficiaryId: match.beneficiary.id,
+              level: match.level,
+              shortName: match.beneficiary.shortName || match.beneficiary.beneficiaryName || '(unnamed)',
+              incomingVendorId: (match.beneficiary.vendorId || '').trim() || null,
+            },
+          });
         } else {
           unmatched.push({ profileId: profile.id, userId: profile.user_id, userName: user.name });
         }
@@ -3933,22 +3961,15 @@ const TimesheetSystem = () => {
       g.distinctIbans = new Set(g.entries.map(e => e.iban)).size;
     }
 
-    // Pre-compute suggested vendor IDs for "no Convera beneficiary linked" skips.
-    // Group by IBAN — two skipped invoices with the same IBAN are almost certainly the
-    // same new beneficiary and should share a vendor code.
-    const maxIdRes = await supabase.from('convera_beneficiaries').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-    let nextSyn = ((maxIdRes.data?.id as number) || 0) + 1;
-    const synByIban = new Map<string, string>();
+    // Suggested vendor code for "no Convera beneficiary linked" skips. Uses the
+    // shared computeSynVendorCode helper so the same profile shows one consistent
+    // SYN code across every surface (Convera Batch export, Payment Profiles
+    // Awaiting-Convera-setup panel, and the beneficiary-import matcher).
     for (const s of skipped) {
       if (s.reason !== 'no Convera beneficiary linked') continue;
-      const groupKey = s.iban || `no-iban:${s.invoice.id}`;   // rows without an IBAN each get their own code
-      let syn = synByIban.get(groupKey);
-      if (!syn) {
-        syn = `SYN-${String(nextSyn).padStart(4, '0')}`;
-        synByIban.set(groupKey, syn);
-        nextSyn++;
-      }
-      s.suggestedVendorId = syn;
+      const liveProfile = findLiveProfile(s.invoice);
+      if (!liveProfile) continue;
+      s.suggestedVendorId = computeSynVendorCode(liveProfile.id, liveProfile.iban, paymentProfiles);
     }
 
     const groupList = [...groups.values()].sort((a, b) =>
@@ -9562,11 +9583,7 @@ const TimesheetSystem = () => {
                           return !!(p.iban && p.swift);
                         });
                         if (awaiting.length === 0) return null;
-                        // Deterministic SYN code: SYN-{payment_profiles.id:04d}. Stable per
-                        // profile — Dan enters this in Convera, next beneficiary import
-                        // matches vendor_id on the way back. Panels shown here and matcher
-                        // in importConveraBeneficiaries use the same formula.
-                        const synFor = (profileId: number): string => `SYN-${String(profileId).padStart(4, '0')}`;
+                        const synFor = (p: PaymentProfile) => computeSynVendorCode(p.id, p.iban, paymentProfiles);
                         return (
                           <div className="mb-5 border border-amber-300 rounded-lg overflow-hidden">
                             <div className="bg-amber-50 px-4 py-2 border-b border-amber-200 text-xs font-semibold text-amber-800 flex items-center justify-between">
@@ -9576,7 +9593,7 @@ const TimesheetSystem = () => {
                             <div className="divide-y divide-amber-100">
                               {awaiting.map(p => {
                                 const owner = users.find(u => u.id === p.userId);
-                                const synCode = synFor(p.id);
+                                const synCode = synFor(p);
                                 const detailLines = [
                                   `Vendor ID: ${synCode}`,
                                   `Full Company Name: ${p.companyName}`,
@@ -9647,12 +9664,26 @@ const TimesheetSystem = () => {
                             <div className="border border-amber-200 rounded-lg divide-y divide-amber-100">
                               {beneficiaryImportResult.unmatched.map(u => (
                                 <div key={u.profileId} className="bg-amber-50">
-                                  <div className="flex items-center justify-between px-3 py-2">
-                                    <span className="text-sm text-gray-700">{u.userName}</span>
-                                    {beneficiaryOverrideProfileId === u.profileId
-                                      ? <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="text-xs text-gray-500 hover:underline">Cancel</button>
-                                      : <button onClick={() => { setBeneficiaryOverrideProfileId(u.profileId); setBeneficiaryOverrideSearch(''); }} className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">Link manually</button>
-                                    }
+                                  <div className="flex items-center justify-between gap-3 px-3 py-2">
+                                    <div className="min-w-0">
+                                      <div className="text-sm text-gray-700">{u.userName}</div>
+                                      {u.suggested && (
+                                        <div className="mt-0.5 text-xs text-amber-800">
+                                          Suggested ({u.suggested.level === 'iban' ? 'IBAN match' : 'name match'}):
+                                          <span className="ml-1 font-mono">{u.suggested.shortName}</span>
+                                          {u.suggested.incomingVendorId && <span className="ml-1 text-amber-600">· vendor {u.suggested.incomingVendorId}</span>}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-2 flex-shrink-0">
+                                      {u.suggested && beneficiaryOverrideProfileId !== u.profileId && (
+                                        <button onClick={() => setConveraOverride(u.profileId, u.suggested!.beneficiaryId)} className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700 font-medium">Confirm link</button>
+                                      )}
+                                      {beneficiaryOverrideProfileId === u.profileId
+                                        ? <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="text-xs text-gray-500 hover:underline">Cancel</button>
+                                        : <button onClick={() => { setBeneficiaryOverrideProfileId(u.profileId); setBeneficiaryOverrideSearch(''); }} className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">{u.suggested ? 'Pick different…' : 'Link manually'}</button>
+                                      }
+                                    </div>
                                   </div>
                                   {beneficiaryOverrideProfileId === u.profileId && (
                                     <div className="px-3 pb-3 border-t border-amber-200 bg-indigo-50">
