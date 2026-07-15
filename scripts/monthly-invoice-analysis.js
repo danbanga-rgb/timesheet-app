@@ -77,7 +77,7 @@ async function main() {
   const liveInvoiceMap = {};
   if (invoiceIds.length > 0) {
     const liveInvoices = await restGet(
-      `invoices?id=in.(${invoiceIds.join(',')})&select=id,total_hours,rate,total_amount,currency,period_start,period_end`
+      `invoices?id=in.(${invoiceIds.join(',')})&select=id,total_hours,rate,total_amount,currency,period_start,period_end,group_key`
     );
     for (const inv of liveInvoices) liveInvoiceMap[inv.id] = inv;
   }
@@ -95,12 +95,16 @@ async function main() {
   const contractors = Object.values(byContractor).sort((a, b) => b.calls.length - a.calls.length);
 
   // Detect anomalies by comparing raw_extracted against live DB values
-  // Only flag if current DB values still look wrong (not if they've been manually corrected)
+  // Only flag if current DB values still look wrong (not if they've been manually corrected).
+  // Skip multi-contractor invoices (group_key set): raw_extracted holds the PDF-level total
+  // while live.total_amount holds the per-contractor split. Comparing them fires false
+  // positives every month (Teal Crossroads produced 6 spurious rows in Jun 2026).
   const anomalies = [];
   for (const log of aiLogs) {
     if (!log.invoice_id || !log.raw_extracted) continue;
     const live = liveInvoiceMap[log.invoice_id];
     if (!live) continue;
+    if (live.group_key) continue;
     const rx = log.raw_extracted;
     // Flag if rate > $120/h and live DB still reflects that (cap heuristic — real rates rarely exceed $120)
     if (live.rate != null && live.rate > 120) {
