@@ -321,6 +321,7 @@ interface Invoice {
   paymentTerms: string | null; // NET15 / NET30 / NET45 / NET60
   qbExportStatus: 'not_exported' | 'exported' | 'confirmed' | 'skipped';
   qbExportStatusAt: string | null;
+  matcherIgnore: boolean;  // pre-2026-04-28 historical invoices — hidden from matchPaymentToInvoice
 }
 
 interface ConveraPaymentRow {
@@ -376,6 +377,7 @@ interface ConveraTransaction {
   notes: string | null;
   // For umbrella payments (many-to-many)
   matchedInvoiceIds?: number[];
+  matcherIgnore: boolean;  // pre-2026-06-20 historical Convera transactions
 }
 
 interface ReminderEmail {
@@ -991,6 +993,7 @@ const TimesheetSystem = () => {
   const [paymentsImportFile, setPaymentsImportFile] = useState<File | null>(null);
   const [paymentsImporting, setPaymentsImporting] = useState(false);
   const [paymentsImportError, setPaymentsImportError] = useState('');
+  const [showHistoricalTxns, setShowHistoricalTxns] = useState(false);
   const [showProcessPreview, setShowProcessPreview] = useState(false);
   // Staged edits (transient — only committed to DB on Process): map txn id → chosen invoice id(s) or 'no_invoice'
   const [stagedMatches, setStagedMatches] = useState<Record<number, number[] | 'no_invoice'>>({});
@@ -1981,6 +1984,7 @@ const TimesheetSystem = () => {
       matchedBy:            (r.matched_by as string) ?? null,
       notes:                (r.notes as string) ?? null,
       matchedInvoiceIds:    umbrellaMap?.[r.id as number],
+      matcherIgnore:        Boolean(r.matcher_ignore),
     };
   }
 
@@ -2257,6 +2261,7 @@ const TimesheetSystem = () => {
       corrected: !!(r.corrected as boolean),
       paymentTerms: (r.payment_terms as string) || null,
       qbExportStatus: ((r.qb_export_status as string) || 'not_exported') as Invoice['qbExportStatus'],
+      matcherIgnore: Boolean(r.matcher_ignore),
       qbExportStatusAt: (r.qb_export_status_at as string) || null,
     };
   }
@@ -2863,6 +2868,7 @@ const TimesheetSystem = () => {
     const inWindow = invs.filter(inv =>
       userIds.has(inv.userId) &&
       inv.paymentProfile !== null &&
+      !inv.matcherIgnore &&
       inv.payOnDate != null &&
       inv.periodStart >= '2026-05-01' &&
       Math.abs(parseYMD(inv.payOnDate) - txMs) / 86400000 <= 7
@@ -2907,10 +2913,14 @@ const TimesheetSystem = () => {
     const matchedBenef = resolveBeneficiary(beneficiary, vendorCode);
 
     // ── Candidate pools ───────────────────────────────────────────────────
-    // isBroadEligible: invoice has a payment_profile snapshot (i.e. was actually submitted
-    //   through the payment flow — not a placeholder). Applies to both pools.
-    // isStrictEligible: additionally requires unpaid + pay_on_date set + period >= 2026-05-01.
+    // isBroadEligible: invoice has a payment_profile snapshot AND is not fenced off as
+    //   historical (matcher_ignore) AND is not already claimed by another transaction.
+    // isStrictEligible: additionally requires unpaid + pay_on_date set + period floor.
     //   Used for amount-only matching where the safeguards matter most.
+    //
+    // matcher_ignore fences off pre-2026-04-28 invoices (Submitted->Paid legacy that
+    // pre-dated the Submitted->Approved->Paid workflow). Those records stay visible on
+    // invoice pages and exports; they're only invisible to the payment matcher.
     //
     // Cross-txn double-attribution guard: an invoice already the matched_invoice_id of
     // ANOTHER convera_transaction is excluded from every pool. Prevents silently attributing
@@ -2918,7 +2928,7 @@ const TimesheetSystem = () => {
     // Process). Idempotent re-imports of the SAME transaction are handled upstream by the
     // dedup path — that never re-enters the matcher.
     const isBroadEligible = (inv: Invoice): boolean =>
-      inv.paymentProfile !== null && !claimed.has(inv.id);
+      inv.paymentProfile !== null && !inv.matcherIgnore && !claimed.has(inv.id);
     const isStrictEligible = (inv: Invoice): boolean =>
       isBroadEligible(inv) &&
       inv.status !== 'paid' &&
@@ -7793,14 +7803,18 @@ const TimesheetSystem = () => {
           })()}
 
           {accountantTab === 'payments' && (() => {
-            // Filter rows by batch + state
+            // Filter rows by batch + state.
+            // matcher_ignore rows are pre-2026-06-20 historical transactions (already
+            // reconciled by pre-launch scripts). Hidden by default; user opts in via toggle.
             let rows = converaTransactions;
+            if (!showHistoricalTxns) rows = rows.filter(t => !t.matcherIgnore);
             if (selectedBatchId !== 'all') rows = rows.filter(t => t.importBatchId === selectedBatchId);
             if (paymentsStateFilter === 'processed') {
               rows = rows.filter(t => t.matchState === 'matched' || t.matchState === 'no_invoice');
             } else if (paymentsStateFilter !== 'all') {
               rows = rows.filter(t => t.matchState === paymentsStateFilter);
             }
+            const historicalCount = converaTransactions.filter(t => t.matcherIgnore).length;
 
             // Candidate invoices for a transaction. Three sources unioned:
             //   1. Beneficiary pool (invoices for the linked contractor)
@@ -7995,8 +8009,10 @@ const TimesheetSystem = () => {
                 {/* Batch selector */}
                 <div className="mb-3 flex flex-wrap gap-1.5 items-center">
                   <span className="text-xs font-semibold text-gray-500 mr-1">Batch:</span>
-                  <button onClick={() => setSelectedBatchId('all')} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedBatchId === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>All ({converaTransactions.length})</button>
-                  {importBatches.map(b => {
+                  <button onClick={() => setSelectedBatchId('all')} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedBatchId === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>All ({showHistoricalTxns ? converaTransactions.length : converaTransactions.filter(t => !t.matcherIgnore).length})</button>
+                  {importBatches
+                    .filter(b => showHistoricalTxns || converaTransactions.some(t => t.importBatchId === b.id && !t.matcherIgnore))
+                    .map(b => {
                     const stateBadge = b.state === 'pending' ? 'bg-yellow-100 text-yellow-700' : b.state === 'processed' ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600';
                     return (
                       <button key={b.id} onClick={() => setSelectedBatchId(b.id)} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors flex items-center gap-1.5 ${selectedBatchId === b.id ? 'ring-2 ring-indigo-400 bg-white' : 'bg-gray-100 hover:bg-gray-200'}`}>
@@ -8007,6 +8023,15 @@ const TimesheetSystem = () => {
                       </button>
                     );
                   })}
+                  {historicalCount > 0 && (
+                    <button
+                      onClick={() => setShowHistoricalTxns(v => !v)}
+                      className={`ml-2 px-2.5 py-1 rounded-full text-xs font-medium transition-colors border ${showHistoricalTxns ? 'bg-gray-700 text-white border-gray-700' : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'}`}
+                      title="Pre-2026-06-20 transactions from the Submitted->Paid legacy workflow; fenced off from the matcher"
+                    >
+                      {showHistoricalTxns ? 'Hide' : 'Show'} historical ({historicalCount})
+                    </button>
+                  )}
                 </div>
 
                 {/* Batch action buttons — only when a specific batch is selected */}
