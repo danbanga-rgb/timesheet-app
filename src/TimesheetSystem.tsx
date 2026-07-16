@@ -994,6 +994,8 @@ const TimesheetSystem = () => {
   const [paymentsImporting, setPaymentsImporting] = useState(false);
   const [paymentsImportError, setPaymentsImportError] = useState('');
   const [showHistoricalTxns, setShowHistoricalTxns] = useState(false);
+  // Per-row toggle: when true, dropdown also shows wider cross-beneficiary matches
+  const [showWiderForTxn, setShowWiderForTxn] = useState<Record<number, boolean>>({});
   const [showProcessPreview, setShowProcessPreview] = useState(false);
   // Staged edits (transient — only committed to DB on Process): map txn id → chosen invoice id(s) or 'no_invoice'
   const [stagedMatches, setStagedMatches] = useState<Record<number, number[] | 'no_invoice'>>({});
@@ -7809,59 +7811,85 @@ const TimesheetSystem = () => {
             let rows = converaTransactions;
             if (!showHistoricalTxns) rows = rows.filter(t => !t.matcherIgnore);
             if (selectedBatchId !== 'all') rows = rows.filter(t => t.importBatchId === selectedBatchId);
+            // Effective state = staged edits applied over DB state; keeps filter pills
+            // consistent with what the row's State column displays.
+            const effStateOf = (t: ConveraTransaction): MatchState => {
+              const staged = stagedMatches[t.id];
+              if (staged === 'no_invoice') return 'no_invoice';
+              if (Array.isArray(staged) && staged.length > 0) return 'matched';
+              return t.matchState;
+            };
             if (paymentsStateFilter === 'processed') {
-              rows = rows.filter(t => t.matchState === 'matched' || t.matchState === 'no_invoice');
+              rows = rows.filter(t => { const s = effStateOf(t); return s === 'matched' || s === 'no_invoice'; });
             } else if (paymentsStateFilter !== 'all') {
-              rows = rows.filter(t => t.matchState === paymentsStateFilter);
+              rows = rows.filter(t => effStateOf(t) === paymentsStateFilter);
             }
             const historicalCount = converaTransactions.filter(t => t.matcherIgnore).length;
 
-            // Candidate invoices for a transaction. Three sources unioned:
-            //   1. Beneficiary pool (invoices for the linked contractor)
-            //   2. Any currently-matched invoice (single or umbrella) — always shown even if not in pool
-            //   3. Wider fallback: any invoice with matching amount AND pay_on_date within ±30 days
-            //      of the transaction — helps when beneficiary FK is missing/unresolved
-            const parseYMDLocal = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
-            const candidatesFor = (t: ConveraTransaction): Invoice[] => {
-              const pool = new Map<number, Invoice>();
+            // Set of invoice IDs already claimed by any convera_transaction — used to
+            // downrank the dropdown so an already-claimed invoice appears last with a
+            // "(already claimed)" badge instead of being offered as a fresh candidate.
+            const claimedByOther = new Set<number>();
+            for (const t of converaTransactions) {
+              if (t.matchedInvoiceId) claimedByOther.add(t.matchedInvoiceId);
+              for (const id of (t.matchedInvoiceIds || [])) claimedByOther.add(id);
+            }
 
-              // 1. Beneficiary pool
+            // Candidate invoices for a transaction. Same-beneficiary is always shown;
+            // "wider" cross-beneficiary matches (same amount, nearby pay_on_date) live
+            // under an opt-in toggle since they're noise for the common case.
+            const parseYMDLocal = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+            const candidatesFor = (t: ConveraTransaction): { same: Invoice[]; wider: Invoice[] } => {
+              const samePool = new Map<number, Invoice>();
+              const widerPool = new Map<number, Invoice>();
+
+              // Same-beneficiary invoices
               if (t.converaBeneficiaryId) {
                 const userIds = new Set(paymentProfiles.filter(p => p.converaBeneficiaryId === t.converaBeneficiaryId).map(p => p.userId));
-                for (const inv of invoices) if (userIds.has(inv.userId)) pool.set(inv.id, inv);
+                for (const inv of invoices) if (userIds.has(inv.userId)) samePool.set(inv.id, inv);
               }
 
-              // 2. Currently matched (never hide these from the dropdown)
+              // Currently matched invoices (own claims) — always in same-pool
               const alreadyMatched = [
                 ...(t.matchedInvoiceId ? [t.matchedInvoiceId] : []),
                 ...(t.matchedInvoiceIds || []),
               ];
               for (const id of alreadyMatched) {
-                if (pool.has(id)) continue;
+                if (samePool.has(id)) continue;
                 const inv = invoices.find(i => i.id === id);
-                if (inv) pool.set(inv.id, inv);
+                if (inv) samePool.set(inv.id, inv);
               }
 
-              // 3. Wider fallback by amount + pay_on_date proximity (±30 days)
+              // Wider fallback: any invoice with matching amount AND pay_on_date within ±30 days
               if (t.dateOfOrder && t.foreignAmount) {
                 const txnMs = parseYMDLocal(t.dateOfOrder);
                 for (const inv of invoices) {
-                  if (pool.has(inv.id)) continue;
+                  if (samePool.has(inv.id)) continue;
                   if (!inv.payOnDate) continue;
                   if (Math.abs(parseYMDLocal(inv.payOnDate) - txnMs) / 86400000 > 30) continue;
                   if (Math.abs(inv.totalAmount - t.foreignAmount) < 0.02) {
-                    pool.set(inv.id, inv);
+                    widerPool.set(inv.id, inv);
                   }
                 }
               }
 
-              // Paid last (rare double-payment case); within each bucket, newest period first.
-              return [...pool.values()].sort((a, b) => {
-                const aPaid = a.status === 'paid' ? 1 : 0;
-                const bPaid = b.status === 'paid' ? 1 : 0;
-                if (aPaid !== bPaid) return aPaid - bPaid;
+              // Sort each bucket: fresh > claimed > paid, then newest period first.
+              const sortFn = (a: Invoice, b: Invoice) => {
+                const aOwn = alreadyMatched.includes(a.id);
+                const bOwn = alreadyMatched.includes(b.id);
+                const aClaimedRank = aOwn ? 0 : (claimedByOther.has(a.id) ? 1 : 0);
+                const bClaimedRank = bOwn ? 0 : (claimedByOther.has(b.id) ? 1 : 0);
+                const aPaidRank = a.status === 'paid' ? 1 : 0;
+                const bPaidRank = b.status === 'paid' ? 1 : 0;
+                if (aClaimedRank !== bClaimedRank) return aClaimedRank - bClaimedRank;
+                if (aPaidRank !== bPaidRank) return aPaidRank - bPaidRank;
                 return b.periodStart.localeCompare(a.periodStart);
-              });
+              };
+
+              return {
+                same: [...samePool.values()].sort(sortFn),
+                wider: [...widerPool.values()].sort(sortFn),
+              };
             };
 
             // Contractor name(s) linked to this beneficiary — informational, shown even when no invoices exist
@@ -7897,8 +7925,10 @@ const TimesheetSystem = () => {
               return (rank(a.matchConfidence) - rank(b.matchConfidence)) * dir;
             });
 
+            // Effective state = staged edits applied over DB state — same rule the row
+            // renderer + filter use so pill counts always match the visible State column.
             const stateCounts = rows.reduce<Record<string, number>>((acc, t) => {
-              acc[t.matchState] = (acc[t.matchState] || 0) + 1;
+              acc[effStateOf(t)] = (acc[effStateOf(t)] || 0) + 1;
               return acc;
             }, {});
 
@@ -8212,12 +8242,35 @@ const TimesheetSystem = () => {
                                 )}
                                 <div className="flex items-center gap-3 relative">
                                   {(() => {
-                                    const availableToAdd = cands.filter(inv => !selectedIds.includes(inv.id));
-                                    if (availableToAdd.length === 0 && selectedIds.length === 0) {
+                                    const sameAvailable  = cands.same.filter(inv => !selectedIds.includes(inv.id));
+                                    const widerAvailable = cands.wider.filter(inv => !selectedIds.includes(inv.id));
+                                    const alreadyMatchedForRow = new Set<number>([
+                                      ...(t.matchedInvoiceId ? [t.matchedInvoiceId] : []),
+                                      ...(t.matchedInvoiceIds || []),
+                                    ]);
+                                    if (sameAvailable.length === 0 && widerAvailable.length === 0 && selectedIds.length === 0) {
                                       if (contractors.length > 0) return <span className="text-xs text-gray-500 italic">Beneficiary → {contractors.join(', ')} (no invoices yet)</span>;
                                       return <span className="text-xs text-gray-500 italic">No candidates — beneficiary unresolved</span>;
                                     }
-                                    if (availableToAdd.length === 0) return null;
+                                    if (sameAvailable.length === 0 && widerAvailable.length === 0) return null;
+                                    const showWider = !!showWiderForTxn[t.id];
+                                    const renderInv = (inv: Invoice, wider = false) => {
+                                      const isClaimed = !alreadyMatchedForRow.has(inv.id) && claimedByOther.has(inv.id);
+                                      const labels: string[] = [inv.status];
+                                      if (isClaimed) labels.push('already claimed');
+                                      return (
+                                        <button
+                                          key={inv.id}
+                                          onClick={() => {
+                                            setStagedMatches(prev => ({ ...prev, [t.id]: [...currentIdsFor(), inv.id] }));
+                                            setAddInvoicePickerFor(null);
+                                          }}
+                                          className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50 ${isClaimed ? 'bg-amber-50' : ''} ${wider ? 'text-gray-500' : ''}`}
+                                        >
+                                          {inv.userName} · {inv.invoiceNumber} · {inv.periodStart.slice(0,7)} · ${inv.totalAmount.toLocaleString()} ({labels.join(' · ')})
+                                        </button>
+                                      );
+                                    };
                                     return (
                                       <>
                                         <button
@@ -8228,18 +8281,27 @@ const TimesheetSystem = () => {
                                         </button>
                                         {addInvoicePickerFor === t.id && (
                                           <div className="absolute left-0 top-6 z-20 bg-white border border-gray-300 rounded shadow-lg max-h-56 overflow-y-auto min-w-[300px]">
-                                            {availableToAdd.map(inv => (
-                                              <button
-                                                key={inv.id}
-                                                onClick={() => {
-                                                  setStagedMatches(prev => ({ ...prev, [t.id]: [...currentIdsFor(), inv.id] }));
-                                                  setAddInvoicePickerFor(null);
-                                                }}
-                                                className="block w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50"
-                                              >
-                                                {inv.userName} · {inv.invoiceNumber} · {inv.periodStart.slice(0,7)} · ${inv.totalAmount.toLocaleString()} ({inv.status})
-                                              </button>
-                                            ))}
+                                            {sameAvailable.map(inv => renderInv(inv))}
+                                            {sameAvailable.length === 0 && !showWider && widerAvailable.length > 0 && (
+                                              <div className="px-3 py-1.5 text-xs italic text-gray-500">No same-beneficiary candidates.</div>
+                                            )}
+                                            {widerAvailable.length > 0 && (
+                                              <>
+                                                {!showWider ? (
+                                                  <button
+                                                    onClick={(e) => { e.stopPropagation(); setShowWiderForTxn(prev => ({ ...prev, [t.id]: true })); }}
+                                                    className="block w-full text-left px-3 py-1.5 text-xs text-indigo-600 hover:bg-indigo-50 border-t border-gray-200"
+                                                  >
+                                                    Show wider matches ({widerAvailable.length})
+                                                  </button>
+                                                ) : (
+                                                  <>
+                                                    <div className="px-3 py-1 text-[10px] uppercase tracking-wider font-semibold text-gray-400 border-t border-gray-200 bg-gray-50">Wider matches (other beneficiaries)</div>
+                                                    {widerAvailable.map(inv => renderInv(inv, true))}
+                                                  </>
+                                                )}
+                                              </>
+                                            )}
                                           </div>
                                         )}
                                       </>
