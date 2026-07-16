@@ -3202,8 +3202,11 @@ const TimesheetSystem = () => {
         const ref1     = iRef1     >= 0 ? String(r[iRef1] ?? '').trim()    || null : null;
         const vendorCode = iVendorId >= 0 ? String(r[iVendorId] ?? '').trim() : '';
 
-        const invMatch   = ref1?.match(/Inv#\s*([A-Za-z0-9][\w\-\/\.]*)/i);
-        const invoiceRef = invMatch?.[1]?.trim() ?? '';
+        // Convera's XLS ref1 comes back verbatim from what we exported (typically an
+        // invoice_number like "INV 1" or "INV 21/2026"). Older rows use the legacy
+        // "Inv# 12345" convention. Both feed matchPaymentToInvoice → normaliseRef which
+        // strips inv/invoice prefixes + non-alphanum, so we can hand ref1 in as-is.
+        const invoiceRef = ref1?.trim() ?? '';
 
         const groupMatch  = dateOfOrder ? matchPaymentGroup(beneficiary, amount, dateOfOrder, vendorCode, freshInvoices, freshProfiles) : null;
         const isUmbrella  = !!groupMatch && groupMatch.length > 1;
@@ -7823,7 +7826,13 @@ const TimesheetSystem = () => {
                 }
               }
 
-              return [...pool.values()].sort((a, b) => b.periodStart.localeCompare(a.periodStart));
+              // Paid last (rare double-payment case); within each bucket, newest period first.
+              return [...pool.values()].sort((a, b) => {
+                const aPaid = a.status === 'paid' ? 1 : 0;
+                const bPaid = b.status === 'paid' ? 1 : 0;
+                if (aPaid !== bPaid) return aPaid - bPaid;
+                return b.periodStart.localeCompare(a.periodStart);
+              });
             };
 
             // Contractor name(s) linked to this beneficiary — informational, shown even when no invoices exist
@@ -8188,7 +8197,7 @@ const TimesheetSystem = () => {
                                                 }}
                                                 className="block w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50"
                                               >
-                                                {inv.userName} · {inv.invoiceNumber} · {inv.periodStart.slice(0,7)} · ${inv.totalAmount.toLocaleString()}{inv.status === 'paid' ? ' (paid)' : ''}
+                                                {inv.userName} · {inv.invoiceNumber} · {inv.periodStart.slice(0,7)} · ${inv.totalAmount.toLocaleString()} ({inv.status})
                                               </button>
                                             ))}
                                           </div>
