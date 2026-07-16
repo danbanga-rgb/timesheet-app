@@ -2830,15 +2830,14 @@ const TimesheetSystem = () => {
     return (s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
-  // Resolve beneficiary: vendor code (SYN-XXXX) first, then name fallback.
+  // Resolve beneficiary: vendor code (SYN-XXXX etc.) first via the stored vendor_id
+  // column, then name fallback. Vendor codes are NOT SYN-{db_id:04d} — Convera assigns
+  // them independently; the number in "SYN-0164" is a Convera counter, not our DB id.
   function resolveBeneficiary(beneficiary: string, vendorCode?: string): ConveraBeneficiary | null {
     if (vendorCode) {
-      const m = vendorCode.match(/^SYN-(\d{4})$/i);
-      if (m) {
-        const id = parseInt(m[1], 10);
-        const byCode = converaBeneficiaries.find(b => b.id === id);
-        if (byCode) return byCode;
-      }
+      const vc = vendorCode.trim().toUpperCase();
+      const byCode = converaBeneficiaries.find(b => (b.vendorId || '').toUpperCase() === vc);
+      if (byCode) return byCode;
     }
     const norm = normaliseBeneficiaryName(beneficiary);
     return norm ? (converaBeneficiaries.find(b =>
@@ -2897,29 +2896,29 @@ const TimesheetSystem = () => {
     vendorCode?: string,
     invoicesOverride?: Invoice[],
     profilesOverride?: PaymentProfile[],
+    claimedInvoiceIds?: Set<number>,  // matched_invoice_id already used by another convera_transaction
   ): { invoice: Invoice; level: number; confidence: MatchConfidence } | null {
     const invs = invoicesOverride ?? invoices;
     const profs = profilesOverride ?? paymentProfiles;
+    const claimed = claimedInvoiceIds ?? new Set<number>();
     const normRef = normaliseRef(invoiceRef);
 
     // Resolve beneficiary: vendor code (SYN-XXXX) first, then name fallback
     const matchedBenef = resolveBeneficiary(beneficiary, vendorCode);
 
-    // ── Two candidate pools ───────────────────────────────────────────────────
-    // Ref-based matches (Level 1-2) are unambiguous — an invoice number match is a unique
-    // identifier and should succeed even for pre-May invoices or already-paid invoices
-    // (reconciling a Convera payment against an already-paid invoice IS the whole point).
+    // ── Candidate pools ───────────────────────────────────────────────────
+    // isBroadEligible: invoice has a payment_profile snapshot (i.e. was actually submitted
+    //   through the payment flow — not a placeholder). Applies to both pools.
+    // isStrictEligible: additionally requires unpaid + pay_on_date set + period >= 2026-05-01.
+    //   Used for amount-only matching where the safeguards matter most.
     //
-    // Amount-only matches (Level 4) are the risky path — that's where the July 9 fiasco
-    // happened. Those get the full safeguard treatment:
-    //   1. Approval guard: invoice must have BOTH payment_profile snapshot AND pay_on_date
-    //   2. Period floor: only May 2026+ invoices
-    //   3. Exclude already-paid invoices
-    //
-    // The approval guard (payment_profile) applies to BOTH pools — an invoice without a
-    // payment profile isn't real enough to match against.
+    // Cross-txn double-attribution guard: an invoice already the matched_invoice_id of
+    // ANOTHER convera_transaction is excluded from every pool. Prevents silently attributing
+    // two payments to one invoice (which would also overwrite the invoice's paid_date on
+    // Process). Idempotent re-imports of the SAME transaction are handled upstream by the
+    // dedup path — that never re-enters the matcher.
     const isBroadEligible = (inv: Invoice): boolean =>
-      inv.paymentProfile !== null;
+      inv.paymentProfile !== null && !claimed.has(inv.id);
     const isStrictEligible = (inv: Invoice): boolean =>
       isBroadEligible(inv) &&
       inv.status !== 'paid' &&
@@ -2970,12 +2969,24 @@ const TimesheetSystem = () => {
     };
 
     if (normRef) {
-      // Ref-based matches (L1-L3) use the BROAD pool; ref is unambiguous, safeguards N/A.
+      // Ref-based matches (L1-L3) use the BROAD pool; ref is the strong signal.
+      // Prefer unpaid within any tie — a paid invoice ref-matching means the underlying
+      // invoice has already been reconciled; another matching payment is either a duplicate
+      // (very rare) or the ref is wrong on the incoming side. Better to leave it unreviewed
+      // for human eyes than to overwrite the invoice's paid_date on Process.
       const byRef = broadPool.filter(inv => normaliseRef(inv.invoiceNumber) === normRef);
+      const preferUnpaid = (arr: Invoice[]) => {
+        const unpaid = arr.filter(inv => inv.status !== 'paid');
+        return unpaid.length > 0 ? unpaid : arr;
+      };
+
       if (byRef.length === 1) return { invoice: byRef[0], level: 1, confidence: 'strong' };
 
       if (byRef.length > 1) {
-        const byRefAmt = byRef.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
+        const byRefUnpaid = preferUnpaid(byRef);
+        if (byRefUnpaid.length === 1) return { invoice: byRefUnpaid[0], level: 1, confidence: 'strong' };
+
+        const byRefAmt = byRefUnpaid.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
         if (byRefAmt.length === 1) return { invoice: byRefAmt[0], level: 2, confidence: 'strong' };
 
         if (byRefAmt.length > 1) {
@@ -3036,12 +3047,16 @@ const TimesheetSystem = () => {
     try {
       // Always fetch fresh invoices + payment_profiles so matching uses current DB state,
       // not React state that could be stale (e.g., after a direct DB fix outside the UI).
-      const [invsRes, profsRes] = await Promise.all([
+      // Also fetch every invoice already claimed as matched_invoice_id by some other
+      // convera_transaction (any state) — the matcher uses this to prevent double-attribution.
+      const [invsRes, profsRes, claimedRes] = await Promise.all([
         supabase.from('invoices').select('*').order('submitted_at', { ascending: false }),
         supabase.from('payment_profiles').select('*'),
+        supabase.from('convera_transactions').select('matched_invoice_id').not('matched_invoice_id', 'is', null),
       ]);
       const freshInvoices: Invoice[] = (invsRes.data || []).map(normaliseInvoice);
       const freshProfiles: PaymentProfile[] = (profsRes.data || []).map(normalisePaymentProfile);
+      const claimedInvoiceIds = new Set<number>((claimedRes.data || []).map((r: { matched_invoice_id: number }) => r.matched_invoice_id));
       // Also push into state so the rest of the UI reflects the latest data
       setInvoices(freshInvoices);
       setPaymentProfiles(freshProfiles);
@@ -3210,7 +3225,7 @@ const TimesheetSystem = () => {
 
         const groupMatch  = dateOfOrder ? matchPaymentGroup(beneficiary, amount, dateOfOrder, vendorCode, freshInvoices, freshProfiles) : null;
         const isUmbrella  = !!groupMatch && groupMatch.length > 1;
-        const m = isUmbrella ? null : matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined, vendorCode, freshInvoices, freshProfiles);
+        const m = isUmbrella ? null : matchPaymentToInvoice(invoiceRef, beneficiary, amount, dateOfOrder || undefined, vendorCode, freshInvoices, freshProfiles, claimedInvoiceIds);
 
         const resolvedBenef = resolveBeneficiary(beneficiary, vendorCode);
 
