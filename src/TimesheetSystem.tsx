@@ -3537,6 +3537,10 @@ const TimesheetSystem = () => {
         invoicesPaid: invoicesToMarkPaid.length,
         batchFullyProcessed,
       });
+      // If the accountant was viewing 'unreviewed' (the default pending workflow),
+      // reset to 'all' — otherwise the pill they were on now has zero rows after
+      // Process and the listing goes blank with no obvious way to recover.
+      if (paymentsStateFilter === 'unreviewed') setPaymentsStateFilter('all');
       await fetchImportBatches();
       await fetchConveraTransactions();
       await fetchInvoices();
