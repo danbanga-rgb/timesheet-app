@@ -2986,24 +2986,41 @@ const TimesheetSystem = () => {
       // invoice has already been reconciled; another matching payment is either a duplicate
       // (very rare) or the ref is wrong on the incoming side. Better to leave it unreviewed
       // for human eyes than to overwrite the invoice's paid_date on Process.
+      //
+      // Date sanity on the ref match: if the payment lands >14 days BEFORE the invoice's
+      // pay_on_date, that's suspicious — Convera does not pay a month early. Downgrade the
+      // confidence to 'weak' so the accountant reviews before Process. Late payments are
+      // common (contractors defer) so we don't gate on the upper side; only guard the
+      // "paid way too early" case which is what caused the historic June 16 -> INV 07
+      // (pay_on_date July 15) mis-match. Invoices with no pay_on_date get a pass.
+      const refPassesDateSanity = (inv: Invoice): boolean => {
+        const d = dateDelta(inv);
+        return d === null || d >= -14;
+      };
+      const refConfidence = (inv: Invoice): MatchConfidence =>
+        refPassesDateSanity(inv) ? 'strong' : 'weak';
+
       const byRef = broadPool.filter(inv => normaliseRef(inv.invoiceNumber) === normRef);
       const preferUnpaid = (arr: Invoice[]) => {
         const unpaid = arr.filter(inv => inv.status !== 'paid');
         return unpaid.length > 0 ? unpaid : arr;
       };
 
-      if (byRef.length === 1) return { invoice: byRef[0], level: 1, confidence: 'strong' };
+      if (byRef.length === 1) return { invoice: byRef[0], level: 1, confidence: refConfidence(byRef[0]) };
 
       if (byRef.length > 1) {
         const byRefUnpaid = preferUnpaid(byRef);
-        if (byRefUnpaid.length === 1) return { invoice: byRefUnpaid[0], level: 1, confidence: 'strong' };
+        if (byRefUnpaid.length === 1) return { invoice: byRefUnpaid[0], level: 1, confidence: refConfidence(byRefUnpaid[0]) };
 
         const byRefAmt = byRefUnpaid.filter(inv => Math.abs(inv.totalAmount - amount) < 0.02);
-        if (byRefAmt.length === 1) return { invoice: byRefAmt[0], level: 2, confidence: 'strong' };
+        if (byRefAmt.length === 1) return { invoice: byRefAmt[0], level: 2, confidence: refConfidence(byRefAmt[0]) };
 
         if (byRefAmt.length > 1) {
           const byRefAmtDate = byRefAmt.filter(withinRefWindow);
-          if (byRefAmtDate.length >= 1) return { invoice: [...byRefAmtDate].sort(closestDate)[0], level: 3, confidence: 'strong' };
+          if (byRefAmtDate.length >= 1) {
+            const pick = [...byRefAmtDate].sort(closestDate)[0];
+            return { invoice: pick, level: 3, confidence: refConfidence(pick) };
+          }
         }
       }
     }
