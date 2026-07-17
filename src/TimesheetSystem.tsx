@@ -878,6 +878,8 @@ const TimesheetSystem = () => {
   };
   type ClientInvoiceModalState = {
     client: (typeof estimationClients)[number];
+    projectName: string;
+    projectCode: string;
     monthLabel: string;
     periodStart: string;
     periodEnd: string;
@@ -6563,6 +6565,25 @@ const TimesheetSystem = () => {
 
             const userById = new Map(users.map(u => [u.id, u]));
 
+            // Group engagements by the contractor's assigned project_id.
+            // Contractor without a project_id → falls back to their client's default project (client_id=engagement's client → look up).
+            const engagementsByProject = new Map<number, typeof estimationEngagements>();
+            const orphanEngagements: typeof estimationEngagements = [];
+            for (const e of estimationEngagements) {
+              const user = userById.get(e.user_id);
+              const pid = user?.projectId;
+              if (pid) {
+                if (!engagementsByProject.has(pid)) engagementsByProject.set(pid, []);
+                engagementsByProject.get(pid)!.push(e);
+              } else {
+                orphanEngagements.push(e);
+              }
+            }
+            // Determine project ordering: active projects sorted by name, only those with engagements.
+            const projectsWithEngagements = projects
+              .filter(p => (engagementsByProject.get(p.id) || []).length > 0)
+              .sort((a, b) => a.name.localeCompare(b.name));
+
             const cellColor = (source: CellSource) => (
               source === 'actual' ? 'bg-green-50 text-green-800'
               : source === 'estimated' ? 'bg-yellow-50 text-yellow-800'
@@ -6635,13 +6656,17 @@ const TimesheetSystem = () => {
                   </div>
                 )}
 
-                {!estimationLoading && !estimationError && estimationClients.length === 0 && (
-                  <div className="text-gray-500 italic">No clients configured yet.</div>
+                {!estimationLoading && !estimationError && projectsWithEngagements.length === 0 && (
+                  <div className="text-gray-500 italic">No projects with engagements yet.</div>
                 )}
 
-                {!estimationLoading && estimationClients.map(client => {
-                  const engs = engagementsByClient.get(client.id) || [];
+                {!estimationLoading && projectsWithEngagements.map(project => {
+                  const engs = engagementsByProject.get(project.id) || [];
                   if (engs.length === 0) return null;
+                  // Resolve the client via the first engagement's client_id — a project's engagements are conventionally under one client
+                  const clientIdForProject = engs[0].client_id;
+                  const client = estimationClients.find(c => c.id === clientIdForProject);
+                  if (!client) return null;
                   let clientTotalHours = 0;
                   let clientTotalAmount = 0;
 
@@ -6687,9 +6712,12 @@ const TimesheetSystem = () => {
                   };
 
                   return (
-                    <div key={client.id} className="mb-6 border border-gray-200 rounded-lg overflow-hidden">
+                    <div key={project.id} className="mb-6 border border-gray-200 rounded-lg overflow-hidden">
                       <div className="bg-indigo-50 px-4 py-2 border-b border-gray-200 flex justify-between items-center">
-                        <div className="font-semibold text-indigo-900">{client.name}</div>
+                        <div>
+                          <div className="font-semibold text-indigo-900">{project.name} <span className="text-indigo-600 font-normal text-sm">· {project.code}</span></div>
+                          <div className="text-xs text-indigo-700">Client: {client.name}</div>
+                        </div>
                         <div className="flex items-center gap-3">
                           <div className="text-xs text-indigo-700">
                             NET {client.payment_terms_days}
@@ -6728,6 +6756,8 @@ const TimesheetSystem = () => {
                                 console.log('[invoice] lines seeded', { count: lines.length, sample: lines[0] });
                                 setInvoiceModal({
                                   client,
+                                  projectName: project.name,
+                                  projectCode: project.code,
                                   monthLabel,
                                   periodStart: perStart,
                                   periodEnd: perEnd,
@@ -10841,24 +10871,24 @@ const TimesheetSystem = () => {
                 <th className="px-2 py-1 text-right">Amount</th>
               </tr>
               <tr className="border-b border-black align-top">
-                <td colSpan={4} className="border-r border-black px-2 py-1">
+                <td colSpan={4} className="border-r border-black px-2 py-2" style={{ fontSize: '12px', fontWeight: 600 }}>
                   Synergie Tech Solutions - CAPITALIZED CareScout IT - Software Engineering Staff Augmentation for development of CareScout Platforms.
                 </td>
-                <td className="border-r border-black px-2 py-1 text-right">{subtotalGross.toLocaleString()}</td>
-                <td className="border-r border-black px-2 py-1 text-right">1.00</td>
-                <td className="px-2 py-1 text-right">{fmt$(subtotalGross)}</td>
+                <td className="border-r border-black px-2 py-2 text-right" style={{ fontSize: '12px' }}>{subtotalGross.toLocaleString()}</td>
+                <td className="border-r border-black px-2 py-2 text-right" style={{ fontSize: '12px' }}>1.00</td>
+                <td className="px-2 py-2 text-right" style={{ fontSize: '12px' }}>{fmt$(subtotalGross)}</td>
               </tr>
             </thead>
             <tbody>
               {S.lines.map(l => (
                 <tr key={l.id} className="border-b border-gray-200">
-                  <td className="border-r border-black px-2 py-1">{l.contractorName} - {l.roleTitle}</td>
-                  <td className="border-r border-black px-2 py-1 text-right">{l.hours}</td>
-                  <td className="border-r border-black px-2 py-1 text-right">${l.rate.toFixed(0)}</td>
-                  <td className="border-r border-black px-2 py-1 text-right">{fmt$(l.amount)}</td>
-                  <td className="border-r border-black px-2 py-1"></td>
-                  <td className="border-r border-black px-2 py-1"></td>
-                  <td className="px-2 py-1"></td>
+                  <td className="border-r border-black px-2 py-0.5" style={{ paddingLeft: '24px', fontSize: '10px' }}>{l.contractorName} - {l.roleTitle}</td>
+                  <td className="border-r border-black px-2 py-0.5 text-right" style={{ fontSize: '10px' }}>{l.hours}</td>
+                  <td className="border-r border-black px-2 py-0.5 text-right" style={{ fontSize: '10px' }}>${l.rate.toFixed(0)}</td>
+                  <td className="border-r border-black px-2 py-0.5 text-right" style={{ fontSize: '10px' }}>{fmt$(l.amount)}</td>
+                  <td className="border-r border-black px-2 py-0.5"></td>
+                  <td className="border-r border-black px-2 py-0.5"></td>
+                  <td className="px-2 py-0.5"></td>
                 </tr>
               ))}
               <tr className="border-t border-black font-semibold">
@@ -10926,7 +10956,10 @@ const TimesheetSystem = () => {
               <div className="invoice-modal-shell bg-white rounded-lg shadow-xl w-full max-w-5xl my-8" onClick={e => e.stopPropagation()}>
                 {/* Header */}
                 <div className="p-4 border-b flex justify-between items-center no-print">
-                  <h2 className="text-lg font-bold">{S.client.name} Invoice — {S.monthLabel}</h2>
+                  <div>
+                    <h2 className="text-lg font-bold">{S.client.name} Invoice — {S.monthLabel}</h2>
+                    <p className="text-xs text-gray-500">Project: {S.projectName} · {S.projectCode}</p>
+                  </div>
                   <div className="flex gap-2">
                     <button onClick={handlePrint} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm">
                       <Printer className="w-4 h-4" /> Print / Save PDF
