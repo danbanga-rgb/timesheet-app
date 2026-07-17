@@ -379,20 +379,19 @@ function buildDigestChart(
     return `${swatch}<text x="${x + 14}" y="${legendY + 1}" font-size="10" fill="#374151">${it.label}</text>`;
   }).join('');
 
+  const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="Arial,sans-serif">${yTicks.join('')}${bars.join('')}${halo1}${line1}${dots1}${halo2}${line2}${dots2}${xLabels.join('')}${pctTicks.join('')}${dayTicks.join('')}${legend}</svg>`;
+
+  // Base64-encode UTF-8 bytes so the img src round-trips through any mail sanitizer.
+  const utf8 = new TextEncoder().encode(svgMarkup);
+  let binary = '';
+  for (let i = 0; i < utf8.length; i++) binary += String.fromCharCode(utf8[i]);
+  const dataUri = `data:image/svg+xml;base64,${btoa(binary)}`;
+
   return `
     <div style="margin-bottom:20px">
       <h3 style="margin:0 0 6px;color:#374151;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Submission Trend — last ${active.length} weeks</h3>
       <div style="background:white;border:1px solid #e5e7eb;border-radius:6px;padding:8px">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block">
-          ${yTicks.join('')}
-          ${bars.join('')}
-          ${halo1}${line1}${dots1}
-          ${halo2}${line2}${dots2}
-          ${xLabels.join('')}
-          ${pctTicks.join('')}
-          ${dayTicks.join('')}
-          ${legend}
-        </svg>
+        <img src="${dataUri}" alt="Submission trend — last ${active.length} weeks" width="${W}" style="max-width:100%;height:auto;display:block"/>
       </div>
       <p style="margin:4px 0 0;font-size:11px;color:#9ca3af">Stacked bars = channel mix · green line = ≤1d % (target ↑, right axis) · red line = avg days late (target ↓, right axis) · ● = in progress</p>
     </div>`;
