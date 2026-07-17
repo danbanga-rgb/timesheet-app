@@ -829,7 +829,17 @@ const TimesheetSystem = () => {
     d.setDate(1); d.setMonth(d.getMonth() - 1);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   });
-  const [estimationClients, setEstimationClients] = useState<Array<{id:number,name:string,payment_terms_days:number,retention_credit_pct:number}>>([]);
+  const [estimationClients, setEstimationClients] = useState<Array<{
+    id: number; name: string; payment_terms_days: number; retention_credit_pct: number;
+    bill_to_name: string | null; bill_to_attn: string | null;
+    address_line1: string | null; address_line2: string | null;
+    city: string | null; state: string | null; zip: string | null;
+    po_number: string | null; sales_tax_rate: number | null;
+    invoice_format_type: string | null;
+    show_investment_credit_running_total: boolean | null;
+    retention_per_hour: number | null;
+    investment_credit_running: number | null;
+  }>>([]);
   const [estimationEngagements, setEstimationEngagements] = useState<Array<{id:number,client_id:number,user_id:string,role_title:string,sow_reference:string|null,bill_rate:number}>>([]);
   const [estimationLoading, setEstimationLoading] = useState(false);
   const [estimationError, setEstimationError] = useState<string | null>(null);
@@ -840,6 +850,43 @@ const TimesheetSystem = () => {
     diffs: Array<{ engagementId: number; contractorName: string; weekLabel: string; weekStart: string; currentHours: number; newHours: number }>;
   } | null>(null);
   const [estimationImportApplying, setEstimationImportApplying] = useState(false);
+
+  // ─── Client Invoice modal (Phase 1: transient, print-only, no DB persist) ───
+  type ClientInvoiceLine = {
+    id: string;
+    engagementId: number | null;
+    contractorName: string;
+    roleTitle: string;
+    sowCode: string;
+    hours: number;
+    rate: number;
+    amount: number;
+    amountOverridden: boolean;
+    periodStart: string;
+    periodEnd: string;
+  };
+  type ClientInvoiceMeta = {
+    invoiceNumber: string;
+    invoiceDate: string;
+    dueDate: string;
+    poNumber: string;
+    billToName: string;
+    billToAttn: string;
+    addressLines: string[];
+    memo: string;
+  };
+  type ClientInvoiceModalState = {
+    client: (typeof estimationClients)[number];
+    monthLabel: string;
+    periodStart: string;
+    periodEnd: string;
+    meta: ClientInvoiceMeta;
+    lines: ClientInvoiceLine[];
+    retentionPerHour: number;
+    investmentCreditPrior: number;
+    salesTaxRate: number;
+  };
+  const [invoiceModal, setInvoiceModal] = useState<ClientInvoiceModalState | null>(null);
   const [profileTabSearch, setProfileTabSearch] = useState('');
   const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'|'no-qb-vendor'>('all');
   const [profileTabExcludeTest, setProfileTabExcludeTest] = useState(true);
@@ -1154,7 +1201,7 @@ const TimesheetSystem = () => {
         const firstMonday = walker0.toISOString().slice(0, 10);
 
         const [cRes, eRes, oRes] = await Promise.all([
-          supabase.from('clients').select('id,name,payment_terms_days,retention_credit_pct').order('name'),
+          supabase.from('clients').select('id,name,payment_terms_days,retention_credit_pct,bill_to_name,bill_to_attn,address_line1,address_line2,city,state,zip,po_number,sales_tax_rate,invoice_format_type,show_investment_credit_running_total,retention_per_hour,investment_credit_running').order('name'),
           supabase.from('client_engagements').select('id,client_id,user_id,role_title,sow_reference,bill_rate'),
           supabase.from('hour_overrides').select('engagement_id,week_start,hours_override')
             .gte('week_start', firstMonday).lte('week_start', mEnd),
@@ -6650,6 +6697,60 @@ const TimesheetSystem = () => {
                           </div>
                           <button
                             onClick={() => {
+                              // Seed the invoice modal from computed estimation rows for this client
+                              const invDate = new Date().toISOString().slice(0, 10);
+                              const terms = client.payment_terms_days || 30;
+                              const due = new Date(); due.setDate(due.getDate() + terms);
+                              const dueStr = due.toISOString().slice(0, 10);
+                              const addr = [client.address_line1, client.address_line2, [client.city, client.state, client.zip].filter(Boolean).join(', ')].filter((s): s is string => !!s && s.length > 0);
+                              const perStart = `${estimationMonth}-01`;
+                              const [ey, em] = estimationMonth.split('-').map(Number);
+                              const perEnd = new Date(Date.UTC(ey, em, 0)).toISOString().slice(0, 10);
+                              const lines: ClientInvoiceLine[] = rowsWithTotals.map(({ eng, profile, weekTotals, totalH }) => {
+                                const rate = Number(eng.bill_rate);
+                                const hoursActual = weekTotals.reduce((a, b) => a + b.hours, 0);
+                                return {
+                                  id: `eng-${eng.id}`,
+                                  engagementId: eng.id,
+                                  contractorName: profile!.name,
+                                  roleTitle: eng.role_title || '',
+                                  sowCode: eng.sow_reference || '',
+                                  hours: Math.round(hoursActual * 100) / 100,
+                                  rate,
+                                  amount: Math.round(totalH * rate * 100) / 100,
+                                  amountOverridden: false,
+                                  periodStart: perStart,
+                                  periodEnd: perEnd,
+                                };
+                              });
+                              setInvoiceModal({
+                                client,
+                                monthLabel,
+                                periodStart: perStart,
+                                periodEnd: perEnd,
+                                meta: {
+                                  invoiceNumber: '',
+                                  invoiceDate: invDate,
+                                  dueDate: dueStr,
+                                  poNumber: client.po_number || '',
+                                  billToName: client.bill_to_name || client.name,
+                                  billToAttn: client.bill_to_attn || '',
+                                  addressLines: addr,
+                                  memo: '',
+                                },
+                                lines,
+                                retentionPerHour: Number(client.retention_per_hour || 0),
+                                investmentCreditPrior: Number(client.investment_credit_running || 0),
+                                salesTaxRate: Number(client.sales_tax_rate || 0),
+                              });
+                            }}
+                            className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-indigo-600 text-white hover:bg-indigo-700"
+                            title="Open a printable invoice for this client and month"
+                          >
+                            <FileText className="w-3 h-3" /> Generate Invoice
+                          </button>
+                          <button
+                            onClick={() => {
                               const wb = XLSX.utils.book_new();
                               const rows = [
                                 ['Client', client.name],
@@ -11778,6 +11879,395 @@ const TimesheetSystem = () => {
           </div>
         )}
       </div>
+
+      {/* ─── Client Invoice modal (Phase 1: transient, print-only) ────────── */}
+      {invoiceModal && (() => {
+        const S = invoiceModal;
+        const setS = (updater: (prev: ClientInvoiceModalState) => ClientInvoiceModalState) =>
+          setInvoiceModal(prev => prev ? updater(prev) : prev);
+
+        const subtotalGross    = S.lines.reduce((a, l) => a + l.amount, 0);
+        const totalHours       = S.lines.reduce((a, l) => a + l.hours, 0);
+        const retentionAmount  = Math.round((S.retentionPerHour * totalHours) * 100) / 100;
+        const netBeforeTax     = subtotalGross - retentionAmount;
+        const salesTax         = Math.round(netBeforeTax * (S.salesTaxRate / 100) * 100) / 100;
+        const total            = netBeforeTax + salesTax;
+        const runningTotal     = S.investmentCreditPrior + retentionAmount;
+        const isGenworth       = S.client.invoice_format_type === 'genworth';
+        const isAETv           = S.client.invoice_format_type === 'ae_tv';
+        const format           = S.client.invoice_format_type || 'apfm';
+        const fmt$             = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const fmtDate          = (iso: string) => { if (!iso) return ''; const [y, m, d] = iso.split('-'); return `${Number(m)}/${Number(d)}/${y}`; };
+
+        const updateLine = (id: string, patch: Partial<ClientInvoiceLine>) => setS(p => ({
+          ...p,
+          lines: p.lines.map(l => {
+            if (l.id !== id) return l;
+            const next = { ...l, ...patch };
+            if (('hours' in patch || 'rate' in patch) && !next.amountOverridden) {
+              next.amount = Math.round(next.hours * next.rate * 100) / 100;
+            }
+            return next;
+          }),
+        }));
+        const deleteLine = (id: string) => setS(p => ({ ...p, lines: p.lines.filter(l => l.id !== id) }));
+        const addLine = () => setS(p => ({
+          ...p,
+          lines: [...p.lines, {
+            id: `new-${Date.now()}`,
+            engagementId: null,
+            contractorName: '', roleTitle: '', sowCode: '',
+            hours: 0, rate: 0, amount: 0, amountOverridden: false,
+            periodStart: p.periodStart, periodEnd: p.periodEnd,
+          }],
+        }));
+        const moveLine = (id: string, dir: -1 | 1) => setS(p => {
+          const i = p.lines.findIndex(l => l.id === id);
+          if (i < 0) return p;
+          const j = i + dir;
+          if (j < 0 || j >= p.lines.length) return p;
+          const next = [...p.lines];
+          [next[i], next[j]] = [next[j], next[i]];
+          return { ...p, lines: next };
+        });
+
+        const handlePrint = async () => {
+          // For Genworth: bump investment_credit_running BEFORE print so the printed footer sticks.
+          if (isGenworth && retentionAmount > 0) {
+            const newRunning = S.investmentCreditPrior + retentionAmount;
+            const { error: upErr } = await supabase.from('clients').update({ investment_credit_running: newRunning }).eq('id', S.client.id);
+            if (upErr) {
+              alert(`Failed to update Investment Credit running total: ${upErr.message}\nPrint aborted.`);
+              return;
+            }
+            setEstimationClients(cs => cs.map(c => c.id === S.client.id ? { ...c, investment_credit_running: newRunning } : c));
+          }
+          setTimeout(() => window.print(), 100);
+        };
+
+        // ─── Shared invoice header block (Synergie block + Bill To + Meta) ──
+        const InvoiceHeader = (
+          <div className="flex justify-between items-start mb-6">
+            <div className="text-sm leading-tight">
+              <div className="font-bold text-base">SYNERGIE TECH SOLUTIONS, LLC</div>
+              <div>11750 Dublin Blvd,</div>
+              <div>Suite 207</div>
+              <div>Dublin CA 94568</div>
+            </div>
+            <div className="text-right">
+              <div className="text-3xl font-bold tracking-wide">Invoice</div>
+              <table className="mt-2 border border-black text-xs">
+                <thead>
+                  <tr className="border-b border-black"><th className="px-4 py-1 border-r border-black">Date</th><th className="px-4 py-1">Invoice #</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td className="px-4 py-1 border-r border-black text-center">{fmtDate(S.meta.invoiceDate)}</td><td className="px-4 py-1 text-center">{S.meta.invoiceNumber || '(none)'}</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+
+        const BillToBlock = (
+          <div className="border border-black mb-6" style={{ width: '55%' }}>
+            <div className="border-b border-black px-2 py-0.5 text-xs">Bill To</div>
+            <div className="px-2 py-1 text-sm leading-tight min-h-[80px]">
+              <div className="font-semibold">{S.meta.billToName}</div>
+              {isAETv && S.meta.billToAttn && <div>Attn: {S.meta.billToAttn}</div>}
+              {S.meta.addressLines.map((line, i) => <div key={i}>{line}</div>)}
+            </div>
+          </div>
+        );
+
+        const MetaBlock = (
+          <table className="border border-black text-xs mb-4" style={{ marginLeft: 'auto' }}>
+            <thead>
+              <tr className="border-b border-black">
+                <th className="px-4 py-1 border-r border-black">P.O. No.</th>
+                <th className="px-4 py-1">Terms</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td className="px-4 py-1 border-r border-black text-center">{S.meta.poNumber || ''}</td>
+                <td className="px-4 py-1 text-center">Net {S.client.payment_terms_days}</td>
+              </tr>
+            </tbody>
+          </table>
+        );
+
+        // ─── Format-specific line tables ──
+        const ApfmTable = (
+          <table className="w-full text-xs border-collapse border border-black mb-4">
+            <thead>
+              <tr className="border-b border-black">
+                <th className="border-r border-black px-2 py-1 text-left">Item</th>
+                <th className="border-r border-black px-2 py-1 text-left">Description</th>
+                <th className="border-r border-black px-2 py-1 text-right">Hours/Qty</th>
+                <th className="border-r border-black px-2 py-1 text-right">Rate</th>
+                <th className="border-r border-black px-2 py-1 text-left">Category</th>
+                <th className="px-2 py-1 text-right">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {S.lines.map(l => (
+                <tr key={l.id} className="border-b border-gray-300 align-top">
+                  <td className="border-r border-black px-2 py-1">SW_Dev</td>
+                  <td className="border-r border-black px-2 py-1">
+                    <div>Software Development Services -</div>
+                    <div>"{l.roleTitle}"</div>
+                    <div>Consultant Name: {l.contractorName}</div>
+                    <div>Period - {fmtDate(l.periodStart)} through {fmtDate(l.periodEnd)}</div>
+                    {l.sowCode && <div>{l.sowCode}</div>}
+                  </td>
+                  <td className="border-r border-black px-2 py-1 text-right">{l.hours}</td>
+                  <td className="border-r border-black px-2 py-1 text-right">${l.rate.toFixed(2)}</td>
+                  <td className="border-r border-black px-2 py-1">SW_Dev</td>
+                  <td className="px-2 py-1 text-right">{fmt$(l.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        );
+
+        const AETvTable = (
+          <table className="w-full text-xs border-collapse border border-black mb-4">
+            <thead>
+              <tr className="border-b border-black">
+                <th className="border-r border-black px-2 py-1 text-left">Description</th>
+                <th className="border-r border-black px-2 py-1 text-right">Hours</th>
+                <th className="border-r border-black px-2 py-1 text-right">Rate</th>
+                <th className="px-2 py-1 text-right">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {S.lines.map(l => (
+                <tr key={l.id} className="border-b border-gray-300 align-top">
+                  <td className="border-r border-black px-2 py-1">
+                    <span className="font-semibold">{l.contractorName}</span> — {l.roleTitle}
+                    {l.sowCode && <span className="text-gray-600"> · {l.sowCode}</span>}
+                    <div className="text-xs text-gray-600">Period {fmtDate(l.periodStart)} – {fmtDate(l.periodEnd)}</div>
+                  </td>
+                  <td className="border-r border-black px-2 py-1 text-right">{l.hours}</td>
+                  <td className="border-r border-black px-2 py-1 text-right">${l.rate.toFixed(2)}</td>
+                  <td className="px-2 py-1 text-right">{fmt$(l.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        );
+
+        const GenworthTable = (
+          <table className="w-full text-xs border-collapse border border-black mb-4">
+            <thead>
+              <tr className="border-b border-black">
+                <th className="border-r border-black px-2 py-1 text-left">Description</th>
+                <th className="border-r border-black px-2 py-1 text-right">Hours</th>
+                <th className="border-r border-black px-2 py-1 text-right">Rate</th>
+                <th className="border-r border-black px-2 py-1 text-right">Total</th>
+                <th className="border-r border-black px-2 py-1 text-right">Qty</th>
+                <th className="border-r border-black px-2 py-1 text-right">Unit Price</th>
+                <th className="px-2 py-1 text-right">Amount</th>
+              </tr>
+              <tr className="border-b border-black align-top">
+                <td colSpan={4} className="border-r border-black px-2 py-1">
+                  Synergie Tech Solutions - CAPITALIZED CareScout IT - Software Engineering Staff Augmentation for development of CareScout Platforms.
+                </td>
+                <td className="border-r border-black px-2 py-1 text-right">{subtotalGross.toLocaleString()}</td>
+                <td className="border-r border-black px-2 py-1 text-right">1.00</td>
+                <td className="px-2 py-1 text-right">{fmt$(subtotalGross)}</td>
+              </tr>
+            </thead>
+            <tbody>
+              {S.lines.map(l => (
+                <tr key={l.id} className="border-b border-gray-200">
+                  <td className="border-r border-black px-2 py-1">{l.contractorName} - {l.roleTitle}</td>
+                  <td className="border-r border-black px-2 py-1 text-right">{l.hours}</td>
+                  <td className="border-r border-black px-2 py-1 text-right">${l.rate.toFixed(0)}</td>
+                  <td className="border-r border-black px-2 py-1 text-right">{fmt$(l.amount)}</td>
+                  <td className="border-r border-black px-2 py-1"></td>
+                  <td className="border-r border-black px-2 py-1"></td>
+                  <td className="px-2 py-1"></td>
+                </tr>
+              ))}
+              <tr className="border-t border-black font-semibold">
+                <td className="border-r border-black px-2 py-1 text-right">Totals</td>
+                <td className="border-r border-black px-2 py-1 text-right">{totalHours}</td>
+                <td className="border-r border-black px-2 py-1"></td>
+                <td className="border-r border-black px-2 py-1 text-right">{fmt$(subtotalGross)}</td>
+                <td className="border-r border-black px-2 py-1"></td>
+                <td className="border-r border-black px-2 py-1"></td>
+                <td className="px-2 py-1"></td>
+              </tr>
+              {retentionAmount > 0 && (
+                <tr className="border-t border-black">
+                  <td className="border-r border-black px-2 py-1">Retention Investment Credit*</td>
+                  <td className="border-r border-black px-2 py-1"></td>
+                  <td className="border-r border-black px-2 py-1"></td>
+                  <td className="border-r border-black px-2 py-1"></td>
+                  <td className="border-r border-black px-2 py-1 text-right">{retentionAmount.toLocaleString()}</td>
+                  <td className="border-r border-black px-2 py-1 text-right">-1.00</td>
+                  <td className="px-2 py-1 text-right">-{fmt$(retentionAmount)}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        );
+
+        const TotalsBox = (
+          <table className="text-sm ml-auto border border-black" style={{ minWidth: 300 }}>
+            <tbody>
+              <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Subtotal</td><td className="px-3 py-1 text-right">{fmt$(netBeforeTax)}</td></tr>
+              <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Sales Tax ({S.salesTaxRate}%)</td><td className="px-3 py-1 text-right">{fmt$(salesTax)}</td></tr>
+              <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Total</td><td className="px-3 py-1 text-right">{fmt$(total)}</td></tr>
+              {isGenworth && (
+                <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Retention Investment Credit*</td><td className="px-3 py-1 text-right">$0.00</td></tr>
+              )}
+              <tr><td className="px-3 py-1 font-bold text-base">Balance Due</td><td className="px-3 py-1 text-right font-bold text-base">{fmt$(total)}</td></tr>
+            </tbody>
+          </table>
+        );
+
+        const RunningFooter = isGenworth && S.client.show_investment_credit_running_total ? (
+          <div className="text-sm mt-4 border-t border-black pt-2">
+            Total Synergie Investment Credit (including this invoice): <span className="font-semibold">{fmt$(runningTotal)}</span>
+          </div>
+        ) : null;
+
+        return (
+          <>
+            {/* Print styles: hide everything except the invoice-print-root when printing */}
+            <style>{`
+              @media print {
+                body { background: white !important; }
+                body * { visibility: hidden; }
+                .invoice-print-root, .invoice-print-root * { visibility: visible; }
+                .invoice-print-root { position: absolute; left: 0; top: 0; width: 100%; padding: 0.5in; background: white; }
+                .no-print, .no-print * { display: none !important; }
+                .invoice-modal-shell { position: static !important; background: white !important; padding: 0 !important; max-width: none !important; }
+              }
+            `}</style>
+
+            <div
+              className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-start justify-center p-4 overflow-y-auto no-print"
+              onClick={() => setInvoiceModal(null)}
+            >
+              <div className="invoice-modal-shell bg-white rounded-lg shadow-xl w-full max-w-5xl my-8" onClick={e => e.stopPropagation()}>
+                {/* Header */}
+                <div className="p-4 border-b flex justify-between items-center no-print">
+                  <h2 className="text-lg font-bold">{S.client.name} Invoice — {S.monthLabel}</h2>
+                  <div className="flex gap-2">
+                    <button onClick={handlePrint} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm">
+                      <Printer className="w-4 h-4" /> Print / Save PDF
+                    </button>
+                    <button onClick={() => setInvoiceModal(null)} className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 text-sm">Close</button>
+                  </div>
+                </div>
+
+                {/* Meta form */}
+                <div className="p-4 bg-gray-50 border-b no-print">
+                  <div className="grid grid-cols-4 gap-3 text-sm">
+                    <div><label className="block text-xs font-semibold mb-1">Invoice #</label><input value={S.meta.invoiceNumber} onChange={e => setS(p => ({...p, meta: {...p.meta, invoiceNumber: e.target.value}}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                    <div><label className="block text-xs font-semibold mb-1">Date</label><input type="date" value={S.meta.invoiceDate} onChange={e => setS(p => ({...p, meta: {...p.meta, invoiceDate: e.target.value}}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                    <div><label className="block text-xs font-semibold mb-1">Due Date</label><input type="date" value={S.meta.dueDate} onChange={e => setS(p => ({...p, meta: {...p.meta, dueDate: e.target.value}}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                    <div><label className="block text-xs font-semibold mb-1">P.O. Number</label><input value={S.meta.poNumber} onChange={e => setS(p => ({...p, meta: {...p.meta, poNumber: e.target.value}}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-sm mt-3">
+                    <div><label className="block text-xs font-semibold mb-1">Bill To Name</label><input value={S.meta.billToName} onChange={e => setS(p => ({...p, meta: {...p.meta, billToName: e.target.value}}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                    {isAETv && (
+                      <div><label className="block text-xs font-semibold mb-1">Attn</label><input value={S.meta.billToAttn} onChange={e => setS(p => ({...p, meta: {...p.meta, billToAttn: e.target.value}}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                    )}
+                  </div>
+                  {isGenworth && (
+                    <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                      <div><label className="block text-xs font-semibold mb-1">Retention $ / hour</label><input type="number" step="0.01" value={S.retentionPerHour} onChange={e => setS(p => ({...p, retentionPerHour: Number(e.target.value)}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                      <div><label className="block text-xs font-semibold mb-1">Investment Credit — Prior (before this invoice)</label><input type="number" step="0.01" value={S.investmentCreditPrior} onChange={e => setS(p => ({...p, investmentCreditPrior: Number(e.target.value)}))} className="w-full px-2 py-1 border border-gray-300 rounded" /></div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Line editor */}
+                <div className="p-4 no-print">
+                  <div className="text-xs font-semibold text-gray-500 mb-2">LINE ITEMS — edit inline; amount auto-computes from hours × rate</div>
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-gray-100">
+                        <th className="p-1 text-left w-8"></th>
+                        <th className="p-1 text-left">Contractor</th>
+                        <th className="p-1 text-left">Role</th>
+                        <th className="p-1 text-left">SOW</th>
+                        <th className="p-1 text-right w-20">Hours</th>
+                        <th className="p-1 text-right w-20">Rate</th>
+                        <th className="p-1 text-right w-28">Amount</th>
+                        <th className="p-1 w-8"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {S.lines.map((l, i) => (
+                        <tr key={l.id} className="border-b border-gray-200">
+                          <td className="p-1">
+                            <button onClick={() => moveLine(l.id, -1)} disabled={i === 0} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 text-xs">↑</button>
+                            <button onClick={() => moveLine(l.id, 1)} disabled={i === S.lines.length - 1} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 text-xs ml-0.5">↓</button>
+                          </td>
+                          <td className="p-1"><input value={l.contractorName} onChange={e => updateLine(l.id, {contractorName: e.target.value})} className="w-full px-1 py-0.5 border border-transparent focus:border-indigo-400 rounded" /></td>
+                          <td className="p-1"><input value={l.roleTitle} onChange={e => updateLine(l.id, {roleTitle: e.target.value})} className="w-full px-1 py-0.5 border border-transparent focus:border-indigo-400 rounded" /></td>
+                          <td className="p-1"><input value={l.sowCode} onChange={e => updateLine(l.id, {sowCode: e.target.value})} className="w-full px-1 py-0.5 border border-transparent focus:border-indigo-400 rounded" /></td>
+                          <td className="p-1 text-right"><input type="number" step="0.01" value={l.hours} onChange={e => updateLine(l.id, {hours: Number(e.target.value)})} className="w-full px-1 py-0.5 border border-transparent focus:border-indigo-400 rounded text-right" /></td>
+                          <td className="p-1 text-right"><input type="number" step="0.01" value={l.rate} onChange={e => updateLine(l.id, {rate: Number(e.target.value)})} className="w-full px-1 py-0.5 border border-transparent focus:border-indigo-400 rounded text-right" /></td>
+                          <td className={`p-1 text-right ${l.amountOverridden ? 'bg-yellow-50' : ''}`}>
+                            <div className="flex items-center gap-1 justify-end">
+                              <input type="number" step="0.01" value={l.amount} onChange={e => updateLine(l.id, {amount: Number(e.target.value), amountOverridden: true})} className="w-20 px-1 py-0.5 border border-transparent focus:border-indigo-400 rounded text-right" />
+                              {l.amountOverridden && (
+                                <button
+                                  onClick={() => updateLine(l.id, {amount: Math.round(l.hours * l.rate * 100) / 100, amountOverridden: false})}
+                                  title="Reset to hours × rate"
+                                  className="text-indigo-600 hover:text-indigo-800 text-xs"
+                                >↩</button>
+                              )}
+                            </div>
+                          </td>
+                          <td className="p-1 text-center"><button onClick={() => deleteLine(l.id)} className="text-red-500 hover:text-red-700"><Trash2 className="w-3 h-3 inline" /></button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="flex justify-between items-center mt-2">
+                    <button onClick={addLine} className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800"><Plus className="w-3 h-3" /> Add line</button>
+                    <div className="text-xs text-gray-600">
+                      {S.lines.length} lines · {totalHours}h · Gross {fmt$(subtotalGross)}
+                      {isGenworth && retentionAmount > 0 && <> · Retention <span className="text-red-600">-{fmt$(retentionAmount)}</span></>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Printable render */}
+                <div className="invoice-print-root p-8 text-black" style={{ fontFamily: '"Times New Roman", "Liberation Serif", serif', fontSize: '11px' }}>
+                  {InvoiceHeader}
+                  <div className="flex justify-between items-start gap-4">
+                    {BillToBlock}
+                    {MetaBlock}
+                  </div>
+                  {format === 'apfm' && ApfmTable}
+                  {format === 'ae_tv' && AETvTable}
+                  {format === 'genworth' && GenworthTable}
+                  <div className="flex justify-between items-start gap-4 mt-4">
+                    <div className="text-xs" style={{ minWidth: '40%' }}>
+                      {RunningFooter}
+                      {S.meta.memo && <div className="mt-3 text-xs whitespace-pre-line">{S.meta.memo}</div>}
+                      <div className="mt-6 text-xs">
+                        <div className="font-semibold">ACH Remittance Information:</div>
+                        <div>Bank Routing Number: 321180515</div>
+                        <div>Account Number: 527878220</div>
+                      </div>
+                    </div>
+                    {TotalsBox}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        );
+      })()}
 
     </div>
   );
