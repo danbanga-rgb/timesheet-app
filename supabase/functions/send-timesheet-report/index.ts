@@ -139,7 +139,7 @@ function buildTimingSection(
   channelMap: Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>,
   currentWeekForTimeliness: string | null = null,
 ): string {
-  const timingWeeks = completedWeeks.slice(-6);
+  const timingWeeks = completedWeeks.slice(-8);
   if (currentWeekForTimeliness && !timingWeeks.includes(currentWeekForTimeliness)) {
     timingWeeks.push(currentWeekForTimeliness);
   }
@@ -152,9 +152,9 @@ function buildTimingSection(
     profileEndDate.set(p.id, p.end_date ?? '');
   }
 
-  type WeekStat = { total: number; eligible: number; portal: number; direct: number; forwarded: number; autoYes: number; within1d: number; within3d: number; sumDays: number };
+  type WeekStat = { total: number; eligible: number; portal: number; direct: number; forwarded: number; autoYes: number; within1d: number; sumDays: number };
   const stats = new Map<string, WeekStat>();
-  for (const wk of timingWeeks) stats.set(wk, { total: 0, eligible: 0, portal: 0, direct: 0, forwarded: 0, autoYes: 0, within1d: 0, within3d: 0, sumDays: 0 });
+  for (const wk of timingWeeks) stats.set(wk, { total: 0, eligible: 0, portal: 0, direct: 0, forwarded: 0, autoYes: 0, within1d: 0, sumDays: 0 });
 
   for (const ts of allTimesheets) {
     const wk = ts.week_start.slice(0, 10);
@@ -174,7 +174,6 @@ function buildTimingSection(
     else if (channel === 'auto_yes')  st.autoYes++;
     else                              st.direct++;
     if (daysAfter <= 1) st.within1d++;
-    if (daysAfter <= 3) st.within3d++;
     st.sumDays += Math.max(daysAfter, 0);
   }
 
@@ -193,11 +192,9 @@ function buildTimingSection(
     const st = stats.get(wk)!;
     if (st.total === 0) return '';
     const pct1d = Math.round(100 * st.within1d / st.total);
-    const pct3d = Math.round(100 * st.within3d / st.total);
     const avg   = (st.sumDays / st.total).toFixed(1);
     const [, em, ed] = addDays(wk, 6).split('-').map(Number);
     const c1d  = pct1d >= 50 ? '#15803d' : pct1d >= 25 ? '#b45309' : '#dc2626';
-    const c3d  = pct3d >= 90 ? '#15803d' : pct3d >= 70 ? '#b45309' : '#dc2626';
     const cYes = st.autoYes > 0 ? '#15803d' : '#9ca3af';
     const inProg = wk === currentWeekForTimeliness
       ? ' <span style="font-size:9px;color:#9ca3af;font-weight:400">●</span>' : '';
@@ -212,7 +209,6 @@ function buildTimingSection(
       <td style="${TD};text-align:center;color:#6b7280">${st.forwarded}</td>
       <td style="${TD};text-align:center;font-weight:600;color:${cYes}">${st.autoYes}</td>
       <td style="${TD};text-align:center;font-weight:600;color:${c1d}">${pct1d}%</td>
-      <td style="${TD};text-align:center;font-weight:600;color:${c3d}">${pct3d}%</td>
       <td style="${TD};text-align:center">${avg}d</td>
     </tr>`;
   }).filter(Boolean).join('');
@@ -232,101 +228,293 @@ function buildTimingSection(
           <th style="${TH};text-align:center">Fwd</th>
           <th style="${TH};text-align:center">Auto-YES</th>
           <th style="${TH};text-align:center">≤1d</th>
-          <th style="${TH};text-align:center">≤3d</th>
           <th style="${TH};text-align:center">Avg</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="margin:4px 0 0;font-size:11px;color:#9ca3af">≤1d = by Mon · ≤3d = by Wed · Avg = days after week-end · ● = in progress</p>
+      <p style="margin:4px 0 0;font-size:11px;color:#9ca3af">≤1d = by Mon · Avg = days after week-end · ● = in progress</p>
     </div>`;
 }
 
 // ─── Contractor trend table ───────────────────────────────────────────────────
 
-function buildContractorTrendSection(
+// ─── SVG combined chart: stacked channel bars + ≤1d/Avg lines ────────────────
+
+type ChartStat = { total: number; portal: number; direct: number; forwarded: number; autoYes: number; within1d: number; sumDays: number };
+
+function buildDigestChart(
+  allTimesheets: Array<{ id: number; user_id: string; week_start: string; submitted_at: string | null; source: string }>,
+  profileIds: Set<string>,
+  profiles: Array<{ id: string; start_date: string | null; end_date: string | null }>,
+  channelMap: Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>,
+  completedWeeks: string[],
+  currentWeekForTimeliness: string | null,
+): string {
+  const weeks = completedWeeks.slice(-12);
+  if (currentWeekForTimeliness && !weeks.includes(currentWeekForTimeliness)) weeks.push(currentWeekForTimeliness);
+  if (weeks.length === 0) return '';
+
+  const startOf = new Map(profiles.map(p => [p.id, p.start_date ?? '']));
+  const endOf   = new Map(profiles.map(p => [p.id, p.end_date ?? '']));
+
+  const stats = new Map<string, ChartStat>();
+  for (const wk of weeks) stats.set(wk, { total: 0, portal: 0, direct: 0, forwarded: 0, autoYes: 0, within1d: 0, sumDays: 0 });
+
+  for (const ts of allTimesheets) {
+    const wk = ts.week_start.slice(0, 10);
+    if (!stats.has(wk) || !profileIds.has(ts.user_id) || !ts.submitted_at) continue;
+    const sd = startOf.get(ts.user_id) ?? '';
+    if (sd && sd > addDays(wk, 6)) continue;
+    const ed = endOf.get(ts.user_id) ?? '';
+    if (ed && ed < wk) continue;
+    const [y, m, d] = wk.split('-').map(Number);
+    const weekEndMs = Date.UTC(y, m - 1, d + 6);
+    const daysAfter = (new Date(ts.submitted_at).getTime() - weekEndMs) / 86400000;
+    const st = stats.get(wk)!;
+    st.total++;
+    const channel = channelMap.get(ts.id) ?? (ts.source === 'direct' ? 'portal' : 'direct');
+    if (channel === 'portal') st.portal++;
+    else if (channel === 'forwarded') st.forwarded++;
+    else if (channel === 'auto_yes') st.autoYes++;
+    else st.direct++;
+    if (daysAfter <= 1) st.within1d++;
+    st.sumDays += Math.max(daysAfter, 0);
+  }
+
+  const active = weeks.filter(wk => (stats.get(wk)?.total ?? 0) > 0);
+  if (active.length === 0) return '';
+
+  const W = 760, H = 340;
+  const PAD_L = 44, PAD_R = 96, PAD_T = 24, PAD_B = 68;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = H - PAD_T - PAD_B;
+
+  const maxCount = Math.max(...active.map(wk => stats.get(wk)!.total));
+  const yMax = Math.max(10, Math.ceil(maxCount / 10) * 10);
+
+  const colW = chartW / active.length;
+  const barW = Math.min(colW * 0.7, 44);
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const yBar = (v: number) => PAD_T + chartH - (v / yMax) * chartH;
+  const yPct = (p: number) => PAD_T + chartH - (p / 100) * chartH;
+  const yDay = (d: number) => PAD_T + chartH - (Math.min(d, 10) / 10) * chartH;
+
+  const CHAN: Array<{ key: keyof ChartStat; color: string; label: string }> = [
+    { key: 'portal',    color: '#15803d', label: 'Portal' },
+    { key: 'direct',    color: '#2563eb', label: 'Email' },
+    { key: 'forwarded', color: '#9ca3af', label: 'Fwd' },
+    { key: 'autoYes',   color: '#0891b2', label: 'Auto-YES' },
+  ];
+
+  const bars: string[] = [];
+  const xLabels: string[] = [];
+  const line1Pts: string[] = [];
+  const line2Pts: string[] = [];
+
+  active.forEach((wk, i) => {
+    const s = stats.get(wk)!;
+    const cx = PAD_L + i * colW + colW / 2;
+    const x0 = cx - barW / 2;
+
+    let running = 0;
+    for (const ch of CHAN) {
+      const v = s[ch.key] as number;
+      if (v === 0) continue;
+      const yTop = yBar(running + v);
+      const yBot = yBar(running);
+      bars.push(`<rect x="${x0.toFixed(1)}" y="${yTop.toFixed(1)}" width="${barW.toFixed(1)}" height="${(yBot - yTop).toFixed(1)}" fill="${ch.color}"/>`);
+      running += v;
+    }
+
+    const [, em, ed] = addDays(wk, 6).split('-').map(Number);
+    const inProg = wk === currentWeekForTimeliness ? '●' : '';
+    xLabels.push(`<text x="${cx.toFixed(1)}" y="${(H - PAD_B + 14).toFixed(1)}" font-size="10" text-anchor="middle" fill="#6b7280">${MONTHS[em-1]} ${ed}${inProg}</text>`);
+
+    const pct1d = Math.round(100 * s.within1d / s.total);
+    const avgD  = s.sumDays / s.total;
+    line1Pts.push(`${cx.toFixed(1)},${yPct(pct1d).toFixed(1)}`);
+    line2Pts.push(`${cx.toFixed(1)},${yDay(avgD).toFixed(1)}`);
+  });
+
+  const yTicks: string[] = [];
+  for (let v = 0; v <= yMax; v += yMax / 4) {
+    const y = yBar(v);
+    yTicks.push(`<line x1="${PAD_L}" y1="${y.toFixed(1)}" x2="${W - PAD_R}" y2="${y.toFixed(1)}" stroke="#f3f4f6" stroke-width="1"/>`);
+    yTicks.push(`<text x="${PAD_L - 6}" y="${(y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="#6b7280">${Math.round(v)}</text>`);
+  }
+
+  const pctTicks: string[] = [];
+  for (const p of [0, 25, 50, 75, 100]) {
+    const y = yPct(p);
+    pctTicks.push(`<text x="${W - PAD_R + 6}" y="${(y + 3).toFixed(1)}" font-size="10" text-anchor="start" fill="#10b981">${p}%</text>`);
+  }
+  const dayTicks: string[] = [];
+  for (const d of [0, 2.5, 5, 7.5, 10]) {
+    const y = yDay(d);
+    dayTicks.push(`<text x="${W - PAD_R + 44}" y="${(y + 3).toFixed(1)}" font-size="10" text-anchor="start" fill="#dc2626">${d}d</text>`);
+  }
+
+  const halo1 = `<polyline points="${line1Pts.join(' ')}" fill="none" stroke="white" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const halo2 = `<polyline points="${line2Pts.join(' ')}" fill="none" stroke="white" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const line1 = `<polyline points="${line1Pts.join(' ')}" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const line2 = `<polyline points="${line2Pts.join(' ')}" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const dots1 = line1Pts.map(pt => { const [x,y] = pt.split(','); return `<circle cx="${x}" cy="${y}" r="3.5" fill="#10b981" stroke="white" stroke-width="1.5"/>`; }).join('');
+  const dots2 = line2Pts.map(pt => { const [x,y] = pt.split(','); return `<circle cx="${x}" cy="${y}" r="3.5" fill="#dc2626" stroke="white" stroke-width="1.5"/>`; }).join('');
+
+  const legendItems: Array<{ color: string; label: string; kind: 'square' | 'line' }> = [
+    ...CHAN.map(c => ({ color: c.color, label: c.label, kind: 'square' as const })),
+    { color: '#10b981', label: '≤1d %',   kind: 'line'   as const },
+    { color: '#dc2626', label: 'Avg late', kind: 'line'   as const },
+  ];
+  let lx = PAD_L;
+  const legendY = H - 34;
+  const legend = legendItems.map(it => {
+    const x = lx;
+    const width = 14 + it.label.length * 6.2 + 14;
+    lx += width;
+    const swatch = it.kind === 'square'
+      ? `<rect x="${x}" y="${legendY - 8}" width="10" height="10" fill="${it.color}"/>`
+      : `<line x1="${x}" y1="${legendY - 3}" x2="${x + 10}" y2="${legendY - 3}" stroke="${it.color}" stroke-width="2.5"/><circle cx="${x + 5}" cy="${legendY - 3}" r="2.5" fill="${it.color}"/>`;
+    return `${swatch}<text x="${x + 14}" y="${legendY + 1}" font-size="10" fill="#374151">${it.label}</text>`;
+  }).join('');
+
+  return `
+    <div style="margin-bottom:20px">
+      <h3 style="margin:0 0 6px;color:#374151;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Submission Trend — last ${active.length} weeks</h3>
+      <div style="background:white;border:1px solid #e5e7eb;border-radius:6px;padding:8px">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block">
+          ${yTicks.join('')}
+          ${bars.join('')}
+          ${halo1}${line1}${dots1}
+          ${halo2}${line2}${dots2}
+          ${xLabels.join('')}
+          ${pctTicks.join('')}
+          ${dayTicks.join('')}
+          ${legend}
+        </svg>
+      </div>
+      <p style="margin:4px 0 0;font-size:11px;color:#9ca3af">Stacked bars = channel mix · green line = ≤1d % (target ↑, right axis) · red line = avg days late (target ↓, right axis) · ● = in progress</p>
+    </div>`;
+}
+
+// ─── Contractor Movement: last-4w vs prev-4w timeliness + portal adopters ────
+
+function buildContractorMovementSection(
   allTimesheets: Array<{ id: number; user_id: string; week_start: string; submitted_at: string | null; source: string }>,
   profiles: Array<{ id: string; name: string; start_date: string | null; end_date: string | null }>,
   channelMap: Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>,
-  timingWeeks: string[],
-  currentWeekForTimeliness: string | null,
+  completedWeeks: string[],
 ): string {
-  if (timingWeeks.length === 0) return '';
+  const last4 = completedWeeks.slice(-4);
+  const prev4 = completedWeeks.slice(-8, -4);
+  if (last4.length < 3 || prev4.length < 3) return '';
 
-  // Index: userId → weekStart → timesheet
-  const tsIdx = new Map<string, Map<string, { id: number; submittedAt: string | null; source: string }>>();
+  type Rec = { name: string; last: { sum: number; n: number; portal: number; total: number }; prev: { sum: number; n: number; portal: number; total: number } };
+  const per = new Map<string, Rec>();
+  for (const p of profiles) per.set(p.id, { name: p.name, last: { sum: 0, n: 0, portal: 0, total: 0 }, prev: { sum: 0, n: 0, portal: 0, total: 0 } });
+
   for (const ts of allTimesheets) {
     const wk = ts.week_start.slice(0, 10);
-    if (!tsIdx.has(ts.user_id)) tsIdx.set(ts.user_id, new Map());
-    tsIdx.get(ts.user_id)!.set(wk, { id: ts.id, submittedAt: ts.submitted_at, source: ts.source });
+    const rec = per.get(ts.user_id);
+    if (!rec) continue;
+    const bucket = last4.includes(wk) ? rec.last : prev4.includes(wk) ? rec.prev : null;
+    if (!bucket) continue;
+    bucket.total++;
+    const channel = channelMap.get(ts.id) ?? (ts.source === 'direct' ? 'portal' : 'direct');
+    if (channel === 'portal') bucket.portal++;
+    if (ts.submitted_at) {
+      const [y, m, d] = wk.split('-').map(Number);
+      const days = Math.max(0, (new Date(ts.submitted_at).getTime() - Date.UTC(y, m - 1, d + 6)) / 86400000);
+      bucket.sum += days;
+      bucket.n++;
+    }
   }
 
+  type Row = { name: string; prevAvg: number; lastAvg: number; delta: number };
+  const timing: Row[] = [];
+  for (const r of per.values()) {
+    if (r.last.n < 2 || r.prev.n < 2) continue;
+    const la = r.last.sum / r.last.n;
+    const pa = r.prev.sum / r.prev.n;
+    timing.push({ name: r.name, prevAvg: pa, lastAvg: la, delta: la - pa });
+  }
+
+  const improved = timing.filter(r => r.delta <= -1.0).sort((a, b) => a.delta - b.delta).slice(0, 5);
+  const worsened = timing.filter(r => r.delta >=  1.0).sort((a, b) => b.delta - a.delta).slice(0, 5);
+
+  const adopters: Array<{ name: string; prevPct: number; lastPct: number }> = [];
+  for (const r of per.values()) {
+    if (r.last.total < 2 || r.prev.total < 2) continue;
+    const lp = r.last.portal / r.last.total;
+    const pp = r.prev.portal / r.prev.total;
+    if (lp - pp >= 0.5) adopters.push({ name: r.name, prevPct: pp, lastPct: lp });
+  }
+  adopters.sort((a, b) => (b.lastPct - b.prevPct) - (a.lastPct - a.prevPct));
+
+  if (improved.length === 0 && worsened.length === 0 && adopters.length === 0) return '';
+
+  const [ , pm, pd ] = addDays(prev4[0], 6).split('-').map(Number);
+  const [ , lm, ld ] = addDays(last4[last4.length - 1], 6).split('-').map(Number);
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const CH_LABEL: Record<string, string> = { portal: 'P', direct: 'E', forwarded: 'F', auto_yes: 'A' };
-  const CH_COLOR: Record<string, string> = { portal: '#15803d', direct: '#2563eb', forwarded: '#9ca3af', auto_yes: '#0891b2' };
-  const TD = 'padding:3px 7px;border-bottom:1px solid #f3f4f6;white-space:nowrap';
+  const rangeLabel = `${MONTHS[pm-1]} ${pd} → ${MONTHS[lm-1]} ${ld}`;
 
-  const weekHeaders = timingWeeks.map(wk => {
-    const [, em, ed] = addDays(wk, 6).split('-').map(Number);
-    return `${MONTHS[em-1]} ${ed}${wk === currentWeekForTimeliness ? '●' : ''}`;
-  });
+  const TD = 'padding:4px 8px;border-bottom:1px solid #f3f4f6;white-space:nowrap;font-size:13px';
 
-  const rowHtml: string[] = [];
+  const renderRows = (rows: Row[], accent: string, arrow: string) => rows.map(r => `
+    <tr>
+      <td style="${TD};min-width:180px">${r.name}</td>
+      <td style="${TD};text-align:right;color:#6b7280">${r.prevAvg.toFixed(1)}d</td>
+      <td style="${TD};text-align:center;color:#9ca3af">→</td>
+      <td style="${TD};text-align:right;font-weight:600">${r.lastAvg.toFixed(1)}d</td>
+      <td style="${TD};text-align:right;color:${accent};font-weight:600">${arrow} ${Math.abs(r.delta).toFixed(1)}d</td>
+    </tr>`).join('');
 
-  for (const p of profiles) {
-    // Only show contractors active in at least one of the timing weeks
-    const activeSomeWeek = timingWeeks.some(wk => {
-      const sun = addDays(wk, 6);
-      return (!p.start_date || p.start_date <= sun) && (!p.end_date || p.end_date >= wk);
-    });
-    if (!activeSomeWeek) continue;
+  const improvedTable = improved.length === 0 ? '' : `
+    <div style="margin-bottom:12px">
+      <div style="font-size:12px;font-weight:700;color:#15803d;margin-bottom:4px">↓ Improved (top ${improved.length})</div>
+      <table style="border-collapse:collapse;background:white;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;font-size:12px">
+        <thead><tr style="background:#f0fdf4;color:#166534">
+          <th style="padding:5px 8px;text-align:left">Contractor</th>
+          <th style="padding:5px 8px;text-align:right">Prev 4w</th>
+          <th></th>
+          <th style="padding:5px 8px;text-align:right">Last 4w</th>
+          <th style="padding:5px 8px;text-align:right">Δ</th>
+        </tr></thead>
+        <tbody>${renderRows(improved, '#15803d', '↓')}</tbody>
+      </table>
+    </div>`;
 
-    const cells = timingWeeks.map(wk => {
-      const sun = addDays(wk, 6);
-      const eligible = (!p.start_date || p.start_date <= sun) && (!p.end_date || p.end_date >= wk);
-      if (!eligible) return `<td style="${TD}"></td>`;
+  const worsenedTable = worsened.length === 0 ? '' : `
+    <div style="margin-bottom:12px">
+      <div style="font-size:12px;font-weight:700;color:#dc2626;margin-bottom:4px">↑ Worsened (top ${worsened.length})</div>
+      <table style="border-collapse:collapse;background:white;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;font-size:12px">
+        <thead><tr style="background:#fef2f2;color:#991b1b">
+          <th style="padding:5px 8px;text-align:left">Contractor</th>
+          <th style="padding:5px 8px;text-align:right">Prev 4w</th>
+          <th></th>
+          <th style="padding:5px 8px;text-align:right">Last 4w</th>
+          <th style="padding:5px 8px;text-align:right">Δ</th>
+        </tr></thead>
+        <tbody>${renderRows(worsened, '#dc2626', '↑')}</tbody>
+      </table>
+    </div>`;
 
-      const ts = tsIdx.get(p.id)?.get(wk);
-      const inProg = wk === currentWeekForTimeliness;
+  const adoptersChips = adopters.length === 0 ? '' : `
+    <div style="margin-bottom:4px">
+      <div style="font-size:12px;font-weight:700;color:#1e40af;margin-bottom:6px">🆕 New portal adopters (portal share +50pp or more)</div>
+      <div style="line-height:1.7">
+        ${adopters.map(a => `<span style="display:inline-block;background:#eff6ff;color:#1e40af;padding:3px 9px;border-radius:12px;font-size:12px;margin-right:6px;margin-bottom:4px">${a.name} <span style="color:#6b7280;font-weight:400">${Math.round(a.prevPct*100)}%→${Math.round(a.lastPct*100)}%</span></span>`).join('')}
+      </div>
+    </div>`;
 
-      if (!ts) {
-        // Eligible but not submitted
-        const style = inProg ? `${TD};color:#d1d5db` : `${TD};color:#dc2626`;
-        return `<td style="${style};text-align:center">${inProg ? '' : '–'}</td>`;
-      }
-
-      const channel = channelMap.get(ts.id) ?? (ts.source === 'direct' ? 'portal' : 'direct');
-      const label = CH_LABEL[channel] ?? '?';
-      const color = CH_COLOR[channel] ?? '#374151';
-
-      let daysStr = '';
-      if (ts.submittedAt && !inProg) {
-        const [y, m, d] = wk.split('-').map(Number);
-        const weekEndMs = Date.UTC(y, m - 1, d + 6);
-        const days = Math.max(0, Math.round((new Date(ts.submittedAt).getTime() - weekEndMs) / 86400000));
-        daysStr = ` ${days}d`;
-      }
-
-      return `<td style="${TD};text-align:center;color:${color};font-weight:600">${label}${daysStr}</td>`;
-    }).join('');
-
-    const zebra = rowHtml.length % 2 === 1 ? 'background:#f9fafb' : '';
-    rowHtml.push(`<tr style="${zebra}"><td style="${TD};min-width:140px">${p.name}</td>${cells}</tr>`);
-  }
-
-  if (rowHtml.length === 0) return '';
-
-  const TH = 'padding:5px 7px;white-space:nowrap;font-weight:600;text-align:center';
   return `
     <div style="margin-bottom:20px">
-      <h3 style="margin:0 0 6px;color:#374151;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Contractor Trend</h3>
-      <table style="border-collapse:collapse;background:white;border-radius:6px;overflow:hidden;border:1px solid #e5e7eb;font-size:12px">
-        <thead><tr style="background:#374151;color:white">
-          <th style="${TH};text-align:left;min-width:140px">Contractor</th>
-          ${weekHeaders.map(h => `<th style="${TH}">${h}</th>`).join('')}
-        </tr></thead>
-        <tbody>${rowHtml.join('')}</tbody>
-      </table>
-      <p style="margin:4px 0 0;font-size:11px;color:#9ca3af">P=Portal · E=Email · F=Fwd · A=Auto-YES · –=missing · blank=inactive · ●=in progress</p>
+      <h3 style="margin:0 0 6px;color:#374151;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em">Contractor Movement — last 4 weeks vs previous 4 weeks</h3>
+      <p style="margin:0 0 10px;font-size:11px;color:#9ca3af">Window: ${rangeLabel} · shows contractors with ≥1.0d change (min 2 submissions per window)</p>
+      ${improvedTable}
+      ${worsenedTable}
+      ${adoptersChips}
     </div>`;
 }
 
@@ -459,24 +647,24 @@ serve(async (req) => {
       });
     }
 
-    const timingWeeks = completedWeeks.slice(-6);
-    if (currentWeekForTimeliness && !timingWeeks.includes(currentWeekForTimeliness)) timingWeeks.push(currentWeekForTimeliness);
-
+    const chartHtml      = buildDigestChart(allTimesheets ?? [], profileIds, profiles, channelMap, completedWeeks, currentWeekForTimeliness);
     const timingHtml     = buildTimingSection(allTimesheets ?? [], profileIds, completedWeeks, profiles, channelMap, currentWeekForTimeliness);
-    const contractorHtml = buildContractorTrendSection(allTimesheets ?? [], profiles, channelMap, timingWeeks, currentWeekForTimeliness);
+    const movementHtml   = buildContractorMovementSection(allTimesheets ?? [], profiles, channelMap, completedWeeks);
 
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'long' });
     const subject = `Timesheet Submission Digest — ${now}`;
-    const bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto;padding:20px">
+    const bodyHtml = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Timesheet Submission Digest</title></head><body style="margin:0;background:#f3f4f6">
+    <div style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto;padding:20px">
       <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
         <h2 style="margin:0">Timesheet Submission Digest</h2>
         <p style="margin:6px 0 0;opacity:.85;font-size:14px">${now}</p>
       </div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
+        ${chartHtml}
         ${timingHtml || '<p style="color:#6b7280">No completed weeks with data yet.</p>'}
-        ${contractorHtml}
+        ${movementHtml}
       </div>
-    </div>`;
+    </div></body></html>`;
 
     const digestRes = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
