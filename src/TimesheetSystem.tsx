@@ -6697,52 +6697,59 @@ const TimesheetSystem = () => {
                           </div>
                           <button
                             onClick={() => {
-                              // Seed the invoice modal from computed estimation rows for this client
-                              const invDate = new Date().toISOString().slice(0, 10);
-                              const terms = client.payment_terms_days || 30;
-                              const due = new Date(); due.setDate(due.getDate() + terms);
-                              const dueStr = due.toISOString().slice(0, 10);
-                              const addr = [client.address_line1, client.address_line2, [client.city, client.state, client.zip].filter(Boolean).join(', ')].filter((s): s is string => !!s && s.length > 0);
-                              const perStart = `${estimationMonth}-01`;
-                              const [ey, em] = estimationMonth.split('-').map(Number);
-                              const perEnd = new Date(Date.UTC(ey, em, 0)).toISOString().slice(0, 10);
-                              const lines: ClientInvoiceLine[] = rowsWithTotals.map(({ eng, profile, weekTotals, totalH }) => {
-                                const rate = Number(eng.bill_rate);
-                                const hoursActual = weekTotals.reduce((a, b) => a + b.hours, 0);
-                                return {
-                                  id: `eng-${eng.id}`,
-                                  engagementId: eng.id,
-                                  contractorName: profile!.name,
-                                  roleTitle: eng.role_title || '',
-                                  sowCode: eng.sow_reference || '',
-                                  hours: Math.round(hoursActual * 100) / 100,
-                                  rate,
-                                  amount: Math.round(totalH * rate * 100) / 100,
-                                  amountOverridden: false,
+                              try {
+                                console.log('[invoice] Generate Invoice clicked', { clientId: client.id, name: client.name, rowsWithTotalsLen: rowsWithTotals.length });
+                                const invDate = new Date().toISOString().slice(0, 10);
+                                const terms = client.payment_terms_days || 30;
+                                const due = new Date(); due.setDate(due.getDate() + terms);
+                                const dueStr = due.toISOString().slice(0, 10);
+                                const addr = [client.address_line1, client.address_line2, [client.city, client.state, client.zip].filter(Boolean).join(', ')].filter((s): s is string => !!s && s.length > 0);
+                                const perStart = `${estimationMonth}-01`;
+                                const [ey, em] = estimationMonth.split('-').map(Number);
+                                const perEnd = new Date(Date.UTC(ey, em, 0)).toISOString().slice(0, 10);
+                                const lines: ClientInvoiceLine[] = rowsWithTotals.map(({ eng, profile, weekTotals, totalH }) => {
+                                  const rate = Number(eng.bill_rate);
+                                  const hoursActual = weekTotals.reduce((a, b) => a + b.hours, 0);
+                                  return {
+                                    id: `eng-${eng.id}`,
+                                    engagementId: eng.id,
+                                    contractorName: profile!.name,
+                                    roleTitle: eng.role_title || '',
+                                    sowCode: eng.sow_reference || '',
+                                    hours: Math.round(hoursActual * 100) / 100,
+                                    rate,
+                                    amount: Math.round(totalH * rate * 100) / 100,
+                                    amountOverridden: false,
+                                    periodStart: perStart,
+                                    periodEnd: perEnd,
+                                  };
+                                });
+                                console.log('[invoice] lines seeded', { count: lines.length, sample: lines[0] });
+                                setInvoiceModal({
+                                  client,
+                                  monthLabel,
                                   periodStart: perStart,
                                   periodEnd: perEnd,
-                                };
-                              });
-                              setInvoiceModal({
-                                client,
-                                monthLabel,
-                                periodStart: perStart,
-                                periodEnd: perEnd,
-                                meta: {
-                                  invoiceNumber: '',
-                                  invoiceDate: invDate,
-                                  dueDate: dueStr,
-                                  poNumber: client.po_number || '',
-                                  billToName: client.bill_to_name || client.name,
-                                  billToAttn: client.bill_to_attn || '',
-                                  addressLines: addr,
-                                  memo: '',
-                                },
-                                lines,
-                                retentionPerHour: Number(client.retention_per_hour || 0),
-                                investmentCreditPrior: Number(client.investment_credit_running || 0),
-                                salesTaxRate: Number(client.sales_tax_rate || 0),
-                              });
+                                  meta: {
+                                    invoiceNumber: '',
+                                    invoiceDate: invDate,
+                                    dueDate: dueStr,
+                                    poNumber: client.po_number || '',
+                                    billToName: client.bill_to_name || client.name,
+                                    billToAttn: client.bill_to_attn || '',
+                                    addressLines: addr,
+                                    memo: '',
+                                  },
+                                  lines,
+                                  retentionPerHour: Number(client.retention_per_hour || 0),
+                                  investmentCreditPrior: Number(client.investment_credit_running || 0),
+                                  salesTaxRate: Number(client.sales_tax_rate || 0),
+                                });
+                                console.log('[invoice] modal state set');
+                              } catch (err) {
+                                console.error('[invoice] onClick threw', err);
+                                alert('Failed to open invoice: ' + String((err as Error)?.message || err));
+                              }
                             }}
                             className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-indigo-600 text-white hover:bg-indigo-700"
                             title="Open a printable invoice for this client and month"
