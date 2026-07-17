@@ -185,6 +185,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
 };
 
 import { useState, useEffect, useRef, Fragment } from 'react';
+import { createPortal } from 'react-dom';
 import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronLeft, ChevronRight, Building2, ArrowUpDown } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
@@ -11888,7 +11889,7 @@ const TimesheetSystem = () => {
       </div>
 
       {/* ─── Client Invoice modal (Phase 1: transient, print-only) ────────── */}
-      {invoiceModal && (() => {
+      {invoiceModal && createPortal((() => {
         const S = invoiceModal;
         const setS = (updater: (prev: ClientInvoiceModalState) => ClientInvoiceModalState) =>
           setInvoiceModal(prev => prev ? updater(prev) : prev);
@@ -12274,7 +12275,7 @@ const TimesheetSystem = () => {
             </div>
           </>
         );
-      })()}
+      })(), document.body)}
 
     </div>
   );
