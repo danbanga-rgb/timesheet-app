@@ -10738,23 +10738,34 @@ const TimesheetSystem = () => {
           setTimeout(() => window.print(), 100);
         };
 
-        // ─── Shared invoice header block (Synergie block + Bill To + Meta) ──
+        // ─── Modern accent-bar layout ──
+        const ACCENT = '#4f46e5'; // indigo-600
+        const MUTED  = '#64748b'; // slate-500
+        const RULE   = '#e2e8f0'; // slate-200
+        const SUBTLE = '#f1f5f9'; // slate-100
+
+        const AccentBar = (
+          <div style={{ height: 4, background: ACCENT, marginBottom: 24 }} />
+        );
+
         const InvoiceHeader = (
-          <div className="flex justify-between items-start mb-6">
-            <div className="text-sm leading-tight">
-              <div className="font-bold text-base">SYNERGIE TECH SOLUTIONS, LLC</div>
-              <div>11750 Dublin Blvd,</div>
-              <div>Suite 207</div>
-              <div>Dublin CA 94568</div>
+          <div className="flex justify-between items-start" style={{ marginBottom: 28 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: 0.3, color: '#0f172a' }}>SYNERGIE TECH SOLUTIONS, LLC</div>
+              <div style={{ color: MUTED, marginTop: 4, lineHeight: 1.5 }}>
+                <div>11750 Dublin Blvd, Suite 207</div>
+                <div>Dublin, CA 94568</div>
+                <div style={{ marginTop: 6 }}>www.synergiecorp.com · 510-550-1400</div>
+              </div>
             </div>
-            <div className="text-right">
-              <div className="text-3xl font-bold tracking-wide">Invoice</div>
-              <table className="mt-2 border border-black text-xs">
-                <thead>
-                  <tr className="border-b border-black"><th className="px-4 py-1 border-r border-black">Date</th><th className="px-4 py-1">Invoice #</th></tr>
-                </thead>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: 6, color: ACCENT, textTransform: 'uppercase' }}>Invoice</div>
+              <table style={{ marginTop: 10, marginLeft: 'auto', borderCollapse: 'collapse' }}>
                 <tbody>
-                  <tr><td className="px-4 py-1 border-r border-black text-center">{fmtDate(S.meta.invoiceDate)}</td><td className="px-4 py-1 text-center">{S.meta.invoiceNumber || '(none)'}</td></tr>
+                  <tr><td style={{ padding: '2px 0', color: MUTED, textTransform: 'uppercase', fontSize: 10, letterSpacing: 0.8, paddingRight: 12, textAlign: 'left' }}>Invoice #</td><td style={{ padding: '2px 0', fontWeight: 600, textAlign: 'right' }}>{S.meta.invoiceNumber || '(none)'}</td></tr>
+                  <tr><td style={{ padding: '2px 0', color: MUTED, textTransform: 'uppercase', fontSize: 10, letterSpacing: 0.8, paddingRight: 12, textAlign: 'left' }}>Date</td><td style={{ padding: '2px 0', textAlign: 'right' }}>{fmtDate(S.meta.invoiceDate)}</td></tr>
+                  <tr><td style={{ padding: '2px 0', color: MUTED, textTransform: 'uppercase', fontSize: 10, letterSpacing: 0.8, paddingRight: 12, textAlign: 'left' }}>Due</td><td style={{ padding: '2px 0', textAlign: 'right' }}>{fmtDate(S.meta.dueDate)}</td></tr>
+                  <tr><td style={{ padding: '2px 0', color: MUTED, textTransform: 'uppercase', fontSize: 10, letterSpacing: 0.8, paddingRight: 12, textAlign: 'left' }}>Terms</td><td style={{ padding: '2px 0', textAlign: 'right' }}>Net {S.client.payment_terms_days}</td></tr>
                 </tbody>
               </table>
             </div>
@@ -10762,61 +10773,58 @@ const TimesheetSystem = () => {
         );
 
         const BillToBlock = (
-          <div className="border border-black mb-6" style={{ width: '55%' }}>
-            <div className="border-b border-black px-2 py-0.5 text-xs">Bill To</div>
-            <div className="px-2 py-1 text-sm leading-tight min-h-[80px]">
-              <div className="font-semibold">{S.meta.billToName}</div>
-              {isAETv && S.meta.billToAttn && <div>Attn: {S.meta.billToAttn}</div>}
-              {S.meta.addressLines.map((line, i) => <div key={i}>{line}</div>)}
+          <div style={{ width: '55%' }}>
+            <div style={{ color: MUTED, textTransform: 'uppercase', fontSize: 10, letterSpacing: 1.2, fontWeight: 600, borderBottom: `1px solid ${RULE}`, paddingBottom: 4, marginBottom: 8 }}>Bill To</div>
+            <div style={{ lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#0f172a' }}>{S.meta.billToName}</div>
+              {isAETv && S.meta.billToAttn && <div style={{ color: MUTED }}>Attn: {S.meta.billToAttn}</div>}
+              {S.meta.addressLines.map((line, i) => <div key={i} style={{ color: MUTED }}>{line}</div>)}
             </div>
           </div>
         );
 
         const MetaBlock = (
-          <table className="border border-black text-xs mb-4" style={{ marginLeft: 'auto' }}>
-            <thead>
-              <tr className="border-b border-black">
-                <th className="px-4 py-1 border-r border-black">P.O. No.</th>
-                <th className="px-4 py-1">Terms</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td className="px-4 py-1 border-r border-black text-center">{S.meta.poNumber || ''}</td>
-                <td className="px-4 py-1 text-center">Net {S.client.payment_terms_days}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div style={{ width: '40%', textAlign: 'right' }}>
+            <div style={{ color: MUTED, textTransform: 'uppercase', fontSize: 10, letterSpacing: 1.2, fontWeight: 600, borderBottom: `1px solid ${RULE}`, paddingBottom: 4, marginBottom: 8 }}>P.O.</div>
+            <div style={{ lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#0f172a' }}>{S.meta.poNumber || '—'}</div>
+            </div>
+          </div>
         );
 
         // ─── Format-specific line tables ──
+        const thStyle: React.CSSProperties = { padding: '10px 12px', textAlign: 'left', color: MUTED, textTransform: 'uppercase', fontSize: 10, letterSpacing: 1, fontWeight: 600, borderBottom: `1.5px solid #0f172a` };
+        const thNum: React.CSSProperties  = { ...thStyle, textAlign: 'right' };
+        const tdStyle: React.CSSProperties = { padding: '10px 12px', verticalAlign: 'top', borderBottom: `1px solid ${RULE}` };
+        const tdNum: React.CSSProperties   = { ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' };
+
         const ApfmTable = (
-          <table className="w-full text-xs border-collapse border border-black mb-4">
+          <table className="invoice-zebra" style={{ width: '100%', borderCollapse: 'collapse', marginTop: 24, marginBottom: 24 }}>
             <thead>
-              <tr className="border-b border-black">
-                <th className="border-r border-black px-2 py-1 text-left">Item</th>
-                <th className="border-r border-black px-2 py-1 text-left">Description</th>
-                <th className="border-r border-black px-2 py-1 text-right">Hours/Qty</th>
-                <th className="border-r border-black px-2 py-1 text-right">Rate</th>
-                <th className="border-r border-black px-2 py-1 text-left">Category</th>
-                <th className="px-2 py-1 text-right">Amount</th>
+              <tr>
+                <th style={thStyle}>Item</th>
+                <th style={thStyle}>Description</th>
+                <th style={thNum}>Hrs</th>
+                <th style={thNum}>Rate</th>
+                <th style={thStyle}>Category</th>
+                <th style={thNum}>Amount</th>
               </tr>
             </thead>
             <tbody>
               {S.lines.map(l => (
-                <tr key={l.id} className="border-b border-gray-300 align-top">
-                  <td className="border-r border-black px-2 py-1">SW_Dev</td>
-                  <td className="border-r border-black px-2 py-1">
-                    <div>Software Development Services -</div>
-                    <div>"{l.roleTitle}"</div>
-                    <div>Consultant Name: {l.contractorName}</div>
-                    <div>Period - {fmtDate(l.periodStart)} through {fmtDate(l.periodEnd)}</div>
-                    {l.sowCode && <div>{l.sowCode}</div>}
+                <tr key={l.id}>
+                  <td style={tdStyle}>SW_Dev</td>
+                  <td style={tdStyle}>
+                    <div style={{ fontWeight: 600, color: '#0f172a' }}>Software Development Services</div>
+                    <div style={{ color: MUTED, marginTop: 2 }}>"{l.roleTitle}"</div>
+                    <div style={{ color: MUTED }}>Consultant: {l.contractorName}</div>
+                    <div style={{ color: MUTED }}>{fmtDate(l.periodStart)} – {fmtDate(l.periodEnd)}</div>
+                    {l.sowCode && <div style={{ color: MUTED }}>{l.sowCode}</div>}
                   </td>
-                  <td className="border-r border-black px-2 py-1 text-right">{l.hours}</td>
-                  <td className="border-r border-black px-2 py-1 text-right">${l.rate.toFixed(2)}</td>
-                  <td className="border-r border-black px-2 py-1">SW_Dev</td>
-                  <td className="px-2 py-1 text-right">{fmt$(l.amount)}</td>
+                  <td style={tdNum}>{l.hours}</td>
+                  <td style={tdNum}>${l.rate.toFixed(2)}</td>
+                  <td style={tdStyle}>SW_Dev</td>
+                  <td style={{ ...tdNum, fontWeight: 600, color: '#0f172a' }}>{fmt$(l.amount)}</td>
                 </tr>
               ))}
             </tbody>
@@ -10824,26 +10832,26 @@ const TimesheetSystem = () => {
         );
 
         const AETvTable = (
-          <table className="w-full text-xs border-collapse border border-black mb-4">
+          <table className="invoice-zebra" style={{ width: '100%', borderCollapse: 'collapse', marginTop: 24, marginBottom: 24 }}>
             <thead>
-              <tr className="border-b border-black">
-                <th className="border-r border-black px-2 py-1 text-left">Description</th>
-                <th className="border-r border-black px-2 py-1 text-right">Hours</th>
-                <th className="border-r border-black px-2 py-1 text-right">Rate</th>
-                <th className="px-2 py-1 text-right">Amount</th>
+              <tr>
+                <th style={thStyle}>Description</th>
+                <th style={thNum}>Hrs</th>
+                <th style={thNum}>Rate</th>
+                <th style={thNum}>Amount</th>
               </tr>
             </thead>
             <tbody>
               {S.lines.map(l => (
-                <tr key={l.id} className="border-b border-gray-300 align-top">
-                  <td className="border-r border-black px-2 py-1">
-                    <span className="font-semibold">{l.contractorName}</span> — {l.roleTitle}
-                    {l.sowCode && <span className="text-gray-600"> · {l.sowCode}</span>}
-                    <div className="text-xs text-gray-600">Period {fmtDate(l.periodStart)} – {fmtDate(l.periodEnd)}</div>
+                <tr key={l.id}>
+                  <td style={tdStyle}>
+                    <div style={{ fontWeight: 600, color: '#0f172a' }}>{l.contractorName}</div>
+                    <div style={{ color: MUTED, marginTop: 2 }}>{l.roleTitle}{l.sowCode ? ` · ${l.sowCode}` : ''}</div>
+                    <div style={{ color: MUTED }}>{fmtDate(l.periodStart)} – {fmtDate(l.periodEnd)}</div>
                   </td>
-                  <td className="border-r border-black px-2 py-1 text-right">{l.hours}</td>
-                  <td className="border-r border-black px-2 py-1 text-right">${l.rate.toFixed(2)}</td>
-                  <td className="px-2 py-1 text-right">{fmt$(l.amount)}</td>
+                  <td style={tdNum}>{l.hours}</td>
+                  <td style={tdNum}>${l.rate.toFixed(2)}</td>
+                  <td style={{ ...tdNum, fontWeight: 600, color: '#0f172a' }}>{fmt$(l.amount)}</td>
                 </tr>
               ))}
             </tbody>
@@ -10851,79 +10859,85 @@ const TimesheetSystem = () => {
         );
 
         const GenworthTable = (
-          <table className="w-full text-xs border-collapse border border-black mb-4">
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 24, marginBottom: 24 }}>
             <thead>
-              <tr className="border-b border-black">
-                <th className="border-r border-black px-2 py-1 text-left">Description</th>
-                <th className="border-r border-black px-2 py-1 text-right">Hours</th>
-                <th className="border-r border-black px-2 py-1 text-right">Rate</th>
-                <th className="border-r border-black px-2 py-1 text-right">Total</th>
-                <th className="border-r border-black px-2 py-1 text-right">Qty</th>
-                <th className="border-r border-black px-2 py-1 text-right">Unit Price</th>
-                <th className="px-2 py-1 text-right">Amount</th>
-              </tr>
-              <tr className="border-b border-black align-top">
-                <td colSpan={4} className="border-r border-black px-2 py-2" style={{ fontSize: '12px', fontWeight: 600 }}>
-                  Synergie Tech Solutions - CAPITALIZED CareScout IT - Software Engineering Staff Augmentation for development of CareScout Platforms.
-                </td>
-                <td className="border-r border-black px-2 py-2 text-right" style={{ fontSize: '12px' }}>{subtotalGross.toLocaleString()}</td>
-                <td className="border-r border-black px-2 py-2 text-right" style={{ fontSize: '12px' }}>1.00</td>
-                <td className="px-2 py-2 text-right" style={{ fontSize: '12px' }}>{fmt$(subtotalGross)}</td>
+              <tr>
+                <th style={thStyle}>Description</th>
+                <th style={thNum}>Hrs</th>
+                <th style={thNum}>Rate</th>
+                <th style={thNum}>Total</th>
+                <th style={thNum}>Qty</th>
+                <th style={thNum}>Unit</th>
+                <th style={thNum}>Amount</th>
               </tr>
             </thead>
             <tbody>
+              <tr style={{ background: SUBTLE }}>
+                <td colSpan={4} style={{ ...tdStyle, fontWeight: 600, color: '#0f172a' }}>
+                  Synergie Tech Solutions — CAPITALIZED CareScout IT<br />
+                  <span style={{ fontWeight: 400, color: MUTED }}>Software Engineering Staff Augmentation for development of CareScout Platforms.</span>
+                </td>
+                <td style={tdNum}>{subtotalGross.toLocaleString()}</td>
+                <td style={tdNum}>1.00</td>
+                <td style={{ ...tdNum, fontWeight: 600 }}>{fmt$(subtotalGross)}</td>
+              </tr>
               {S.lines.map(l => (
-                <tr key={l.id} className="border-b border-gray-200">
-                  <td className="border-r border-black px-2 py-0.5" style={{ paddingLeft: '24px', fontSize: '10px' }}>{l.contractorName} - {l.roleTitle}</td>
-                  <td className="border-r border-black px-2 py-0.5 text-right" style={{ fontSize: '10px' }}>{l.hours}</td>
-                  <td className="border-r border-black px-2 py-0.5 text-right" style={{ fontSize: '10px' }}>${l.rate.toFixed(0)}</td>
-                  <td className="border-r border-black px-2 py-0.5 text-right" style={{ fontSize: '10px' }}>{fmt$(l.amount)}</td>
-                  <td className="border-r border-black px-2 py-0.5"></td>
-                  <td className="border-r border-black px-2 py-0.5"></td>
-                  <td className="px-2 py-0.5"></td>
+                <tr key={l.id}>
+                  <td style={{ ...tdStyle, paddingLeft: 32, color: MUTED }}>{l.contractorName} — {l.roleTitle}</td>
+                  <td style={{ ...tdNum, color: MUTED }}>{l.hours}</td>
+                  <td style={{ ...tdNum, color: MUTED }}>${l.rate.toFixed(0)}</td>
+                  <td style={{ ...tdNum, color: MUTED }}>{fmt$(l.amount)}</td>
+                  <td style={tdStyle}></td>
+                  <td style={tdStyle}></td>
+                  <td style={tdStyle}></td>
                 </tr>
               ))}
-              <tr className="border-t border-black font-semibold">
-                <td className="border-r border-black px-2 py-1 text-right">Totals</td>
-                <td className="border-r border-black px-2 py-1 text-right">{totalHours}</td>
-                <td className="border-r border-black px-2 py-1"></td>
-                <td className="border-r border-black px-2 py-1 text-right">{fmt$(subtotalGross)}</td>
-                <td className="border-r border-black px-2 py-1"></td>
-                <td className="border-r border-black px-2 py-1"></td>
-                <td className="px-2 py-1"></td>
+              <tr style={{ background: SUBTLE }}>
+                <td style={{ ...tdStyle, fontWeight: 600, textAlign: 'right' }}>Totals</td>
+                <td style={{ ...tdNum, fontWeight: 600 }}>{totalHours}</td>
+                <td style={tdStyle}></td>
+                <td style={{ ...tdNum, fontWeight: 600 }}>{fmt$(subtotalGross)}</td>
+                <td style={tdStyle}></td>
+                <td style={tdStyle}></td>
+                <td style={tdStyle}></td>
               </tr>
               {retentionAmount > 0 && (
-                <tr className="border-t border-black">
-                  <td className="border-r border-black px-2 py-1">Retention Investment Credit*</td>
-                  <td className="border-r border-black px-2 py-1"></td>
-                  <td className="border-r border-black px-2 py-1"></td>
-                  <td className="border-r border-black px-2 py-1"></td>
-                  <td className="border-r border-black px-2 py-1 text-right">{retentionAmount.toLocaleString()}</td>
-                  <td className="border-r border-black px-2 py-1 text-right">-1.00</td>
-                  <td className="px-2 py-1 text-right">-{fmt$(retentionAmount)}</td>
+                <tr>
+                  <td style={tdStyle}>Retention Investment Credit*</td>
+                  <td style={tdStyle}></td>
+                  <td style={tdStyle}></td>
+                  <td style={tdStyle}></td>
+                  <td style={tdNum}>{retentionAmount.toLocaleString()}</td>
+                  <td style={tdNum}>−1.00</td>
+                  <td style={{ ...tdNum, color: '#b91c1c', fontWeight: 600 }}>−{fmt$(retentionAmount)}</td>
                 </tr>
               )}
             </tbody>
           </table>
         );
 
+        const totalsRow: React.CSSProperties = { padding: '6px 14px', fontVariantNumeric: 'tabular-nums' };
         const TotalsBox = (
-          <table className="text-sm ml-auto border border-black" style={{ minWidth: 300 }}>
+          <table style={{ marginLeft: 'auto', minWidth: 320, borderCollapse: 'collapse' }}>
             <tbody>
-              <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Subtotal</td><td className="px-3 py-1 text-right">{fmt$(netBeforeTax)}</td></tr>
-              <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Sales Tax ({S.salesTaxRate}%)</td><td className="px-3 py-1 text-right">{fmt$(salesTax)}</td></tr>
-              <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Total</td><td className="px-3 py-1 text-right">{fmt$(total)}</td></tr>
+              <tr><td style={{ ...totalsRow, color: MUTED }}>Subtotal</td><td style={{ ...totalsRow, textAlign: 'right' }}>{fmt$(netBeforeTax)}</td></tr>
+              <tr><td style={{ ...totalsRow, color: MUTED }}>Sales Tax ({S.salesTaxRate}%)</td><td style={{ ...totalsRow, textAlign: 'right' }}>{fmt$(salesTax)}</td></tr>
               {isGenworth && (
-                <tr className="border-b border-black"><td className="px-3 py-1 font-semibold">Retention Investment Credit*</td><td className="px-3 py-1 text-right">$0.00</td></tr>
+                <tr><td style={{ ...totalsRow, color: MUTED }}>Retention Investment Credit*</td><td style={{ ...totalsRow, textAlign: 'right' }}>$0.00</td></tr>
               )}
-              <tr><td className="px-3 py-1 font-bold text-base">Balance Due</td><td className="px-3 py-1 text-right font-bold text-base">{fmt$(total)}</td></tr>
+              <tr><td colSpan={2} style={{ borderTop: `1px solid ${RULE}`, padding: 0 }}></td></tr>
+              <tr>
+                <td style={{ padding: '12px 14px', background: '#eef2ff', fontWeight: 700, textTransform: 'uppercase', fontSize: 11, letterSpacing: 1, color: ACCENT }}>Balance Due</td>
+                <td style={{ padding: '12px 14px', background: '#eef2ff', textAlign: 'right', fontWeight: 700, fontSize: 16, color: '#0f172a', fontVariantNumeric: 'tabular-nums' }}>{fmt$(total)}</td>
+              </tr>
             </tbody>
           </table>
         );
 
         const RunningFooter = isGenworth && S.client.show_investment_credit_running_total ? (
-          <div className="text-sm mt-4 border-t border-black pt-2">
-            Total Synergie Investment Credit (including this invoice): <span className="font-semibold">{fmt$(runningTotal)}</span>
+          <div style={{ marginTop: 16, paddingTop: 10, borderTop: `1px solid ${RULE}`, color: MUTED }}>
+            Total Synergie Investment Credit (including this invoice):{' '}
+            <span style={{ fontWeight: 600, color: '#0f172a' }}>{fmt$(runningTotal)}</span>
           </div>
         ) : null;
 
@@ -10931,6 +10945,8 @@ const TimesheetSystem = () => {
           <>
             {/* Print styles: hide everything except the invoice-print-root when printing */}
             <style>{`
+              .invoice-print-root, .invoice-print-root * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+              .invoice-zebra > tbody > tr:nth-child(even) > td { background: #f8fafc; }
               @media print {
                 body { background: white !important; }
                 body * { visibility: hidden; }
@@ -10938,6 +10954,7 @@ const TimesheetSystem = () => {
                 .invoice-print-root { position: absolute; left: 0; top: 0; width: 100%; padding: 0.5in; background: white; }
                 .no-print, .no-print * { display: none !important; }
                 .invoice-modal-shell { position: static !important; background: white !important; padding: 0 !important; max-width: none !important; }
+                @page { size: letter; margin: 0.5in; }
               }
             `}</style>
 
@@ -11037,26 +11054,34 @@ const TimesheetSystem = () => {
                 </div>
 
                 {/* Printable render */}
-                <div className="invoice-print-root p-8 text-black" style={{ fontFamily: '"Times New Roman", "Liberation Serif", serif', fontSize: '11px' }}>
+                <div className="invoice-print-root" style={{ padding: '0.5in', color: '#0f172a', fontFamily: '"Inter", "Helvetica Neue", Helvetica, Arial, sans-serif', fontSize: 12, lineHeight: 1.4, background: 'white' }}>
+                  {AccentBar}
                   {InvoiceHeader}
-                  <div className="flex justify-between items-start gap-4">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
                     {BillToBlock}
                     {MetaBlock}
                   </div>
                   {format === 'apfm' && ApfmTable}
                   {format === 'ae_tv' && AETvTable}
                   {format === 'genworth' && GenworthTable}
-                  <div className="flex justify-between items-start gap-4 mt-4">
-                    <div className="text-xs" style={{ minWidth: '40%' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginTop: 24 }}>
+                    <div style={{ minWidth: '45%' }}>
                       {RunningFooter}
-                      {S.meta.memo && <div className="mt-3 text-xs whitespace-pre-line">{S.meta.memo}</div>}
-                      <div className="mt-6 text-xs">
-                        <div className="font-semibold">ACH Remittance Information:</div>
-                        <div>Bank Routing Number: 321180515</div>
-                        <div>Account Number: 527878220</div>
-                      </div>
+                      {S.meta.memo && <div style={{ marginTop: 12, whiteSpace: 'pre-line', color: MUTED }}>{S.meta.memo}</div>}
                     </div>
                     {TotalsBox}
+                  </div>
+                  <div style={{ marginTop: 40, paddingTop: 16, borderTop: `1px solid ${RULE}`, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 24, color: MUTED, fontSize: 11 }}>
+                    <div>
+                      <div style={{ textTransform: 'uppercase', fontSize: 9, letterSpacing: 1.2, fontWeight: 600, color: '#0f172a', marginBottom: 4 }}>ACH Remittance</div>
+                      <div>Routing 321180515 · Account 527878220</div>
+                      <div>EIN 20-3985663</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ textTransform: 'uppercase', fontSize: 9, letterSpacing: 1.2, fontWeight: 600, color: '#0f172a', marginBottom: 4 }}>Questions?</div>
+                      <div>accounting@synergiecorp.com</div>
+                      <div>+1 510-550-1400</div>
+                    </div>
                   </div>
                 </div>
               </div>
