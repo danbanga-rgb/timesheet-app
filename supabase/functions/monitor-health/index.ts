@@ -29,6 +29,7 @@ interface SloResult {
   details: string;
   capMinutes: number; // frequency cap in minutes
   actionSuggestion: string;
+  minConsecutiveBreaches?: number; // require N consecutive failed checks before alerting; default 1
 }
 
 // ─── SLO checks ────────────────────────────────────────────────────────────
@@ -39,6 +40,7 @@ async function checkPollerHeartbeat(supabase: ReturnType<typeof createClient>): 
     threshold: '120 min gap',
     capMinutes: 24 * 60,
     actionSuggestion: 'Check GitHub Actions → poll-timesheets.yml. Re-run the job manually if stalled.',
+    minConsecutiveBreaches: 2,
   };
 
   const now = new Date();
@@ -404,16 +406,22 @@ serve(async (req) => {
     // Breach — single read for state + cap check
     const { consecutiveBreaches, canAlert } = await getBreachState(supabase, slo.key, slo.capMinutes);
     const newCount = consecutiveBreaches + 1;
+    const meetsThreshold = newCount >= (slo.minConsecutiveBreaches ?? 1);
 
-    if (canAlert && !DRY_RUN) {
+    if (canAlert && meetsThreshold && !DRY_RUN) {
       const emailResult = await sendAlert(BREVO_API_KEY, FROM_EMAIL, slo, newCount);
       await recordBreach(supabase, slo.key, newCount, true);
       report.push({ slo: slo.key, ok: false, current: slo.current, alerted: emailResult.ok });
     } else {
       await recordBreach(supabase, slo.key, newCount, false);
+      const skipReason = DRY_RUN
+        ? 'dry_run'
+        : !meetsThreshold
+          ? `${newCount}/${slo.minConsecutiveBreaches} consecutive breach(es)`
+          : `within ${slo.capMinutes}min cap`;
       report.push({
         slo: slo.key, ok: false, current: slo.current, alerted: false,
-        skipped: DRY_RUN ? 'dry_run' : `within ${slo.capMinutes}min cap`,
+        skipped: skipReason,
       });
     }
   }
