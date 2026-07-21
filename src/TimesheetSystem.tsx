@@ -10966,7 +10966,12 @@ const TimesheetSystem = () => {
                 .invoice-print-root tfoot { display: table-footer-group; }
                 .invoice-print-root tr { page-break-inside: avoid; break-inside: avoid; }
                 .invoice-totals-block, .invoice-footer-block { page-break-inside: avoid; break-inside: avoid; }
-                @page { size: letter; margin: 0.5in; }
+                @page {
+                  size: letter;
+                  margin: 0.5in 0.5in 0.7in 0.5in;
+                  @bottom-left  { content: "${(S.meta.invoiceNumber || 'Draft').replace(/"/g, '\\"')}  ·  ${S.client.name.replace(/"/g, '\\"')}"; font-family: 'Inter','Helvetica Neue',Helvetica,Arial,sans-serif; font-size: 9pt; color: #64748b; }
+                  @bottom-right { content: "Page " counter(page) " of " counter(pages); font-family: 'Inter','Helvetica Neue',Helvetica,Arial,sans-serif; font-size: 9pt; color: #64748b; }
+                }
               }
             `}</style>
 
