@@ -10881,17 +10881,21 @@ const TimesheetSystem = () => {
                 <td style={tdNum}>1.00</td>
                 <td style={{ ...tdNum, fontWeight: 600 }}>{fmt$(subtotalGross)}</td>
               </tr>
-              {S.lines.map(l => (
-                <tr key={l.id}>
-                  <td style={{ ...tdStyle, paddingLeft: 32, color: MUTED }}>{l.contractorName} — {l.roleTitle}</td>
-                  <td style={{ ...tdNum, color: MUTED }}>{l.hours}</td>
-                  <td style={{ ...tdNum, color: MUTED }}>${l.rate.toFixed(0)}</td>
-                  <td style={{ ...tdNum, color: MUTED }}>{fmt$(l.amount)}</td>
-                  <td style={tdStyle}></td>
-                  <td style={tdStyle}></td>
-                  <td style={tdStyle}></td>
-                </tr>
-              ))}
+              {S.lines.map(l => {
+                const gwCell: React.CSSProperties = { padding: '3px 12px', verticalAlign: 'top', color: MUTED, borderBottom: 'none' };
+                const gwNum: React.CSSProperties  = { ...gwCell, textAlign: 'right', fontVariantNumeric: 'tabular-nums' };
+                return (
+                  <tr key={l.id}>
+                    <td style={{ ...gwCell, paddingLeft: 32 }}>{l.contractorName} — {l.roleTitle}</td>
+                    <td style={gwNum}>{l.hours}</td>
+                    <td style={gwNum}>${l.rate.toFixed(0)}</td>
+                    <td style={gwNum}>{fmt$(l.amount)}</td>
+                    <td style={gwCell}></td>
+                    <td style={gwCell}></td>
+                    <td style={gwCell}></td>
+                  </tr>
+                );
+              })}
               <tr style={{ background: SUBTLE }}>
                 <td style={{ ...tdStyle, fontWeight: 600, textAlign: 'right' }}>Totals</td>
                 <td style={{ ...tdNum, fontWeight: 600 }}>{totalHours}</td>
