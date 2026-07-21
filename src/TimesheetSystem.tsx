@@ -10961,6 +10961,11 @@ const TimesheetSystem = () => {
                 body > [data-invoice-print] .no-print { display: none !important; }
                 body > [data-invoice-print] .invoice-modal-shell { position: static !important; background: white !important; padding: 0 !important; margin: 0 !important; max-width: none !important; box-shadow: none !important; border-radius: 0 !important; width: auto !important; }
                 body > [data-invoice-print] .invoice-print-root { position: static !important; padding: 0 !important; width: auto !important; }
+                /* Multi-page hygiene: repeat table header, keep rows/totals/footer intact */
+                .invoice-print-root thead { display: table-header-group; }
+                .invoice-print-root tfoot { display: table-footer-group; }
+                .invoice-print-root tr { page-break-inside: avoid; break-inside: avoid; }
+                .invoice-totals-block, .invoice-footer-block { page-break-inside: avoid; break-inside: avoid; }
                 @page { size: letter; margin: 0.5in; }
               }
             `}</style>
@@ -11072,14 +11077,14 @@ const TimesheetSystem = () => {
                   {format === 'apfm' && ApfmTable}
                   {format === 'ae_tv' && AETvTable}
                   {format === 'genworth' && GenworthTable}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginTop: 24 }}>
+                  <div className="invoice-totals-block" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginTop: 24 }}>
                     <div style={{ minWidth: '45%' }}>
                       {RunningFooter}
                       {S.meta.memo && <div style={{ marginTop: 12, whiteSpace: 'pre-line', color: MUTED }}>{S.meta.memo}</div>}
                     </div>
                     {TotalsBox}
                   </div>
-                  <div style={{ marginTop: 40, paddingTop: 16, borderTop: `1px solid ${RULE}`, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 24, color: MUTED, fontSize: 11 }}>
+                  <div className="invoice-footer-block" style={{ marginTop: 40, paddingTop: 16, borderTop: `1px solid ${RULE}`, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 24, color: MUTED, fontSize: 11 }}>
                     <div>
                       <div style={{ textTransform: 'uppercase', fontSize: 9, letterSpacing: 1.2, fontWeight: 600, color: '#0f172a', marginBottom: 4 }}>ACH Remittance</div>
                       <div>Routing 321180515 · Account 527878220</div>
