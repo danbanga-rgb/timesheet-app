@@ -10952,18 +10952,20 @@ const TimesheetSystem = () => {
               .invoice-print-root, .invoice-print-root * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
               .invoice-zebra > tbody > tr:nth-child(even) > td { background: #f8fafc; }
               @media print {
-                body { background: white !important; }
-                body * { visibility: hidden; }
-                .invoice-print-root, .invoice-print-root * { visibility: visible; }
-                .invoice-print-root { position: absolute; left: 0; top: 0; width: 100%; padding: 0.5in; background: white; }
-                .no-print, .no-print * { display: none !important; }
-                .invoice-modal-shell { position: static !important; background: white !important; padding: 0 !important; max-width: none !important; }
+                body { background: white !important; margin: 0 !important; }
+                /* Hide everything at body-level except our portal, isolating from other pages' print CSS */
+                body > *:not([data-invoice-print]) { display: none !important; }
+                body > [data-invoice-print] { display: block !important; position: static !important; background: white !important; padding: 0 !important; margin: 0 !important; box-shadow: none !important; }
+                body > [data-invoice-print] .no-print { display: none !important; }
+                body > [data-invoice-print] .invoice-modal-shell { position: static !important; background: white !important; padding: 0 !important; margin: 0 !important; max-width: none !important; box-shadow: none !important; border-radius: 0 !important; width: auto !important; }
+                body > [data-invoice-print] .invoice-print-root { position: static !important; padding: 0 !important; width: auto !important; }
                 @page { size: letter; margin: 0.5in; }
               }
             `}</style>
 
             <div
-              className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-start justify-center p-4 overflow-y-auto no-print"
+              data-invoice-print="true"
+              className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-start justify-center p-4 overflow-y-auto"
               onClick={() => setInvoiceModal(null)}
             >
               <div className="invoice-modal-shell bg-white rounded-lg shadow-xl w-full max-w-5xl my-8" onClick={e => e.stopPropagation()}>
