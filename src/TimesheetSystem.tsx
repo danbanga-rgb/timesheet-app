@@ -10956,6 +10956,8 @@ const TimesheetSystem = () => {
                 /* Hide everything at body-level except our portal, isolating from other pages' print CSS */
                 body > *:not([data-invoice-print]) { display: none !important; }
                 body > [data-invoice-print] { display: block !important; position: static !important; background: white !important; padding: 0 !important; margin: 0 !important; box-shadow: none !important; }
+                /* Re-assert visibility: an older print CSS block sets body * { visibility: hidden } */
+                body > [data-invoice-print], body > [data-invoice-print] * { visibility: visible !important; }
                 body > [data-invoice-print] .no-print { display: none !important; }
                 body > [data-invoice-print] .invoice-modal-shell { position: static !important; background: white !important; padding: 0 !important; margin: 0 !important; max-width: none !important; box-shadow: none !important; border-radius: 0 !important; width: auto !important; }
                 body > [data-invoice-print] .invoice-print-root { position: static !important; padding: 0 !important; width: auto !important; }
