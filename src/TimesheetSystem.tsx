@@ -2808,21 +2808,24 @@ const TimesheetSystem = () => {
       }
       blocks.push('ENDTRNS');
 
-      // Blocks 2..N+1: BILLPMT per matched invoice, FROM Western Union Holding
+      // Blocks 2..N+1: one CHECK per matched invoice, FROM Western Union Holding
+      // to Accounts Payable. QB Online does not accept BILLPMT via IIF; CHECK-to-AP
+      // with vendor NAME + bill DOCNUM produces a vendor credit QBO auto-applies to
+      // the outstanding BILL (or accountant applies via Bill screen with one click).
       for (const r of g.rows) {
         const inv = r.invoice!;
         const vendor = r.vendorName!;
         const sub = Number(r.txn.subtotal ?? 0);
-        const memo = `Applied to INV ${inv.invoiceNumber} — ${inv.userName}`;
+        const memo = `Applied to INV ${inv.invoiceNumber} — ${inv.userName} — wire ${g.confirmationNumber}`;
 
         blocks.push([
-          'TRNS', trnsId, 'BILLPMT', wireDate, WU_HOLDING, vendor,
-          (-sub).toFixed(2), g.confirmationNumber, memo, 'N',
+          'TRNS', trnsId, 'CHECK', wireDate, WU_HOLDING, vendor,
+          (-sub).toFixed(2), inv.invoiceNumber, memo, 'N',
         ].join('\t'));
         trnsId++;
 
         blocks.push([
-          'SPL', splId, 'BILLPMT', wireDate, AP_ACCOUNT, vendor,
+          'SPL', splId, 'CHECK', wireDate, AP_ACCOUNT, vendor,
           sub.toFixed(2), inv.invoiceNumber, memo, 'N',
         ].join('\t'));
         splId++;
