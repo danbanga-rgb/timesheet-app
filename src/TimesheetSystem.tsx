@@ -2641,7 +2641,7 @@ const TimesheetSystem = () => {
         const amt   = Number(inv.totalAmount || 0);
         const memo  = `${monthShort} — ${hours}h @ $${rate} — ${inv.userName} — INV ${inv.invoiceNumber}`;
         const spl = [
-          'SPL', splId, 'BILL', billDate, EXPENSE_ACCOUNT, g.vendor,
+          'SPL', splId, 'BILL', billDate, EXPENSE_ACCOUNT, '',
           amt.toFixed(2), inv.invoiceNumber, memo, 'N', hours.toFixed(2), rate.toFixed(2),
         ].join('\t');
         blocks.push(spl);
