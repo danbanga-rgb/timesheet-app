@@ -379,6 +379,8 @@ interface ConveraTransaction {
   // For umbrella payments (many-to-many)
   matchedInvoiceIds?: number[];
   matcherIgnore: boolean;  // pre-2026-06-20 historical Convera transactions
+  qbPaymentExportStatus: 'not_exported' | 'exported' | 'confirmed' | 'skipped';
+  qbPaymentExportStatusAt: string | null;
 }
 
 interface ReminderEmail {
@@ -950,6 +952,8 @@ const TimesheetSystem = () => {
   type ConveraBatchManualRow = { id: string; beneficiaryId: number; shortName: string; vendorId: string; country: string; amount: number; ref1: string };
   const [converaBatchManualRows, setConveraBatchManualRows] = useState<ConveraBatchManualRow[]>([]);
   const [converaBatchManualEditor, setConveraBatchManualEditor] = useState<{ open: boolean; search: string; benef: ConveraBeneficiary | null; amount: string; ref1: string }>({ open: false, search: '', benef: null, amount: '', ref1: '' });
+  // QB Payment IIF preview modal state
+  const [paymentIifPreview, setPaymentIifPreview] = useState<PaymentIifPreview | null>(null);
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
@@ -2037,6 +2041,8 @@ const TimesheetSystem = () => {
       notes:                (r.notes as string) ?? null,
       matchedInvoiceIds:    umbrellaMap?.[r.id as number],
       matcherIgnore:        Boolean(r.matcher_ignore),
+      qbPaymentExportStatus: ((r.qb_payment_export_status as string) || 'not_exported') as ConveraTransaction['qbPaymentExportStatus'],
+      qbPaymentExportStatusAt: (r.qb_payment_export_status_at as string) || null,
     };
   }
 
@@ -2651,6 +2657,198 @@ const TimesheetSystem = () => {
     }
 
     return header + '\n' + blocks.join('\n') + '\n';
+  };
+
+  // ─── QB Payment IIF export ──────────────────────────────────────────────────
+  // Groups a batch's Convera transactions by confirmation_number (one wire = one
+  // bank debit). For each group: one CHECK from Key Point Checking (splits to
+  // Western Union Holding + Bank Service Charges) + one BILLPMT per matched
+  // invoice from Western Union Holding. See project_convera_payment_iif memory.
+  type PaymentIifRow = {
+    txn: ConveraTransaction;
+    invoice: Invoice | null;
+    vendorName: string | null;
+    excludeReason: string | null;  // null = includable
+  };
+  type PaymentIifGroup = {
+    confirmationNumber: string;
+    dateOfOrder: string;
+    rows: PaymentIifRow[];         // includable only
+    subtotalSum: number;
+    feeSum: number;
+    grandTotalSum: number;
+  };
+  type PaymentIifPreview = {
+    batch: ImportBatch;
+    groups: PaymentIifGroup[];
+    excluded: PaymentIifRow[];     // rows with excludeReason set
+    totalSubtotal: number;
+    totalFee: number;
+    totalGrand: number;
+    includableTxnIds: number[];    // for bulk-mark on download
+  };
+
+  const buildPaymentIifPreview = (batchId: number): PaymentIifPreview | null => {
+    const batch = importBatches.find(b => b.id === batchId);
+    if (!batch) return null;
+    const batchRows = converaTransactions.filter(t =>
+      t.importBatchId === batchId && !t.matcherIgnore
+    );
+
+    // Classify every row: includable or excluded (with reason)
+    const classified: PaymentIifRow[] = batchRows.map(txn => {
+      const invId = txn.matchedInvoiceId;
+      const inv = invId ? invoices.find(i => i.id === invId) ?? null : null;
+      let vendor: string | null = null;
+      if (inv) {
+        const pp = inv.paymentProfile?.id
+          ? paymentProfiles.find(p => p.id === inv.paymentProfile!.id) ?? null
+          : (paymentProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null);
+        vendor = pp?.qbVendorName || null;
+      }
+      let reason: string | null = null;
+      if (txn.matchState !== 'matched' || !invId || !inv) reason = 'Not matched to an invoice';
+      else if (!vendor) reason = 'Missing qb_vendor_name on payment profile';
+      else if (!inv.invoiceNumber) reason = 'Missing invoice number';
+      else if (inv.qbExportStatus === 'not_exported') reason = 'BILL not yet exported to QB';
+      else if (inv.qbExportStatus === 'skipped') reason = 'BILL was skipped in QB export';
+      else if (txn.qbPaymentExportStatus === 'exported' || txn.qbPaymentExportStatus === 'confirmed') reason = 'Payment already exported';
+      return { txn, invoice: inv, vendorName: vendor, excludeReason: reason };
+    });
+
+    const includable = classified.filter(r => !r.excludeReason);
+    const excluded   = classified.filter(r =>  r.excludeReason);
+
+    // Group includable by confirmation_number
+    const groupMap = new Map<string, PaymentIifGroup>();
+    for (const r of includable) {
+      const key = r.txn.confirmationNumber;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          confirmationNumber: key,
+          dateOfOrder: r.txn.dateOfOrder,
+          rows: [],
+          subtotalSum: 0,
+          feeSum: 0,
+          grandTotalSum: 0,
+        });
+      }
+      const g = groupMap.get(key)!;
+      g.rows.push(r);
+      g.subtotalSum   += Number(r.txn.subtotal ?? 0);
+      g.feeSum        += Number(r.txn.serviceCharges ?? 0);
+      g.grandTotalSum += Number(r.txn.grandTotal ?? 0);
+      // Use earliest date in the group as the wire date
+      if (r.txn.dateOfOrder < g.dateOfOrder) g.dateOfOrder = r.txn.dateOfOrder;
+    }
+    const groups = Array.from(groupMap.values()).sort((a, b) => a.dateOfOrder.localeCompare(b.dateOfOrder));
+
+    const totalSubtotal = groups.reduce((s, g) => s + g.subtotalSum, 0);
+    const totalFee      = groups.reduce((s, g) => s + g.feeSum, 0);
+    const totalGrand    = groups.reduce((s, g) => s + g.grandTotalSum, 0);
+
+    return {
+      batch,
+      groups,
+      excluded,
+      totalSubtotal,
+      totalFee,
+      totalGrand,
+      includableTxnIds: includable.map(r => r.txn.id),
+    };
+  };
+
+  const buildPaymentIifContent = (preview: PaymentIifPreview): string => {
+    const KEY_POINT       = 'BANK/CASH:8220 - Key Point Checking';
+    const WU_HOLDING      = 'BANK/CASH:Western Union Holding';
+    const BANK_CHARGES    = 'Bank Charges:Bank Service Charges';
+    const AP_ACCOUNT      = 'Accounts Payable';
+    const CONVERA_PAYEE   = 'Convera';
+
+    const fmtDate = (yyyyMmDd: string) => {
+      const [y, m, d] = yyyyMmDd.split('-');
+      return `${m}/${d}/${y}`;
+    };
+
+    const header = [
+      '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR',
+      '!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR',
+      '!ENDTRNS',
+    ].join('\n');
+
+    let trnsId = 1;
+    let splId  = 1;
+    const blocks: string[] = [];
+
+    for (const g of preview.groups) {
+      const wireDate = fmtDate(g.dateOfOrder);
+      const memoTop  = `Convera wire ${g.confirmationNumber} — ${g.rows.length} bill${g.rows.length === 1 ? '' : 's'}`;
+
+      // Block 1: CHECK from Key Point Checking
+      blocks.push([
+        'TRNS', trnsId, 'CHECK', wireDate, KEY_POINT, CONVERA_PAYEE,
+        (-g.grandTotalSum).toFixed(2), g.confirmationNumber, memoTop, 'N',
+      ].join('\t'));
+      trnsId++;
+
+      // SPL 1: Wire principal → Western Union Holding
+      blocks.push([
+        'SPL', splId, 'CHECK', wireDate, WU_HOLDING, '',
+        g.subtotalSum.toFixed(2), '', 'Wire principal to Western Union Holding', 'N',
+      ].join('\t'));
+      splId++;
+
+      // SPL 2: Fees → Bank Service Charges (only if > 0)
+      if (g.feeSum > 0) {
+        blocks.push([
+          'SPL', splId, 'CHECK', wireDate, BANK_CHARGES, '',
+          g.feeSum.toFixed(2), '', `Convera fees (${g.rows.length} × $${(g.feeSum / g.rows.length).toFixed(2)})`, 'N',
+        ].join('\t'));
+        splId++;
+      }
+      blocks.push('ENDTRNS');
+
+      // Blocks 2..N+1: BILLPMT per matched invoice, FROM Western Union Holding
+      for (const r of g.rows) {
+        const inv = r.invoice!;
+        const vendor = r.vendorName!;
+        const sub = Number(r.txn.subtotal ?? 0);
+        const memo = `Applied to INV ${inv.invoiceNumber} — ${inv.userName}`;
+
+        blocks.push([
+          'TRNS', trnsId, 'BILLPMT', wireDate, WU_HOLDING, vendor,
+          (-sub).toFixed(2), g.confirmationNumber, memo, 'N',
+        ].join('\t'));
+        trnsId++;
+
+        blocks.push([
+          'SPL', splId, 'BILLPMT', wireDate, AP_ACCOUNT, vendor,
+          sub.toFixed(2), inv.invoiceNumber, memo, 'N',
+        ].join('\t'));
+        splId++;
+
+        blocks.push('ENDTRNS');
+      }
+    }
+
+    return header + '\n' + blocks.join('\n') + '\n';
+  };
+
+  const bulkMarkPaymentExportStatus = async (
+    txnIds: number[],
+    next: ConveraTransaction['qbPaymentExportStatus'],
+  ) => {
+    if (txnIds.length === 0) return;
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from('convera_transactions')
+      .update({ qb_payment_export_status: next, qb_payment_export_status_at: nowIso })
+      .in('id', txnIds);
+    if (error) { alert('Error updating payment export status: ' + error.message); return; }
+    const idSet = new Set(txnIds);
+    setConveraTransactions(prev => prev.map(t => idSet.has(t.id)
+      ? { ...t, qbPaymentExportStatus: next, qbPaymentExportStatusAt: nowIso }
+      : t));
   };
 
   // Save approval status and/or pay on date without closing modal
@@ -8260,6 +8458,15 @@ const TimesheetSystem = () => {
                         {b.state === 'pending' && (
                           <button onClick={() => handleRollbackBatch(b.id)} className="px-3 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200 font-medium border border-red-200">Rollback & Delete</button>
                         )}
+                        <button
+                          onClick={() => {
+                            const preview = buildPaymentIifPreview(b.id);
+                            if (!preview) { alert('Could not load batch data'); return; }
+                            setPaymentIifPreview(preview);
+                          }}
+                          className="px-3 py-1 text-xs bg-emerald-100 text-emerald-700 rounded hover:bg-emerald-200 font-medium border border-emerald-200"
+                          title="Preview and download the QuickBooks payment IIF for this batch"
+                        >Export Payments IIF</button>
                       </div>
                     </div>
                   );
@@ -9444,6 +9651,150 @@ const TimesheetSystem = () => {
                     >
                       Generate IIF ({qbExportSelectedIds.size})
                     </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* QB Payment IIF Preview + Download Modal */}
+          {paymentIifPreview && (() => {
+            const p = paymentIifPreview;
+            const fmt$ = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const canDownload = p.groups.length > 0;
+            const excludedByReason = p.excluded.reduce<Record<string, PaymentIifRow[]>>((acc, r) => {
+              const k = r.excludeReason || 'Unknown';
+              (acc[k] ??= []).push(r);
+              return acc;
+            }, {});
+            return (
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+                  <div className="p-6">
+                    <div className="flex items-start justify-between mb-4">
+                      <div>
+                        <h2 className="text-xl font-semibold text-gray-900">QB Payment IIF Export</h2>
+                        <p className="text-sm text-gray-500 mt-1">
+                          Batch #{p.batch.id} · {p.batch.sourceFilename || p.batch.source}
+                        </p>
+                      </div>
+                      <button onClick={() => setPaymentIifPreview(null)} className="text-gray-400 hover:text-gray-600">
+                        <span className="text-2xl leading-none">×</span>
+                      </button>
+                    </div>
+
+                    {/* Summary cards */}
+                    <div className="grid grid-cols-4 gap-3 mb-4">
+                      <div className="bg-emerald-50 border border-emerald-200 rounded p-3">
+                        <div className="text-[10px] uppercase tracking-wider text-emerald-700 font-semibold">Wires</div>
+                        <div className="text-2xl font-bold text-emerald-900">{p.groups.length}</div>
+                      </div>
+                      <div className="bg-indigo-50 border border-indigo-200 rounded p-3">
+                        <div className="text-[10px] uppercase tracking-wider text-indigo-700 font-semibold">Bills paid</div>
+                        <div className="text-2xl font-bold text-indigo-900">{p.includableTxnIds.length}</div>
+                      </div>
+                      <div className="bg-slate-50 border border-slate-200 rounded p-3">
+                        <div className="text-[10px] uppercase tracking-wider text-slate-700 font-semibold">Principal + Fees</div>
+                        <div className="text-lg font-bold text-slate-900">${fmt$(p.totalSubtotal)} + ${fmt$(p.totalFee)}</div>
+                      </div>
+                      <div className="bg-slate-900 text-white rounded p-3">
+                        <div className="text-[10px] uppercase tracking-wider text-slate-300 font-semibold">Bank debit total</div>
+                        <div className="text-2xl font-bold">${fmt$(p.totalGrand)}</div>
+                      </div>
+                    </div>
+
+                    {/* Wire groups */}
+                    {p.groups.length === 0 ? (
+                      <div className="bg-amber-50 border border-amber-200 rounded p-4 mb-4 text-sm text-amber-900">
+                        No exportable payments in this batch. See exclusions below.
+                      </div>
+                    ) : (
+                      <div className="mb-4">
+                        <h3 className="text-sm font-semibold text-gray-700 mb-2">Wire groups (one CHECK per group)</h3>
+                        <div className="space-y-3">
+                          {p.groups.map(g => (
+                            <div key={g.confirmationNumber} className="border border-gray-200 rounded">
+                              <div className="bg-gray-50 px-3 py-2 border-b border-gray-200 flex items-center justify-between">
+                                <div className="text-sm">
+                                  <span className="font-mono font-semibold text-emerald-700">{g.confirmationNumber}</span>
+                                  <span className="text-gray-500 ml-2">· {g.dateOfOrder}</span>
+                                  <span className="text-gray-500 ml-2">· {g.rows.length} bill{g.rows.length === 1 ? '' : 's'}</span>
+                                </div>
+                                <div className="text-sm font-semibold text-gray-900">
+                                  ${fmt$(g.subtotalSum)} + ${fmt$(g.feeSum)} = <span className="text-emerald-700">${fmt$(g.grandTotalSum)}</span>
+                                </div>
+                              </div>
+                              <div className="p-2 text-xs">
+                                {g.rows.map(r => (
+                                  <div key={r.txn.id} className="flex justify-between py-0.5 border-b border-gray-100 last:border-b-0">
+                                    <div>
+                                      <span className="text-gray-600">{r.invoice?.userName}</span>
+                                      <span className="text-gray-400 mx-2">·</span>
+                                      <span className="font-mono text-gray-700">{r.vendorName}</span>
+                                      <span className="text-gray-400 mx-2">·</span>
+                                      <span className="text-gray-500">INV {r.invoice?.invoiceNumber}</span>
+                                    </div>
+                                    <div className="text-gray-900 font-medium">${fmt$(Number(r.txn.subtotal ?? 0))}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Exclusions */}
+                    {p.excluded.length > 0 && (
+                      <div className="mb-4">
+                        <h3 className="text-sm font-semibold text-gray-700 mb-2">Excluded ({p.excluded.length})</h3>
+                        {Object.entries(excludedByReason).map(([reason, rows]) => (
+                          <div key={reason} className="mb-2 border border-amber-200 rounded overflow-hidden">
+                            <div className="bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900">
+                              {reason} — {rows.length}
+                            </div>
+                            <div className="p-2 text-xs bg-white">
+                              {rows.map(r => (
+                                <div key={r.txn.id} className="text-gray-600 py-0.5">
+                                  <span className="font-mono text-gray-500">{r.txn.confirmationNumber}</span>
+                                  <span className="mx-2">·</span>
+                                  <span>{r.txn.beneficiaryName}</span>
+                                  <span className="mx-2">·</span>
+                                  <span>${fmt$(Number(r.txn.grandTotal ?? 0))}</span>
+                                  {r.txn.ref1 && <><span className="mx-2">·</span><span className="text-gray-500">{r.txn.ref1}</span></>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Actions */}
+                    <div className="flex justify-end gap-2 pt-3 border-t border-gray-200">
+                      <button
+                        onClick={() => setPaymentIifPreview(null)}
+                        className="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                      >Cancel</button>
+                      <button
+                        onClick={async () => {
+                          const iif = buildPaymentIifContent(p);
+                          const dateSlug = p.groups[0]?.dateOfOrder.replace(/-/g, '') || new Date().toISOString().slice(0, 10).replace(/-/g, '');
+                          const filename = `Synergie_QB_Payments_Batch${p.batch.id}_${dateSlug}.iif`;
+                          const blob = new Blob([iif], { type: 'application/octet-stream' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = filename;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                          await bulkMarkPaymentExportStatus(p.includableTxnIds, 'exported');
+                          setPaymentIifPreview(null);
+                        }}
+                        disabled={!canDownload}
+                        className={`px-4 py-2 text-sm rounded font-medium ${canDownload ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}
+                      >Download IIF ({p.groups.length} wire{p.groups.length === 1 ? '' : 's'})</button>
+                    </div>
                   </div>
                 </div>
               </div>
