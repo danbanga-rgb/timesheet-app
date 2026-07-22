@@ -2800,9 +2800,13 @@ const TimesheetSystem = () => {
 
       // SPL 2: Fees → Bank Service Charges (only if > 0)
       if (g.feeSum > 0) {
+        const distinctFees = new Set(g.rows.map(r => Number(r.txn.serviceCharges ?? 0)));
+        const feeMemo = distinctFees.size === 1
+          ? `Convera fees (${g.rows.length} × $${[...distinctFees][0].toFixed(2)})`
+          : `Convera fees for ${g.rows.length} wires (mixed rates)`;
         blocks.push([
           'SPL', splId, 'CHECK', wireDate, BANK_CHARGES, '',
-          g.feeSum.toFixed(2), '', `Convera fees (${g.rows.length} × $${(g.feeSum / g.rows.length).toFixed(2)})`, 'N',
+          g.feeSum.toFixed(2), '', feeMemo, 'N',
         ].join('\t'));
         splId++;
       }
