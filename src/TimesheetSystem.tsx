@@ -2556,7 +2556,7 @@ const TimesheetSystem = () => {
   // vendors (Teal, Cloudygon, etc.) get one bill with multiple SPL lines.
   const buildIifContent = (invoicesToExport: Invoice[]): string => {
     const AP_ACCOUNT      = 'Accounts Payable';
-    const EXPENSE_ACCOUNT = 'Cost of Goods Sold:Project Related Costs:Personnel Expenses:Consulting:Vendor Consultants';
+    const EXPENSE_ACCOUNT = 'Project Related Costs:Personnel Expenses:Consulting:Vendor Consultants';
     const termsToDays: Record<string, number> = { NET15: 15, NET30: 30, NET45: 45, NET60: 60 };
     const findLivePp = (inv: Invoice) => {
       const pp = inv.paymentProfile;
