@@ -2822,15 +2822,20 @@ const TimesheetSystem = () => {
         const sub = Number(r.txn.subtotal ?? 0);
         const memo = `Applied to INV ${inv.invoiceNumber} — ${inv.userName} — wire ${g.confirmationNumber}`;
 
+        // DOCNUM = wire confirmation (always ≤11 chars). QB rejects DOCNUM > 11
+        // on IIF import; invoice numbers often exceed that. Full invoice number
+        // stays in the memo so accountant can identify the target bill in "Set
+        // Credits". Wire is not the join key anyway — CHECK-to-AP lands as a
+        // vendor credit that accountant applies manually (QBO restriction).
         blocks.push([
           'TRNS', trnsId, 'CHECK', wireDate, WU_HOLDING, vendor,
-          (-sub).toFixed(2), inv.invoiceNumber, memo, 'N',
+          (-sub).toFixed(2), g.confirmationNumber, memo, 'N',
         ].join('\t'));
         trnsId++;
 
         blocks.push([
           'SPL', splId, 'CHECK', wireDate, AP_ACCOUNT, vendor,
-          sub.toFixed(2), inv.invoiceNumber, memo, 'N',
+          sub.toFixed(2), g.confirmationNumber, memo, 'N',
         ].join('\t'));
         splId++;
 
@@ -9718,6 +9723,9 @@ const TimesheetSystem = () => {
                     ) : (
                       <div className="mb-4">
                         <h3 className="text-sm font-semibold text-gray-700 mb-2">Wire groups (one CHECK per group)</h3>
+                        <div className="mb-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900">
+                          <span className="font-semibold">Ref No. in QB</span> = wire confirmation (e.g. <span className="font-mono">OTR6607568</span>) for every credit. Full invoice number is in the memo so you can identify the target bill when clicking Set Credits.
+                        </div>
                         <div className="space-y-3">
                           {p.groups.map(g => (
                             <div key={g.confirmationNumber} className="border border-gray-200 rounded">
