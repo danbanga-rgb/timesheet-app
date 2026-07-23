@@ -46,3 +46,43 @@ Each session appends; nothing is removed.
 - **Two-space indentation inside emitted XML.** Chosen for readability when a request is logged or dumped. QB doesn't care about whitespace.
 - **File layout:** `types.ts` for input/output shapes, `envelope.ts` for shared wrapping + escaping, `builders.ts` for request builders. Parsers will land in a separate `parsers.ts` (Chunk 3).
 - **Sessions committed independently** so each is reviewable in isolation.
+
+## Session 2 — 2026-07-23 — BillAddRq
+
+### Decisions locked
+
+- **Constants extracted to `constants.ts`.** `DEFAULT_AP_ACCOUNT`, `DEFAULT_EXPENSE_ACCOUNT`, plus payment-side accounts (`KEY_POINT_CHECKING`, `WU_HOLDING`, `BANK_SERVICE_CHARGES`, `CONVERA_PAYEE`) staged now so Session 3 doesn't need to re-derive them. Values mirror the existing IIF export exactly. Do not change without re-verifying against QB.
+
+- **Element ordering is enforced by the builder AND locked in a test.**
+  qbXML rejects requests where `<BillAdd>` children arrive out of spec order (schema validation error). Locked order:
+  `VendorRef → APAccountRef → TxnDate → DueDate → RefNumber → Memo → ExpenseLineAdd+`
+  Inside `ExpenseLineAdd`: `AccountRef → Amount → Memo`.
+  Test `builders.test.ts:"emits elements in the strict qbXML spec order"` guards against accidental refactor breaking this.
+
+- **`ExpenseLineAdd.Amount` is POSITIVE** (expense debit). QB derives the A/P credit internally. Differs from IIF where the caller wrote both sides explicitly.
+
+- **Bill is per-group, not multi-group.** Each `BillAddRqInput` = ONE bill. Callers (job enqueue layer, later) do umbrella-vendor grouping and enqueue N `bill_add` jobs. Cleaner than accepting an array of groups here.
+
+- **`Amount` always formatted `.toFixed(2)`.** Currency is USD-only for now; qbXML AMTTYPE tolerates more precision but 2dp matches QB storage + IIF + accountant expectations. Guards against JS float noise.
+
+- **Optional elements omitted when not supplied.** `DueDate`, `Memo`, per-line `Memo` — all conditional. Sending empty `<DueDate></DueDate>` or `<Memo></Memo>` can trip QB parsers; omission is safer.
+
+- **`TermsRef` explicitly NOT emitted.** Mixing `TermsRef` and `DueDate` in one request is ambiguous — QB's precedence behavior is undocumented. We compute `DueDate` ourselves (same policy as IIF: last-day-of-month + max NET terms across combined invoices) and send that. No `TermsRef`.
+
+- **Unicode is passed through untouched.** Only the five XML special chars are escaped. Croatian/Serbian diacritics (`Đ Ž Č Ć Š`) survive the builder as-is. QB Desktop 2020's SDK has known encoding quirks with some codepoints (see project memory for `OBAI DRUŠTVO` history); that's a QB-side problem to solve when we see it — the builder shouldn't sanitize preemptively.
+
+### Open questions for Aug 9 accountant testing
+
+5. **`RefNumber` max length on `BillAdd`.** Consolibyte schema pins `BillPaymentCheckAddRq.RefNumber` at 11 chars — but Bill's may be higher (QB UI supports 20 chars in the Bill Ref No. field). Not verified. Long invoice numbers like `INVOICE_Synergie 05/01-31/2026` (30 chars) may need truncation OR may pass through if the actual QB limit is more generous. Test with a real long-refnumber bill on first live handshake.
+
+6. **`ExpenseLineAdd` vs `ItemLineAdd`.** We use `ExpenseLineAdd` matching IIF. This loses hours/rate as structured fields (they only appear in memo strings). If the accountant wants hours×rate in QB reports (e.g. for cost-per-hour analytics), we'd need `ItemLineAdd` referencing a Service item per contractor. Not needed for MVP.
+
+7. **How does QB respond when `VendorRef.FullName` doesn't match an existing vendor?** BillAddRq requires the vendor to pre-exist. Assumption: statusCode ≠ 0 with a "vendor not found" message. Parser (Session 3) must surface this cleanly so the caller can prompt the accountant to create the vendor in QB (or auto-create via VendorAddRq — future scope, tracked in main design memory).
+
+8. **Multi-currency.** All amounts assumed USD. Combined bills across currencies would need `<CurrencyRef>` + `<ExchangeRate>` on the bill and probably per-line handling. Not implemented; not tested. Note in code comment where these would live.
+
+### Non-obvious style choices
+
+- **Two-level indentation of ExpenseLineAdd** (4 spaces inside `<BillAdd>`, 6 spaces inside `<ExpenseLineAdd>`) — human-readable when logged; QB doesn't care.
+- **Grouping semantic lives in the caller, not the builder.** Encouraged pattern: caller (edge fn job dispatcher) groups by `(qb_vendor_name, period_end month)` before enqueueing.
+- **`fmtAmount` helper is private to `builders.ts`.** Not exported. Session 3 will need it too; will lift to a shared helper file if a second builder wants it.
