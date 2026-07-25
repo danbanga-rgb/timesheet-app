@@ -710,6 +710,10 @@ These links are valid for 7 days and are single-use.`;
 
   // ══════════════════════════════════════════════════════════════════════════
   // 3. ACCOUNTANT REMINDERS — disabled for now; covered by send-timesheet-report
+  // SHAPE-TRAP: if re-enabling, the entries read at ~line 805 only handles
+  // object-shape entries and drops plain-number (imported) days. Port
+  // getHours() from send-timesheet-report/index.ts:98 before removing the
+  // `continue` below. See project_entries_shape_latent_bugs.
   // ══════════════════════════════════════════════════════════════════════════
   for (const accountant of accountants) {
     results.push({ role: 'accountant', user: accountant.name, action: 'skipped (disabled)' });

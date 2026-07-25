@@ -50,6 +50,11 @@ async function reconcile(
     return { status: 'unverifiable', delta: null, notes: 'No timesheets found for period' };
   }
 
+  // SHAPE-TRAP: entries has two shapes — portal writes {hours:"8"} objects,
+  // poller writes plain numbers. The read below only handles the object shape,
+  // so imported-source timesheets sum to 0 and return 'unverifiable'.
+  // Port getHours() from send-timesheet-report/index.ts:98 before invoking
+  // this utility on imported-source invoices. See project_entries_shape_latent_bugs.
   let timesheetHours = 0;
   for (const ts of timesheets) {
     const entries = ts.entries as Record<string, { hours: string | number }>;
