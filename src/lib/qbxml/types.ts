@@ -168,3 +168,22 @@ export interface QbxmlResponseStatus {
   /** Echoed requestID if we supplied one. */
   requestId?: string;
 }
+
+/** Return shape of parseBillQueryRs. `results` is empty when statusCode !== 0
+ *  OR when the query matched zero bills (see GOTCHAS Session 4 open question). */
+export interface ParsedBillQueryRs {
+  status: QbxmlResponseStatus;
+  results: BillQueryResult[];
+}
+
+/** Return shape of parseBillAddRs. `result` is null on any non-success status. */
+export interface ParsedBillAddRs {
+  status: QbxmlResponseStatus;
+  result: BillAddResult | null;
+}
+
+/** Return shape of parseBillPaymentCheckAddRs. `result` is null on any non-success status. */
+export interface ParsedBillPaymentCheckAddRs {
+  status: QbxmlResponseStatus;
+  result: BillPaymentCheckAddResult | null;
+}

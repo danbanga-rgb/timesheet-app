@@ -132,3 +132,50 @@ Each session appends; nothing is removed.
 - **Fixture in the test suite mirrors a real Convera wire.** `payeeVendorName = 'Bimosoft - Amar Pljevljak'`, `refNumber = 'OTR6607568'`, `bankAccount = WU_HOLDING`, real TxnID shape (`12006-1196864828`). Makes the emitted XML meaningful to spot-check by eye, and makes debugging against a real payment easier.
 - **Boundary test on RefNumber length (exactly 11 chars accepted, 12+ rejected).** Belt-and-suspenders — the `<=` in the check would silently mis-bound if someone flipped it to `<`.
 - **"Bare skeleton" test** verifies that ONLY the required elements appear when every optional field is omitted. Guards against accidental emit-of-empty tags — QB parsers can trip on `<Memo></Memo>` even when they accept omission.
+
+## Chunk 3 · Session 1 — 2026-07-25 — response parsers
+
+Chunk 3 opens with the response parsers (`parsers.ts`). Zero-dep, hand-rolled targeted extractors — matches the aesthetic of Sessions 1–3 and keeps the Deno edge fn lean. Alternative (fast-xml-parser) was considered and explicitly rejected in favor of the smaller surface area.
+
+### Decisions locked
+
+- **Targeted extractors, not a general XML parser.** Four private helpers do 95% of the work: `xmlUnescape`, `getLeafText` (first `<tag>text</tag>` occurrence), `getAttr` (attribute value from an opening tag string), `getAllBlocks` (all top-level `<tag>…</tag>` occurrences). Plus `getFirstElement` which returns opening-tag + inner content for the response's top-level element.
+
+- **Sub-block stripping is the critical safety measure.** `BillRet` contains `<LinkedTxn>` sub-blocks with nested `<TxnID>` and `<RefNumber>` that refer to OTHER transactions (previous payments, credits). A naïve first-occurrence extractor would return LinkedTxn's TxnID/RefNumber for any bill with linked history. Solution: strip `LinkedTxn` (and other defensive candidates: `VendorRef`, `APAccountRef`, `CurrencyRef`, `TermsRef`, `SalesTaxCodeRef`, `ExpenseLineRet`, `ItemLineRet`, `CustomFieldRet`, `DataExtRet`) from the block before extracting leaves. `BillPaymentCheckRet` gets the same treatment against `AppliedToTxnRet` etc.
+
+- **Load-bearing test:** `parseBillQueryRs` "IGNORES nested LinkedTxn TxnID/RefNumber". Realistic fixture with a bill that has payment history. Rejects both incorrect values by name. This test is the difference between the parser being correct in production and being subtly wrong on the first bill with a linked payment.
+
+- **Belt-and-suspenders test on BillPaymentCheckRet** — same pattern, `AppliedToTxnRet` sub-blocks carry per-bill TxnIDs which must not surface as the payment's identity.
+
+- **Case sensitivity: qbXML is always PascalCase.** Parser is case-sensitive by design. No inference; no normalization. If QB ever returns lowercase (it shouldn't), the parser will silently miss it — and that's the correct signal to investigate rather than paper over.
+
+- **`getLeafText` uses `[^<]*` for content.** Deliberately does NOT support elements with child content — those are container blocks, and we strip them before extraction. Regex is tighter and mis-matches are impossible.
+
+- **Attribute parsing supports both single and double quotes.** QB always double-quotes, but the parser doesn't care. Small robustness for zero cost.
+
+- **`unwrapQbxmlResponses` returns whole-element strings**, one per `*Rs` element in `QBXMLMsgsRs`. Edge fn dispatches each to the appropriate parser by tag name. Regex `<([A-Za-z][A-Za-z0-9]*Rs)…</\1>` — one-off targeted match on the response-element naming convention.
+
+- **Envelope-optional inputs.** All three top-level parsers accept EITHER a full QBXML envelope OR just the bare `*Rs` fragment. Simpler for tests and gives the edge fn one less thing to do.
+
+- **Return shape uses `null` for missing result, empty array for zero matches.** `BillQuery` returns `results: []` on zero-match (valid successful state). `BillAdd` / `BillPaymentCheckAdd` return `result: null` on error (no Ret block emitted by QB). Type-checked callers can't confuse the two.
+
+- **`result.refNumber` is optional on BillPaymentCheckAddResult**, matching the request where RefNumber is optional. If our caller didn't supply one, QB won't have one to echo back.
+
+- **Missing required leaves skip the record, not throw.** If QB ever returns a BillRet without TxnID (never observed), that Ret is silently dropped rather than throwing and losing every other result in the batch. Defensive. Tested.
+
+### Open questions for Aug 9 accountant testing
+
+14. **What does QB return on "no records found" from BillQueryRq?** Consolibyte says statusCode=1 severity=Warn. Our parser treats it as "no matches"; if the actual behavior is statusCode=0 with an empty result set, both branches yield the same output. Verify on first empty query.
+
+15. **`AppliedToTxnRet` shape on BillPaymentCheckAddRs when SetCredit is applied.** We strip the whole block, so we don't care about its inner shape — but if a future feature needs to surface applied-credit breakdowns back to the UI, we'll need to re-parse it. Confirm the shape on first payment involving credits.
+
+16. **CDATA in responses.** Our stripper and leaf extractor don't specially handle `<![CDATA[…]]>` inside stripped blocks (safe — we're throwing them away). Inside a leaf field, CDATA content would be returned as literal `<![CDATA[…]]>` text. Never observed from QB but worth noting.
+
+17. **`statusCode` value taxonomy.** We treat non-zero as "error or warning" without enumerating specific codes. QB Desktop 2020 Pro has a large statusCode table (3100+ for various errors); when we start writing user-visible error handling, we'll want a mapping — but for parser MVP, opaque strings are sufficient.
+
+### Non-obvious style choices
+
+- **Fixture builder in the test** (`buildBillRet` in `parseBillQueryRs` tests) — reduces boilerplate for the multi-record + LinkedTxn-stripping tests. NOT used elsewhere; kept local to that describe block to avoid over-abstracting.
+- **`getFirstElement` returns `{openingTag, inner}`, not just `inner`.** Callers need the opening tag string to run `getAttr` for status attributes. One helper produces both cheaply; separating would double the regex work.
+- **The stripped-tag list is a `const` array, not inlined.** Both to signal that "these are the container types we know about in BillRet" and to make future additions a one-line change (e.g. when qbXML 14.0 introduces a new container).
+- **Tests use hand-crafted response fixtures**, not captured-from-QB responses. This is a MVP concession — we don't have live QB output yet. Aug 9 live testing will produce real fixtures we can bake into a `parsers.fixtures.ts` file for regression coverage.
