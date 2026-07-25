@@ -72,6 +72,91 @@ export interface BillAddResult {
   refNumber: string;
 }
 
+/** BillPaymentCheckAddRq: record a check-style bill payment (Convera wire, ACH,
+ *  or physical check) tied to a bank account and applied to one or more bills.
+ *
+ *  Represents ONE payment covering ONE payee vendor. If a single wire covers
+ *  bills for multiple vendors (rare in our Convera flow — routing is per
+ *  beneficiary — but possible), the caller enqueues one job per (vendor, wire)
+ *  pair with the same TxnDate + BankAccount + RefNumber.
+ *
+ *  Semantics mirror the existing IIF payment export
+ *  (`buildPaymentIifPreview` / IIF CHECK+BILLPMT rows in TimesheetSystem.tsx)
+ *  so QB behaves identically: one wire → one bank debit → applied against the
+ *  covered A/P bills. The improvement over IIF is auto-apply via TxnID — no
+ *  more DOCNUM string-matching gymnastics.
+ */
+export interface BillPaymentCheckAddRqInput {
+  /** qb_vendor_name — must match an existing QB vendor exactly. Same source of
+   *  truth as BillAddRqInput.vendorName (payment_profiles.qb_vendor_name). */
+  payeeVendorName: string;
+  /** A/P account whose bills we're paying down. Defaults to DEFAULT_AP_ACCOUNT. */
+  apAccountName?: string;
+  /** Payment date. YYYY-MM-DD. Existing IIF uses convera_transactions.payment_date. */
+  txnDate: string;
+  /** Bank account paying out. For Convera wires: WU_HOLDING (from constants).
+   *  For direct disbursements: KEY_POINT_CHECKING. Caller decides. */
+  bankAccountName: string;
+  /** RefNumber — MAX 11 CHARS. Existing IIF/Payment flow uses the wire
+   *  confirmation code (e.g. "OTR6607568", 10 chars — always fits). Builder
+   *  throws if longer to prevent silent QB truncation. See GOTCHAS Session 3. */
+  refNumber?: string;
+  /** Payment-level memo. Existing IIF: "Convera wire — INV {invoice_number} — {vendor}". */
+  memo?: string;
+  /** Optional flag. Convera wires and ACH are NOT printed checks — leave
+   *  unset (default) and QB uses its own default. Set false explicitly if you
+   *  want to be defensive against a QB company setting that defaults new
+   *  payments to "to be printed". */
+  isToBePrinted?: boolean;
+  /** One or more bills this payment covers. Required, min 1. */
+  applications: BillPaymentApplicationInput[];
+  /** Optional request correlation ID. */
+  requestId?: string;
+}
+
+/** One bill being paid by a BillPaymentCheck. */
+export interface BillPaymentApplicationInput {
+  /** TxnID of the Bill in QB. Obtained via BillQueryRs lookup or persisted
+   *  immediately after BillAddRs (see project_qb_web_connector_design memory). */
+  billTxnId: string;
+  /** Amount from this payment applied to this bill. Multiple applications
+   *  in one BillPaymentCheck naturally split the bank debit across bills. */
+  paymentAmount: number;
+  /** Optional early-payment discount to book against this bill. */
+  discountAmount?: number;
+  /** REQUIRED if discountAmount is set — QB rejects a discount without an
+   *  account to book it against. Builder throws if discountAmount is set
+   *  without this. */
+  discountAccountName?: string;
+  /** Optional class for the discount line. */
+  discountClassName?: string;
+  /** Optional existing vendor credits in QB to consume alongside this
+   *  payment (each SetCredit reduces the effective PaymentAmount needed
+   *  from bank cash). Not used in the Convera MVP flow; supported here so
+   *  a future accountant-triggered payment can drain credits. */
+  setCredits?: SetCreditInput[];
+}
+
+/** Apply an existing vendor credit (e.g. from a prior overpayment) to a bill
+ *  as part of a BillPaymentCheck. */
+export interface SetCreditInput {
+  /** TxnID of the Credit already in QB. */
+  creditTxnId: string;
+  /** Portion of the credit consumed by this application. */
+  appliedAmount: number;
+  /** If true, permits applying more than the credit's currently-available
+   *  balance (QB surfaces a warning). Rare; leave unset in normal flow. */
+  override?: boolean;
+}
+
+/** Result of parseBillPaymentCheckAddRs — the newly-created payment's identity. */
+export interface BillPaymentCheckAddResult {
+  txnId: string;
+  editSequence: string;
+  /** Echoed back only if we supplied one (RefNumber is optional on the request). */
+  refNumber?: string;
+}
+
 /** Common shape for any parsed qbXML response. */
 export interface QbxmlResponseStatus {
   /** statusCode="0" is success; anything else is an error. */

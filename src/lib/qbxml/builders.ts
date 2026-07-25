@@ -4,12 +4,25 @@
 // Wrap one or more with wrapQbxmlRequests() from ./envelope.ts to produce a
 // full QBXML round-trip payload.
 //
-// Session 1 (this file, initial): BillQueryRq only.
-// Session 2 will add BillAddRq, Session 3 will add BillPaymentCheckAddRq.
+// Session 1: BillQueryRq.
+// Session 2: BillAddRq + constants.ts.
+// Session 3 (this session): BillPaymentCheckAddRq — auto-apply the payment
+// against previously-recorded bills using TxnID (replaces IIF DOCNUM matching).
 
-import type { BillAddRqInput, BillQueryRqInput } from './types';
+import type {
+  BillAddRqInput,
+  BillPaymentCheckAddRqInput,
+  BillQueryRqInput,
+} from './types';
 import { xmlEscape } from './envelope';
 import { DEFAULT_AP_ACCOUNT, DEFAULT_EXPENSE_ACCOUNT } from './constants';
+
+/** QB Desktop limit for BillPaymentCheck.RefNumber. Documented in Consolibyte's
+ *  qbXML schema and confirmed in QB's UI (the "No." field on the Bill Payment
+ *  screen accepts 11 chars max). Exceeding it produces a schema validation
+ *  error from QB. Our Convera flow uses wire confirmation codes like
+ *  "OTR6607568" (10 chars) — always fits. */
+const BILL_PAYMENT_CHECK_REF_NUMBER_MAX = 11;
 
 /** Format a monetary amount as a qbXML AMTTYPE string (2 decimal places).
  *  Matches how the existing IIF export renders amounts, and matches how
@@ -115,5 +128,177 @@ export function buildBillAddRq(input: BillAddRqInput): string {
   }
   parts.push('  </BillAdd>');
   parts.push('</BillAddRq>');
+  return parts.join('\n');
+}
+
+/** Build a <BillPaymentCheckAddRq> element.
+ *
+ * qbXML element ordering inside <BillPaymentCheckAdd> is STRICT (same rules
+ * as BillAdd — QB rejects out-of-order children with a schema error). Locked
+ * order:
+ *
+ *    PayeeEntityRef → APAccountRef → TxnDate → BankAccountRef →
+ *    RefNumber → Memo → IsToBePrinted → AppliedToTxnAdd+
+ *
+ * Inside <AppliedToTxnAdd>, also strict:
+ *
+ *    TxnID → PaymentAmount → DiscountAmount → DiscountAccountRef →
+ *    DiscountClassRef → SetCredit*
+ *
+ * Inside <SetCredit>:
+ *
+ *    CreditTxnID → AppliedAmount → Override?
+ *
+ * Two order-related tests lock these — do not rearrange without updating
+ * both tests AND re-verifying against qbXML 13.0 spec / a live QB.
+ *
+ * ONE PayeeEntityRef per BillPaymentCheck: this element models a single
+ * check to a single vendor, covering N of that vendor's bills. If a Convera
+ * wire ever covers bills for multiple vendors (rare — routing is per
+ * beneficiary), the caller enqueues one job per (vendor, wire) pair with
+ * the same TxnDate + BankAccount + RefNumber. Not a builder concern.
+ *
+ * PaymentAmount is entered as POSITIVE — the amount OF the payment applied
+ * to this bill. QB reduces the bill's outstanding balance by that amount
+ * and credits the bank account for the sum of all PaymentAmounts.
+ *
+ * DiscountAmount + DiscountAccountRef go together: if DiscountAmount is
+ * provided without an account, QB has nowhere to post the discount and the
+ * request fails. Builder catches this at input-validation time with a
+ * useful error rather than letting it round-trip to QB.
+ *
+ * SetCredit blocks apply existing vendor credits (from prior overpayments
+ * or vendor-issued credits) toward the same bill. Not used in the Convera
+ * MVP flow; supported for a future accountant-triggered payment path.
+ *
+ * See constants.ts for KEY_POINT_CHECKING and WU_HOLDING (bank account
+ * paths used by Convera and direct-disbursement flows respectively).
+ * See GOTCHAS.md Session 3 for RefNumber length rationale and remaining
+ * questions for Aug 9 live testing.
+ */
+export function buildBillPaymentCheckAddRq(
+  input: BillPaymentCheckAddRqInput,
+): string {
+  if (input.applications.length === 0) {
+    throw new Error(
+      'buildBillPaymentCheckAddRq: at least one application required',
+    );
+  }
+  if (
+    input.refNumber != null &&
+    input.refNumber.length > BILL_PAYMENT_CHECK_REF_NUMBER_MAX
+  ) {
+    throw new Error(
+      `buildBillPaymentCheckAddRq: refNumber "${input.refNumber}" exceeds ` +
+        `QB's ${BILL_PAYMENT_CHECK_REF_NUMBER_MAX}-char BillPaymentCheck.RefNumber limit ` +
+        `(actual: ${input.refNumber.length}). Use the wire confirmation code, ` +
+        `not the invoice number.`,
+    );
+  }
+  for (const app of input.applications) {
+    if (app.discountAmount != null && !app.discountAccountName) {
+      throw new Error(
+        `buildBillPaymentCheckAddRq: application for billTxnId ` +
+          `"${app.billTxnId}" has discountAmount but no discountAccountName. ` +
+          `QB requires the discount account when a discount is applied.`,
+      );
+    }
+  }
+
+  const apAccount = input.apAccountName ?? DEFAULT_AP_ACCOUNT;
+  const attrs = input.requestId
+    ? ` requestID="${xmlEscape(input.requestId)}"`
+    : '';
+
+  const parts: string[] = [
+    `<BillPaymentCheckAddRq${attrs}>`,
+    '  <BillPaymentCheckAdd>',
+  ];
+
+  // PayeeEntityRef
+  parts.push('    <PayeeEntityRef>');
+  parts.push(
+    `      <FullName>${xmlEscape(input.payeeVendorName)}</FullName>`,
+  );
+  parts.push('    </PayeeEntityRef>');
+
+  // APAccountRef
+  parts.push('    <APAccountRef>');
+  parts.push(`      <FullName>${xmlEscape(apAccount)}</FullName>`);
+  parts.push('    </APAccountRef>');
+
+  // TxnDate
+  parts.push(`    <TxnDate>${xmlEscape(input.txnDate)}</TxnDate>`);
+
+  // BankAccountRef
+  parts.push('    <BankAccountRef>');
+  parts.push(
+    `      <FullName>${xmlEscape(input.bankAccountName)}</FullName>`,
+  );
+  parts.push('    </BankAccountRef>');
+
+  // RefNumber (optional)
+  if (input.refNumber) {
+    parts.push(`    <RefNumber>${xmlEscape(input.refNumber)}</RefNumber>`);
+  }
+
+  // Memo (optional)
+  if (input.memo) {
+    parts.push(`    <Memo>${xmlEscape(input.memo)}</Memo>`);
+  }
+
+  // IsToBePrinted (optional — omit unless caller supplied a value)
+  if (input.isToBePrinted != null) {
+    parts.push(
+      `    <IsToBePrinted>${input.isToBePrinted ? 'true' : 'false'}</IsToBePrinted>`,
+    );
+  }
+
+  // AppliedToTxnAdd (required, repeatable)
+  for (const app of input.applications) {
+    parts.push('    <AppliedToTxnAdd>');
+    parts.push(`      <TxnID>${xmlEscape(app.billTxnId)}</TxnID>`);
+    parts.push(
+      `      <PaymentAmount>${fmtAmount(app.paymentAmount)}</PaymentAmount>`,
+    );
+    if (app.discountAmount != null) {
+      parts.push(
+        `      <DiscountAmount>${fmtAmount(app.discountAmount)}</DiscountAmount>`,
+      );
+      parts.push('      <DiscountAccountRef>');
+      parts.push(
+        `        <FullName>${xmlEscape(app.discountAccountName!)}</FullName>`,
+      );
+      parts.push('      </DiscountAccountRef>');
+      if (app.discountClassName) {
+        parts.push('      <DiscountClassRef>');
+        parts.push(
+          `        <FullName>${xmlEscape(app.discountClassName)}</FullName>`,
+        );
+        parts.push('      </DiscountClassRef>');
+      }
+    }
+    if (app.setCredits && app.setCredits.length > 0) {
+      for (const sc of app.setCredits) {
+        parts.push('      <SetCredit>');
+        parts.push(
+          `        <CreditTxnID>${xmlEscape(sc.creditTxnId)}</CreditTxnID>`,
+        );
+        parts.push(
+          `        <AppliedAmount>${fmtAmount(sc.appliedAmount)}</AppliedAmount>`,
+        );
+        if (sc.override != null) {
+          parts.push(
+            `        <Override>${sc.override ? 'true' : 'false'}</Override>`,
+          );
+        }
+        parts.push('      </SetCredit>');
+      }
+    }
+    parts.push('    </AppliedToTxnAdd>');
+  }
+
+  parts.push('  </BillPaymentCheckAdd>');
+  parts.push('</BillPaymentCheckAddRq>');
   return parts.join('\n');
 }
