@@ -10919,7 +10919,7 @@ const TimesheetSystem = () => {
                                 value={editTerms}
                                 onChange={e => {
                                   setPendingPaymentTerms(e.target.value);
-                                  if (e.target.value && !editPayOn) setPendingPayOnDate(calculatePayOn(inv.periodEnd, e.target.value));
+                                  if (e.target.value) setPendingPayOnDate(calculatePayOn(inv.periodEnd, e.target.value));
                                 }}
                                 className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-400 text-sm bg-white"
                               >
