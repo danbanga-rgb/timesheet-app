@@ -133,7 +133,7 @@ function buildConsolidatedReport(
       project: projectRef ? `${projectRef.name} (${projectRef.code})` : 'Not Assigned',
       hours, statuses, rowTotal,
     };
-  }).sort((a, b) => a.name.localeCompare(b.name));
+  }).sort((a, b) => a.locationType.localeCompare(b.locationType) || a.name.localeCompare(b.name));
 
   const colTotals: Record<string, number> = {};
   weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
