@@ -323,6 +323,16 @@ interface Invoice {
   qbExportStatus: 'not_exported' | 'exported' | 'confirmed' | 'skipped';
   qbExportStatusAt: string | null;
   matcherIgnore: boolean;  // pre-2026-04-28 historical invoices — hidden from matchPaymentToInvoice
+  editHistory: InvoiceEditEntry[];
+}
+
+interface InvoiceEditEntry {
+  at: string;              // ISO timestamp
+  by: string;              // accountant name
+  field: 'period';         // only period edits today; more later
+  old: { periodStart: string; periodEnd: string };
+  new: { periodStart: string; periodEnd: string };
+  reason: string;
 }
 
 interface ConveraPaymentRow {
@@ -1014,6 +1024,12 @@ const TimesheetSystem = () => {
   const [pendingInvoiceNumber, setPendingInvoiceNumber] = useState('');
   const [pendingPaidDate, setPendingPaidDate] = useState('');     // actual paid date (set when marking paid)
   const [pendingUsdRate, setPendingUsdRate] = useState('');
+  // Period edit (Marta-style corrections): accountant overrides period_start/period_end.
+  const [pendingPeriodStart, setPendingPeriodStart] = useState('');
+  const [pendingPeriodEnd, setPendingPeriodEnd] = useState('');
+  const [pendingEditReason, setPendingEditReason] = useState('');
+  const [periodEditOpen, setPeriodEditOpen] = useState(false);
+  const [periodEditPreviewShown, setPeriodEditPreviewShown] = useState(false);
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState<Set<string>>(new Set());
   const [invoicePayOnPreset, setInvoicePayOnPreset] = useState<Set<string>>(new Set()); // empty=all, 'none'=not assigned, 'YYYY-MM-DD'=specific date
   const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState<Set<string>>(new Set()); // empty=all
@@ -2321,6 +2337,7 @@ const TimesheetSystem = () => {
       qbExportStatus: ((r.qb_export_status as string) || 'not_exported') as Invoice['qbExportStatus'],
       matcherIgnore: Boolean(r.matcher_ignore),
       qbExportStatusAt: (r.qb_export_status_at as string) || null,
+      editHistory: Array.isArray(r.edit_history) ? (r.edit_history as InvoiceEditEntry[]) : [],
     };
   }
 
@@ -2907,6 +2924,135 @@ const TimesheetSystem = () => {
       ...(fields.paymentTerms !== undefined ? { paymentTerms: fields.paymentTerms || null } : {}),
       ...(fields.invoiceNumber !== undefined ? { invoiceNumber: fields.invoiceNumber || '' } : {}),
     } : prev);
+  };
+
+  // Preview what happens when the invoice period is edited: collision with an existing
+  // invoice, timesheet-lock diff (only meaningful once approved), recon change under the
+  // new period, and any Convera payment already matched to this invoice.
+  function previewPeriodChange(inv: Invoice, newStart: string, newEnd: string) {
+    // Collision: any other non-rejected invoice for the same contractor whose period overlaps.
+    const collisions = invoices.filter(o =>
+      o.id !== inv.id &&
+      o.userId === inv.userId &&
+      o.status !== 'rejected' &&
+      o.periodStart && o.periodEnd &&
+      o.periodStart <= newEnd && o.periodEnd >= newStart
+    );
+
+    // Recon under the new period — pure eval, no DB.
+    const nextInv: Invoice = { ...inv, periodStart: newStart, periodEnd: newEnd };
+    const nextRecon = reconcileInvoiceLive(nextInv, timesheets);
+
+    // Lock diff: only relevant when status is approved or paid (period locks days on approve).
+    // Compute set of dates in old range vs new range.
+    const dateSet = (s: string, e: string) => {
+      const out = new Set<string>();
+      const cur = new Date(s + 'T12:00:00Z');
+      const end = new Date(e + 'T12:00:00Z');
+      while (cur <= end) { out.add(cur.toISOString().slice(0, 10)); cur.setUTCDate(cur.getUTCDate() + 1); }
+      return out;
+    };
+    const willChangeLocks = inv.status === 'approved' || inv.status === 'paid';
+    const oldDays = willChangeLocks ? dateSet(inv.periodStart, inv.periodEnd) : new Set<string>();
+    const newDays = willChangeLocks ? dateSet(newStart, newEnd) : new Set<string>();
+    const toUnlock = [...oldDays].filter(d => !newDays.has(d)).sort();
+    const toLock = [...newDays].filter(d => !oldDays.has(d)).sort();
+
+    // Convera payment already matched to this invoice (direct or umbrella).
+    const converaMatch = converaTransactions.find(t =>
+      t.matchedInvoiceId === inv.id ||
+      (t.matchedInvoiceIds || []).includes(inv.id)
+    );
+
+    return { collisions, nextRecon, willChangeLocks, toUnlock, toLock, converaMatch };
+  }
+
+  const savePeriodEdit = async (inv: Invoice, newStart: string, newEnd: string, reason: string) => {
+    if (!newStart || !newEnd) { alert('Both period start and end are required.'); return; }
+    if (newEnd < newStart) { alert('Period end must be on or after period start.'); return; }
+    if (!reason.trim()) { alert('Please enter a reason for this change.'); return; }
+    if (inv.status === 'paid') { alert('Cannot edit period of a paid invoice. Revert to approved first.'); return; }
+
+    const nextInv: Invoice = { ...inv, periodStart: newStart, periodEnd: newEnd };
+    const nextRecon = reconcileInvoiceLive(nextInv, timesheets);
+    const newEntry: InvoiceEditEntry = {
+      at: new Date().toISOString(),
+      by: currentUser!.name,
+      field: 'period',
+      old: { periodStart: inv.periodStart, periodEnd: inv.periodEnd },
+      new: { periodStart: newStart, periodEnd: newEnd },
+      reason: reason.trim(),
+    };
+    const nextHistory = [...(inv.editHistory || []), newEntry];
+
+    const reconNotes = nextRecon.timesheetHours != null
+      ? `Timesheet: ${nextRecon.timesheetHours}h · Invoice: ${inv.totalHours ?? '—'}h`
+      : 'No timesheets in period';
+
+    const { error } = await supabase.from('invoices').update({
+      period_start: newStart,
+      period_end: newEnd,
+      edit_history: nextHistory,
+      reconciliation_status: nextRecon.status,
+      reconciliation_delta: nextRecon.delta,
+      reconciliation_notes: reconNotes,
+    }).eq('id', inv.id);
+    if (error) { alert('Error saving period change: ' + error.message); return; }
+
+    // Re-run timesheet locking if the invoice already carries locks (approved).
+    if (inv.status === 'approved') {
+      const dateSet = (s: string, e: string) => {
+        const out = new Set<string>();
+        const cur = new Date(s + 'T12:00:00Z');
+        const end = new Date(e + 'T12:00:00Z');
+        while (cur <= end) { out.add(cur.toISOString().slice(0, 10)); cur.setUTCDate(cur.getUTCDate() + 1); }
+        return out;
+      };
+      const oldDays = dateSet(inv.periodStart, inv.periodEnd);
+      const newDays = dateSet(newStart, newEnd);
+      // Union of old + new range determines which timesheets to touch.
+      const unionStart = inv.periodStart < newStart ? inv.periodStart : newStart;
+      const unionEnd = inv.periodEnd > newEnd ? inv.periodEnd : newEnd;
+      const windowStart = new Date(new Date(unionStart + 'T00:00:00Z').getTime() - 6 * 86400000).toISOString().slice(0, 10);
+      const { data: tsList } = await supabase
+        .from('timesheets')
+        .select('id, week_start, locked_days')
+        .eq('user_id', inv.userId)
+        .gte('week_start', windowStart)
+        .lte('week_start', unionEnd);
+      for (const ts of tsList || []) {
+        const existing: string[] = Array.isArray(ts.locked_days)
+          ? (ts.locked_days as string[]).map(d => (d + '').slice(0, 10))
+          : [];
+        // Strip any day that was locked because of THIS invoice's old range (and no other
+        // reason we can detect) and add any day newly inside the new range.
+        const kept = existing.filter(d => !oldDays.has(d));
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(ts.week_start + 'T12:00:00Z');
+          d.setUTCDate(d.getUTCDate() + i);
+          const dStr = d.toISOString().slice(0, 10);
+          if (newDays.has(dStr) && !kept.includes(dStr)) kept.push(dStr);
+        }
+        await supabase.from('timesheets').update({ locked_days: kept.length ? kept : null }).eq('id', ts.id);
+      }
+    }
+
+    await fetchInvoices();
+    setSelectedInvoice(prev => prev && prev.id === inv.id ? {
+      ...prev,
+      periodStart: newStart,
+      periodEnd: newEnd,
+      editHistory: nextHistory,
+      reconciliationStatus: nextRecon.status,
+      reconciliationDelta: nextRecon.delta,
+      reconciliationNotes: reconNotes,
+    } : prev);
+    setPendingPeriodStart('');
+    setPendingPeriodEnd('');
+    setPendingEditReason('');
+    setPeriodEditPreviewShown(false);
+    setPeriodEditOpen(false);
+    alert('Period updated.');
   };
 
   const switchInvoicePaymentProfile = async (invoiceId: number, newProfile: PaymentProfile) => {
@@ -10719,6 +10865,114 @@ const TimesheetSystem = () => {
                         )}
                       </div>
                     </div>
+                    {/* ── Edit invoice period (accountant override) ── */}
+                    {currentUser?.role === 'accountant' && inv.status !== 'paid' && (
+                      <div className="mb-5 border border-gray-200 rounded-lg overflow-hidden">
+                        <button
+                          onClick={() => {
+                            const opening = !periodEditOpen;
+                            setPeriodEditOpen(opening);
+                            if (opening) {
+                              setPendingPeriodStart(inv.periodStart);
+                              setPendingPeriodEnd(inv.periodEnd);
+                              setPendingEditReason('');
+                              setPeriodEditPreviewShown(false);
+                            }
+                          }}
+                          className="w-full px-4 py-2.5 bg-gray-50 hover:bg-gray-100 flex items-center justify-between text-sm"
+                        >
+                          <span className="font-semibold text-gray-700 flex items-center gap-2"><Edit2 className="w-4 h-4" /> Edit invoice period</span>
+                          <span className="text-xs text-gray-500">{periodEditOpen ? 'Hide' : `Current: ${inv.periodStart} → ${inv.periodEnd}`}</span>
+                        </button>
+                        {periodEditOpen && (() => {
+                          const newStart = pendingPeriodStart || inv.periodStart;
+                          const newEnd = pendingPeriodEnd || inv.periodEnd;
+                          const changed = newStart !== inv.periodStart || newEnd !== inv.periodEnd;
+                          const preview = changed ? previewPeriodChange(inv, newStart, newEnd) : null;
+                          const reconLabel = { matched: '✓ matched', mismatch: '⚠ mismatch', unverifiable: '· unverifiable' } as Record<string, string>;
+                          return (
+                            <div className="p-4 space-y-3 bg-white">
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <label className="block text-xs font-medium text-gray-600 mb-1">Period Start</label>
+                                  <input type="date" value={newStart} onChange={e => { setPendingPeriodStart(e.target.value); setPeriodEditPreviewShown(false); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" />
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-medium text-gray-600 mb-1">Period End</label>
+                                  <input type="date" value={newEnd} onChange={e => { setPendingPeriodEnd(e.target.value); setPeriodEditPreviewShown(false); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" />
+                                </div>
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Reason for change <span className="text-red-500">*</span></label>
+                                <textarea
+                                  value={pendingEditReason}
+                                  onChange={e => setPendingEditReason(e.target.value)}
+                                  rows={2}
+                                  placeholder="e.g. Parser assigned July but the invoice covers June — confirmed with contractor"
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm"
+                                />
+                              </div>
+                              {changed && preview && (
+                                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 space-y-1.5">
+                                  <div className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> Preview of changes</div>
+                                  <div>Period will move from <span className="font-mono">{inv.periodStart} → {inv.periodEnd}</span> to <span className="font-mono">{newStart} → {newEnd}</span>.</div>
+                                  {preview.collisions.length > 0 && (
+                                    <div className="text-red-700">
+                                      ⚠ Overlaps with {preview.collisions.length} other invoice{preview.collisions.length > 1 ? 's' : ''} for {inv.userName}: {preview.collisions.map(c => `${c.invoiceNumber} (${c.status}, ${c.periodStart}→${c.periodEnd})`).join('; ')}. Both will coexist unless you reject one.
+                                    </div>
+                                  )}
+                                  {preview.willChangeLocks && (preview.toUnlock.length > 0 || preview.toLock.length > 0) && (
+                                    <div>
+                                      Timesheet locks: {preview.toUnlock.length} day{preview.toUnlock.length === 1 ? '' : 's'} will be <strong>unlocked</strong>{preview.toUnlock.length ? ` (${preview.toUnlock[0]}${preview.toUnlock.length > 1 ? ` … ${preview.toUnlock[preview.toUnlock.length - 1]}` : ''})` : ''}; {preview.toLock.length} day{preview.toLock.length === 1 ? '' : 's'} will be <strong>locked</strong>{preview.toLock.length ? ` (${preview.toLock[0]}${preview.toLock.length > 1 ? ` … ${preview.toLock[preview.toLock.length - 1]}` : ''})` : ''}.
+                                    </div>
+                                  )}
+                                  <div>
+                                    Reconciliation will become <strong>{reconLabel[preview.nextRecon.status] || preview.nextRecon.status}</strong>
+                                    {preview.nextRecon.timesheetHours != null && ` (TS ${preview.nextRecon.timesheetHours}h`}
+                                    {preview.nextRecon.delta != null && preview.nextRecon.delta !== 0 && `, Δ ${preview.nextRecon.delta > 0 ? '+' : ''}${preview.nextRecon.delta}h`}
+                                    {preview.nextRecon.timesheetHours != null && ')'}.
+                                  </div>
+                                  {preview.converaMatch && (
+                                    <div className="text-red-700">
+                                      ⚠ Matched to Convera payment (conf {preview.converaMatch.confirmationNumber || '—'}, dated {preview.converaMatch.dateOfOrder?.slice(0, 10) || '—'}). Date-fit window will change; consider unmatching if it no longer makes sense.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => setPeriodEditPreviewShown(true)}
+                                  disabled={!changed}
+                                  className="flex-1 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                >Preview</button>
+                                <button
+                                  onClick={() => savePeriodEdit(inv, newStart, newEnd, pendingEditReason)}
+                                  disabled={!changed || !pendingEditReason.trim() || !periodEditPreviewShown}
+                                  className="flex-1 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                  title={!periodEditPreviewShown ? 'Click Preview first' : !pendingEditReason.trim() ? 'Reason required' : ''}
+                                >Confirm change</button>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                        {(inv.editHistory || []).length > 0 && (
+                          <div className="px-4 py-2 bg-gray-50 border-t border-gray-200">
+                            <details>
+                              <summary className="text-xs font-medium text-gray-600 cursor-pointer">Edit history ({inv.editHistory.length})</summary>
+                              <ul className="mt-2 space-y-1.5 text-xs text-gray-700">
+                                {[...inv.editHistory].reverse().map((h, i) => (
+                                  <li key={i} className="border-l-2 border-gray-300 pl-2">
+                                    <div className="text-gray-500">{new Date(h.at).toLocaleString()} · {h.by}</div>
+                                    <div className="font-mono">{h.old.periodStart}→{h.old.periodEnd}  ⇒  {h.new.periodStart}→{h.new.periodEnd}</div>
+                                    <div className="italic text-gray-600">{h.reason}</div>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {/* ── Timesheet reconciliation section ── */}
                     {(() => {
                       const statusBg: Record<string, string> = {
