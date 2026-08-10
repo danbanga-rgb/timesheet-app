@@ -22,6 +22,74 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-ingest-secret',
 };
 
+// ─── Beneficiary deprecation guardrail ────────────────────────────────────────
+// Some Convera beneficiaries are known-wrong (Bimosoft 2026-08-10 incident: 4 stale
+// aux benes 153/157/158/162 all pooling at IE Revolut IE18REVO99036092001905, causing
+// funds to route to wrong account). The convera_beneficiaries table now has a
+// `deprecated` flag + `replacement_beneficiary_id` pointer. This helper walks that
+// chain in memory so the ingest picker never links a new profile to a deprecated bene.
+// Future-proof: if UK ALT (156) is itself deprecated later, set its replacement pointer
+// and downstream flows continue working with no code changes.
+
+interface BeneRow { id: number; deprecated?: boolean; replacement_beneficiary_id?: number | null }
+type BeneMap = Map<number, { deprecated: boolean; replacement: number | null }>;
+
+async function loadDeprecatedBeneMap(
+  supabase: ReturnType<typeof createClient>
+): Promise<BeneMap> {
+  const map: BeneMap = new Map();
+  const { data } = await supabase
+    .from('convera_beneficiaries')
+    .select('id, deprecated, replacement_beneficiary_id')
+    .eq('deprecated', true);
+  (data as BeneRow[] | null ?? []).forEach(b => {
+    map.set(b.id, { deprecated: true, replacement: (b.replacement_beneficiary_id ?? null) });
+  });
+  return map;
+}
+
+function resolveBene(id: number | null | undefined, depMap: BeneMap): { resolved: number | null; wasDeprecated: boolean; original: number | null } {
+  if (id == null) return { resolved: null, wasDeprecated: false, original: null };
+  let cur: number | null = id;
+  let wasDeprecated = false;
+  let hops = 0;
+  while (cur != null && depMap.has(cur) && hops < 10) {
+    wasDeprecated = true;
+    cur = depMap.get(cur)!.replacement;
+    hops++;
+  }
+  return { resolved: cur, wasDeprecated, original: id };
+}
+
+async function appendGuardrailEditHistory(
+  invoiceId: number,
+  events: Array<{ stage: string; original: number; resolved: number | null; note?: string }>,
+  supabase: ReturnType<typeof createClient>
+): Promise<void> {
+  if (!events.length) return;
+  try {
+    const { data } = await supabase
+      .from('invoices')
+      .select('edit_history')
+      .eq('id', invoiceId)
+      .maybeSingle();
+    const current = Array.isArray((data as { edit_history?: unknown[] } | null)?.edit_history)
+      ? ((data as { edit_history: unknown[] }).edit_history)
+      : [];
+    const entry = {
+      at: new Date().toISOString(),
+      by: 'beneficiary-guardrail',
+      events,
+    };
+    await supabase
+      .from('invoices')
+      .update({ edit_history: [...current, entry] })
+      .eq('id', invoiceId);
+  } catch (e) {
+    console.warn(`guardrail edit_history append failed for invoice ${invoiceId}: ${String(e)}`);
+  }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function sanitizeName(name: string | null): string | null {
@@ -555,6 +623,13 @@ serve(async (req) => {
     detectorFixes          = detectorResult.fixes;
     detectorFlags          = detectorResult.flags;
 
+    // Beneficiary guardrail: skip any convera_beneficiaries flagged deprecated. Events
+    // recorded here are appended to invoice.edit_history after insert so accountant sees
+    // when the guardrail intervened. Declared at outer scope so both correction-update
+    // and new-insert response paths can log them.
+    const depMap = await loadDeprecatedBeneMap(supabase);
+    const beneGuardrailEvents: Array<{ stage: string; original: number; resolved: number | null; note?: string }> = [];
+
     // Build payment profile snapshot from parsed bank details (if any)
     const pd = paymentDetails as Record<string, string | null> | null;
     let paymentProfileSnapshot = pd ? {
@@ -579,9 +654,11 @@ serve(async (req) => {
     // Flow:
     //   1. Incomplete parsed data (no IBAN / no SWIFT+account) → strip; accountant assigns.
     //   2. Already-linked existing payment_profile (same user, matching IBAN/swift+acc) → reuse.
-    //   3. Lookup convera_beneficiaries by IBAN. If 1 match → hydrate. If multiple (shared
-    //      intermediary like Bimosoft/NativeTeams/Revolut) → narrow by short_name containing
-    //      contractor's name. Create payment_profile linked to the beneficiary.
+    //      Skipped if the linked bene is deprecated (guardrail).
+    //   3. Lookup convera_beneficiaries by IBAN. Deprecated benes filtered out. If 1 match →
+    //      hydrate. If multiple (shared intermediary like Bimosoft/NativeTeams/Revolut) →
+    //      narrow by short_name containing contractor's name. Create payment_profile linked
+    //      to the beneficiary.
     //   4. No beneficiary match → create a "pending" payment_profile from parsed data; it
     //      will be enriched when a future Convera CSV import creates the matching beneficiary.
     if (pd && paymentProfileSnapshot) {
@@ -627,8 +704,19 @@ serve(async (req) => {
           ? (existing ?? []).find(p => norm(p.iban) === ibanN)
           : (existing ?? []).find(p => norm(p.swift) === swiftN && norm(p.account_number) === accN);
         if (existingMatch) {
-          paymentProfileSnapshot = buildSnapshot(existingMatch);
-          resolved = true;
+          // Guardrail: refuse to reuse a profile linked to a deprecated beneficiary.
+          const beneCheck = resolveBene(existingMatch.convera_beneficiary_id as number | null, depMap);
+          if (beneCheck.wasDeprecated) {
+            beneGuardrailEvents.push({
+              stage: 'existing_profile_skipped',
+              original: beneCheck.original!,
+              resolved: beneCheck.resolved,
+              note: `Skipped payment_profile ${existingMatch.id} (linked to deprecated bene ${beneCheck.original}); falling through to bene lookup`,
+            });
+          } else {
+            paymentProfileSnapshot = buildSnapshot(existingMatch);
+            resolved = true;
+          }
         }
 
         // Step 3 — Convera beneficiary lookup. NOTE: convera_beneficiaries.bank_account
@@ -639,6 +727,7 @@ serve(async (req) => {
           const { data: benefs } = await supabase
             .from('convera_beneficiaries')
             .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
+            .eq('deprecated', false)  // guardrail: never link to deprecated benes
             .ilike('bank_account', ibanN);
 
           let chosen: Record<string, unknown> | null = null;
@@ -700,6 +789,7 @@ serve(async (req) => {
             const { data: nameBenefs } = await supabase
               .from('convera_beneficiaries')
               .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
+              .eq('deprecated', false)  // guardrail: never link to deprecated benes
               .or(`short_name.ilike.*${last}*,beneficiary_name.ilike.*${last}*`);
             const nameMatches = (nameBenefs ?? []).filter(b => {
               const sn = unaccent(((b.short_name as string) || '').toLowerCase());
@@ -869,11 +959,16 @@ serve(async (req) => {
         if (detectorResult.fixes.length > 0 || detectorResult.flags.length > 0) {
           await appendAnomalyEditHistory(invoiceId!, detectorResult.fixes, detectorResult.flags, supabase);
         }
+        // Append beneficiary guardrail events (skipped deprecated bene links etc).
+        if (beneGuardrailEvents.length > 0) {
+          await appendGuardrailEditHistory(invoiceId!, beneGuardrailEvents, supabase);
+        }
         return new Response(JSON.stringify({
           ok: true, action: 'corrected', parseStatus: 'success',
           userId, userName, invoiceId, invoiceNumber: resolvedInvoiceNumber,
           periodStart: finalPeriodStart, periodEnd: finalPeriodEnd, notes: actionNotes,
           anomalyFixes: detectorResult.fixes, anomalyFlags: detectorResult.flags,
+          beneGuardrailEvents,
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
@@ -977,6 +1072,10 @@ serve(async (req) => {
     if (detectorResult.fixes.length > 0 || detectorResult.flags.length > 0) {
       await appendAnomalyEditHistory(invoiceId, detectorResult.fixes, detectorResult.flags, supabase);
     }
+    // Append beneficiary guardrail events (skipped deprecated bene links etc).
+    if (beneGuardrailEvents.length > 0) {
+      await appendGuardrailEditHistory(invoiceId, beneGuardrailEvents, supabase);
+    }
 
     // ── Upload attachment to storage ──────────────────────────────────────
     if (pdfBase64 && typeof pdfBase64 === 'string') {
@@ -1051,6 +1150,7 @@ serve(async (req) => {
     notes:               actionNotes,
     anomalyFixes:        detectorFixes,
     anomalyFlags:        detectorFlags,
+    beneGuardrailEvents,
     attemptCount,
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
