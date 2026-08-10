@@ -179,3 +179,57 @@ Chunk 3 opens with the response parsers (`parsers.ts`). Zero-dep, hand-rolled ta
 - **`getFirstElement` returns `{openingTag, inner}`, not just `inner`.** Callers need the opening tag string to run `getAttr` for status attributes. One helper produces both cheaply; separating would double the regex work.
 - **The stripped-tag list is a `const` array, not inlined.** Both to signal that "these are the container types we know about in BillRet" and to make future additions a one-line change (e.g. when qbXML 14.0 introduces a new container).
 - **Tests use hand-crafted response fixtures**, not captured-from-QB responses. This is a MVP concession — we don't have live QB output yet. Aug 9 live testing will produce real fixtures we can bake into a `parsers.fixtures.ts` file for regression coverage.
+
+## Chunk 4 · Session 1 — 2026-08-10 — edge fn SOAP skeleton
+
+Chunk 4 wires the Chunks 2-3 builders/parsers behind a QBWC-compatible SOAP endpoint. Deno edge fn at `supabase/functions/qb-web-connector/index.ts` with 8 handlers, ~500 LOC including job dispatch and response persistence. Pure SOAP helpers extracted to `soap.ts` and Vitest-tested (11 tests). qbXML code is a physical copy under `qb-web-connector/qbxml/` — see the README there for the sync rule.
+
+### Decisions locked
+
+- **Physical copy of qbxml/, not `_shared/`.** Supabase edge fns can consume `_shared/` but relocating the qbXML source and updating test paths is a Chunk-2 refactor not worth doing today. `supabase/functions/qb-web-connector/qbxml/` mirrors `src/lib/qbxml/`; README notes the sync rule. Consolidation is a future cleanup.
+
+- **Ticket-issued-by-us gate on every post-auth handler.** `sendRequestXML` / `receiveResponseXML` / `closeConnection` / `connectionError` / `getLastError` all check that `params.ticket` is in `qb_wc_sessions`. Without the gate, an arbitrary POST could dispatch a real qb_sync_jobs row with a made-up ticket. Failing modes are intentionally quiet: `sendRequestXML` returns empty (WC exits cleanly), `receiveResponseXML` returns "-1" (WC treats as error but doesn't crash), the others return their success shape so no side channel reveals whether the ticket was valid.
+
+- **Session progress heuristic: `started_at >= session.started_at`.** `receiveResponseXML` must return an int 0-100. We count jobs whose `started_at` is at or after the current session's start — done + error + skipped over total. Simple, not perfect (a very long-running session that spans a new job appearing will see the denominator grow), but WC only reads progress for its progress bar. Not load-bearing.
+
+- **hresult passed by WC gets recorded verbatim before parser runs.** If QB returned an error to WC (via COM), WC forwards it in `hresult` + `message`. When non-zero, we mark the job `error` without invoking our parser (whose contract is "success or empty result set", not "arbitrary XML"). Preserves the exact wire error for post-mortem debug.
+
+- **`nextRunnableJob` batches 50 pending, filters by deps in-process.** A pure SQL join for "all depends_on are done" is possible but harder to reason about with `bigint[]`. In-process is simpler and 50 is more than enough for a session — WC calls `sendRequestXML` in a tight loop, one job at a time.
+
+- **`persistJobResponse` writes to the domain table (invoices / convera_transactions) directly.** No trigger, no separate reconciliation step. Persists TxnID keyed by `invoice_number` (BillQuery/BillAdd) or `confirmation_number` from the payload (BillPaymentCheck). If the domain row doesn't exist yet (created after job enqueue but deleted before response), the update is a no-op and the job still succeeds — TxnID is only lost, not the whole response.
+
+- **`renderJobRequest` reuses the request builders directly.** Job payload is the builder input verbatim (BillQueryRqInput / BillAddRqInput / BillPaymentCheckAddRqInput). Callers (Chunk 5, job enqueue) don't need to know about qbXML — they just push a typed payload. Keeps the enqueue-side surface small.
+
+- **`serverVersion` returns "0.1.0", `clientVersion` returns "".** Version scheme is per-edge-fn (server-side); WC version isn't gated (empty response = accept any). WSDL doesn't demand versions match; the fields exist so the accountant can visually confirm they connected to the right server in WC's UI.
+
+- **`authenticate` returns `companyFile="none"` when the job queue is empty.** Tells WC "you're valid but there's nothing to do" — it exits cleanly. Without this shortcut, WC calls `sendRequestXML`, gets an empty string, then still runs `closeConnection` — 3 round-trips for nothing. Slight optimization worth the two extra lines.
+
+- **`getLastError` returns the current session's most-recent job's error_msg** (empty string if none). WC calls this when it wants a user-visible message after a failure. Good enough for MVP — accountant sees "BillAdd status=3210: Vendor 'Foo' does not exist" verbatim in WC's UI.
+
+### Open questions for Aug 9 live testing
+
+18. **SOAPAction header value.** WSDL says `http://developer.intuit.com/authenticate` etc. We don't validate it today (only care about the body). If WC checks *our* echo of SOAPAction, we may need to set it on responses too — untested.
+
+19. **WSDL delivery.** WC downloads the WSDL when first configured (from a URL in the .qwc file, or from the same endpoint with `?wsdl`). We don't serve a WSDL today. May be OK if the .qwc file itself is complete — check on Aug 9 or during Chunk 6.
+
+20. **Namespace prefix on the response envelope.** We emit `<soap:Envelope>`. Some WC versions may reject prefixes other than `soap` or expect no prefix. Ours is the most-common form.
+
+21. **Content-Type case.** We send `text/xml; charset=utf-8`. WSDL sometimes prefers `application/soap+xml` (SOAP 1.2) — QBWC uses SOAP 1.1 with `text/xml`. Should be right; verify.
+
+22. **`receiveResponseXML` return type — string vs int.** WSDL declares it as int. We return the number formatted as a string inside `<receiveResponseXMLResult>`. QBWC's XML parser reads it as text and coerces to int — should work but confirm behavior on non-numeric responses (e.g. if we accidentally emit "OK", WC may interpret as 0).
+
+23. **`connectionError` return semantics.** We return "done" (WC gives up). Alternative return is a company-file path (WC retries against that). We never retry — this is a single-tenant deployment. Confirm "done" is the correct sentinel; some docs suggest empty string is the same.
+
+24. **Ticket lifetime.** We never age out `qb_wc_sessions` rows. A stale ticket could be replayed indefinitely (with random guessing of UUID collision — statistically infeasible, but defensively we should either TTL sessions or index-scope `validateTicket` by recency). Add a scheduled prune in Chunk 5 if it hasn't happened by then.
+
+### Non-obvious style choices
+
+- **soap.ts is intentionally pure.** No Deno.env, no supabase-js — so Vitest tests can import it directly without a Deno environment. Handler functions in index.ts do the I/O; `soap.ts` only handles wire format.
+
+- **Tests import edge-fn code via relative path `../../../../supabase/functions/qb-web-connector/soap`.** Vitest resolves fine because both sides are ESM. If Chunk 5 lifts qbxml/ to `_shared/`, tests can go with it — no test infrastructure changes needed.
+
+- **`renderJobRequest` uses the job id as `requestID`.** Simple correlation for logs/debug: WC-side XML has `requestID="42"` matching `qb_sync_jobs.id = 42`. Not currently read anywhere on the response side (persistence keys off refNumber / confirmation_number), but future retry logic can use it to reconcile.
+
+- **Two return shapes for `authenticate` failure: `["", "nvu"]`.** Empty ticket + "nvu" (not valid user) tells WC to abort. Compare with `[<ticket>, ""]` (accepted, use default company) and `[<ticket>, "none"]` (accepted, no work). The four permutations are the entire authenticate protocol.
+
+- **`renderJobRequest` catches builder throws (e.g. bad payload).** Rather than crash the whole SOAP handler, we mark the job as `error` with the render exception and return empty from `sendRequestXML` — WC ends the session gracefully. Prevents one bad enqueue from blocking every subsequent WC run.
