@@ -55,6 +55,7 @@ serve(async (req) => {
     start_date, end_date, phone,
     email_approvals_enabled, invoice_enabled,
     reminders_enabled, vendor_manager_id,
+    payment_terms, location_type,
   } = body;
 
   if (!email || !password || !name) {
@@ -107,6 +108,8 @@ serve(async (req) => {
     invoice_enabled:         invoice_enabled ?? false,
     reminders_enabled:       reminders_enabled ?? true,
     vendor_manager_id:       vendor_manager_id || null,
+    payment_terms:           payment_terms || null,
+    location_type:           location_type || null,
   });
 
   if (profileErr) {
