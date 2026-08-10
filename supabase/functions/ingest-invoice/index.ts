@@ -704,14 +704,39 @@ serve(async (req) => {
           ? (existing ?? []).find(p => norm(p.iban) === ibanN)
           : (existing ?? []).find(p => norm(p.swift) === swiftN && norm(p.account_number) === accN);
         if (existingMatch) {
-          // Guardrail: refuse to reuse a profile linked to a deprecated beneficiary.
+          // Guardrail: if the matched profile is linked to a deprecated bene, look for
+          // another profile for the same user linked to the resolved replacement bene
+          // (e.g. redirect Amar's IE Revolut profile → his UK ALT profile). If a
+          // suitable replacement profile exists, use it. Otherwise fall through so the
+          // downstream steps can create/pick a valid one.
           const beneCheck = resolveBene(existingMatch.convera_beneficiary_id as number | null, depMap);
-          if (beneCheck.wasDeprecated) {
+          if (beneCheck.wasDeprecated && beneCheck.resolved != null) {
+            const replProfile = (existing ?? []).find(p => p.convera_beneficiary_id === beneCheck.resolved);
+            if (replProfile) {
+              beneGuardrailEvents.push({
+                stage: 'existing_profile_redirected',
+                original: beneCheck.original!,
+                resolved: beneCheck.resolved,
+                note: `Redirected from payment_profile ${existingMatch.id} (deprecated bene ${beneCheck.original}) to payment_profile ${replProfile.id} (bene ${beneCheck.resolved})`,
+              });
+              paymentProfileSnapshot = buildSnapshot(replProfile);
+              resolved = true;
+            } else {
+              beneGuardrailEvents.push({
+                stage: 'existing_profile_deprecated_no_replacement_profile',
+                original: beneCheck.original!,
+                resolved: beneCheck.resolved,
+                note: `Profile ${existingMatch.id} links to deprecated bene ${beneCheck.original}; no user profile links to replacement bene ${beneCheck.resolved}. Falling through — Step 3 will create one.`,
+              });
+              // fall through — Step 3 will match the parsed IBAN, see deprecation, and
+              // create/link a fresh profile pointed at the replacement bene.
+            }
+          } else if (beneCheck.wasDeprecated) {
             beneGuardrailEvents.push({
-              stage: 'existing_profile_skipped',
+              stage: 'existing_profile_deprecated_no_replacement',
               original: beneCheck.original!,
-              resolved: beneCheck.resolved,
-              note: `Skipped payment_profile ${existingMatch.id} (linked to deprecated bene ${beneCheck.original}); falling through to bene lookup`,
+              resolved: null,
+              note: `Profile ${existingMatch.id} links to deprecated bene ${beneCheck.original} with no replacement configured. Manual review required.`,
             });
           } else {
             paymentProfileSnapshot = buildSnapshot(existingMatch);
@@ -727,7 +752,6 @@ serve(async (req) => {
           const { data: benefs } = await supabase
             .from('convera_beneficiaries')
             .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
-            .eq('deprecated', false)  // guardrail: never link to deprecated benes
             .ilike('bank_account', ibanN);
 
           let chosen: Record<string, unknown> | null = null;
@@ -741,6 +765,45 @@ serve(async (req) => {
               const sn = unaccent(((b.short_name as string) || '').toLowerCase());
               return userTokens.some(t => sn.includes(t));
             }) ?? null;
+          }
+
+          // Guardrail: if the matched bene is deprecated, resolve to the replacement bene
+          // and use that instead (e.g. Bimosoft aux benes → UK ALT). Log the redirection.
+          if (chosen) {
+            const chosenId = chosen.id as number;
+            const beneCheck = resolveBene(chosenId, depMap);
+            if (beneCheck.wasDeprecated) {
+              if (beneCheck.resolved != null) {
+                const { data: replBene } = await supabase
+                  .from('convera_beneficiaries')
+                  .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
+                  .eq('id', beneCheck.resolved)
+                  .maybeSingle();
+                if (replBene) {
+                  beneGuardrailEvents.push({
+                    stage: 'iban_match_redirected',
+                    original: chosenId,
+                    resolved: beneCheck.resolved,
+                    note: `IBAN matched deprecated bene ${chosenId} (${(chosen.short_name as string) || ''}); redirected to bene ${beneCheck.resolved} (${(replBene.short_name as string) || ''}).`,
+                  });
+                  chosen = replBene as Record<string, unknown>;
+                } else {
+                  beneGuardrailEvents.push({
+                    stage: 'iban_match_deprecated_replacement_missing',
+                    original: chosenId, resolved: beneCheck.resolved,
+                    note: `Replacement bene ${beneCheck.resolved} not found; treating as no match.`,
+                  });
+                  chosen = null;
+                }
+              } else {
+                beneGuardrailEvents.push({
+                  stage: 'iban_match_deprecated_no_replacement',
+                  original: chosenId, resolved: null,
+                  note: `Matched deprecated bene ${chosenId} with no replacement configured; treating as no match.`,
+                });
+                chosen = null;
+              }
+            }
           }
 
           if (chosen) {
@@ -789,7 +852,6 @@ serve(async (req) => {
             const { data: nameBenefs } = await supabase
               .from('convera_beneficiaries')
               .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
-              .eq('deprecated', false)  // guardrail: never link to deprecated benes
               .or(`short_name.ilike.*${last}*,beneficiary_name.ilike.*${last}*`);
             const nameMatches = (nameBenefs ?? []).filter(b => {
               const sn = unaccent(((b.short_name as string) || '').toLowerCase());
@@ -797,7 +859,30 @@ serve(async (req) => {
               return (sn.includes(first) && sn.includes(last)) || (bn.includes(first) && bn.includes(last));
             });
             if (nameMatches.length === 1) {
-              const m = nameMatches[0];
+              let m = nameMatches[0];
+              // Guardrail: if name-matched bene is deprecated, redirect to replacement.
+              const beneCheck = resolveBene(m.id as number, depMap);
+              if (beneCheck.wasDeprecated) {
+                if (beneCheck.resolved != null) {
+                  const { data: replBene } = await supabase
+                    .from('convera_beneficiaries')
+                    .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
+                    .eq('id', beneCheck.resolved)
+                    .maybeSingle();
+                  if (replBene) {
+                    beneGuardrailEvents.push({
+                      stage: 'name_match_redirected',
+                      original: m.id as number,
+                      resolved: beneCheck.resolved,
+                      note: `Name matched deprecated bene ${m.id}; redirected to bene ${beneCheck.resolved} (${(replBene.short_name as string) || ''}).`,
+                    });
+                    m = replBene as typeof m;
+                  }
+                }
+                // If replacement missing, fall through — name match "landed" on nothing usable.
+                // The subsequent code will still try to link/create; if we can't find a valid
+                // target, the invoice ends up in the pending profile path (Step 4).
+              }
               const alreadyLinked = (existing ?? []).find(p => p.convera_beneficiary_id === m.id);
               if (alreadyLinked) {
                 paymentProfileSnapshot = buildSnapshot(alreadyLinked);

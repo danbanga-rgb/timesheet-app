@@ -3062,31 +3062,50 @@ const TimesheetSystem = () => {
   };
 
   const switchInvoicePaymentProfile = async (invoiceId: number, newProfile: PaymentProfile) => {
-    // Guardrail: block save if the target profile is linked to a deprecated Convera
-    // beneficiary (e.g. one of the retired Bimosoft aux benes). Accountant may override
-    // with confirm. Same principle as ingest-invoice guardrail — flag, don't silently allow.
+    // Guardrail: if the selected profile links to a deprecated Convera beneficiary
+    // (e.g. one of the retired Bimosoft aux benes), auto-redirect to the contractor's
+    // profile linked to the resolved replacement bene. Accountant is notified but does
+    // not need to re-pick — the correct route is chosen for them.
+    let profileToSave = newProfile;
     if (newProfile.converaBeneficiaryId) {
       const bene = converaBeneficiaries.find(b => b.id === newProfile.converaBeneficiaryId);
       if (bene?.deprecated) {
-        const replacement = bene.replacementBeneficiaryId
-          ? converaBeneficiaries.find(b => b.id === bene.replacementBeneficiaryId)
-          : null;
-        const replacementLabel = replacement
-          ? `${replacement.shortName || replacement.beneficiaryName} (bene ${replacement.id})`
-          : '(no replacement configured)';
-        const ok = confirm(
-          `⚠ This payment profile links to a DEPRECATED Convera beneficiary "${bene.shortName || bene.beneficiaryName}" (bene ${bene.id}).\n\n` +
-          `Reason: ${bene.deprecatedReason || 'marked deprecated'}\n` +
-          `Recommended replacement: ${replacementLabel}\n\n` +
-          `Payments routed to deprecated beneficiaries may go to the wrong account. Proceed anyway?`
-        );
-        if (!ok) return;
+        const replBeneId = bene.replacementBeneficiaryId;
+        const replBene = replBeneId ? converaBeneficiaries.find(b => b.id === replBeneId) : null;
+        if (replBene) {
+          // Find the contractor's OWN profile that links to the replacement bene.
+          const inv = invoices.find(i => i.id === invoiceId);
+          const userId = inv?.userId;
+          const replProfile = userId
+            ? paymentProfiles.find(p => p.userId === userId && p.converaBeneficiaryId === replBene.id)
+            : null;
+          if (replProfile) {
+            alert(
+              `⚠ Auto-switched to "${replProfile.profileName}" (bene ${replBene.shortName || replBene.beneficiaryName}).\n\n` +
+              `You picked "${newProfile.profileName}", which links to DEPRECATED bene "${bene.shortName || bene.beneficiaryName}" (${bene.deprecatedReason || 'deprecated'}).`
+            );
+            profileToSave = replProfile;
+          } else {
+            alert(
+              `❌ Cannot switch: profile "${newProfile.profileName}" links to DEPRECATED bene "${bene.shortName || bene.beneficiaryName}".\n\n` +
+              `Recommended replacement bene: "${replBene.shortName || replBene.beneficiaryName}" (${replBene.id}).\n\n` +
+              `No profile for this contractor links to the replacement bene. Create/link a profile first, then re-try.`
+            );
+            return;
+          }
+        } else {
+          alert(
+            `❌ Cannot switch: profile "${newProfile.profileName}" links to DEPRECATED bene "${bene.shortName || bene.beneficiaryName}" with no replacement configured.\n\n` +
+            `Manual review required.`
+          );
+          return;
+        }
       }
     }
-    const { error } = await supabase.from('invoices').update({ payment_profile: newProfile }).eq('id', invoiceId);
+    const { error } = await supabase.from('invoices').update({ payment_profile: profileToSave }).eq('id', invoiceId);
     if (error) { alert('Error switching profile: ' + error.message); return; }
-    setSelectedInvoice(prev => prev ? { ...prev, paymentProfile: newProfile } : prev);
-    setInvoices(prev => prev.map(i => i.id === invoiceId ? { ...i, paymentProfile: newProfile } : i));
+    setSelectedInvoice(prev => prev ? { ...prev, paymentProfile: profileToSave } : prev);
+    setInvoices(prev => prev.map(i => i.id === invoiceId ? { ...i, paymentProfile: profileToSave } : i));
   };
 
 
@@ -4374,38 +4393,55 @@ const TimesheetSystem = () => {
     const groups = new Map<string, ConveraBatchGroup>();
     const skipped: ConveraBatchSkip[] = [];
 
+    const beneRedirects: Array<{ invoiceId: number; from: string; to: string }> = [];
     for (const inv of eligible) {
       const liveProfile = findLiveProfile(inv);
       const contractorUser = users.find(u => u.id === inv.userId);
-      const benef = liveProfile?.converaBeneficiaryId
+      let benef = liveProfile?.converaBeneficiaryId
         ? freshBenefs.find(b => b.id === liveProfile.converaBeneficiaryId)
         : null;
 
-      // Guardrail: refuse to batch an invoice routing to a deprecated bene. Surface as
-      // skipped with the resolved replacement so accountant can fix (switch profile) before
-      // re-running the export.
+      // Guardrail: if the linked bene is deprecated, auto-redirect the outbound wire
+      // to the resolved replacement bene (walk the chain). Convera routes by VendorID,
+      // so as long as the replacement has a vendor code, the wire lands at the correct
+      // account. Accountant is shown a summary banner. If replacement is missing or has
+      // no vendor code, invoice is still skipped for manual review.
       if (benef?.deprecated) {
-        const repl = benef.replacementBeneficiaryId
-          ? freshBenefs.find(b => b.id === benef.replacementBeneficiaryId)
-          : null;
-        skipped.push({
-          invoice: inv,
-          reason: `linked bene "${benef.shortName || benef.beneficiaryName}" is deprecated${repl ? ` — replace with "${repl.shortName || repl.beneficiaryName}"` : ''}`,
-          companyName: liveProfile?.companyName || '',
-          country: liveProfile?.country || '',
-          bankCountry: countryFromIban(liveProfile?.iban || ''),
-          bankName: liveProfile?.bankName || '',
-          bankAddress: liveProfile?.bankAddress || '',
-          iban: liveProfile?.iban || '',
-          swift: liveProfile?.swift || '',
-          accountNumber: liveProfile?.accountNumber || '',
-          paymentEmail: liveProfile?.paymentEmail || '',
-          contractorEmail: contractorUser?.email || '',
-          contractorName: inv.userName || '',
-          linkedBeneficiary: { id: benef.id, shortName: benef.shortName || '', fullName: benef.beneficiaryName || '' },
-          suggestedBeneficiary: repl ? { id: repl.id, shortName: repl.shortName || '', vendorId: (repl.vendorId || '').trim() } : undefined,
-        });
-        continue;
+        // Walk the replacement chain (defensive — supports multi-hop)
+        let cur: ConveraBeneficiary | undefined = benef;
+        let hops = 0;
+        while (cur?.deprecated && hops < 10) {
+          const nextId: number | null = cur.replacementBeneficiaryId;
+          cur = nextId != null ? freshBenefs.find(b => b.id === nextId) : undefined;
+          hops++;
+        }
+        const repl: ConveraBeneficiary | null = cur && !cur.deprecated ? cur : null;
+        if (repl && (repl.vendorId || '').trim()) {
+          beneRedirects.push({
+            invoiceId: inv.id,
+            from: benef.shortName || benef.beneficiaryName || `bene ${benef.id}`,
+            to: repl.shortName || repl.beneficiaryName || `bene ${repl.id}`,
+          });
+          benef = repl;  // route the wire via replacement
+        } else {
+          skipped.push({
+            invoice: inv,
+            reason: `linked bene "${benef.shortName || benef.beneficiaryName}" is deprecated and replacement is missing or has no vendor code`,
+            companyName: liveProfile?.companyName || '',
+            country: liveProfile?.country || '',
+            bankCountry: countryFromIban(liveProfile?.iban || ''),
+            bankName: liveProfile?.bankName || '',
+            bankAddress: liveProfile?.bankAddress || '',
+            iban: liveProfile?.iban || '',
+            swift: liveProfile?.swift || '',
+            accountNumber: liveProfile?.accountNumber || '',
+            paymentEmail: liveProfile?.paymentEmail || '',
+            contractorEmail: contractorUser?.email || '',
+            contractorName: inv.userName || '',
+            linkedBeneficiary: { id: benef.id, shortName: benef.shortName || '', fullName: benef.beneficiaryName || '' },
+          });
+          continue;
+        }
       }
 
       const vendorId = (benef?.vendorId || '').trim();
@@ -4501,6 +4537,14 @@ const TimesheetSystem = () => {
     setConveraBatchSkipped(skipped);
     setConveraBatchExcluded(excluded);
     setShowConveraBatchModal(true);
+
+    if (beneRedirects.length > 0) {
+      const summary = beneRedirects.slice(0, 5).map(r =>
+        `  • Invoice ${r.invoiceId}: routed via "${r.to}" instead of deprecated "${r.from}"`
+      ).join('\n');
+      const more = beneRedirects.length > 5 ? `\n  … and ${beneRedirects.length - 5} more` : '';
+      alert(`ℹ ${beneRedirects.length} invoice(s) auto-redirected from deprecated Convera beneficiaries to their replacements:\n\n${summary}${more}\n\nThe outbound wire will land at the correct account. Consider fixing each invoice's payment profile so the redirect isn't needed next time.`);
+    }
   };
 
   // Step 2: called by the modal's "Download CSV" button. Applies the accountant's combine
