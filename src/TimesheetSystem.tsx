@@ -1894,6 +1894,8 @@ const TimesheetSystem = () => {
           invoice_enabled: userForm.invoice_enabled,
           reminders_enabled: userForm.reminders_enabled,
           vendor_manager_id: userForm.vendor_manager_id || null,
+          payment_terms: userForm.payment_terms || null,
+          location_type: userForm.role === 'timesheetuser' ? (userForm.location_type || null) : null,
         }),
       });
       const result = await res.json();
