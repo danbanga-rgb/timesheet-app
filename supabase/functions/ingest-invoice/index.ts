@@ -15,6 +15,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { detectAnomalies } from './anomaly-detector.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -79,6 +80,41 @@ async function findUser(
   };
 }
 
+// ─── Anomaly edit_history append ──────────────────────────────────────────────
+// Fetch current edit_history, append one detector entry, write it back.
+// Two-step is required because supabase-js JSONB append via UPDATE ... = expr
+// is not a first-class API and we don't own an RPC for it. Kept fire-and-forget
+// (errors logged, not thrown) so a stray audit failure never blocks ingest.
+async function appendAnomalyEditHistory(
+  invoiceId: number,
+  fixes: unknown[],
+  flags: unknown[],
+  supabase: ReturnType<typeof createClient>
+): Promise<void> {
+  try {
+    const { data } = await supabase
+      .from('invoices')
+      .select('edit_history')
+      .eq('id', invoiceId)
+      .maybeSingle();
+    const current = Array.isArray((data as { edit_history?: unknown[] } | null)?.edit_history)
+      ? ((data as { edit_history: unknown[] }).edit_history)
+      : [];
+    const entry = {
+      at: new Date().toISOString(),
+      by: 'anomaly-detector',
+      fixes,
+      flags,
+    };
+    await supabase
+      .from('invoices')
+      .update({ edit_history: [...current, entry] })
+      .eq('id', invoiceId);
+  } catch (e) {
+    console.warn(`anomaly edit_history append failed for invoice ${invoiceId}: ${String(e)}`);
+  }
+}
+
 // ─── Invoice number generation ────────────────────────────────────────────────
 
 async function generateInvoiceNumber(
@@ -102,24 +138,20 @@ async function generateInvoiceNumber(
 
 // ─── Reconciliation ───────────────────────────────────────────────────────────
 
-async function reconcile(
+// Sum timesheet hours in a period. Extracted from reconcile so the anomaly
+// detector can consume the same number pre-insert without duplicating logic.
+// Returns { hours, lastCoveredDate, hadTimesheets } so callers can distinguish
+// "no timesheets at all" from "0h summed".
+async function sumTimesheetHours(
   userId: string,
   periodStart: string,
   periodEnd: string,
-  invoiceHours: number,
   supabase: ReturnType<typeof createClient>
-): Promise<{
-  status: 'matched' | 'mismatch' | 'unverifiable' | 'pending_final_week' | 'undercharged';
-  delta: number | null;
-  notes: string;
-}> {
-  // Fetch approved timesheets that could overlap the period.
-  // week_start can be up to 6 days before periodEnd and still contain days in the period.
+): Promise<{ hours: number; lastCoveredDate: string; hadTimesheets: boolean } | null> {
   const rangeStart = new Date(periodStart + 'T12:00:00');
   rangeStart.setDate(rangeStart.getDate() - 6);
   const rangeStartStr = rangeStart.toISOString().slice(0, 10);
 
-  // Status filter intentionally omitted — all submitted/pending/approved timesheets count.
   const { data: timesheets, error } = await supabase
     .from('timesheets')
     .select('week_start, entries')
@@ -127,23 +159,15 @@ async function reconcile(
     .gte('week_start', rangeStartStr)
     .lte('week_start', periodEnd);
 
-  if (error) {
-    return { status: 'unverifiable', delta: null, notes: `DB error during reconciliation: ${error.message}` };
-  }
-
+  if (error) return null;
   if (!timesheets || timesheets.length === 0) {
-    return { status: 'unverifiable', delta: null, notes: 'No timesheets found for period' };
+    return { hours: 0, lastCoveredDate: periodStart, hadTimesheets: false };
   }
 
-  // Sum only entries whose date falls within [periodStart, periodEnd].
-  // Entries can be stored as plain numbers (from XLSX parser) or objects (from portal / auto-YES).
-  // Reading only entry.hours silently drops plain-number entries — causing reconciliation to
-  // report 0h and mark the invoice "unverifiable" when it should have been "mismatch".
-  let timesheetHours = 0;
-  let lastCoveredDate = periodStart; // furthest date with a submitted timesheet entry in the period
+  let hours = 0;
+  let lastCoveredDate = periodStart;
   for (const ts of timesheets) {
     const entries = (ts.entries || {}) as Record<string, unknown>;
-    // A submitted week covers days up to its Sunday (week_start + 6), capped by periodEnd
     const wsStr = String((ts as { week_start: string }).week_start).slice(0, 10);
     const wsDate = new Date(wsStr + 'T12:00:00');
     const weekSun = new Date(wsDate);
@@ -160,9 +184,64 @@ async function reconcile(
         const raw = (entry as { hours?: string | number }).hours;
         h = typeof raw === 'number' ? raw : parseFloat(String(raw ?? 0));
       }
-      if (!isNaN(h) && h > 0) timesheetHours += h;
+      if (!isNaN(h) && h > 0) hours += h;
     }
   }
+  return { hours, lastCoveredDate, hadTimesheets: true };
+}
+
+// Most common rate from contractor's approved invoices in 6 months before
+// `beforeDate`. Used by the anomaly detector to fill missing rates or verify
+// implausible ones. Returns null if no prior approved invoices with a rate.
+async function getPriorRate(
+  userId: string,
+  beforeDate: string,
+  supabase: ReturnType<typeof createClient>
+): Promise<number | null> {
+  const cutoff = new Date(beforeDate + 'T12:00:00Z');
+  cutoff.setMonth(cutoff.getMonth() - 6);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const { data } = await supabase
+    .from('invoices')
+    .select('rate')
+    .eq('user_id', userId)
+    .gte('period_start', cutoffStr)
+    .lt('period_start', beforeDate)
+    .in('status', ['approved', 'paid'])
+    .not('rate', 'is', null);
+  if (!data || data.length === 0) return null;
+  const counts = new Map<number, number>();
+  for (const r of data) {
+    const rate = Number((r as { rate: number | string }).rate);
+    if (rate > 0) counts.set(rate, (counts.get(rate) || 0) + 1);
+  }
+  if (counts.size === 0) return null;
+  let bestRate: number | null = null;
+  let bestCount = 0;
+  for (const [rate, count] of counts) if (count > bestCount) { bestRate = rate; bestCount = count; }
+  return bestRate;
+}
+
+async function reconcile(
+  userId: string,
+  periodStart: string,
+  periodEnd: string,
+  invoiceHours: number,
+  supabase: ReturnType<typeof createClient>
+): Promise<{
+  status: 'matched' | 'mismatch' | 'unverifiable' | 'pending_final_week' | 'undercharged';
+  delta: number | null;
+  notes: string;
+}> {
+  const summed = await sumTimesheetHours(userId, periodStart, periodEnd, supabase);
+  if (summed === null) {
+    return { status: 'unverifiable', delta: null, notes: 'DB error during reconciliation' };
+  }
+  if (!summed.hadTimesheets) {
+    return { status: 'unverifiable', delta: null, notes: 'No timesheets found for period' };
+  }
+  const timesheetHours = summed.hours;
+  const lastCoveredDate = summed.lastCoveredDate;
 
   if (timesheetHours === 0) {
     return { status: 'unverifiable', delta: null, notes: `Timesheet: 0h · Invoice: ${invoiceHours}h · Zero hours in period` };
@@ -416,6 +495,13 @@ serve(async (req) => {
   let reconStatus: 'matched' | 'mismatch' | 'unverifiable' | null = null;
   let reconDelta: number | null = null;
   let resolvedInvoiceNumber: string | null = null;
+  // Post-detector period values. Hoisted so the outer log/response can reflect
+  // what actually got written. Default to parsed values in case the try block
+  // throws before the detector runs.
+  let finalPeriodStart = parsedPeriodStart;
+  let finalPeriodEnd   = parsedPeriodEnd;
+  let detectorFixes: unknown[] = [];
+  let detectorFlags: unknown[] = [];
 
   try {
     const parsedRate     = rate != null ? Number(rate) : null;
@@ -428,15 +514,46 @@ serve(async (req) => {
 
     // Synthetic single line representing the full period.
     // hours/rate may be null for amount-only invoices (no hourly breakdown).
-    const computedAmount = parsedAmount
+    const initialComputedAmount = parsedAmount
       ?? (parsedHours != null && parsedRate != null ? parsedHours * parsedRate : 0);
-    const lines = [{
+    const initialLines = [{
       weekStart:     parsedPeriodStart,
       weekEndingFri: parsedPeriodEnd,
       hours:         parsedHours,
       rate:          parsedRate,
-      amount:        computedAmount,
+      amount:        initialComputedAmount,
     }];
+
+    // ── Anomaly detection ────────────────────────────────────────────────────
+    // Runs before existing-invoice lookup so period corrections affect the
+    // duplicate check. Uses prior approved rates + timesheet hours as context.
+    // Fixes rebind final* vars used by both correction and new-insert paths.
+    const priorRate = await getPriorRate(userId, parsedPeriodStart, supabase);
+    const preTsSum  = await sumTimesheetHours(userId, parsedPeriodStart, parsedPeriodEnd, supabase);
+    const detectorResult = detectAnomalies(
+      {
+        periodStart: parsedPeriodStart,
+        periodEnd:   parsedPeriodEnd,
+        hours:       parsedHours,
+        rate:        parsedRate,
+        amount:      initialComputedAmount,
+        currency:    parsedCurrency,
+        lines:       initialLines,
+      },
+      {
+        priorRate,
+        timesheetHours: preTsSum ? preTsSum.hours : null,
+      },
+    );
+
+    finalPeriodStart       = detectorResult.corrected.periodStart;
+    finalPeriodEnd         = detectorResult.corrected.periodEnd;
+    const finalHours       = detectorResult.corrected.hours;
+    const finalRate        = detectorResult.corrected.rate;
+    const computedAmount   = detectorResult.corrected.amount ?? 0;
+    const lines            = detectorResult.corrected.lines;
+    detectorFixes          = detectorResult.fixes;
+    detectorFlags          = detectorResult.flags;
 
     // Build payment profile snapshot from parsed bank details (if any)
     const pd = paymentDetails as Record<string, string | null> | null;
@@ -630,7 +747,7 @@ serve(async (req) => {
             .from('invoices')
             .select('payment_profile')
             .eq('user_id', userId)
-            .lt('period_start', parsedPeriodStart)
+            .lt('period_start', finalPeriodStart)
             .not('payment_profile', 'is', null)
             .order('period_start', { ascending: false })
             .limit(5);
@@ -647,7 +764,7 @@ serve(async (req) => {
         // Step 4 — no beneficiary match, persist a "pending" profile from parsed data
         if (!resolved) {
           const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-          const [pyear, pmonth] = parsedPeriodStart.split('-');
+          const [pyear, pmonth] = finalPeriodStart.split('-');
           const periodLabel = `${monthNames[parseInt(pmonth) - 1]} ${pyear}`;
           const { data: inserted } = await supabase
             .from('payment_profiles')
@@ -678,8 +795,8 @@ serve(async (req) => {
       .from('invoices')
       .select('id, attachment_path, total_hours, rate, total_amount, status')
       .eq('user_id', userId)
-      .eq('period_start', parsedPeriodStart)
-      .eq('period_end', parsedPeriodEnd)
+      .eq('period_start', finalPeriodStart)
+      .eq('period_end', finalPeriodEnd)
       .eq('source', 'imported')
       .maybeSingle();
 
@@ -690,8 +807,8 @@ serve(async (req) => {
       const existingRate   = existingInvoice.rate          != null ? Number(existingInvoice.rate)          : null;
       const existingAmount = existingInvoice.total_amount  != null ? Number(existingInvoice.total_amount)  : null;
       const isDuplicate    = !correctionHint
-                          && existingHours === parsedHours
-                          && existingRate  === parsedRate
+                          && existingHours === finalHours
+                          && existingRate  === finalRate
                           && Math.abs((existingAmount ?? 0) - computedAmount) < 0.01;
 
       if (!isDuplicate) {
@@ -700,8 +817,10 @@ serve(async (req) => {
         // and the audit trail lives in email_invoice_log.raw_extracted snapshots.
         const updatePayload: Record<string, unknown> = {
           invoice_number: finalInvoiceNumber,
-          total_hours:    parsedHours,
-          rate:           parsedRate,
+          period_start:   finalPeriodStart,
+          period_end:     finalPeriodEnd,
+          total_hours:    finalHours,
+          rate:           finalRate,
           total_amount:   computedAmount,
           lines,
           corrected:      true,
@@ -729,7 +848,7 @@ serve(async (req) => {
           } catch {}
         }
 
-        actionNotes = `Corrected invoice (id=${invoiceId}): hours ${existingHours}→${parsedHours}, rate ${existingRate}→${parsedRate}, amount ${existingAmount}→${computedAmount}`;
+        actionNotes = `Corrected invoice (id=${invoiceId}): hours ${existingHours}→${finalHours}, rate ${existingRate}→${finalRate}, amount ${existingAmount}→${computedAmount}`;
         await supabase.from('email_invoice_log').insert({
           message_id:      messageId,
           from_email:      contractorEmail,
@@ -739,17 +858,22 @@ serve(async (req) => {
           parse_notes:     [parseNotes, hoursSourceNote, actionNotes].filter(Boolean).join(' | '),
           user_id:         userId,
           invoice_id:      invoiceId,
-          period_start:    parsedPeriodStart,
-          period_end:      parsedPeriodEnd,
+          period_start:    finalPeriodStart,
+          period_end:      finalPeriodEnd,
           raw_extracted:   body.rawExtracted ?? null,
           attempt_count:   attemptCount,
           attachment_hash: (attachmentHash as string) || null,
           groq_vision_verification: (groqVisionVerification as Record<string, unknown>) || null,
         });
+        // Append anomaly detector output to edit_history for audit.
+        if (detectorResult.fixes.length > 0 || detectorResult.flags.length > 0) {
+          await appendAnomalyEditHistory(invoiceId!, detectorResult.fixes, detectorResult.flags, supabase);
+        }
         return new Response(JSON.stringify({
           ok: true, action: 'corrected', parseStatus: 'success',
           userId, userName, invoiceId, invoiceNumber: resolvedInvoiceNumber,
-          periodStart: parsedPeriodStart, periodEnd: parsedPeriodEnd, notes: actionNotes,
+          periodStart: finalPeriodStart, periodEnd: finalPeriodEnd, notes: actionNotes,
+          anomalyFixes: detectorResult.fixes, anomalyFlags: detectorResult.flags,
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
@@ -785,8 +909,8 @@ serve(async (req) => {
         parse_notes:     actionNotes,
         user_id:         userId,
         invoice_id:      invoiceId,
-        period_start:    parsedPeriodStart,
-        period_end:      parsedPeriodEnd,
+        period_start:    finalPeriodStart,
+        period_end:      finalPeriodEnd,
         attempt_count:   attemptCount,
         attachment_hash: (attachmentHash as string) || null,
           groq_vision_verification: (groqVisionVerification as Record<string, unknown>) || null,
@@ -794,13 +918,15 @@ serve(async (req) => {
 
       return new Response(JSON.stringify({
         ok: true, action: 'reattached', parseStatus: 'duplicate',
-        userId, userName, invoiceId, periodStart: parsedPeriodStart, notes: actionNotes,
+        userId, userName, invoiceId, periodStart: finalPeriodStart, notes: actionNotes,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     // ── Reconcile against approved timesheets (skip for amount-only invoices) ──
-    const recon = parsedHours != null
-      ? await reconcile(userId, parsedPeriodStart, parsedPeriodEnd, parsedHours, supabase)
+    // Uses finalHours/finalPeriodStart/finalPeriodEnd so period corrections from
+    // the detector are reflected in the reconciliation status we ship.
+    const recon = finalHours != null
+      ? await reconcile(userId, finalPeriodStart, finalPeriodEnd, finalHours, supabase)
       : { status: 'unverifiable' as const, delta: null, notes: 'No hours on invoice — amount-only, cannot reconcile' };
 
     // ── Insert invoice ────────────────────────────────────────────────────
@@ -811,11 +937,11 @@ serve(async (req) => {
         user_name:                userName,
         project_id:               null,
         invoice_number:           finalInvoiceNumber,
-        period_start:             parsedPeriodStart,
-        period_end:               parsedPeriodEnd,
+        period_start:             finalPeriodStart,
+        period_end:               finalPeriodEnd,
         lines,
-        total_hours:              parsedHours,
-        rate:                     parsedRate,
+        total_hours:              finalHours,
+        rate:                     finalRate,
         total_amount:             computedAmount,
         currency:                 parsedCurrency,
         status:                   'submitted',
@@ -846,6 +972,11 @@ serve(async (req) => {
     reconStatus = recon.status;
     reconDelta  = recon.delta;
     actionNotes = `Reconciliation: ${recon.notes}`;
+
+    // Append anomaly detector output to edit_history for audit.
+    if (detectorResult.fixes.length > 0 || detectorResult.flags.length > 0) {
+      await appendAnomalyEditHistory(invoiceId, detectorResult.fixes, detectorResult.flags, supabase);
+    }
 
     // ── Upload attachment to storage ──────────────────────────────────────
     if (pdfBase64 && typeof pdfBase64 === 'string') {
@@ -895,8 +1026,8 @@ serve(async (req) => {
     parse_notes:     [parseNotes, hoursSourceNote, actionNotes].filter(Boolean).join(' | '),
     user_id:         userId,
     invoice_id:      invoiceId,
-    period_start:    parsedPeriodStart,
-    period_end:      parsedPeriodEnd,
+    period_start:    finalPeriodStart,
+    period_end:      finalPeriodEnd,
     raw_extracted:   body.rawExtracted ?? null,
     attempt_count:   attemptCount,
     attachment_hash: (attachmentHash as string) || null,
@@ -912,12 +1043,14 @@ serve(async (req) => {
     nameUpdated,
     invoiceId,
     invoiceNumber:       resolvedInvoiceNumber,
-    periodStart:         parsedPeriodStart,
-    periodEnd:           parsedPeriodEnd,
+    periodStart:         finalPeriodStart,
+    periodEnd:           finalPeriodEnd,
     forwardedBy:         forwardedBy || null,
     reconciliationStatus: reconStatus,
     reconciliationDelta:  reconDelta,
     notes:               actionNotes,
+    anomalyFixes:        detectorFixes,
+    anomalyFlags:        detectorFlags,
     attemptCount,
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
