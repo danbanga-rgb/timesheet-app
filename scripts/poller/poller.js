@@ -2231,11 +2231,23 @@ async function fillGapsWithGroqVision(result, pdfBuffer, filename) {
 // FINAL. If ANY primary result is missing period/hours/rate/total, run Groq vision as
 //        a free gap-filler (never overrides fields the primary parse found).
 async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null) {
-  const primary = await extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText, knownTemplate);
+  // DOCX invoices route through text-only pipeline: extractDocxText upstream has
+  // already populated pdfText from word/document.xml. Skip every vision path —
+  // vision APIs are PDF-only and DOCX buffers throw "Invalid PDF structure"
+  // (Slaven Konforta 8-1-1.docx on 2026-08-10, both Groq vision and Claude vision).
+  const isDocx = /\.docx$/i.test(filename || '');
+  const primary = await extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText, knownTemplate, isDocx);
+  if (isDocx) return primary;  // no vision-based gap fill for DOCX
   return fillGapsWithGroqVision(primary, pdfBuffer, filename);
 }
 
-async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null) {
+async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null, isDocx = false) {
+  // DOCX invoices skip the vision fast-path — the stored `groq_vision` template
+  // was set based on a historical image-PDF submission that has since switched
+  // to DOCX (Slaven Konforta). Force the regex → Groq-text → Claude-text pipeline.
+  if (isDocx && (knownTemplate === 'claude_vision' || knownTemplate === 'groq_vision')) {
+    knownTemplate = null;
+  }
   // Fast-path: skip regex for known vision-only invoices — try Groq vision first, Claude fallback
   if (knownTemplate === 'claude_vision' || knownTemplate === 'groq_vision') {
     if (CONFIG.groqApiKey) {
@@ -2343,7 +2355,8 @@ async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, ema
   }
 
   // ── Step 2d: image PDF with no extractable text — try Groq vision before Claude ──
-  if (CONFIG.groqApiKey && isImagePdf && !pdfText) {
+  // Skip for DOCX — DOCX has no image-PDF form and the buffer isn't a PDF.
+  if (CONFIG.groqApiKey && isImagePdf && !pdfText && !isDocx) {
     const groqResult = await groqVisionExtractInvoice(pdfBuffer, filename);
     if (groqResult?.periodStart && groqResult?.periodEnd) {
       const merged = mergeInvoiceResults(regexResult, groqResult);
