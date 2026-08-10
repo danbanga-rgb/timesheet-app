@@ -279,6 +279,7 @@ interface ConveraBeneficiary {
   deprecated: boolean;
   replacementBeneficiaryId: number | null;
   deprecatedReason: string | null;
+  forceCombine: boolean;  // Umbrella beneficiaries (e.g. Bimosoft UK ALT) always combine into one wire.
 }
 
 interface InvoiceLine {
@@ -2029,6 +2030,7 @@ const TimesheetSystem = () => {
       deprecated: !!(r.deprecated as boolean),
       replacementBeneficiaryId: (r.replacement_beneficiary_id as number | null) ?? null,
       deprecatedReason: (r.deprecated_reason as string | null) ?? null,
+      forceCombine: !!(r.force_combine as boolean),
     };
   }
 
@@ -4529,7 +4531,15 @@ const TimesheetSystem = () => {
     //   • Single invoice               → not eligible
     const combineChoices: Record<string, boolean> = {};
     for (const g of groupList) {
-      if (g.entries.length > 1) combineChoices[g.key] = g.distinctIbans === 1;
+      // force_combine benes (umbrella payments like Bimosoft UK ALT) always combine
+      // regardless of entry count or distinct IBANs. The checkbox for these is disabled
+      // in the modal so accountant can't split by accident.
+      const groupBene = freshBenefs.find(b => b.id.toString() === g.key);
+      if (groupBene?.forceCombine) {
+        combineChoices[g.key] = true;
+      } else if (g.entries.length > 1) {
+        combineChoices[g.key] = g.distinctIbans === 1;
+      }
     }
 
     setConveraBatchGroups(groupList);
@@ -9356,18 +9366,24 @@ const TimesheetSystem = () => {
                       const combined = isMulti && converaBatchCombine[g.key];
                       const total = g.entries.reduce((s, e) => s + e.inv.totalAmount, 0);
                       const mixedIbans = g.distinctIbans > 1;
+                      const groupBene = converaBeneficiaries.find(b => b.id.toString() === g.key);
+                      const forceCombine = !!groupBene?.forceCombine;
                       return (
                         <div key={g.key} className={`p-3 rounded-lg border ${combined ? 'bg-indigo-50 border-indigo-200' : mixedIbans ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'}`}>
                           <div className="flex items-start gap-3">
                             {isMulti ? (
-                              <label className="flex items-center gap-2 cursor-pointer flex-shrink-0 mt-0.5">
+                              <label
+                                className={`flex items-center gap-2 flex-shrink-0 mt-0.5 ${forceCombine ? 'opacity-70 cursor-not-allowed' : 'cursor-pointer'}`}
+                                title={forceCombine ? 'This umbrella beneficiary always settles as one wire' : undefined}
+                              >
                                 <input
                                   type="checkbox"
                                   checked={!!converaBatchCombine[g.key]}
+                                  disabled={forceCombine}
                                   onChange={e => setConveraBatchCombine(prev => ({ ...prev, [g.key]: e.target.checked }))}
                                   className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500"
                                 />
-                                <span className="text-xs font-medium text-indigo-700">Combine</span>
+                                <span className="text-xs font-medium text-indigo-700">Combine{forceCombine ? ' (locked)' : ''}</span>
                               </label>
                             ) : (
                               <div className="w-16 flex-shrink-0" />

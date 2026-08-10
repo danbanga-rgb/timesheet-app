@@ -46,3 +46,12 @@ SET deprecated = true,
     deprecated_at = now()
 WHERE id IN (153, 157, 158, 162)
   AND deprecated = false;
+
+-- Some beneficiaries settle a single wire covering multiple contractors (umbrella
+-- payments — e.g. Bimosoft UK ALT bundles Amar/Anela/Fadil/Naretena/Edin into one
+-- Convera transaction). force_combine forces the batch export to always combine
+-- entries for these benes into one wire — accountant can't accidentally split.
+ALTER TABLE convera_beneficiaries
+  ADD COLUMN IF NOT EXISTS force_combine boolean NOT NULL DEFAULT false;
+
+UPDATE convera_beneficiaries SET force_combine = true WHERE id = 156 AND force_combine = false;
