@@ -276,6 +276,9 @@ interface ConveraBeneficiary {
   bankCountry: string | null;
   bankAccount: string;
   ibanUnique: boolean;
+  deprecated: boolean;
+  replacementBeneficiaryId: number | null;
+  deprecatedReason: string | null;
 }
 
 interface InvoiceLine {
@@ -928,7 +931,7 @@ const TimesheetSystem = () => {
   };
   type ConveraBatchSkip = {
     invoice: Invoice;
-    reason: 'no vendor code assigned' | 'no Convera beneficiary linked';
+    reason: 'no vendor code assigned' | 'no Convera beneficiary linked' | string;  // guardrail may inject deprecation reason
     // Payment profile fields (used for the "Create Convera Beneficiary" panel)
     companyName: string;      // Beneficiary long name
     country: string;          // payment_profile.country (rarely set)
@@ -2023,6 +2026,9 @@ const TimesheetSystem = () => {
       bankCountry: r.bank_country as string | null ?? null,
       bankAccount: (r.bank_account as string) || '',
       ibanUnique: !!(r.iban_unique as boolean),
+      deprecated: !!(r.deprecated as boolean),
+      replacementBeneficiaryId: (r.replacement_beneficiary_id as number | null) ?? null,
+      deprecatedReason: (r.deprecated_reason as string | null) ?? null,
     };
   }
 
@@ -3056,11 +3062,31 @@ const TimesheetSystem = () => {
   };
 
   const switchInvoicePaymentProfile = async (invoiceId: number, newProfile: PaymentProfile) => {
+    // Guardrail: block save if the target profile is linked to a deprecated Convera
+    // beneficiary (e.g. one of the retired Bimosoft aux benes). Accountant may override
+    // with confirm. Same principle as ingest-invoice guardrail — flag, don't silently allow.
+    if (newProfile.converaBeneficiaryId) {
+      const bene = converaBeneficiaries.find(b => b.id === newProfile.converaBeneficiaryId);
+      if (bene?.deprecated) {
+        const replacement = bene.replacementBeneficiaryId
+          ? converaBeneficiaries.find(b => b.id === bene.replacementBeneficiaryId)
+          : null;
+        const replacementLabel = replacement
+          ? `${replacement.shortName || replacement.beneficiaryName} (bene ${replacement.id})`
+          : '(no replacement configured)';
+        const ok = confirm(
+          `⚠ This payment profile links to a DEPRECATED Convera beneficiary "${bene.shortName || bene.beneficiaryName}" (bene ${bene.id}).\n\n` +
+          `Reason: ${bene.deprecatedReason || 'marked deprecated'}\n` +
+          `Recommended replacement: ${replacementLabel}\n\n` +
+          `Payments routed to deprecated beneficiaries may go to the wrong account. Proceed anyway?`
+        );
+        if (!ok) return;
+      }
+    }
     const { error } = await supabase.from('invoices').update({ payment_profile: newProfile }).eq('id', invoiceId);
     if (error) { alert('Error switching profile: ' + error.message); return; }
     setSelectedInvoice(prev => prev ? { ...prev, paymentProfile: newProfile } : prev);
     setInvoices(prev => prev.map(i => i.id === invoiceId ? { ...i, paymentProfile: newProfile } : i));
-    
   };
 
 
@@ -4354,6 +4380,34 @@ const TimesheetSystem = () => {
       const benef = liveProfile?.converaBeneficiaryId
         ? freshBenefs.find(b => b.id === liveProfile.converaBeneficiaryId)
         : null;
+
+      // Guardrail: refuse to batch an invoice routing to a deprecated bene. Surface as
+      // skipped with the resolved replacement so accountant can fix (switch profile) before
+      // re-running the export.
+      if (benef?.deprecated) {
+        const repl = benef.replacementBeneficiaryId
+          ? freshBenefs.find(b => b.id === benef.replacementBeneficiaryId)
+          : null;
+        skipped.push({
+          invoice: inv,
+          reason: `linked bene "${benef.shortName || benef.beneficiaryName}" is deprecated${repl ? ` — replace with "${repl.shortName || repl.beneficiaryName}"` : ''}`,
+          companyName: liveProfile?.companyName || '',
+          country: liveProfile?.country || '',
+          bankCountry: countryFromIban(liveProfile?.iban || ''),
+          bankName: liveProfile?.bankName || '',
+          bankAddress: liveProfile?.bankAddress || '',
+          iban: liveProfile?.iban || '',
+          swift: liveProfile?.swift || '',
+          accountNumber: liveProfile?.accountNumber || '',
+          paymentEmail: liveProfile?.paymentEmail || '',
+          contractorEmail: contractorUser?.email || '',
+          contractorName: inv.userName || '',
+          linkedBeneficiary: { id: benef.id, shortName: benef.shortName || '', fullName: benef.beneficiaryName || '' },
+          suggestedBeneficiary: repl ? { id: repl.id, shortName: repl.shortName || '', vendorId: (repl.vendorId || '').trim() } : undefined,
+        });
+        continue;
+      }
+
       const vendorId = (benef?.vendorId || '').trim();
 
       if (!vendorId) {
