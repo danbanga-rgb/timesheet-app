@@ -1,282 +1,419 @@
-# Database Schema Reference
+# Database Schema — Synergie Timesheet System
 
-> Generated 2026-06-12. May need review as the system evolves.
+> Last brought current 2026-08-11 by querying `information_schema.columns` directly. Supabase project `mimlatvdwxqtgxrgcins`, schema `public`.
+
+**Table catalog (19 total):**
+
+| Domain | Tables |
+|---|---|
+| Core | `profiles`, `projects`, `timesheets`, `invoices`, `payment_profiles` |
+| Ingest logs | `email_import_log`, `email_invoice_log`, `parser_shadow_log` |
+| Convera / Payments | `convera_beneficiaries`, `convera_transactions`, `convera_transaction_invoices`, `import_batches` |
+| Client Invoicing | `clients`, `client_engagements`, `hour_overrides` |
+| QuickBooks Integration | `qb_sync_jobs`, `qb_wc_sessions` |
+| Ops | `system_settings`, `system_alerts_state` |
 
 ---
 
-## Overview
+## Core
 
-All tables live in Supabase PostgreSQL (project `mimlatvdwxqtgxrgcins`). Column names are `snake_case`; TypeScript interface fields are `camelCase` — `normaliseTimesheet()` and similar functions map at fetch time.
-
----
-
-## `profiles`
-
-Extends `auth.users`. One row per user. Created by the `create-user` edge function (public signups disabled).
+### `profiles`
+Extends `auth.users`. Every contractor / manager / accountant / admin has one.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `id` | `uuid` | PK, FK → `auth.users.id` |
-| `email` | `text` | Lowercase. Used for all contractor resolution lookups |
-| `username` | `text` | Set to email at creation; not used for login |
-| `name` | `text` | Display name. `ingest-timesheet` may update from email metadata if current name looks auto-generated (all lowercase, no space, matches email prefix) |
-| `role` | `text` | `timesheetuser` / `manager` / `accountant` / `vendormanager` / `admin` |
-| `country` | `text` | ISO 2-letter code (US, GB, CA, HR, RS, BA, SI, MK, IN, NL) |
-| `region` | `text` | Free text region within country. Combined with country to look up timezone in `tzMap`. Admin sees warning icon for unknown combos |
-| `manager_id` | `uuid` | FK → `profiles.id`. NULL = auto-approve on submit |
-| `project_id` | `uuid` | FK → `projects.id`. Current project assignment. Historical consolidated reports use most-recent timesheet's project_id, not this column |
-| `start_date` | `date` | When contractor started. All views, reminders, and reports are bounded by this date. `getMissingWeeks()` starts from here. **Must be updated (not just cleared) when a contractor returns after a gap** |
-| `end_date` | `date` | When contractor ended. NULL = active. Reports and reminders stop at this date |
-| `phone` | `text` | Optional. Profile completion banner prompts if missing |
-| `invoice_enabled` | `bool` | Whether contractor can see invoice features. Default false |
-| `reminders_enabled` | `bool` | Whether automated reminders are sent to this user. Default true. Admin can toggle. Set to false for users blocked in Brevo (e.g. spam complaint) |
-| `email_approvals_enabled` | `bool` | Whether manager approval emails are sent. Default false |
-| `vendor_manager_id` | `uuid` | FK → `profiles.id`. Links vendor contractors to their vendormanager |
-| `payment_terms` | `varchar(10)` | Default payment terms: NET15 / NET30 / NET45 / NET60. Cascades from invoice on change. ~44 contractors have no history yet — accountant sets as invoices come through |
+|---|---|---|
+| `id` | uuid PK | matches `auth.users.id` |
+| `username` | text | login-friendly |
+| `name` | text | display name |
+| `role` | text | `timesheetuser` / `manager` / `accountant` / `vendormanager` / `admin` |
+| `email` | text | login email; unique |
+| `country` | text default `'US'` | for tzMap + reminders |
+| `region` | text | US state / UK region / etc — refines timezone |
+| `project_id` | int → projects.id | default project assignment |
+| `manager_id` | uuid → profiles.id | approval routing |
+| `vendor_manager_id` | uuid → profiles.id | scoped view |
+| `start_date` / `end_date` | date | contractor lifecycle bounds all views + reminders |
+| `phone` | text | |
+| `invoice_enabled` | bool default true | (create-user path defaults to `false` since 2026-08-10) |
+| `reminders_enabled` | bool default true | admin toggle to silence per user |
+| `email_approvals_enabled` | bool default false | for the unwired per-timesheet email-approval flow |
+| `imported_password` | text | legacy migration; not used at login |
+| `payment_terms` | varchar | `NET15` / `NET30` / `NET45` / `NET60` — profile default |
+| `invoice_template` | text | `regex` / `claude_vision` / null / `claude_full` — routes `extractInvoice()` |
+| `location_type` | text | onshore / offshore — drives GNW $20/hr discount rule |
+| `created_at` | timestamptz default now() | |
 
-**RLS:** Row-level security is enabled. From the poller, always use SECURITY DEFINER RPCs (`profile_email_exists`, `find_profile_by_first_name`, `find_profiles_by_name_words`) for profile lookups — the anon key cannot read `profiles` directly and returns `[]` silently.
+### `projects`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int PK | |
+| `name` | text | |
+| `code` | text | display code |
+| `status` | text default `'active'` | filter for active/inactive |
+| `description` | text | |
+| `created_at` | timestamptz | |
 
-**Gotchas:**
-- Never use `profiles.project_id` for historical reports. The column always reflects the current project; historical weeks before a project switch would retroactively show the new project.
-- When a contractor leaves and returns: set a **new** `start_date` equal to their return date and clear `end_date`. Do NOT keep the original start_date — `getMissingWeeks()` starts from `start_date` and would generate reminders for the entire gap period.
+### `timesheets`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int PK | |
+| `user_id` | uuid → profiles.id | |
+| `user_name` | text | denormalized for report speed |
+| `project_id` | int → projects.id | |
+| `week_start` | date | **always Monday**; unique `(user_id, week_start)` |
+| `entries` | jsonb default `'{}'` | `{YYYY-MM-DD: number}` or `{YYYY-MM-DD: {hours, isHoliday, ...}}` — see SHAPE-TRAP note |
+| `status` | text default `'pending'` | `pending` / `approved` / `rejected` |
+| `source` | text default `'direct'` | `direct` (portal) or `imported` (email); drives correction rules |
+| `submitted_at` | timestamptz default now() | |
+| `approved_at` | timestamptz | |
+| `approved_by` | text | `'self-submit'` for no-manager auto-approve |
+| `locked_days` | timestamptz[] | days locked by an approved invoice period; blocks re-submission. **Bug fixed 2026-07-08** (`2847e9a`) — was compared to date strings, every lock had been theater |
+| `verified_zero_hours` | bool default false | true = confirmed LOA/PTO/sick; monitored by SLO `zero_hour_timesheet` |
+| `verified_zero_hours_by` | uuid → profiles.id | admin who verified (null if auto-set via internal-forwarder path) |
+| `verified_zero_hours_at` | timestamptz | |
+| `verified_zero_hours_note` | text | free-form reason |
 
----
+**Entries shape gotcha:** two readers still assume `{hours}`-object shape and silently drop plain-numbers ([[project_entries_shape_latent_bugs]]). Neither fires today. SHAPE-TRAP comments in the code point at `getHours()` in `send-timesheet-report:98`.
 
-## `timesheets`
+### `invoices`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int PK | |
+| `user_id` | uuid → profiles.id | |
+| `user_name` | text | |
+| `project_id` | int → projects.id | |
+| `invoice_number` | text default `''` | contractor's invoice #; used for matching + display |
+| `period_start` / `period_end` | date | billing period |
+| `lines` | jsonb default `'[]'` | `[{weekEndingFri, hours, rate, amount, ...}]` |
+| `total_hours` / `rate` | numeric | |
+| `total_amount` | numeric | primary $ field |
+| `currency` | text default `'USD'` | |
+| `status` | text default `'submitted'` | `submitted` / `approved` / `rejected` / `paid` / `flagged` |
+| `payment_profile` | jsonb | snapshot of `payment_profiles` at approval time |
+| `payment_terms` | varchar | invoice-level override of profile default |
+| `payment_method` | text | Intuit (US default) / Convera (default all other) / manual override |
+| `pay_on_date` | date | auto-computed from `period_end` + `payment_terms` |
+| `paid_date` | date | locks the invoice from further edits |
+| `attachment_path` | text | Supabase Storage bucket `invoice-attachments` |
+| `submitted_at` / `reviewed_at` | timestamptz | |
+| `reviewed_by` | text | |
+| `notes` | text | |
+| `is_vendor_invoice` | bool | vendormanager scope |
+| `vendor_manager_id` | uuid → profiles.id | |
+| `source` | text default `'direct'` | `direct` = frontend-created; `imported` = email-parsed |
+| `reconciliation_status` / `reconciliation_delta` / `reconciliation_notes` | text/float/text | vs approved timesheets |
+| `group_key` | text | groups multi-contractor umbrella payments |
+| `corrected` | bool default false | re-submitted with different values |
+| `matcher_ignore` | bool default false | fences pre-Submitted→Approved→Paid legacy from matcher (cutoff 2026-04-28) |
+| `qb_export_status` | text default `'not_exported'` | `not_exported` / `exported_bill` / `bill_confirmed` |
+| `qb_export_status_at` | timestamptz | |
+| `qb_bill_txn_id` | text | QB TxnID once accountant confirms in QB |
+| `edit_history` | jsonb default `'[]'` | JSON array of period-edit events (2026-07-28) |
+| `created_at` | timestamptz | |
 
-One row per contractor per week. The core table.
+### `payment_profiles`
+Bank / company details attached to invoices; snapshot copied into `invoices.payment_profile` on approval.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `id` | `int8` | PK, auto-increment |
-| `user_id` | `uuid` | FK → `profiles.id` |
-| `user_name` | `text` | Snapshot of contractor name at submission time |
-| `week_start` | `date` | Always a **Monday** in `YYYY-MM-DD` format. Never stored with time component |
-| `entries` | `jsonb` | See entry shape below |
-| `status` | `text` | See status values below |
-| `source` | `text` | `'direct'` (portal) or `'imported'` (email/poller). Drives correction rules |
-| `submitted_at` | `timestamptz` | When timesheet entered the system. Portal: exact submit time. Email: poller processing time (≤1h lag) |
-| `approved_at` | `timestamptz` | When approved |
-| `approved_by` | `text` | `'system-import'` for auto-approved imports; `'self-submit'` for no-manager portal submits; manager name/id for manual approvals |
-| `project_id` | `uuid` | FK → `projects.id`. May be null for email-imported timesheets (falls back to `profiles.project_id` in UI) |
-| `message_id` | `text` | Email message ID. Used for deduplication. Auto-submitted YES replies use prefix `reply-yes-{uuid}` |
-
-### `timesheets.entries` JSON shape
-
-```json
-{
-  "2026-05-25": { "hours": "8", "isHoliday": false, "holidayName": null, "isWeekend": false },
-  "2026-05-26": { "hours": "8" },
-  "2026-05-27": { "hours": "8" },
-  "2026-05-28": { "hours": "8" },
-  "2026-05-29": { "hours": "8" },
-  "2026-05-30": { "hours": "0", "isWeekend": true },
-  "2026-05-31": { "hours": "0", "isWeekend": true }
-}
-```
-
-Keys are `YYYY-MM-DD` date strings (Monday through Sunday). All 7 days may or may not be present.
-
-`hours` is always stored as a **string** in portal submissions. Email imports may store as number. `getHours()` in `send-timesheet-report` handles both: `typeof entry === 'number' ? entry : parseFloat(String(entry?.hours ?? 0))`.
-
-Optional fields: `isHoliday` (bool), `holidayName` (string), `isWeekend` (bool).
-
-### `timesheets.status` values and transitions
-
-| Status | Meaning | Next states |
-|--------|---------|------------|
-| `pending` | Submitted by contractor, awaiting manager approval | `approved`, `rejected` |
-| `approved` | Approved (by manager, by system-import, or self-submit with no manager) | `correction_pending` (if emailed correction received) |
-| `rejected` | Rejected by manager or accountant | `pending` (if contractor resubmits) |
-| `correction_pending` | Contractor emailed different hours for an already-approved portal submission | `approved` (after admin review) |
-
-**Key rule:** `correction_pending` is never auto-resolved. It means a contractor sent different hours by email after a portal submission. An admin must review and manually apply or discard.
-
-### Correction rules (enforced in `ingest-timesheet`)
-
-| Incoming | Existing | Action |
-|---------|---------|--------|
-| Any source, no `forwardedBy` | `source='direct'` exists | → `correction_pending` (never auto-apply) |
-| Any source, `forwardedBy` set | `source='direct'` exists | → replace entries outright, auto-approve. Accountant is authoritative and may reduce hours |
-| `source='imported'` | `source='imported'` exists | → `mergeEntries()` max per day, keep `approved`. Handles month-end partial-week splits |
-| Any | None exists | → create as `approved`, `source='imported'` |
-| Identical hours | `source='direct'` exists, no `forwardedBy` | → `duplicate`, no change |
-
-**Why outright replace for internal forwarder:** Accountants may need to reduce hours (e.g. contractor submitted 40h but only 16h are billable). Max-merge would silently ignore the reduction.
-
-**Why max-merge for imported→imported:** Contractor may send Apr 27–30 in one email and May 1 in another. Both map to `week_start=2026-04-27`. Max-merge preserves the best of each day.
-
-**Rolling multi-week file risk:** A contractor who submits a file spanning multiple weeks, where the earlier weeks had already been corrected to lower values, will overwrite those corrections on any day where the file has higher hours (max-merge wins). This is a known limitation.
+|---|---|---|
+| `id` | int PK | |
+| `user_id` | uuid → profiles.id | one contractor can have many |
+| `profile_name` | text | user-facing label (e.g. "Bimosoft UK ALT") |
+| `company_name` / `company_address` | text | on-invoice recipient |
+| `country` | text | 2-letter ISO |
+| `bank_name` / `bank_address` / `bank_branch` | text | |
+| `account_number` / `iban` / `swift` | text | IBAN lives in `iban` here; note `convera_beneficiaries` puts IBAN in `bank_account` |
+| `payment_email` | text | contractor's preferred email for payment confirmations |
+| `is_default` | bool default false | one per user shown first |
+| `combine_payments` | bool | send as one wire when multiple profiles share same beneficiary |
+| `convera_beneficiary_id` | int → convera_beneficiaries.id | link for auto-matching |
+| `convera_match_override` | bool default false | manual pin — Bimosoft UK ALT guardrail uses this |
+| `qb_vendor_name` | text | maps to QB vendor for Bills/Payments export |
+| `created_at` | timestamptz | |
 
 ---
 
-## `invoices`
+## Ingest Logs
 
-One row per contractor invoice.
+### `email_import_log`
+One row per email the poller processes. **Every email produces exactly one entry as of 2026-08-11** — no silent drops. See [edge-functions.md](edge-functions.md#email_import_logparse_status-vocabulary) for the full `parse_status` vocabulary (15 statuses).
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `id` | `int8` | PK |
-| `user_id` | `uuid` | FK → `profiles.id` |
-| `period_start` | `date` | Billing period start |
-| `period_end` | `date` | Billing period end |
-| `total_hours` | `numeric` | Total hours. May be null for amount-only invoices; system then queries timesheets to derive |
-| `rate` | `numeric` | Hourly rate |
-| `amount` | `numeric` | Invoice amount |
-| `currency` | `text` | Always USD in practice. Non-USD = parsing failure, not a conversion |
-| `status` | `text` | `submitted` / `approved` / `rejected` / `paid` |
-| `source` | `text` | `'imported'` for email-ingested; never auto-approved |
-| `payment_profile` | `jsonb` | Full snapshot of `PaymentProfile` object at time of approval. NOT a FK. Switching profiles replaces this snapshot. Keys are camelCase |
-| `attachment_path` | `text` | Path in Supabase Storage bucket `invoice-attachments` |
-| `payment_terms` | `varchar(10)` | NET15 / NET30 / NET45 / NET60. Overrides profile default. Cascade: change → writes back to `profiles.payment_terms` |
-| `pay_on` | `date` | Calculated pay date (period_end + N days, rounded to next 15th or EOM, adjusted for weekends) |
-| `reconciliation_status` | `text` | Stored at insert time and recomputed live from current timesheet state |
-| `reconciliation_delta` | `numeric` | Hours difference between invoice and approved timesheets |
-| `message_id` | `text` | Email message ID for deduplication |
+|---|---|---|
+| `id` | bigint PK | |
+| `received_at` | timestamptz default now() | |
+| `message_id` | text | unique-ish; per-attachment logOnly uses `${msgId}::${att.name}` |
+| `from_email` | text | actual sender (or forwarder) |
+| `resolved_email` | text | actual contractor (differs when forwarded) |
+| `subject` | text | |
+| `body_preview` | text | first ~500 chars |
+| `attachment_name` | text | |
+| `parse_status` | text | 15 possible values — see edge-functions.md |
+| `parse_notes` | text | |
+| `user_id` | uuid | resolved contractor |
+| `user_created` | bool default false | always false — auto-create disabled |
+| `timesheet_id` | bigint | linked timesheet if created |
+| `week_start` | text | resolved week |
+| `raw_hours` | jsonb | as-parsed entries |
+| `total_hours` | numeric | |
+| `contractor_name` | text | |
+| `attempt_count` | int default 1 | |
+| `run_id` | text | UUID per poller invocation |
 
-**Note:** `payment_profile` is a full JSON snapshot, not a FK. Accountant can switch profiles via the "Switch" button in the invoice modal — this replaces the snapshot. No separate profile link table exists.
+**Dropped 2026-08-11:** `forwarded_to` — was never written by any code, confirmed dead.
 
----
-
-## `payment_profiles`
-
-Bank/company details for a contractor. Multiple profiles per contractor (e.g. personal vs company account, or different IBANs).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | `int8` | PK |
-| `user_id` | `uuid` | FK → `profiles.id` |
-| `company_name` | `text` | Payee company name |
-| `bank_name` | `text` | |
-| `iban` / `account_number` | `text` | One or the other depending on country |
-| `swift` / `sort_code` / `routing_number` | `text` | Routing details |
-| `is_default` | `bool` | One default per contractor. Shown first in profile picker |
-| `payment_terms` | `varchar(10)` | Per-profile default terms (also on `profiles`) |
-| `convera_beneficiary_id` | `int8` | FK → `convera_beneficiaries.id`. Links to Convera payment system |
-
-**IBAN gotchas (critical):** LT Revolut pool IBAN `LT633250056365211440` is shared by 24 contractors. IE Revolut pool `IE18REVO99036092001905` is shared by 9 contractors. IBAN matching alone cannot identify these contractors. Match by contractor name or `convera_beneficiary_id` instead.
-
----
-
-## `projects`
+### `email_invoice_log`
+Same idea but for invoices. Separate table.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `id` | `uuid` | PK |
-| `name` | `text` | Project display name |
-| `code` | `text` | Short code used in reports |
-| `status` | `text` | `active` / `inactive` |
+|---|---|---|
+| `id` | bigint PK | |
+| `created_at` | timestamptz default now() | |
+| `message_id` | text | unique |
+| `from_email` | text | |
+| `subject` | text | |
+| `attachment_name` | text | |
+| `attachment_hash` | text | dedup on same file re-sent |
+| `parse_status` | text | |
+| `parse_notes` | text | |
+| `user_id` | uuid | |
+| `invoice_id` | bigint | linked invoice |
+| `period_start` / `period_end` | text | (**text**, not date — historical) |
+| `raw_extracted` | jsonb | snapshot of parser output |
+| `groq_vision_verification` | jsonb | shadow verification pass ([[project_groq_vision_layer]], currently broken) |
+| `attempt_count` | int default 1 | |
 
----
-
-## `email_import_log`
-
-Audit log for every email the poller processes. One row per email-attachment pair (some emails have multiple attachments, generating multiple rows).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | `int8` | PK |
-| `message_id` | `text` | IMAP message ID. Used for deduplication. See unique constraint below |
-| `from_email` | `text` | **As of 2026-06-12:** the forwarder's email when `forwardedBy` is set; the contractor's email otherwise. Before this fix, `from_email` was always set to `contractorEmail` — the bug masked whether a submission was forwarded |
-| `resolved_email` | `text` | Always the contractor's email (what was resolved from forwarded headers / attachment filenames) |
-| `subject` | `text` | |
-| `attachment_name` | `text` | |
-| `parse_status` | `text` | `success` / `duplicate` / `correction` / `correction_pending` / `failed` / `partial` |
-| `parse_notes` | `text` | Human-readable notes, including `[parseMethod]` prefix for invoice parsing |
-| `user_id` | `uuid` | FK → `profiles.id`. NULL if unknown contractor |
-| `user_created` | `bool` | Always false (auto-creation disabled) |
-| `timesheet_id` | `int8` | FK → `timesheets.id`. Used by `send-timesheet-report` for channel classification |
-| `week_start` | `date` | Resolved week Monday |
-| `raw_hours` | `jsonb` | The parsed entry object before upsert |
-| `attempt_count` | `int` | How many times this email has been processed (failed → deleted and retried) |
-| `run_id` | `text` | UUID linking to a specific poller run. Query: `SELECT * FROM email_import_log WHERE run_id = '...'`. The run ID is in `system_settings.poller_last_run` |
-
-**Deduplication trap:** Once `parse_status` is `success`, `duplicate`, `correction`, or `correction_pending`, the row is never reprocessed. If a submission needs to be re-ingested (e.g. after a parser fix), delete the log row first. Failed and partial statuses are retried automatically on next run (the old row is deleted and a fresh one inserted).
-
-**Channel classification** in `send-timesheet-report`:
-- `message_id LIKE 'reply-yes-%'` → `auto_yes`
-- `from_email != resolved_email` → `forwarded` (reliable from 2026-06-12)
-- Log entry exists, emails match → `direct`
-- No log entry + `source='direct'` → `portal` (default fallback in `buildTimingSection`)
-
----
-
-## `system_settings`
-
-Key/value store for operational metadata and locks. Single-row per key.
-
-| Key pattern | Value | Notes |
-|-------------|-------|-------|
-| `poller_last_run` | JSON: `{ran_at, run_id, created, duplicates, corrections, failures, forwarded, invoices}` | Written at end of every poller run. Used by `send-reminder` to detect stale runs (defer 9am reminder if age > 45min) |
-| `reminder_invocation_lock_{YYYYMMDDHH}` | ISO timestamp | Hourly mutex. First concurrent invocation wins; others return `{skipped: 'duplicate_invocation'}`. Prevents pg_net queue flush bursts |
-| `reminder_user_{YYYYMMDD}_{userId}` | ISO timestamp | Per-user daily claim. Atomic INSERT prevents double-send. Bypassed by `?force=true` |
-| `reply_yes_pending_{userId}` | JSON: `{weekStart, created_at, email}` | Written when poller classifies a YES reply (before auto-submit). Suppresses Monday reminders for 72h as belt-and-suspenders. To be removed once YES flow has weeks of clean runs |
-
-**Do not manually delete `reminder_invocation_lock_*` or `reminder_user_*` entries unless diagnosing an incident** — they expire naturally (one per day) and are harmless.
-
----
-
-## `convera_beneficiaries`
-
-One row per Convera payment beneficiary record.
+### `parser_shadow_log`
+Shadow-run log for parser experiments. Compares prod vs shadow implementations without side effects.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `id` | `int8` | PK |
-| `short_name` | `text` | Convera-assigned alias (up to ~35 chars, truncated) |
-| `beneficiary_name` | `text` | Legal payee name |
-| `iban` | `text` | Bank account identifier |
-| `bank_name` | `text` | |
-| `currency` | `text` | Almost always USD |
-
-163 records total (as of 2026-06-03). Imported from Convera export. Source of truth for contractor IBANs. The JSON file `scripts/poller/convera-beneficiaries.json` is gitignored (contains contractor banking data) — it's the local memory bank for re-imports.
-
-**Matching:** Short-name prefix match using `norm(short_name).startswith(norm(contractor_name))`. Two known exceptions require manual overrides (Convera typo "Alexandar Brajkovic", different name "LIIA KHAUSTOVA" for Liya Haustova).
+|---|---|---|
+| `id` | bigint PK | |
+| `at` | timestamptz default now() | |
+| `kind` | text | e.g. `invoice_extract`, `week_resolve` |
+| `source` | text | `poller` / `edge_fn` / etc |
+| `reference_id` | bigint | linked row in prod table |
+| `file_path` / `filename` | text | |
+| `prod_result` / `shadow_result` | jsonb | |
+| `signals` / `agreement` / `tiebreak_result` | jsonb | |
+| `disagreement_severity` | text | `low` / `medium` / `high` |
+| `disagreement_summary` | text | |
+| `alerted_at` / `alert_reason` | timestamptz / text | |
 
 ---
 
-## `convera_transactions`
+## Convera / Payments
 
-One row per line item in a Convera payment order. 138 rows covering Mar–Jun 2026.
+### `convera_beneficiaries`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `beneficiary_id` | text | Convera's ID |
+| `short_name` | text | maps to `payment_profiles.profile_name` for auto-link |
+| `beneficiary_name` | text | full display |
+| `beneficiary_country` | text | 2-letter |
+| `currency` | text | |
+| `default_payment_method` | text | |
+| `vendor_id` | text | |
+| `bank_name` / `bank_country` / `bank_account` | text | **IBAN is in `bank_account`** — `iban_unique` is a boolean flag, not the IBAN itself |
+| `iban_unique` | bool | true if not shared across contractors (LT Revolut shared by 24, IE Revolut by 9 — see [[reference_convera_export]]) |
+| `updated_by` / `updated_date` | text | |
+| `imported_at` | timestamptz | |
+| `deprecated` | bool default false | soft-delete for old beneficiaries |
+| `deprecated_reason` / `deprecated_at` | text/timestamptz | |
+| `replacement_beneficiary_id` | int | redirect target |
+| `force_combine` | bool default false | umbrella beneficiaries always group in Convera batch (Bimosoft UK ALT case) |
+
+### `convera_transactions`
+Inbound payment records from Convera CSV exports.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `id` | `int8` | PK |
-| `confirmation_number` | `text` | Payment order confirmation |
-| `line_item` | `int` | Line item within the order. Unique pair with `confirmation_number` |
-| `date_of_order` | `date` | |
-| `beneficiary_name` | `text` | As shown in Convera export |
-| `subtotal` | `numeric` | |
-| `service_charges` | `numeric` | |
-| `grand_total` | `numeric` | |
-| `item_type` | `text` | |
-| `foreign_amount` | `numeric` | If paid in non-USD |
-| `ref1` | `text` | |
-| `convera_beneficiary_id` | `int8` | FK → `convera_beneficiaries.id`. 127/138 rows linked |
+|---|---|---|
+| `id` | int PK | |
+| `confirmation_number` | text | Convera wire confirmation — grouping key for QB payments IIF |
+| `line_item` | int | line within a batch |
+| `date_of_order` | date | |
+| `beneficiary_name` | text | |
+| `subtotal` / `service_charges` / `grand_total` / `foreign_amount` | numeric | |
+| `item_type` | text | |
+| `ref1` | text | e.g. `INV 123` (never `Inv#`) — feed to `normaliseRef`, don't regex-parse |
+| `convera_beneficiary_id` | int → convera_beneficiaries.id | routing key. **Not** snap IBAN (2026-08-10 finding, [[project_convera_transactions]]) |
+| `import_batch_id` | int → import_batches.id | |
+| `matched_invoice_id` | int → invoices.id | primary match (many-to-many also lives in `convera_transaction_invoices`) |
+| `match_state` | text default `'unreviewed'` | `unreviewed` / `auto` / `manual` / `no_invoice` |
+| `match_confidence` | text | `strong` / `weak` (weak = level ≥ 3) |
+| `match_level` | int | 1–5 (see [[project_payment_matching_logic]]) |
+| `matched_at` / `matched_by` | timestamptz / text | |
+| `notes` | text | |
+| `matcher_ignore` | bool default false | fences legacy from matcher (cutoff 2026-06-20) |
+| `qb_payment_export_status` | text default `'not_exported'` | |
+| `qb_payment_export_status_at` | timestamptz | |
+| `qb_billpmt_txn_id` | text | (aspirational — QBO doesn't support BILLPMT, but shipped for QBD upgrade path) |
 
-Upsert on `(confirmation_number, line_item)`. Safe to re-run the import script. 11 rows unlinked because the beneficiary is an intermediary (Native Teams Limited = 5 candidates; D-KODE = 2 candidates sharing a company).
-
-Used by the Convera Matching modal in the accountant Invoices tab to show "last paid" date per contractor.
-
----
-
-## `email_approval_tokens`
-
-For manager email approvals (single-use tokenised links).
+### `convera_transaction_invoices`
+Many-to-many join. One Convera transaction can pay multiple invoices (umbrella payments).
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `id` | `int8` | PK |
-| `timesheet_id` | `int8` | FK → `timesheets.id` |
-| `manager_id` | `uuid` | FK → `profiles.id` |
-| `token` | `text` | UUID-based random token, 64 chars |
-| `expires_at` | `timestamptz` | 7 days from creation |
-| `used` | `bool` | One-time use. `used_at` recorded |
-| `used_at` | `timestamptz` | |
+|---|---|---|
+| `transaction_id` | int → convera_transactions.id | PK part 1 |
+| `invoice_id` | int → invoices.id | PK part 2 |
+| `amount_share` | numeric | dollar amount attributed to this invoice |
+
+### `import_batches`
+Every CSV/XLS import creates a batch row so imports can be undone or audited.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int PK | |
+| `source` | text | `convera_transactions` / `qb_txn_detail` / etc |
+| `source_filename` | text | |
+| `imported_at` | timestamptz default now() | |
+| `imported_by` | text | admin user |
+| `row_count` | int | |
+| `state` | text default `'pending'` | `pending` / `applied` / `reverted` |
 
 ---
 
-## Notes on Missing Tables
+## Client Invoicing
 
-- `invoice-attachments` — This is a **Supabase Storage bucket**, not a table. Invoices store the attachment path in `invoices.attachment_path`.
-- `email_invoice_log` — Separate from `email_import_log`. Tracks invoice ingestion attempts with `parse_notes` containing `[parseMethod]` prefix. See invoice-pipeline.md for detail.
+### `clients`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int PK | |
+| `name` | text | |
+| `bill_to_name` / `bill_to_attn` | text | invoice header |
+| `address_line1` / `address_line2` / `city` / `state` / `zip` | text | |
+| `po_number` | text | |
+| `payment_terms_days` | int default 30 | drives client invoice `pay_on_date` |
+| `sales_tax_rate` | numeric default 0 | |
+| `retention_credit_pct` | numeric default 0 | percentage held back |
+| `retention_per_hour` | numeric default 0 | fixed $/hr retention |
+| `investment_credit_running` | numeric default 0 | running total (Genworth) |
+| `show_investment_credit_running_total` | bool default false | display in invoice footer |
+| `invoice_format_type` | text default `'apfm'` | drives template selection (`apfm` / `ae` / `genworth`) |
+| `created_at` / `updated_at` | timestamptz | |
+
+### `client_engagements`
+Assigns a contractor (`user_id`) to a client at a specific bill rate for a period.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int PK | |
+| `client_id` | int → clients.id | |
+| `user_id` | uuid → profiles.id | |
+| `role_title` | text | e.g. "Senior Engineer" |
+| `sow_reference` | text | Statement of Work ref |
+| `bill_rate` | numeric | $/hr to client |
+| `effective_from` / `effective_to` | date | window; `to` null = active |
+| `created_at` | timestamptz | |
+
+### `hour_overrides`
+Accountant edits to hours per engagement per week when the raw timesheet doesn't match what should be invoiced.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int PK | |
+| `engagement_id` | int → client_engagements.id | |
+| `week_start` | date | |
+| `hours_override` | numeric | |
+| `note` | text | reason |
+| `edited_by` | uuid → profiles.id | |
+| `edited_at` | timestamptz | |
+
+**GOTCHA:** this table exists in production but has **no migration file** in the repo. If restoring from schema-only pg_dump the table will be missing. See [[project_client_invoicing]].
+
+---
+
+## QuickBooks Integration
+
+### `qb_sync_jobs`
+Job queue for the QB Web Connector qbXML flow (in-flight — Chunks 2, 3, 4·Session 1 committed on branch `qb-web-connector-chunk2-builders`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `kind` | text | e.g. `bill_add`, `bill_query`, `bill_payment_check_add` |
+| `payload` | jsonb | job-specific inputs |
+| `depends_on` | bigint[] default `'{}'` | job DAG |
+| `status` | text default `'pending'` | `pending` / `running` / `succeeded` / `failed` |
+| `qbxml_request` | text | outgoing SOAP body |
+| `qbxml_response` | text | QB's reply |
+| `error_msg` | text | |
+| `created_at` / `started_at` / `completed_at` | timestamptz | |
+
+### `qb_wc_sessions`
+Session tracking for QuickBooks Web Connector SOAP handshake.
+
+| Column | Type | Notes |
+|---|---|---|
+| `ticket` | text PK | session token issued by `authenticate()` |
+| `started_at` / `last_seen_at` | timestamptz default now() | |
+| `job_id` | bigint → qb_sync_jobs.id | current job being served |
+| `qb_company` | text | QB company file identifier |
+
+---
+
+## Ops
+
+### `system_settings`
+Key/value store for cross-run coordination. Everything from feature flags to atomic locks lives here.
+
+| Column | Type | Notes |
+|---|---|---|
+| `key` | text PK | |
+| `value` | text | JSON-encoded when structured |
+| `updated_at` | timestamptz default now() | |
+
+**Well-known keys:**
+- `poller_last_run` — JSON `{ran_at, run_id, counts}` heartbeat
+- `reminder_invocation_lock_{YYYYMMDDHH}` — hourly guard against pg_net flush duplicates
+- `reminder_user_{YYYYMMDD}_{userId}` — per-user daily send claim
+- `reply_yes_pending_{userId}` — 72h suppressor after YES reply
+- `auto_reply_sent_{userId}` — rate-limit on auto-reply-B (YES no history)
+
+### `system_alerts_state`
+Per-SLO alert state for `monitor-health` cron.
+
+| Column | Type | Notes |
+|---|---|---|
+| `slo_key` | text PK | e.g. `poller_heartbeat`, `zero_hour_timesheet` |
+| `last_breached_at` | timestamptz | |
+| `last_alerted_at` | timestamptz | for cooldown |
+| `consecutive_breaches` | int default 0 | some SLOs require ≥ N consecutive breaches before firing (e.g. `poller_heartbeat` = 2, `e1e4854`) |
+
+---
+
+## Notable RPCs (SECURITY DEFINER)
+
+| RPC | Purpose |
+|---|---|
+| `profile_email_exists(email)` | Sender allowlist check. Fail-open on error. Called by poller Layer 1 defence. |
+| `find_profile_by_first_name(first)` | Match Intuit/QB filename contractor name to profile. Case-insensitive, unaccent. |
+| `find_profile_by_name(name)` | Full-name match with `unaccent(lower())`. Used in name-word fallback resolution. |
+| `find_profiles_by_name_words(words[])` | Multi-word capitalised-token subject fallback. |
+
+---
+
+## Correction Rules (source-of-truth summary)
+
+Applied by `ingest-timesheet` when a timesheet is upserted:
+
+| Existing | Incoming | Result |
+|---|---|---|
+| none | any | `create`, `status='approved'`, `source='imported'` |
+| `source='direct'` (portal) | `forwardedBy=null`, same hours | `duplicate` — no change |
+| `source='direct'` (portal) | `forwardedBy=null`, different hours | `correction_pending` — contractor can't reduce own hours; needs review |
+| `source='direct'` (portal) | `forwardedBy` set | replace entries outright, `status='approved'` — accountant is authoritative |
+| `source='imported'` | any | `mergeEntries()` max per day, keep `status='approved'` — handles month-end splits |
+| any | `total=0` + valid week + contractor name | `success_zero_hours` (direct) or `success_zero_hours_forwarded`; latter auto-sets `verified_zero_hours=true` |
+| any | `total=0` from `reply-yes-*` messageId | `auto_yes_zero_blocked` via sanity gate — refuses to submit |
+
+Full detail: [[project_ingest_correction_rules]].
+
+---
+
+## Migration & Backup
+
+- **Backup:** `.github/workflows/backup.yml` runs `pg_dump` on public schema at 2am UTC daily. Uploaded as GitHub Actions artifact with 30-day retention.
+- **Restore:** artifacts are `.sql` files; drop-and-recreate against a Supabase project via `psql`. Note `hour_overrides` has no migration file, so schema-only restores need manual recreation.
+- **Direct queries:** use Supabase Management API `POST /v1/projects/{ref}/database/query` with PAT ([[reference_supabase_pat]]).

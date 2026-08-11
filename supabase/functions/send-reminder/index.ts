@@ -207,6 +207,11 @@ serve(async (req) => {
   }
 
   // ── TIMESHEET SUBMITTED — send per-timesheet approval email to manager ──────
+  // ⚠️  UNWIRED FEATURE (2026-08-11): the `email_approval_tokens` table does NOT
+  // exist in production, and no frontend code calls this action. The per-timesheet
+  // manager approval flow was designed but never shipped. Kept intact per product
+  // decision — either complete the wiring (create the table + call from
+  // TimesheetSystem.tsx submitTimesheet) or delete both action handlers below.
   if (reqBody.action === 'timesheet_submitted') {
     const { timesheetId, timesheetUserName, weekStart, totalHours, projectName, projectCode, managerId, managerName, managerEmail } = reqBody;
 
@@ -292,6 +297,8 @@ These links are valid for 7 days and are single-use.`;
   }
 
   // ── PROCESS EMAIL APPROVAL — validate token and apply approval/rejection ────
+  // ⚠️  UNWIRED — see note on `timesheet_submitted` above. Depends on the same
+  // non-existent `email_approval_tokens` table.
   if (reqBody.action === 'process_approval') {
     const { token, decision } = reqBody;
 
@@ -434,7 +441,7 @@ These links are valid for 7 days and are single-use.`;
   // Claim is made BEFORE sending so a failed send still burns today's slot — that's
   // intentional: never double-send, even on retry. ?force=true bypasses the claim.
   const todayUTC = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const INVOCATION_EMAIL_CAP = 80;
+  const INVOCATION_EMAIL_CAP = 150;
   let invocationEmailCount = 0;
 
   async function claimSend(userId: string): Promise<boolean> {
