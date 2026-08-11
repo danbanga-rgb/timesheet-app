@@ -44,6 +44,72 @@ function looksLikeRealName(name: string | null): boolean {
   return name.includes(' ') && name.length > 3 && name.length < 60 && !/^\d/.test(name);
 }
 
+// ─── Zero-hour confirmation email ─────────────────────────────────────────────
+// When a contractor submits a zero-hour timesheet directly (source='direct',
+// no internal forwarder), we accept the submission and ask them to confirm.
+// Closes the loop so people who fat-fingered a blank submission get a nudge.
+
+async function sendZeroHourConfirmation(
+  contractorEmail: string,
+  contractorName: string,
+  weekStart: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const apiKey = Deno.env.get('BREVO_API_KEY');
+  const fromEmail = Deno.env.get('FROM_EMAIL');
+  const fromName = Deno.env.get('FROM_NAME') || 'Timesheet System';
+  const appUrl = Deno.env.get('APP_URL') || 'https://time.mysynergie.net';
+
+  if (!apiKey || !fromEmail) {
+    return { ok: false, error: 'Missing BREVO_API_KEY or FROM_EMAIL' };
+  }
+
+  // Compute week-ending Sunday (Monday + 6 days) in a display-friendly format.
+  const monday = new Date(weekStart + 'T12:00:00Z');
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  const weekEndingDisplay = sunday.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+
+  const subject = `Confirmation needed: 0-hour timesheet for W/E ${weekEndingDisplay}`;
+  const bodyText = `Hi ${contractorName || 'there'},\n\n` +
+    `We received your timesheet for the week ending ${weekEndingDisplay} and recorded 0 hours for all days.\n\n` +
+    `If this is correct (e.g. PTO, sick leave, holiday, or leave of absence), no action is needed.\n\n` +
+    `If this is a mistake — for example, your hours didn't come through in the file you sent — please reply to this email with a corrected timesheet attached.\n\n` +
+    `You can also log in and submit the correct hours directly:\n${appUrl}\n\n` +
+    `Thanks,\nSynergie Timesheet System`;
+
+  const bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px">
+    <div style="background:#f59e0b;color:white;padding:20px;border-radius:8px 8px 0 0">
+      <h2 style="margin:0">Zero-Hour Timesheet Received</h2>
+    </div>
+    <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
+      <p>Hi ${contractorName || 'there'},</p>
+      <p>We received your timesheet for the week ending <strong>${weekEndingDisplay}</strong> and recorded <strong>0 hours</strong> for all days.</p>
+      <p><strong>If this is correct</strong> (PTO, sick leave, holiday, or leave of absence), no action is needed.</p>
+      <p><strong>If this is a mistake</strong> — for example your hours didn't come through in the file you sent — please reply to this email with a corrected timesheet attached, or log in and submit the correct hours directly.</p>
+      <div style="margin-top:24px">
+        <a href="${appUrl}" style="background:#f59e0b;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Open Timesheet App →</a>
+      </div>
+      <p style="margin-top:24px;font-size:12px;color:#9ca3af">This is an automated confirmation from the Synergie Timesheet System.</p>
+    </div>
+  </div>`;
+
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sender: { name: fromName, email: fromEmail },
+      to: [{ email: contractorEmail, name: contractorName || contractorEmail }],
+      replyTo: { email: fromEmail, name: fromName },
+      subject, textContent: bodyText, htmlContent: bodyHtml,
+    }),
+  });
+  if (!res.ok) {
+    const data = await res.text();
+    return { ok: false, error: data };
+  }
+  return { ok: true };
+}
+
 // ─── User management ──────────────────────────────────────────────────────────
 // Auto-creation is intentionally disabled. Users must be created by an admin
 // before their timesheets can be ingested. Unknown emails are rejected here
@@ -393,9 +459,20 @@ serve(async (req) => {
     });
   }
 
-  // ── Log-only mode — unsupported attachment types logged by poller ────────────
+  // ── Log-only mode — the poller records an email that we intentionally will not
+  // process further (unsupported extension, unparseable PDF, Claude gave up, etc.).
+  // Callers pass parseStatus so each dead-end path gets its own distinct status —
+  // no bundling into a generic 'failed' bucket. See email_import_log status vocabulary.
   if (body.logOnly === true) {
-    const { messageId: lMsgId, contractorEmail: lEmail, attachmentName: lAtt, parseNotes: lNotes, subject: lSubject, run_id: lRunId } = body;
+    const {
+      messageId: lMsgId,
+      contractorEmail: lEmail,
+      attachmentName: lAtt,
+      parseNotes: lNotes,
+      subject: lSubject,
+      run_id: lRunId,
+      parseStatus: lStatus,
+    } = body;
     if (!lMsgId) {
       return new Response(JSON.stringify({ error: 'Missing messageId' }), {
         status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -411,7 +488,7 @@ serve(async (req) => {
       resolved_email:  lEmail || null,
       subject:         lSubject || null,
       attachment_name: lAtt || null,
-      parse_status:    'failed',
+      parse_status:    (lStatus as string) || 'failed',
       parse_notes:     lNotes || 'Unsupported file type',
       run_id:          lRunId || null,
     });
@@ -594,7 +671,36 @@ serve(async (req) => {
       if (action === 'correction_pending') parseStatus = 'correction_pending';
       else if (action === 'correction_imported') parseStatus = 'correction';
       else if (action === 'duplicate') parseStatus = 'duplicate';
-      else if (parseStatus === 'success' && totalHoursForLog === 0) parseStatus = 'success_zero';
+      else if (parseStatus === 'success' && totalHoursForLog === 0) {
+        // Split zero-hour submissions by channel so the log tells the whole story
+        // without bundling into one bucket. Direct = contractor's own submission
+        // (needs confirmation). Forwarded = accountant already validated.
+        const isForwarded = !!(forwardedBy as string);
+        parseStatus = isForwarded ? 'success_zero_hours_forwarded' : 'success_zero_hours';
+
+        if (isForwarded && timesheetId) {
+          // Accountant-validated zero-hour week — mark verified so monitor-health
+          // doesn't flag it. verified_zero_hours_by=null since we don't have the
+          // accountant's user id in this scope; the forwarder email is captured in the log.
+          await supabase.from('timesheets').update({
+            verified_zero_hours: true,
+            verified_zero_hours_at: new Date().toISOString(),
+            verified_zero_hours_note: `Auto-verified: forwarded by ${forwardedBy as string}`,
+          }).eq('id', timesheetId);
+        } else {
+          // Direct submission — send contractor a confirmation email, let them
+          // correct if wrong. Verified stays false until we hear back.
+          const result = await sendZeroHourConfirmation(
+            contractorEmail as string,
+            userName as string,
+            resolvedWeek as string,
+          );
+          upsertNotes = [upsertNotes, result.ok
+            ? `Zero-hour confirmation email sent to contractor`
+            : `Zero-hour confirmation email FAILED: ${result.error}`
+          ].filter(Boolean).join(' | ');
+        }
+      }
       else if (action === 'period_locked') {
         parseStatus = 'period_locked';
         // Return early — poller needs a distinct signal to notify accountant.

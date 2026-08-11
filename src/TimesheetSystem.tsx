@@ -1754,6 +1754,21 @@ const TimesheetSystem = () => {
       alert('Please select a project before submitting your timesheet.');
       return;
     }
+    const totalHoursForWeek = Object.values(timeEntries).reduce(
+      (sum, entry) => sum + (parseFloat(entry?.hours || '0') || 0),
+      0,
+    );
+    if (totalHoursForWeek === 0) {
+      const weekDates = getWeekDates(selectedWeek);
+      const sundayLabel = weekDates[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      const confirmed = window.confirm(
+        `You're about to submit a timesheet with 0 hours for W/E ${sundayLabel}.\n\n` +
+        `Common reasons: PTO, sick leave, holiday, or leave of absence.\n\n` +
+        `If this is a mistake, cancel and add your hours before submitting.\n\n` +
+        `Continue with 0-hour submission?`,
+      );
+      if (!confirmed) return;
+    }
     const weekKey = formatDate(selectedWeek);
     const now = new Date().toISOString();
     const hasManager = !!currentUser!.managerId;

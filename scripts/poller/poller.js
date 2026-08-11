@@ -1449,11 +1449,17 @@ async function claudeExtractTimesheet(pdfBuffer, textContent) {
       }
     }
 
-    // Reject if all hours are zero — Claude likely couldn't identify timesheet content
+    // Reject if all hours are zero AND Claude gave no supporting evidence (no week, no name).
+    // With week + name present, trust it — contractor legitimately submitted a zero-hour
+    // week (LOA, PTO, sick). ingest-timesheet will mark success_zero_hours and send a
+    // confirmation email so the contractor can correct if this was a mistake.
     const totalFromDays = Object.values(parsed.dailyHours || {}).reduce((s, v) => s + v, 0);
-    if (totalFromDays === 0) {
-      console.warn(`  ⚠️  Claude: all daily hours are 0 — not a timesheet, ignoring`);
+    if (totalFromDays === 0 && (!parsed.weekStart || !parsed.contractorName)) {
+      console.warn(`  ⚠️  Claude: all daily hours are 0 with no week/name context — not a timesheet, ignoring`);
       return null;
+    }
+    if (totalFromDays === 0) {
+      console.log(`  📭 Claude: zero-hour timesheet with valid week+name — accepting; contractor will get confirmation email`);
     }
 
     // Ensure weekStart is a Monday
@@ -2552,6 +2558,21 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     }
   }
 
+  // Silent-drop guard: every unclassified PDF gets its own log entry so the
+  // admin Import Log tab shows the email + reason instead of nothing.
+  for (const att of unknownPdfs) {
+    await postToIngest({
+      logOnly:         true,
+      messageId:       `${messageId}::${att.name}`,
+      contractorEmail,
+      attachmentName:  att.name,
+      subject,
+      parseStatus:     'unknown_pdf_type',
+      parseNotes:      `PDF classifier: could not determine invoice vs timesheet`,
+      run_id:          runId,
+    });
+  }
+
   // DOCX attachments are treated as invoices — extract text from the ZIP/XML structure
   for (const att of docxQueue) {
     console.log(`  📄 DOCX invoice attachment: ${att.name}`);
@@ -2577,6 +2598,16 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         notes: `XLSX parse failed: ${att.name}`,
       });
       console.log(`  ⚠️  XLSX parse failed for ${att.name} — will not retry`);
+      await postToIngest({
+        logOnly:         true,
+        messageId:       `${messageId}::${att.name}`,
+        contractorEmail,
+        attachmentName:  att.name,
+        subject,
+        parseStatus:     'xlsx_parse_failed',
+        parseNotes:      `XLSX parse returned no timesheets (fallback week from filename: ${fallbackWeek || 'none'})`,
+        run_id:          runId,
+      });
       continue;
     }
     for (const ts of parsed) {
@@ -2654,7 +2685,23 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
 
   const results = [];
   for (const ts of timesheets) {
-    if (ts.claudeAttempted || ts.xlsxParseFailed) continue; // sentinels — don't post, don't retry
+    if (ts.claudeAttempted) {
+      // Silent-drop guard: Claude vision ran but returned no usable timesheet
+      // (image PDF, garbled, or all-zeros without a name/signature). Log the email
+      // so the admin Import Log tab shows the sender + attachment + reason.
+      await postToIngest({
+        logOnly:         true,
+        messageId:       `${messageId}::${ts.attachmentName}`,
+        contractorEmail,
+        attachmentName:  ts.attachmentName,
+        subject,
+        parseStatus:     'parser_no_extract',
+        parseNotes:      ts.notes || `Claude vision could not extract timesheet from PDF`,
+        run_id:          runId,
+      });
+      continue;
+    }
+    if (ts.xlsxParseFailed) continue; // already logged at parse-failure point above
     const filenameWeek = weekFromFilename(ts.attachmentName || '');
     let weekCandidates = [...new Set([ts.weekStart, weekFromSubject, filenameWeek].filter(Boolean))];
 
@@ -3507,6 +3554,7 @@ async function autoSubmitFromReply(contractorEmail, contractorName, weekStart, s
       contractorEmail,
       subject:        null,
       attachmentName: null,
+      parseStatus:    'auto_yes_zero_blocked',
       parseNotes:     `Auto-YES sanity gate: shifted entries total 0h from source week ${sourceWeekStart}. Refusing to submit to avoid under-invoicing. Investigate source timesheet or auto-YES shift logic.`,
       run_id:         runId,
     }, CONFIG.ingestUrl);
@@ -4866,6 +4914,7 @@ async function main() {
             contractorEmail: fromEmail,
             attachmentName:  att.name,
             subject,
+            parseStatus:     'unsupported_file_type',
             parseNotes:      `Unsupported file type: .${ext} — please resubmit as XLSX, PDF, or DOCX`,
             run_id:          RUN_ID,
           });
