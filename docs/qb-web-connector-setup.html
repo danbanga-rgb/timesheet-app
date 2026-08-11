@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>QuickBooks Web Connector — Setup Guide</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; color: #1f2937; line-height: 1.6; max-width: 720px; margin: 24px auto; padding: 0 20px; background: #ffffff;">
+
+<h1 style="color: #111827; border-bottom: 3px solid #4f46e5; padding-bottom: 12px; margin-top: 0;">QuickBooks Web Connector — Setup Guide</h1>
+
+<p style="color: #6b7280; font-style: italic; margin-top: 0;">Full step-by-step for setting up your Windows machine to sync with the Synergie Timesheet App. Written so no click is left unexplained.</p>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827; margin-top: 32px;">What we're doing and why</h2>
+
+<p>The Synergie Timesheet App runs on the web. QuickBooks Desktop runs on your Windows computer. They can't talk to each other directly. <strong>QuickBooks Web Connector</strong> is a small free program from Intuit that acts as a bridge: it sits on your Windows machine, periodically checks with the Synergie app to see if anything needs to be sent to QuickBooks, and if so it hands the data to QuickBooks and reports back what happened.</p>
+
+<p>You install Web Connector once. After that, it runs quietly in the background.</p>
+
+<div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 14px 18px; margin: 18px 0; border-radius: 4px;">
+<strong>Today we're going to test it on a copy of your QuickBooks company file — not the real one.</strong> That way if anything unexpected happens, no real data is touched. Once we're confident the sync works cleanly, we switch to the real company file.
+</div>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Before we start — what you should have</h2>
+
+<ul style="padding-left: 24px;">
+<li>A Windows computer with <strong>QuickBooks Desktop 2020 Pro</strong> (or later) installed</li>
+<li>The QuickBooks company file, closed (not currently open in QuickBooks)</li>
+<li>A file called <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">synergie-timesheet.qwc</code> — Dan will give you this by email or on a thumb drive</li>
+<li>A <strong>password</strong> — Dan will give you this separately (via a text or password manager entry)</li>
+<li>About 30 minutes of quiet time. First-time setup involves several clicks and one Intuit download.</li>
+</ul>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Step 1 — Make a working copy of your company file <span style="color: #6b7280; font-weight: normal;">(10 min)</span></h2>
+
+<p>We do this so today's testing runs against a safe copy, not your real books.</p>
+
+<ol style="padding-left: 24px;">
+<li>Open <strong>File Explorer</strong> (Windows key + E).</li>
+<li>Navigate to where your QuickBooks company file lives. Common locations:
+  <ul style="margin-top: 6px;">
+    <li><code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">C:\Users\Public\Public Documents\Intuit\QuickBooks\Company Files\</code></li>
+    <li>Or wherever you normally open it from.</li>
+  </ul>
+</li>
+<li>The file you want has the extension <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">.QBW</code> — for example <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">Synergie Company.QBW</code>.</li>
+<li>Right-click that file → <strong>Copy</strong>.</li>
+<li>Right-click in the same folder → <strong>Paste</strong>. You'll get a new file called something like <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">Synergie Company - Copy.QBW</code>.</li>
+<li>Right-click the copy → <strong>Rename</strong> → change it to <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">Synergie Company - TEST.QBW</code>. (Any name that clearly says TEST is fine.)
+  <div style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 10px 14px; margin: 10px 0; border-radius: 4px; font-size: 0.95em;">
+    <strong>Why rename?</strong> So you never accidentally confuse it with the real one during testing.
+  </div>
+</li>
+<li>Now open QuickBooks Desktop:
+  <ul style="margin-top: 6px;">
+    <li><strong>File → Open or Restore Company → Open a company file → Next</strong></li>
+    <li>Navigate to and select <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">Synergie Company - TEST.QBW</code></li>
+    <li>Click <strong>Open</strong></li>
+    <li>If it asks about "Update Company File" — click <strong>Yes</strong> (it will convert the copy, not the original).</li>
+    <li>Sign in with your usual credentials.</li>
+  </ul>
+</li>
+<li>Confirm you're in the test copy: the QuickBooks title bar at the top should show something like <em>"Synergie Company - TEST"</em>. <strong>Verify this before continuing.</strong> If it says the original company name, close it and re-open the TEST file.</li>
+</ol>
+
+<div style="background: #ecfdf5; border-left: 4px solid #10b981; padding: 14px 18px; margin: 18px 0; border-radius: 4px;">
+<strong>Leave QuickBooks open with the test company file for the rest of this guide.</strong> We'll need it in Step 3.
+</div>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Step 2 — Install QuickBooks Web Connector <span style="color: #6b7280; font-weight: normal;">(5 min, one-time)</span></h2>
+
+<p>Web Connector is free from Intuit. You only install it once per computer.</p>
+
+<ol style="padding-left: 24px;">
+<li>In your web browser, go to Intuit's official install page:
+  <div style="margin: 8px 0;"><a href="https://developer.intuit.com/app/developer/qbdesktop/docs/develop/tutorials/install-web-connector" style="color: #4f46e5; word-break: break-all;">https://developer.intuit.com/app/developer/qbdesktop/docs/develop/tutorials/install-web-connector</a></div>
+</li>
+<li>On that page, look for a section called <strong>"Get the latest QBWC installer"</strong> or a button that says <strong>Download QBWC 2.3.x</strong> (the version number will vary — always take the latest). Click it.
+  <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 10px 14px; margin: 10px 0; border-radius: 4px; font-size: 0.95em;">
+    If the page has changed and you can't find the download button, do a web search for <em>QuickBooks Web Connector download</em>. The first result should be an Intuit domain (<code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">developer.intuit.com</code> or <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">quickbooks.intuit.com</code>). Do not download from any other site.
+  </div>
+</li>
+<li>Save the installer file. It's called something like <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">QBWebConnectorInstaller.exe</code> and is roughly 5 MB.</li>
+<li>Once downloaded, open your <strong>Downloads</strong> folder and double-click <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">QBWebConnectorInstaller.exe</code>.</li>
+<li>Windows may show a security prompt asking <em>"Do you want to allow this app to make changes to your device?"</em> → Click <strong>Yes</strong>.</li>
+<li>The installer opens. Click through:
+  <ul style="margin-top: 6px;">
+    <li>Welcome screen → <strong>Next</strong></li>
+    <li>License agreement → check <em>"I accept the terms"</em> → <strong>Next</strong></li>
+    <li>Destination folder — leave as default → <strong>Next</strong></li>
+    <li>Ready to install → <strong>Install</strong></li>
+    <li>When it finishes → <strong>Finish</strong></li>
+  </ul>
+</li>
+<li>Web Connector is now installed. To launch it:
+  <ul style="margin-top: 6px;">
+    <li>Click the Windows <strong>Start</strong> button</li>
+    <li>Type <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">QBWebConnector</code></li>
+    <li>Click the app when it appears in search results</li>
+  </ul>
+</li>
+<li>The QuickBooks Web Connector window opens. It's a small window with a list area (empty right now) and several buttons at the bottom: <strong>Add an Application</strong>, <strong>Update Selected</strong>, <strong>Remove</strong>, <strong>Help</strong>, <strong>Hide</strong>.
+<br><br>
+Leave this window open. We'll add our app to it in Step 3.</li>
+</ol>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Step 3 — Add the Synergie app to Web Connector <span style="color: #6b7280; font-weight: normal;">(5 min)</span></h2>
+
+<ol style="padding-left: 24px;">
+<li>In the Web Connector window, click <strong>Add an Application</strong> (bottom right corner).</li>
+<li>A file picker appears. Navigate to where Dan sent you the file. Look for <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">synergie-timesheet.qwc</code>. Click it → <strong>Open</strong>.</li>
+<li>A dialog appears asking <em>"Authorize New Web Service"</em>. Read what it says (it will show "Synergie Timesheet App" and the URL). Click <strong>OK</strong>.</li>
+<li>QuickBooks itself now pops up (in the background) with a security prompt titled something like <em>"QuickBooks — Application Certificate"</em>. It asks whether to allow this application to read and modify your company file.
+  <p><strong>Select these options:</strong></p>
+  <ul>
+    <li><strong>Yes, always; allow access even if QuickBooks is not running</strong></li>
+    <li>Under "Login as", leave it on your current QuickBooks user</li>
+    <li>Check the box <strong>Allow this application to access personal data such as Social Security Numbers and customer credit card information</strong> (only if it appears — it depends on your QuickBooks version)</li>
+  </ul>
+  <p>Click <strong>Continue</strong> → the next screen shows a summary → click <strong>Done</strong>.</p>
+  <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 10px 14px; margin: 10px 0; border-radius: 4px; font-size: 0.95em;">
+    <strong>Important:</strong> if you accidentally clicked <strong>No</strong>, you can fix it. In QuickBooks: <strong>Edit → Preferences → Integrated Applications → Company Preferences</strong>. Find "Synergie Timesheet App" in the list, click <strong>Properties</strong>, and re-check <em>"Allow this application to log in automatically"</em> and <em>"Allow this application to access Social Security Numbers…"</em>. Then click OK.
+  </div>
+</li>
+<li>Back in Web Connector, the Synergie Timesheet App now appears in the list with a checkbox next to it and columns for <strong>Auto Run</strong>, <strong>Every_Min</strong>, <strong>Status</strong>, etc.</li>
+<li>In the same row, there's a <strong>Password</strong> field (or column). Click into it and paste the password Dan sent you. Press <strong>Tab</strong> or click elsewhere to confirm.</li>
+<li>Web Connector asks <em>"Do you want to save this password?"</em> → click <strong>Yes</strong>. (If you click No, you'll have to re-enter it every 15 minutes.)</li>
+</ol>
+
+<p>You're now set up. The row should show <strong>Status: Ready</strong> or similar.</p>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Step 4 — First sync test <span style="color: #6b7280; font-weight: normal;">(5 min, together with Dan)</span></h2>
+
+<div style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; margin: 18px 0; border-radius: 4px;">
+<strong>Do this step with Dan on a phone/video call</strong> so he can watch what happens on his end.
+</div>
+
+<ol style="padding-left: 24px;">
+<li>Make sure QuickBooks is still open with the <strong>TEST</strong> company file (check the title bar).</li>
+<li>In Web Connector, click the checkbox next to Synergie Timesheet App if it isn't already checked.</li>
+<li>Click <strong>Update Selected</strong> (the button at the bottom).</li>
+<li>Web Connector will start talking to the Synergie app. You'll see the Status column change — first to <em>Connecting</em>, then <em>Running</em>, then <em>Done</em>.</li>
+<li>What Dan will see on his end: a job move from <em>pending</em> to <em>done</em> in the sync queue. He'll confirm this out loud to you.</li>
+<li>What you might see on your end:
+  <ul style="margin-top: 6px;">
+    <li><strong>Green checkmark</strong> or <strong>"Update completed successfully"</strong> → all good.</li>
+    <li><strong>"No work to do"</strong> → the Synergie app didn't have anything queued for you. This is fine; it means the connection works.</li>
+    <li><strong>Red X</strong> with an error message → note the exact wording, screenshot it if you can, and send to Dan. Common causes: password typo (redo Step 3.6), company file not open, wrong version of QuickBooks.</li>
+  </ul>
+</li>
+</ol>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Step 5 — What happens from here on</h2>
+
+<p>Once the first test works, Web Connector will run automatically <strong>every 15 minutes</strong> in the background. You don't have to do anything.</p>
+
+<p>If Dan queues up bills or payments to be sent to QuickBooks, they'll appear in your QuickBooks the next time Web Connector runs — or immediately, if you click <strong>Update Selected</strong>.</p>
+
+<ul style="padding-left: 24px;">
+<li><strong>To leave Web Connector running:</strong> just close the Web Connector window with the <strong>Hide</strong> button (bottom right). It keeps running in your system tray (the small icons near the clock). You'll see a small green Q icon there.</li>
+<li><strong>To stop syncing temporarily:</strong> open Web Connector, uncheck the box on the Synergie row. Re-check to resume.</li>
+<li><strong>To quit Web Connector entirely:</strong> right-click the system tray icon → <strong>Exit</strong>. Next time you want it to run, launch from the Start menu again.</li>
+</ul>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Switching from the test copy to the real company file</h2>
+
+<p>Once we're confident everything is working (probably later today or tomorrow), we switch to the real books:</p>
+
+<ol style="padding-left: 24px;">
+<li>In QuickBooks: <strong>File → Close Company</strong> to close the TEST file.</li>
+<li><strong>File → Open or Restore Company → Open a company file → Next</strong>, then open the <strong>real</strong> <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">Synergie Company.QBW</code>.</li>
+<li>Sign in.</li>
+<li>Back in Web Connector — this is important — <strong>remove</strong> the Synergie app from the list and re-add it:
+  <ul style="margin-top: 6px;">
+    <li>Highlight the Synergie Timesheet App row → click <strong>Remove</strong>.</li>
+    <li>Click <strong>Add an Application</strong> again → select the same <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">synergie-timesheet.qwc</code> file.</li>
+    <li>You'll go through the QuickBooks permission prompt (Step 3.4) one more time — this time it's granting access to the real company file. Same answers as before.</li>
+    <li>Re-enter the password (Step 3.6).</li>
+  </ul>
+</li>
+</ol>
+
+<p>The reason we re-add is because the permission grant is tied to a specific company file. Skipping this would mean Web Connector still points at the TEST copy.</p>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">If something goes wrong</h2>
+
+<p><strong>Password rejected / "Invalid User Name and/or Password":</strong></p>
+<ul style="padding-left: 24px;">
+<li>Re-check the password. It's case-sensitive. If you're pasting from a text message, make sure no invisible spaces snuck in at the start or end.</li>
+<li>If unsure, ask Dan to send it again. If still stuck, Dan can rotate the password in the app admin panel and give you the new one.</li>
+</ul>
+
+<p><strong>"Cannot connect" or "Web service URL is not reachable":</strong></p>
+<ul style="padding-left: 24px;">
+<li>Your internet connection is down, or a firewall is blocking <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">mimlatvdwxqtgxrgcins.supabase.co</code>. Ask IT to whitelist that domain.</li>
+<li>If you're on a home network, restart the router and try again.</li>
+</ul>
+
+<p><strong>QuickBooks says the app doesn't have permission:</strong></p>
+<ul style="padding-left: 24px;">
+<li>Open QuickBooks → <strong>Edit → Preferences → Integrated Applications → Company Preferences</strong>.</li>
+<li>Find "Synergie Timesheet App" in the list → click <strong>Properties</strong>.</li>
+<li>Re-check the permission boxes as described in Step 3.4.</li>
+</ul>
+
+<p><strong>Web Connector shows other applications you don't recognise:</strong></p>
+<ul style="padding-left: 24px;">
+<li>Ignore them. Web Connector can host many apps at once. Uncheck any you're not actively syncing with; leave the Synergie row checked.</li>
+</ul>
+
+<p><strong>You accidentally chose the wrong company file in Step 1:</strong></p>
+<ul style="padding-left: 24px;">
+<li>Close QuickBooks. Delete the TEST copy from File Explorer. Start Step 1 again.</li>
+</ul>
+
+<p><strong>Windows says "This program can't run on your PC":</strong></p>
+<ul style="padding-left: 24px;">
+<li>The Web Connector installer might have been corrupted during download. Delete <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">QBWebConnectorInstaller.exe</code>, then re-download from the Intuit link in Step 2.</li>
+</ul>
+
+<p><strong>Everything else, or Dan needs a screenshot to help you diagnose:</strong> press <strong>Windows + Shift + S</strong> to open the screenshot tool, drag over the Web Connector window (or the error message), and it copies to your clipboard. Paste into an email to Dan.</p>
+
+<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+<h2 style="color: #111827;">Reference — what's what</h2>
+
+<table style="width: 100%; border-collapse: collapse; margin-top: 12px;">
+<tr style="background: #f9fafb;">
+  <td style="border: 1px solid #e5e7eb; padding: 10px; font-weight: 600; width: 30%;">QuickBooks Desktop</td>
+  <td style="border: 1px solid #e5e7eb; padding: 10px;">The accounting software you already use daily.</td>
+</tr>
+<tr>
+  <td style="border: 1px solid #e5e7eb; padding: 10px; font-weight: 600;">Company file (<code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">.QBW</code>)</td>
+  <td style="border: 1px solid #e5e7eb; padding: 10px;">Your books. There's one for each business you keep books for.</td>
+</tr>
+<tr style="background: #f9fafb;">
+  <td style="border: 1px solid #e5e7eb; padding: 10px; font-weight: 600;">QuickBooks Web Connector</td>
+  <td style="border: 1px solid #e5e7eb; padding: 10px;">The Intuit-provided bridge program. Free.</td>
+</tr>
+<tr>
+  <td style="border: 1px solid #e5e7eb; padding: 10px; font-weight: 600;"><code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">.qwc</code> file</td>
+  <td style="border: 1px solid #e5e7eb; padding: 10px;">A small config file that tells Web Connector where the Synergie app lives and what credentials to use. Same file for every Synergie user; not sensitive.</td>
+</tr>
+<tr style="background: #f9fafb;">
+  <td style="border: 1px solid #e5e7eb; padding: 10px; font-weight: 600;">The password</td>
+  <td style="border: 1px solid #e5e7eb; padding: 10px;">The shared secret Web Connector sends when it authenticates with the Synergie app. Keep it in a password manager. Do not paste into unknown websites.</td>
+</tr>
+<tr>
+  <td style="border: 1px solid #e5e7eb; padding: 10px; font-weight: 600;">Synergie Timesheet App</td>
+  <td style="border: 1px solid #e5e7eb; padding: 10px;">The web app at <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 3px;">time.mysynergie.net</code> where Dan and the team manage timesheets and invoices.</td>
+</tr>
+</table>
+
+<p style="color: #9ca3af; font-size: 0.85em; margin-top: 40px; text-align: center;">Synergie Tech Solutions — QuickBooks Web Connector Setup Guide</p>
+
+</body>
+</html>
