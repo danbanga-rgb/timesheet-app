@@ -405,13 +405,42 @@ serve(async (req: Request) => {
   const url = new URL(req.url);
 
   // GET /qwc — download-the-.qwc-file helper (accountant setup)
-  // Deferred to Chunk 6 (.qwc generator). Reply with a placeholder for now
-  // so a curl-visible endpoint exists.
+  // Returns a stable .qwc XML file. UUIDs are hardcoded on purpose: re-downloads
+  // must produce the SAME file so Web Connector recognises it as an existing
+  // app rather than a duplicate. AppURL is derived from this request's host so
+  // the same code works across dev + prod deploys.
   if (req.method === 'GET' && url.pathname.endsWith('/qwc')) {
-    return new Response(
-      '<!-- .qwc generator lives in Chunk 6 -->',
-      { headers: { 'content-type': 'text/plain' }, status: 501 },
-    );
+    const wcUser = Deno.env.get('QB_WC_USER') || '';
+    // Build AppURL from SUPABASE_URL rather than the request URL. The request
+    // arrives with a stripped path (Supabase's edge router rewrites) and http
+    // scheme (Cloudflare terminates TLS upstream), both wrong for the .qwc file.
+    const supabaseUrl = (Deno.env.get('SUPABASE_URL') || '').replace(/\/$/, '');
+    const appUrl = `${supabaseUrl}/functions/v1/qb-web-connector`;
+    const qwc = `<?xml version="1.0"?>
+<QBWCXML>
+  <AppName>Synergie Timesheet App</AppName>
+  <AppID>{14a3de1c-b2e0-4048-9e8c-87924a13fa4c}</AppID>
+  <AppURL>${xmlEscape(appUrl)}</AppURL>
+  <AppDescription>Sync bills and payments from the Synergie timesheet system into QuickBooks Desktop.</AppDescription>
+  <AppSupport>https://time.mysynergie.net</AppSupport>
+  <UserName>${xmlEscape(wcUser)}</UserName>
+  <OwnerID>{f354b289-aa7f-454a-a2ea-3680b800347b}</OwnerID>
+  <FileID>{652f2b08-9806-4a8f-a056-bfdf01bf7421}</FileID>
+  <QBType>QBFS</QBType>
+  <Scheduler>
+    <RunEveryNMinutes>15</RunEveryNMinutes>
+  </Scheduler>
+</QBWCXML>
+`;
+    return new Response(qwc, {
+      status: 200,
+      headers: {
+        'content-type': 'application/vnd.intuit.QBWebConnector',
+        'content-disposition': 'attachment; filename="synergie-timesheet.qwc"',
+        // Allow the frontend admin tab to fetch this from the browser.
+        'access-control-allow-origin': '*',
+      },
+    });
   }
 
   // GET / — health probe

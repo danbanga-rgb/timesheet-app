@@ -13,9 +13,9 @@ import type {
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
-} from './types';
-import { xmlEscape } from './envelope';
-import { DEFAULT_AP_ACCOUNT, DEFAULT_EXPENSE_ACCOUNT } from './constants';
+} from './types.ts';
+import { xmlEscape } from './envelope.ts';
+import { DEFAULT_AP_ACCOUNT, DEFAULT_EXPENSE_ACCOUNT } from './constants.ts';
 
 /** QB Desktop limit for BillPaymentCheck.RefNumber. Documented in Consolibyte's
  *  qbXML schema and confirmed in QB's UI (the "No." field on the Bill Payment

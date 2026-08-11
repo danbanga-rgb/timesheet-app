@@ -27,7 +27,7 @@ import type {
   ParsedBillPaymentCheckAddRs,
   ParsedBillQueryRs,
   QbxmlResponseStatus,
-} from './types';
+} from './types.ts';
 
 // ─── Private helpers ────────────────────────────────────────────────────────
 
