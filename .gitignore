@@ -58,3 +58,6 @@ scripts/poller/import-convera-transactions.js
 scripts/poller/mark-invoices-paid.js
 scripts/poller/match-invoices-to-transactions.js
 .vercel
+
+# qbXML dry-run generated artifacts (contain real contractor vendor names + IBANs)
+scripts/one-off/dry-run-output/
