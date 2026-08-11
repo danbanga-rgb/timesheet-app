@@ -1,10 +1,76 @@
 # Changelog — Synergie Timesheet System
 
-> Generated 2026-06-12 from git log and memory files. Focuses on WHY, not just what. Commit hashes included where available.
+> Last brought current 2026-08-11. Focuses on WHY, not just what. Commit hashes included where available.
+> Recent sections are lighter than early ones — for deep detail on any theme, follow the memory-file links in each section.
 
 ---
 
-## 2026-06-13/14 — Invoice Filter Overhaul, Submission Channel Cards, NaN Fix
+## 2026-08-11 — No Silent Drops + Zero-Hour Accept & Confirm Loop
+
+**Commits:** `a8e76ae`, merge `c26fb4b` — hotfix branch `hotfix/silent-drops-and-zero-hour-loop`
+
+**Trigger:** Zejd Koco submitted a legitimate zero-hour PDF (LOA week 8/3–8/9). Claude vision correctly read all zeros, but the poller's all-zero rejection guard (built to filter Claude misreads) silently dropped the email — no log entry, contractor got no acknowledgement, admin had no visibility.
+
+**Three parts shipped:**
+
+1. **Every email now produces a log entry.** Three sentinel paths in `poller.js` (unknown PDF type, XLSX parse failure, Claude gave up) previously returned without any DB write. Each now POSTs `logOnly: true` with a distinct `parseStatus` — `unknown_pdf_type`, `xlsx_parse_failed`, `parser_no_extract`. The existing `logOnly` handler in `ingest-timesheet` was extended to accept a caller-supplied `parseStatus` (previously hardcoded to `'failed'`). Two additional statuses renamed out of the generic `failed` bucket: `unsupported_file_type` (attachment ext not xlsx/pdf/docx) and `auto_yes_zero_blocked` (sanity gate refusal). See `docs/edge-functions.md` for the full status vocabulary table.
+
+2. **Zero-hour direct submissions are accepted.** `claudeExtractTimesheet` no longer rejects all-zero output if Claude also returned a valid `weekStart` and `contractorName` — that combination signals a real submission (LOA/PTO/sick). Ingest splits the old `success_zero` status into `success_zero_hours` (direct — sends a Brevo confirmation email asking the contractor to reply with a correction if wrong; Reply-To routes back into the poller) and `success_zero_hours_forwarded` (accountant-forwarded — auto-sets `timesheets.verified_zero_hours=true`, no email). `DONE_STATUSES` was extended so a re-attempted zero-hour message doesn't fire a second confirmation email.
+
+3. **Portal 0-hour submission guard.** `submitTimesheet` in `TimesheetSystem.tsx` computes total hours before insert; if 0, shows a `window.confirm` dialog citing common reasons (PTO/LOA/sick) and requiring explicit confirmation.
+
+Zejd's specific week was inserted manually as `timesheets.id=1480`, `verified_zero_hours=true`, note "Contractor confirmed LOA".
+
+---
+
+## 2026-07 to 2026-08 — Major initiatives (thematic summary)
+
+The July stretch was the busiest shipping period since launch. Rather than 200+ commit entries, this section maps memory files to the initiative they document. Each memory file has the full context.
+
+### Payments Tab (July 1–13)
+Full round-trip payment pipeline: Convera Batch CSV export + Payments tab CSV import + auto-matcher.
+- **Matcher redesign** (2026-06-30, `9d5080d`) — 5-level beneficiary-ID-first sequence; "weak" badge for level ≥ 3; 15-day proximity window on payOnDate. Detail: [[project_payment_matching_logic]].
+- **Payments Tab MVP** (`c988935`, `dcd44d3`, `ae62668`) — `matcher_ignore` fences on invoices + convera_transactions, asymmetric date windows, two-pool matcher, re-import dedup, umbrella-group multi-select. Detail: [[project_payments_tab_mvp]] and [[project_payments_backlog]].
+- **Convera Batch Upload** (`ff4474e`, `987c673`, `86877dc`) — CSV CRLF, shared invoice-number for umbrella groups, beneficiary directory with filter pills + sortable columns + manual batch rows. Country enforced from IBAN. Detail: [[project_convera_batch_upload]] and [[project_convera_beneficiary_names]] (cp1250 sniff shipped for encoded names).
+
+### Client Invoicing (July 2–21)
+End-to-end client invoice generation, edit, and print flow.
+- **MVP-A** (2026-07-02, `648cbf4`) — Export + import round-trip; blue cells for hour overrides. `hour_overrides` table exists in DB but has no migration file (GOTCHA). Detail: [[project_client_invoicing]].
+- **MVP-B Phase 1** (`ff48d26`, `84c4bb8`) — Printable invoice modal; SLO tweak on `poller_heartbeat` (require 2 consecutive breaches). Detail: [[project_session_2026_07_17]].
+- **Print CSS overhaul** (`b4b8c7e`, `29daeb3`, `0682a05`, `e8b2dbf`, `0702f5b`) — Modern accent-bar visual redesign; print isolation via data-attribute portal; page-counter footer with invoice ref; multi-page hygiene. Detail: [[project_session_2026_07_21]].
+- **Invoice status reversibility** (2026-07-10) — Accountant can Re-approve rejected or Reject approved invoices; locked once `paid_date` set. Detail: [[project_invoice_status_reversibility]].
+- **Invoice period edit** (2026-07-28, `6e3e753`, `e45a3a3`) — Accountant edits period from modal with preview + reason gate + collision detection + auto pay-on-date recompute on terms change. Detail: [[project_invoice_period_edit]].
+
+### QuickBooks Exports (July 8–23)
+- **QuickBooks IIF Phase 3** (2026-07-08, `2e94d68`) — Modal + Generate IIF + per-row Confirm. Detail: [[project_quickbooks_iif_export]].
+- **QB Payments IIF** (2026-07-22, `f0564c0`, `37b85d3`, `27fb92b`, `4ccf272`) — Per-batch button on Payments tab; CHECK not BILLPMT (QBO restriction — no BILLPMT type, no auto-apply); grouping by confirmation number; honest fee memo; DOCNUM = wire confirmation to survive IIF's 11-char limit. Detail: [[project_qb_payment_iif_export]] and [[project_session_2026_07_22]].
+- **QB integration direction locked** (2026-07-23) — Path A (DIY qbXML Web Connector, query-then-apply, move bills too) chosen over Path B. Iterative async build while Dan travels. Detail: [[project_qb_web_connector_design]] and [[project_qb_integration_direction]]. Chunks 2, 3, 4·Session 1 committed on branch `qb-web-connector-chunk2-builders` (74 tests). Not yet live.
+
+### Anomaly Detector & Guardrails (Aug 6–10)
+- **Invoice anomaly detector** (2026-08-06, deployed; committed 2026-08-10 as `54824b2` + `5d0662c`) — Post-parse deterministic rulebook in `ingest-invoice`. 107/109 clean run; 2 legit flags. Catches Juran/Zlatar/Nikolina originals. Detail: [[project_invoice_anomaly_detector]].
+- **Bimosoft UK ALT rule** (2026-08-10, `5a3b585`→`54cde1d`) — Beneficiary deprecation guardrail: all Bimosoft invoices must link to UK ALT profile. Legacy linkages caused two contractors' payments to go astray. `force_combine` flag added for umbrella beneficiaries. Detail: [[project_bimosoft_uk_alt]] and [[project_session_2026_08_10]].
+- **DOCX invoice pipeline** (2026-08-10, `e3fb22d`) — Text-only extraction; skips vision paths.
+- **Admin create-user fields** (2026-08-10, `b5151d6`, `67572ce`) — Persist `payment_terms` + `location_type`; default `invoice_enabled=false`. Follows the create-vs-edit-path split rule ([[feedback_create_edit_path_split]]).
+
+### SLO Alerting (2026-06-22)
+`monitor-health` edge fn + `system_alerts_state` table + pg_cron job 8 (`:47`). 5 Tier 1 SLOs, all verified via `?dry_run=true`. Detail: [[project_slo_alerting]].
+
+### Timesheet Locking (2026-07-08)
+`locked_days[]` on timesheets; set on invoice approval; hard-rejects re-submissions to accountant email. **Silent bypass bug fixed** (`2847e9a`) — `locked_days` is `timestamptz[]` but was compared to date strings; every lock had been theater since ship. Damir 552 only definitive victim. Detail: [[project_timesheet_locking]].
+
+### Digest Redesign (Jul 17)
+`d5591845`, `28c6191` — SVG trend chart wrapped in data-URI img for Apple Mail; trimmed table; contractor movement panel. Detail: [[project_session_2026_07_17]].
+
+### GNW Offshore Rate Correction (Jul 24)
+GNW offshore = `bill_rate − $20/hr` practical. Org `$65` seed was applied to raw rates → 27 GNW mis-seeded onshore. Corrected 2026-07-24 with `$85` threshold. Detail: [[project_gnw_offshore_rate_discount]].
+
+### Poller Heartbeat + Age Gate (Jul)
+- `system_settings.poller_last_run` stores JSON `{ran_at, run_id, counts}`.
+- `run_id` indexed on `email_import_log` for per-run drill-down.
+- `send-reminder` defers at hours 9–10 if poller age > 45 min, fires anyway at 11 (safety fallback).
+- **7-day age gate on UNSEEN IMAP search** (`d9bc308`) — filters phantom re-fetches. Detail: [[project_poller_heartbeat]].
+
+---
 
 **Commits:** `e6147f4`, `23fd4fa`, `02f754a`, `d8f3d0d`, `4ff7bed`
 

@@ -532,7 +532,12 @@ serve(async (req) => {
     // 'success', 'duplicate'          → created or already deduped
     // 'correction', 'correction_pending' → correction was applied; re-running would
     //   delete this log entry and apply another correction on every poller run forever.
-    const DONE_STATUSES = ['success', 'duplicate', 'correction', 'correction_pending'];
+    const DONE_STATUSES = [
+      'success', 'duplicate', 'correction', 'correction_pending',
+      // Zero-hour submissions are terminal — re-running would fire another confirmation
+      // email or re-verify. Legacy 'success_zero' stays here for pre-Aug 11 rows.
+      'success_zero_hours', 'success_zero_hours_forwarded', 'success_zero',
+    ];
     if (DONE_STATUSES.includes(existingLog.parse_status)) {
       return new Response(JSON.stringify({
         ok: true,

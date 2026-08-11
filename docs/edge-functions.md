@@ -40,14 +40,29 @@ Forgetting this flag makes functions boot (visible in logs) but return `{"error"
 }
 ```
 
-**Special mode — `logOnly: true`:** Used by the poller to log unsupported file types (e.g. `.txt`) without ingesting. Creates a `parse_status='failed'` log entry only.
+**Special mode — `logOnly: true`:** Used by the poller to record dead-end emails (unsupported extension, unparseable PDF, Claude gave up, etc.) without any ingest side-effect. The poller passes `parseStatus` so each dead-end path lands with its own distinct status rather than bundling into a generic `failed`. Payload:
+
+```json
+{
+  "logOnly": true,
+  "messageId": "string (required, use ${emailMsgId}::${att.name} for per-attachment uniqueness)",
+  "contractorEmail": "string",
+  "attachmentName": "string | null",
+  "subject": "string | null",
+  "parseStatus": "unknown_pdf_type | xlsx_parse_failed | parser_no_extract | unsupported_file_type | auto_yes_zero_blocked",
+  "parseNotes": "string",
+  "run_id": "uuid"
+}
+```
+
+Dedupes on `messageId`. If already logged, returns `{ ok: true, action: 'duplicate' }` without inserting.
 
 **Response:**
 ```json
 {
   "ok": true,
   "action": "created | updated | correction_imported | correction_pending | duplicate",
-  "parseStatus": "success | correction | correction_pending | duplicate | failed | partial",
+  "parseStatus": "see vocabulary table below",
   "userId": "uuid",
   "userName": "string",
   "wasCreated": false,
@@ -58,6 +73,30 @@ Forgetting this flag makes functions boot (visible in logs) but return `{"error"
   "attemptCount": "number"
 }
 ```
+
+### `email_import_log.parse_status` vocabulary
+
+Every email the poller sees produces exactly one log entry with one of these statuses. Nothing is silently dropped. Statuses are deliberately non-bundled so the admin Import Log tab explains what happened without cross-referencing source.
+
+| Status | Set by | Retryable? | Meaning |
+|---|---|---|---|
+| `success` | ingest-timesheet | No | Nonzero timesheet ingested (auto-approved or pending manager) |
+| `success_zero_hours` | ingest-timesheet | No | Zero-hour timesheet from direct contractor email; Brevo confirmation email sent asking contractor to reply if wrong |
+| `success_zero_hours_forwarded` | ingest-timesheet | No | Zero-hour timesheet forwarded by internal forwarder; `timesheets.verified_zero_hours=true` auto-set; no email |
+| `success_zero` | ingest-timesheet | No | **Legacy status** — pre-Aug 11 zero-hour submissions before the split. No new writes; historical rows only |
+| `correction` | ingest-timesheet | No | Corrective entries from internal forwarder; replaces prior entries; keeps `approved` |
+| `correction_pending` | ingest-timesheet | No | Contractor's own self-correction; requires accountant review before overwriting |
+| `duplicate` | ingest-timesheet | No | Identical entries; blocks reprocessing |
+| `period_locked` | ingest-timesheet | No | Ingest blocked because week has locked_days from an approved invoice |
+| `partial` | ingest-timesheet | **Yes** | No hours parsed from attachment; the log entry is deleted on next attempt so the email retries |
+| `failed` | ingest-timesheet | **Yes** | Genuine ingest failure (unknown contractor via 2-layer defence, DB error, upsert exception). Deletion+retry on next attempt |
+| `unsupported_file_type` | poller (logOnly) | No | Attachment extension not xlsx/pdf/docx (e.g. `.pages`, `.numbers`) |
+| `unknown_pdf_type` | poller (logOnly) | No | PDF classifier couldn't tell if it was invoice or timesheet |
+| `xlsx_parse_failed` | poller (logOnly) | No | XLSX parse threw or returned no timesheets |
+| `parser_no_extract` | poller (logOnly) | No | Claude vision called on PDF but returned no usable timesheet (image PDF, garbled, or all-zeros without name/week context) |
+| `auto_yes_zero_blocked` | poller (logOnly) | No | Auto-YES sanity gate refused a shifted-hours submission that would have zeroed the target week |
+
+**Retryable rule:** `DONE_STATUSES = ['success', 'duplicate', 'correction', 'correction_pending', 'success_zero_hours', 'success_zero_hours_forwarded', 'success_zero']` are terminal. Anything else lets the poller re-mark the email UNSEEN and try again (`attempt_count` increments).
 
 Error response: `{ "ok": false, "error": "unknown_contractor" }` when email not in profiles.
 

@@ -1,260 +1,215 @@
-# AI Agent — Phase A Documentation
+# Reply-YES Pipeline & LLM Assistants
 
-> Generated 2026-06-12. May need review as the system evolves.
-
-Phase A is LIVE on `main` as of 2026-06-11. See also `docs/poller-architecture.md` for the full poller flow context.
+> Last brought current 2026-08-11.
+> The original doc (June 2026) described a Groq LLM as the primary YES/MODIFY/NO classifier. **That classifier was ripped out on 2026-07-12** (commits `1344d77`, `ef274a3`) — see the "Why the LLM was replaced" section at the bottom. The pipeline is now deterministic regex + reply-header trimming. Groq is still used for narrower, non-critical jobs.
 
 ---
 
 ## Overview
 
-The AI agent adds a YES-reply auto-submission flow on top of the existing reminder infrastructure:
+When a contractor replies to a Friday reminder email, the poller decides whether the reply is a "yes, submit last week's hours again" or something that needs a human. The classifier is deterministic (regex whitelist) — if the reply doesn't cleanly match, the poller forwards to helpdesk and never guesses.
 
-1. Friday reminder emails now include a "Reply YES" option for contractors with consistent submission history
-2. The poller classifies inbound replies using Groq (LLM)
-3. YES → auto-submits a copy of last week's timesheet
-4. MODIFY → logged for future human handling (not yet built)
-5. NO → dropped
+```
+Reply arrives → strip HTML/quote headers → normalize whitespace →
+  ≤60 chars AND matches YES whitelist  → auto-submit last week's hours
+  otherwise                             → forward to helpdesk
+```
 
-This reuses all existing infrastructure. No new services were added; Groq's free tier handles classification.
+No LLM is in the auto-submit critical path. If the regex says YES, the submission fires. If not, a human handles it.
 
 ---
 
-## Phase A: Full Flow
+## The pipeline (poller.js)
 
 ### Step 1 — Friday reminder personalisation (send-reminder)
 
-When generating Friday 5pm reminders, `send-reminder` checks each contractor's recent submission history:
+Same as before. When generating Friday 5pm reminders, `send-reminder` checks each contractor's recent submission history and appends a "Reply YES" CTA only for consistent submitters:
 
 ```
 fetch last 5 approved timesheets (order by week_start desc)
 if len >= 3 AND NOT portal-only AND consistent (max_hours - min_hours <= 4h):
   isConsistent = true
-  avg = round(sum / len)
-  patternLine = "You typically submit {avg}h per week."
 ```
 
-Portal-only contractors (`source='direct'` for all recent timesheets) are **suppressed** from the reply CTA. They should use the portal or the future conversational interface, not the email reply path.
+Portal-only contractors (all recent timesheets `source='direct'`) are suppressed from the reply CTA — they should use the portal.
 
-The Friday reminder subject is: `Timesheet Reminder — Week ending {Sun date, e.g. "Jun 15, 2026"}`. This subject line is critical — it's how the poller parses the week when a YES reply arrives.
-
-For consistent contractors, option 1 in the reminder email is: "**Reply YES** to this email to submit the same hours as last week". For others (or portal-only), option 1 is the portal link.
+Subject line format: `Timesheet Reminder — Week ending {Sun date, e.g. "Aug 9, 2026"}`. The Sunday date embedded here is how the poller parses the target week when a YES reply arrives (`parseWeekFromSubject`).
 
 ### Step 2 — Reply detection in the poller outer loop
 
-The outer loop in `main()` routes every UNSEEN IMAP email. Routing order is critical:
+The outer `main()` loop routes every UNSEEN IMAP email:
 
 ```
 1. DMARC report? → delete, skip
-2. hasTimesheetContent? (XLSX/PDF/CSV/DOCX/EML attachment) → processEmail()
-3. !hasTimesheetContent:
-   a. isReply + weekStart parseable + groqApiKey present + not internal forwarder + allowlisted?
+2. hasTimesheetContent? (XLSX/PDF/CSV/DOCX attachment) → processEmail()
+3. no attachment:
+   a. isReply + weekStart parseable + not internal forwarder + allowlisted?
       → classifyReply() flow
    b. else → forward to helpdesk
 ```
 
-**Critical:** The reply classifier (3a) MUST be checked before the helpdesk forward (3b). If any new `!hasTimesheetContent` branch is inserted before 3a, it will silently intercept replies. This was the bug that made the classifier dead code for weeks after initial deployment — a prior block forwarded to helpdesk and `continue`d before the classifier ran.
+The route-3a-before-3b ordering is load-bearing. Any new `no attachment` branch inserted before 3a will silently steal replies. (This bug happened once, `4ff6bb1` — commit fixed it and the tests pin the order.)
 
-**Conditions for classifier to run:**
-- `isReply`: subject starts with "Re:" (case-insensitive)
-- `weekStart`: parseable from subject (`parseWeekFromSubject()` extracts date from "Week ending Jun 15, 2026" or similar)
-- `CONFIG.groqApiKey`: Groq API key present in environment
-- Not an internal forwarder email (`!isInternal(fromEmail)`)
-- Sender is in the allowlist (`isKnownContractor` RPC returns true)
+### Step 3 — Reply classification (`classifyReply`, poller.js:3104)
 
-### Step 3 — Groq classification (`classifyReply`)
+**Deterministic. No network calls. Runs in microseconds.**
 
-Model: `llama-3.3-70b-versatile` on Groq's free tier (14,400 req/day, 6,000 tokens/min).
+Preprocessing (three cuts):
 
-System prompt:
-```
-You are classifying a contractor's reply to a timesheet reminder email.
-Respond with EXACTLY one JSON object on a single line, no other text:
-{"intent":"YES","hours":null,"notes":null}
-{"intent":"MODIFY","hours":40,"notes":"took Friday off"}
-{"intent":"NO","hours":null,"notes":null}
+1. **HTML-flattened reply header cut** — HTML mail clients (Apple Mail, Gmail) flatten `<blockquote>` quoting to plain text without `>`-prefix, so a bare "Yes" reply becomes `"Yes\n\nOn Fri, 10 Jul 2026 at 19:00, ... wrote:\n..."`. Split at `On <date> at <time>, <name> wrote:` (regex) and take the first chunk.
+2. **`>`-prefix strip** — remove classic plain-text quoted lines.
+3. **Signature cut** — split at `-- `, `Sent from`, `Best`, `Regards`, `Thanks`, `Cheers`, `Kind regards`, `Sincerely` so mobile footers don't inflate length past the bare-YES cap.
 
-Rules:
-- intent=YES: contractor confirms ("yes", "ok", "go ahead", "same as last week", "correct", "please submit", affirmative in any language)
-- intent=MODIFY: contractor specifies different hours (extract numeric hours if mentioned)
-- intent=NO: contractor declines or the message is clearly not a timesheet reply
-- When in doubt between YES and MODIFY, prefer MODIFY
-- When in doubt between MODIFY and NO, prefer NO
+Then normalize whitespace and apply two guardrails:
+
+- Empty after cuts → `intent: 'NO'`
+- Length > 60 chars → `intent: 'OTHER'` (real replies are almost always ≤10 chars; anything longer likely has hours, day names, or prose that regex shouldn't try to interpret)
+
+Finally match against the YES whitelist (`BARE_YES_RE`):
+
+```regex
+(?:yes|yeah|yep|yup|yess+|ok|okay|okey|kk|confirm(?:ed)?|approv(?:e|ed)|please\s+submit|submit\s+it|go\s+ahead|proceed|same\s+as\s+last\s+week|da|да|sí|si|sim|oui|ja|aprovado|подтверждаю)
 ```
 
-Quoted reply text (lines starting with `>`) is stripped before classification to focus on what the contractor wrote. Body is truncated to 500 characters. Temperature is 0 for determinism.
+Whole string must be one or more YES tokens (comma/`and`/whitespace separated) with optional trailing punctuation. Chains like `"yes, please submit"` or `"ok confirmed"` pass; anything with hours (`"40 hours"`), day names (`"took Monday off"`), or extra prose fails and routes to helpdesk.
 
-Classification outcomes:
+**Intent outcomes:**
 
 | Intent | Action |
-|--------|--------|
-| YES | `fetchLastApprovedEntries` → `setReplyPendingFlag` → `autoSubmitFromReply` |
-| MODIFY | push `reply_modify_pending` to `summary.timesheetReports`, stop |
-| NO | push `reply_no`, stop |
+|---|---|
+| `YES` | `fetchLastApprovedEntries` → `setReplyPendingFlag` → `autoSubmitFromReply` |
+| `OTHER` | forward to helpdesk with the reply body |
+| `NO` (empty body only) | drop silently |
 
-If Groq is unavailable (no key, API error, exception), defaults to `intent: 'NO'` — fail-safe, never auto-submits.
+Note there's no `MODIFY` intent anymore. The old LLM path had it but it was never wired into a UI, and regex can't extract "40 hours" reliably. Everything non-YES routes to helpdesk.
 
 ### Step 4 — Fetch last approved entries (`fetchLastApprovedEntries`)
 
-```javascript
-// Must use service role key — anon key is blocked by RLS
-const authHeaders = {
-  'apikey': CONFIG.supabaseServiceKey,
-  'Authorization': `Bearer ${CONFIG.supabaseServiceKey}`
-};
+Uses `CONFIG.supabaseServiceKey` (not anon — RLS returns `[]` silently for anon reads, see [[feedback_service_role_key]]).
 
-// Step 1: lookup profile by email
+```
 GET /rest/v1/profiles?email=eq.{email}&select=id&limit=1
-
-// Step 2: fetch most recent approved timesheet
 GET /rest/v1/timesheets?user_id=eq.{userId}&status=eq.approved&select=week_start,entries&order=week_start.desc&limit=1
 ```
 
-Returns `{ userId, weekStart, entries }` or null if not found.
+Returns `{ userId, weekStart, entries }` or null.
 
-**Critical RLS trap:** The anon key (`SUPABASE_ANON_KEY`) cannot read `profiles` or `timesheets` directly. RLS returns `[]` with no error, making the bug look like "contractor has no history." Always use `CONFIG.supabaseServiceKey` for direct table reads.
+### Step 5 — Set reply-pending flag (`setReplyPendingFlag`)
 
-This was the bug in commit `a433b8a` — `fetchLastApprovedEntries` was using the anon key and silently returning null for all contractors, causing every YES reply to be logged as "no history found" and no auto-submit ever fired.
+Writes `system_settings.reply_yes_pending_{userId}` = `{weekStart, created_at, email}` (upsert). `send-reminder` reads all `reply_yes_pending_*` keys at startup; matching users have Monday/Tuesday reminders suppressed for 72h.
 
-### Step 5 — Write reply-pending flag (`setReplyPendingFlag`)
-
-Before auto-submitting, writes to `system_settings`:
-
-```json
-key: "reply_yes_pending_{userId}"
-value: { "weekStart": "YYYY-MM-DD", "created_at": "ISO", "email": "contractor@email.com" }
-```
-
-This is written with `Prefer: resolution=merge-duplicates` (upsert). It runs before the ingest call — if ingest fails, the flag still suppresses Monday reminders (preventing a reminder to a contractor who tried to submit but failed).
-
-`send-reminder` reads all `reply_yes_pending_*` keys at startup and builds a set of user IDs to suppress for 72 hours. If the flag is within 72h, Monday/Tuesday reminders are skipped for that user.
-
-This is a belt-and-suspenders safety measure. Once the YES flow has 2–3 weeks of clean runs, remove:
-- `setReplyPendingFlag()` call in poller
-- The `reply_yes_pending_*` check in `send-reminder`
-
-The approved timesheet in the DB is sufficient natural suppression.
+Belt-and-suspenders. The approved timesheet in DB is natural suppression on its own — this flag adds a safety net in case ingest fails between accept and insert.
 
 ### Step 6 — Auto-submit (`autoSubmitFromReply`)
 
-```javascript
-// Zero out weekend hours, preserve weekday pattern
-entries[dateKey] = (dow === 0 || dow === 6)
-  ? { ...entry, hours: '0' }
-  : { ...entry };
+Copies last week's entries verbatim, zeroes weekends, POSTs to `ingest-timesheet` with:
 
-// Post to ingest-timesheet
-payload = {
-  contractorEmail,
-  displayName: contractorName,
-  weekStart,           // parsed from reply subject
-  entries,             // copied from last approved timesheet, weekends zeroed
-  source: 'direct',
-  forwardedBy: null,
-  messageId: `reply-yes-${messageId}`,  // prefix used for channel classification
-  runId,
-};
+```json
+{
+  "source": "direct",
+  "forwardedBy": null,
+  "messageId": "reply-yes-{originalMsgId}",
+  "weekStart": "<parsed from reply subject>",
+  "entries": "<last week's, weekends zeroed>"
+}
 ```
 
-The `reply-yes-` prefix on `messageId` is how `send-timesheet-report` classifies this submission as `auto_yes` in the timeliness table.
+The `reply-yes-` prefix is how `send-timesheet-report` classifies the submission as `auto_yes` in the timeliness table, and how [monitor-health](edge-functions.md#monitor-health) SLOs detect zero-hour auto-YES anomalies (Marta 902 / Nikolina 1047 class disasters — see the sanity gate in the next section).
 
-`source: 'direct'` means correction rules apply: if the contractor already submitted this week via portal, it becomes `correction_pending` (not overwritten). If no submission exists, it creates a new approved timesheet.
+### Step 7 — Auto-YES sanity gate (poller.js:3543)
 
-### Summary reporting
+Before firing the ingest POST, sum the shifted entries. If total = 0, refuse:
 
-YES auto-submit pushes to `summary.timesheetReports`:
-```javascript
-{ action: 'reply_yes_submitted', contractorName, week, attachmentName: '(reply)', notes: 'auto-submitted from YES reply' }
+```
+🚫 Auto-YES sanity gate: refusing 0h submission for {email} (source {srcWeek} → target {tgtWeek})
 ```
 
-MODIFY pushes:
-```javascript
-{ action: 'reply_modify_pending', contractorName, week, attachmentName: '(reply)', notes: classifier.notes }
-```
-
-These appear in the helpdesk summary email and in the `timesheetReports.length > 0` gate for `triggerTimesheetReport`.
+The refusal writes `parse_status='auto_yes_zero_blocked'` to `email_import_log` and returns without ingesting. Rationale: auto-YES exists to replicate a proven pattern; 0h means either the source timesheet was corrupted or the entry-shift logic emitted nothing. Under-invoicing a client is worse than missing a timesheet — [[project_client_invoicing_phase1_test]] documents the Marta/Nikolina near-miss that inspired this gate.
 
 ---
 
-## Infrastructure
+## Groq's remaining roles
 
-### Groq (current)
-- Model: `llama-3.3-70b-versatile`
-- Free tier: 14,400 requests/day, 6,000 tokens/min
-- API: OpenAI-compatible (`https://api.groq.com/openai/v1/chat/completions`)
-- Secret: `GROQ_API_KEY` in GitHub Actions secrets
-- Key: stored as `GROQ_API_KEY` GitHub Actions secret — rotate at console.groq.com if compromised
+The LLM was ripped out of YES classification, but Groq still handles narrower judgement calls where a wrong answer just means a log line, not a client under-invoice.
 
-### Oracle VM (pending — for self-hosting)
-- Account created, OCI CLI configured, networking set up (VCN/subnet/IGW in tenancy `ocid1.tenancy.oc1..aaaaaaaaol5nhcsevcpcc2lgb6gtvwsaszqcnx3hkvrmyglr2wrplvqupnpq`)
-- Instance creation BLOCKED — all 3 US-ASHBURN ADs returning "Out of capacity for VM.Standard.A1.Flex" as of 2026-06-11
-- SSH key: `/Users/dbanga/Documents/Synergie/ssh-key-2026-06-11.key`
-- ADs: `tZkU:US-ASHBURN-AD-1/2/3`, Image OCID: `ocid1.image.oc1.iad.aaaaaaaas3q57pjdbmj46ykc5djtazakxanfvvadw43iuyguiue6ruvjd6yq`, Subnet OCID: `ocid1.subnet.oc1.iad.aaaaaaaaxpxduq4dm372g4crkv4cyfnj74lxdimnagwpdannutlanlnvfpeq`
+### `groqResolveContractor` (poller.js:390)
 
-When Oracle instance is available:
-1. Assign public IP via VNIC
-2. SSH: `ssh -i /Users/dbanga/Documents/Synergie/ssh-key-2026-06-11.key ubuntu@<public-ip>`
-3. Install Ollama: `curl -fsSL https://ollama.ai/install.sh | sh`
-4. Pull model: `ollama pull llama3.2` (or similar)
-5. Expose via Cloudflare Tunnel (no port forwarding needed)
-6. Switch poller: one-line URL change (Groq and Ollama are both OpenAI-compatible)
+**Job:** identify the actual contractor when the sender is an internal forwarder (e.g. `contracts@synergietechsolutions.com`) and the regex-based subject/forwarder-note extraction fails to pin one profile.
 
-### 2FA
-Oracle requires 2FA. Dan uses Oracle Authenticator app (TOTP, no network needed after setup). Oracle remembers trusted devices.
+**Model:** `llama-3.3-70b-versatile` (Groq free tier)
+
+**Fallback if Groq unavailable:** return null → the email routes to helpdesk. No auto-guessing.
+
+### `checkCorrectionSanity` — GROQ_PRE + GROQ_OCC (poller.js:2665, 2691)
+
+**Job:** decide which week a contractor intended when the filename date range disagrees with dates embedded in the file (stale template).
+
+**Two triggers:**
+- `GROQ_PRE`: `filenameWeek ≠ contentWeek` and no correction hint in subject/body. Ask Groq which week wins.
+- `GROQ_OCC`: content week already occupied in DB, no filename hint. Ask Groq if this is a re-submission or a new week.
+
+**Output:** `{ assessment, suggested_week, reason }` — added to `weekCandidates`, edge fn's `resolveWeek()` picks the best match.
+
+**Fallback if Groq unavailable:** fall through to `resolveWeek()`'s deterministic logic. No worse than pre-Groq.
+
+### Groq vision — invoice verification + gap-filler (poller.js:2131, 2181)
+
+**Job A (verification):** After the primary invoice parse (regex or Claude) succeeds, independently run Groq vision on the PDF and compare field-by-field. Writes to `email_invoice_log.groq_vision_verification` as jsonb. **Zero production impact** — it's a shadow verification for future migration to Groq-primary.
+
+**Job B (gap-filler):** After any successful parse that returned with missing period/hours/rate/total, try Groq vision to fill the gaps. Zero-cost so always worth trying.
+
+**Current issue** ([[project_groq_vision_layer]]): broken since 2026-08-04, 42/42 nulls today. Qwen3.6-27b emits `<think>` tokens that burn the 400-token budget. No SLO on the null-return rate; silent shadow failure.
+
+### Claude (Anthropic) — invoice extraction primary
+
+Not Groq, but worth listing: `extractInvoice()` uses Anthropic's Claude for OCR-quality timesheet PDF parsing when regex bucketing gives up. Cost tracking via [[project_invoice_claude_cost_review]] — a cron job on the 8th of each month reviews bucketing effectiveness.
+
+Claude vision is also called on **timesheet PDFs** (not just invoices) at `poller.js:2459` when regex extraction fails — this is the same path that flagged Zejd's zero-hour PDF and inspired the 2026-08-11 `success_zero_hours` accept-and-confirm loop ([[project_invoice_ingestion]] history).
 
 ---
 
-## Test Parameters
+## Test parameters
 
-| Param | How to use |
-|-------|-----------|
+| Param | Effect |
+|---|---|
 | `?dry_run=true` on `send-reminder` | Returns JSON of what would be sent; no emails fired |
 | `?test_to=email` on `send-reminder` | Redirects all emails to one address |
 | `?test_user=email` on `send-reminder` | Processes only that one user |
-| `GROQ_API_KEY` absent in env | Classifier returns `intent: 'NO'` for all replies — safe no-op |
+| `GROQ_API_KEY` absent in env | `groqResolveContractor` and week-sanity checks return null → fall through to deterministic logic. YES classifier is unaffected (regex is local). |
+| `ANTHROPIC_API_KEY` absent in env | Claude PDF fallback skipped → `parse_status='parser_no_extract'` |
 
-Recommended test accounts: Bron (`btamulis@hotmail.com`) and Dan Hotmail (`d_banga@hotmail.com`).
-
----
-
-## Bugs Found on First Run (2026-06-11)
-
-These issues were found and fixed before the first real-world run:
-
-1. **Classifier dead code** (commit `4ff6bb1`): The outer loop had a `!hasTimesheetContent` block that forwarded to helpdesk with `continue` before the reply classifier check. Every YES reply was forwarded to helpdesk and never classified. Fixed by reordering the branches.
-
-2. **`fetchLastApprovedEntries` using anon key** (commit `a433b8a`): RLS blocked profile and timesheet reads; function silently returned null for all contractors. Fixed by switching to `CONFIG.supabaseServiceKey`.
-
-3. **`sendSummaryEmail` crash on reply entries** (commit `503b163`): `timesheetReports` entries from the classifier had different field names than what `sendSummaryEmail` expected for `.padEnd()` formatting. Fixed by standardising on `action`, `contractorName`, `week`, `attachmentName`, `notes`.
-
-4. **`timesheetReports` missing from actionable count** (commit `c16b819`): The `actionable` sum at end of `main()` didn't include `timesheetReports.length`, so a run with only YES replies never sent the summary email or triggered the timesheet report. Fixed.
+Recommended test accounts: Bron (`btamulis@hotmail.com`), Dan Hotmail (`d_banga@hotmail.com`).
 
 ---
 
-## Backlog (Phase A)
+## Why the LLM classifier was replaced (historical)
 
-1. **Remove reply_yes_pending flag** — Once 2–3 weeks of clean YES runs: delete `setReplyPendingFlag()` call in poller and the `reply_yes_pending_*` check in `send-reminder`. The approved timesheet in DB is sufficient.
+The Phase A YES/MODIFY/NO classifier used `llama-3.3-70b-versatile` on Groq. It was ripped out on 2026-07-12 (commits `1344d77`, `ef274a3`) after a series of production incidents:
 
-2. **Operational readout** — A daily/weekly summary showing reply counts (YES/MODIFY/NO), auto-submit success rate, suppressed reminders. Admin needs a "just know the system is healthy" signal without digging into logs.
+- **Model deprecations** — `llama-3.1-70b-versatile` retired; had to migrate mid-week
+- **JSON-mode quirks** — inconsistent whether the model emitted trailing whitespace, code fences, or extra text alongside the JSON. Every parse variant had to be regex-rescued
+- **`<think>` token churn** — Groq's Qwen line started emitting reasoning tokens that consumed the response budget before any JSON came out
+- **Silent shadow failures** — when the LLM failed, it returned `NO` (fail-safe) — but the contractor's real intent was lost, and they got no acknowledgement
 
-3. **MODIFY flow UI** — When poller logs `reply_modify_pending`, what does the accountant see? Options: email notification, flag in invoices/timesheet UI. Must be decided before Phase B.
+The domain problem is genuinely trivial: *"did they say yes?"* — English + a handful of other languages, ≤10 char replies in 90%+ of real traffic. Regex handles this with 100% precision. The trade is: MODIFY replies (`"yes but only 32 hours"`) now route to helpdesk instead of being partially parsed — which is a correctness win, not a regression, since the LLM's MODIFY output was never wired to a UI anyway (see [[project_ai_agent_roadmap]] for the ripout audit).
 
-4. **Oracle VM** — Once capacity frees up, set up Ollama and switch from Groq.
+**When to reconsider LLM classification:**
+- Phase B natural-language submission (`"40 hours this week"` with no attachment). Regex can't extract quantities reliably; that's LLM-shaped.
+- MODIFY UI ever gets built and demand grows.
+- Groq stabilizes JSON mode + moves off `<think>`-token models.
+
+Until then, deterministic wins.
 
 ---
 
-## Phase B: Natural Language Submission (Not Built)
+## DMARC inbox sweep (poller.js)
 
-- Contractor emails "40 hours this week" with no attachment
-- Poller: no attachment detected → pass body text to LLM → extract hours per day → submit
-- New branch in `processEmail()` or outer loop; not a rewrite
-- Higher risk than Phase A (free-form input vs yes/no classification)
+Runs every poll. IMAP `FROM 'dmarc'` regardless of `\Seen` flag → delete. First run in production cleaned 31 pieces of noise ([[project_dmarc_sweep]]). Not AI-related but shares the poller outer loop.
 
-## Phase C: Conversational Portal (Not Built)
+---
 
-- Chat widget in portal backed by a new Claude API edge function
-- System prompt describes schema + user role; agent has read/write Supabase access
-- Always confirms before any write operation
-- Separate project; higher risk surface
+## Backlog
 
-**Agreed starting order:** A → B → C. Phase A must have weeks of clean runs before investing in B.
+- **Groq vision null-return SLO** — currently silent-fails (see [[project_groq_vision_layer]]). Add a monitor-health check.
+- **MODIFY UI decision** — see docs/open-questions.md #8. If built, that opens the door to reintroducing LLM classification for the modify branch specifically.
+- **Phase B natural-language submission** — deferred until MODIFY UI decision. Would fold in a light LLM path with heavy sanity gates.
