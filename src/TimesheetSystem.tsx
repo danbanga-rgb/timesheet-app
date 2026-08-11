@@ -5491,7 +5491,10 @@ const TimesheetSystem = () => {
               <div className="border border-amber-200 rounded-lg p-4 bg-amber-50">
                 <h3 className="font-semibold text-amber-900 mb-2">Before the first live run</h3>
                 <p className="text-sm text-amber-900">
-                  Ask the accountant to back up his QuickBooks company file: <em>File → Back Up Company</em>. This is a safety measure; the sync tests bills and payments against real QB data.
+                  Test against a <strong>copy</strong> of the QuickBooks company file, not the real one. In File Explorer: right-click the <code>.QBW</code> file → Copy → Paste → rename to include <code>TEST</code>. Then <em>File → Open or Restore Company</em> in QuickBooks and open the TEST copy. Only switch to the real file after a clean test run.
+                </p>
+                <p className="text-sm text-amber-900 mt-2">
+                  Full step-by-step guide for the accountant: <code>docs/qb-web-connector-setup.md</code> in the repo.
                 </p>
               </div>
             </div>
