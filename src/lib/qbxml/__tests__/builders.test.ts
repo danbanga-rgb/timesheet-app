@@ -327,20 +327,19 @@ describe('buildBillPaymentCheckAddRq', () => {
     expect(out).toContain('</BillPaymentCheckAddRq>');
   });
 
-  it('emits BillPaymentCheckAdd children in the strict qbXML spec order', () => {
+  it('emits BillPaymentCheckAdd children in the strict qbXML spec order (RefNumber variant)', () => {
     // Order-lock test. QB rejects out-of-order children with a schema error.
+    // (IsToBePrinted|RefNumber) is a REQUIRED CHOICE — only one appears.
     const out = buildBillPaymentCheckAddRq({
-      ...baseSinglePayment,
-      isToBePrinted: false,
+      ...baseSinglePayment,  // has refNumber, so RefNumber occupies the choice slot
     });
     const order = [
       '<PayeeEntityRef>',
       '<APAccountRef>',
       '<TxnDate>',
       '<BankAccountRef>',
-      '<RefNumber>',
+      '<RefNumber>',        // choice element
       '<Memo>',
-      '<IsToBePrinted>',
       '<AppliedToTxnAdd>',
     ];
     let cursor = 0;
@@ -349,6 +348,30 @@ describe('buildBillPaymentCheckAddRq', () => {
       expect(idx, `${tag} should appear after cursor ${cursor}`).toBeGreaterThan(-1);
       cursor = idx;
     }
+    // Sanity: when RefNumber occupies the choice, IsToBePrinted must NOT appear.
+    expect(out).not.toContain('<IsToBePrinted>');
+  });
+
+  it('emits BillPaymentCheckAdd children in spec order with IsToBePrinted (no refNumber)', () => {
+    // Same order lock but exercising the IsToBePrinted branch of the choice.
+    const { refNumber: _drop, ...noRef } = baseSinglePayment;
+    const out = buildBillPaymentCheckAddRq({ ...noRef, isToBePrinted: false });
+    const order = [
+      '<PayeeEntityRef>',
+      '<APAccountRef>',
+      '<TxnDate>',
+      '<BankAccountRef>',
+      '<IsToBePrinted>',    // choice element
+      '<Memo>',
+      '<AppliedToTxnAdd>',
+    ];
+    let cursor = 0;
+    for (const tag of order) {
+      const idx = out.indexOf(tag, cursor);
+      expect(idx, `${tag} should appear after cursor ${cursor}`).toBeGreaterThan(-1);
+      cursor = idx;
+    }
+    expect(out).not.toContain('<RefNumber>');
   });
 
   it('emits AppliedToTxnAdd inner elements in TxnID → PaymentAmount → Discount* → SetCredit* order', () => {
@@ -508,15 +531,31 @@ describe('buildBillPaymentCheckAddRq', () => {
     expect(out).not.toContain('<Memo>');
   });
 
-  it('emits IsToBePrinted true/false explicitly, omits when undefined', () => {
-    // Convera wires are NOT printed checks, but QB companies may default to
-    // "to be printed". Allowing explicit false lets callers defend against that.
-    expect(buildBillPaymentCheckAddRq({ ...baseSinglePayment, isToBePrinted: true }))
+  it('choice: RefNumber wins over IsToBePrinted when both would apply', () => {
+    // (IsToBePrinted|RefNumber) is a schema-required XOR. When both refNumber and
+    // isToBePrinted are supplied, RefNumber occupies the slot (Convera wire code
+    // is the more informative signal). No IsToBePrinted emitted.
+    const out = buildBillPaymentCheckAddRq({ ...baseSinglePayment, isToBePrinted: true });
+    expect(out).toContain('<RefNumber>');
+    expect(out).not.toContain('<IsToBePrinted>');
+  });
+
+  it('choice: IsToBePrinted emitted (true/false) when caller supplies it and refNumber is absent', () => {
+    const { refNumber: _drop, ...noRef } = baseSinglePayment;
+    expect(buildBillPaymentCheckAddRq({ ...noRef, isToBePrinted: true }))
       .toContain('<IsToBePrinted>true</IsToBePrinted>');
-    expect(buildBillPaymentCheckAddRq({ ...baseSinglePayment, isToBePrinted: false }))
+    expect(buildBillPaymentCheckAddRq({ ...noRef, isToBePrinted: false }))
       .toContain('<IsToBePrinted>false</IsToBePrinted>');
-    expect(buildBillPaymentCheckAddRq({ ...baseSinglePayment, isToBePrinted: undefined }))
-      .not.toContain('<IsToBePrinted>');
+  });
+
+  it('choice: defaults to IsToBePrinted=false when neither refNumber nor isToBePrinted supplied', () => {
+    // The choice is REQUIRED — omitting both causes QB Xerces to reject with
+    // a schema error (2026-08-12 live test). Convera wires are never printed
+    // checks, so false is the safe default for our flows.
+    const { refNumber: _drop, ...noRef } = baseSinglePayment;
+    const out = buildBillPaymentCheckAddRq(noRef);
+    expect(out).toContain('<IsToBePrinted>false</IsToBePrinted>');
+    expect(out).not.toContain('<RefNumber>');
   });
 
   it('throws when discountAmount is provided without discountAccountName', () => {
@@ -592,8 +631,9 @@ describe('buildBillPaymentCheckAddRq', () => {
     expect(out).toContain('Đđ Ž ž Č č Ć ć Š š — Marta Sušek');
   });
 
-  it('emits nothing when isToBePrinted is undefined AND no optional fields set (bare skeleton)', () => {
-    // Sanity: just PayeeEntityRef, APAccountRef, TxnDate, BankAccountRef, one application.
+  it('bare skeleton still emits the required (IsToBePrinted|RefNumber) choice slot', () => {
+    // Absolute minimum: PayeeEntityRef, APAccountRef, TxnDate, BankAccountRef,
+    // default IsToBePrinted=false (fills the required choice), one application.
     const out = buildBillPaymentCheckAddRq({
       payeeVendorName: 'Vendor',
       txnDate: '2026-06-30',
@@ -602,7 +642,8 @@ describe('buildBillPaymentCheckAddRq', () => {
     });
     expect(out).not.toContain('<RefNumber>');
     expect(out).not.toContain('<Memo>');
-    expect(out).not.toContain('<IsToBePrinted>');
+    // IsToBePrinted MUST be present — schema-required. See 2026-08-12 live test.
+    expect(out).toContain('<IsToBePrinted>false</IsToBePrinted>');
     expect(out).not.toContain('<DiscountAmount>');
     expect(out).not.toContain('<SetCredit>');
   });

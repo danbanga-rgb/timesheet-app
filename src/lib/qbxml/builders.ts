@@ -239,21 +239,33 @@ export function buildBillPaymentCheckAddRq(
   );
   parts.push('    </BankAccountRef>');
 
-  // RefNumber (optional)
+  // (IsToBePrinted | RefNumber) — REQUIRED choice per QB Desktop's qbXML v16.0
+  // schema. Exactly ONE must appear at this position (before Memo). Discovered
+  // 2026-08-12 accountant live test: without either, QB emits
+  //   "Element 'AppliedToTxnAdd' is not valid for content model:
+  //    (PayeeEntityRef, APAccountRef?, TxnDate?, BankAccountRef,
+  //     (IsToBePrinted|RefNumber), Memo?, ExchangeRate?, ExternalGUID?, AppliedToTxnAdd+)"
+  //
+  // Selection order:
+  //  1. Caller-supplied refNumber wins (Convera wire confirmation code).
+  //  2. Else caller-supplied isToBePrinted.
+  //  3. Else default IsToBePrinted=false — Convera wires and ACH transfers are
+  //     never printed checks; false is the correct default for our flows.
   if (input.refNumber) {
     parts.push(`    <RefNumber>${xmlEscape(input.refNumber)}</RefNumber>`);
-  }
-
-  // Memo (optional)
-  if (input.memo) {
-    parts.push(`    <Memo>${xmlEscape(input.memo)}</Memo>`);
-  }
-
-  // IsToBePrinted (optional — omit unless caller supplied a value)
-  if (input.isToBePrinted != null) {
+  } else if (input.isToBePrinted != null) {
     parts.push(
       `    <IsToBePrinted>${input.isToBePrinted ? 'true' : 'false'}</IsToBePrinted>`,
     );
+  } else {
+    parts.push('    <IsToBePrinted>false</IsToBePrinted>');
+  }
+
+  // Memo (optional) — MUST come AFTER the (IsToBePrinted|RefNumber) choice per
+  // the schema sequence. Earlier iterations placed IsToBePrinted after Memo,
+  // which QB Xerces rejected with the same content-model error above.
+  if (input.memo) {
+    parts.push(`    <Memo>${xmlEscape(input.memo)}</Memo>`);
   }
 
   // AppliedToTxnAdd (required, repeatable)
