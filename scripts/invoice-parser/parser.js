@@ -469,10 +469,56 @@ function extractTotal(text) {
 }
 
 function extractCurrency(text) {
-  if (/\bUSD\b/.test(text)) return 'USD';
-  if (/\bGBP\b/.test(text)) return 'GBP';
-  if (/\bEUR\b/.test(text)) return 'EUR';
-  if (/\bCAD\b/.test(text)) return 'CAD';
+  // Require currency codes to be adjacent to a digit on the SAME line — a bare
+  // "EUR" in a header like "Ukupno za platiti u EUR" is NOT a signal (Davor Buha
+  // bilingual Croatian template, Aug 2026 incident where the naive regex crossed
+  // newlines and matched EUR three lines away from an unrelated number).
+  const codeNearNum = (code) =>
+    new RegExp(`(?:[\\d.,]+[ \\t]*${code}\\b|\\b${code}[ \\t]*[\\d.,]+)`).test(text);
+  if (codeNearNum('USD')) return 'USD';
+  if (codeNearNum('GBP')) return 'GBP';
+  if (codeNearNum('EUR')) return 'EUR';
+  if (codeNearNum('CAD')) return 'CAD';
+
+  // Symbols may collide in bilingual invoices ($ line total + € informational
+  // conversion, or vice versa). Pick the symbol adjacent to the LARGEST amount.
+  // For Davor's PDF: 6440 $ vs 5611.71 € → USD wins.
+  const pairs = [];
+  const sym2cur = { '$': 'USD', '€': 'EUR', '£': 'GBP' };
+  const parseNum = (raw) => {
+    // Handle both US (1,234.56) and European (1.234,56 or 1 234,56) formats.
+    // The decimal is whichever of . or , appears last; the other separates thousands.
+    const s = String(raw).replace(/\s/g, '');
+    const lastDot = s.lastIndexOf('.'), lastComma = s.lastIndexOf(',');
+    let normalized;
+    if (lastDot === -1 && lastComma === -1) normalized = s;
+    else if (lastDot > lastComma) normalized = s.replace(/,/g, '');
+    else normalized = s.replace(/\./g, '').replace(',', '.');
+    const n = parseFloat(normalized);
+    return isNaN(n) ? null : n;
+  };
+  const numRe = '[\\d][\\d.,\\s]{1,15}';
+  const symClass = '[€$£]';
+  for (const m of text.matchAll(new RegExp(`(${numRe})\\s*(${symClass})`, 'g'))) {
+    const n = parseNum(m[1]);
+    if (n != null) pairs.push({ cur: sym2cur[m[2]], amount: n });
+  }
+  for (const m of text.matchAll(new RegExp(`(${symClass})\\s*(${numRe})`, 'g'))) {
+    const n = parseNum(m[2]);
+    if (n != null) pairs.push({ cur: sym2cur[m[1]], amount: n });
+  }
+  if (pairs.length > 0) {
+    const maxByCur = new Map();
+    for (const p of pairs) {
+      const prev = maxByCur.get(p.cur) || 0;
+      if (p.amount > prev) maxByCur.set(p.cur, p.amount);
+    }
+    let winner = null, best = -1;
+    for (const [cur, amt] of maxByCur) if (amt > best) { winner = cur; best = amt; }
+    if (winner) return winner;
+  }
+
+  // Final naive fallback for symbol-only PDFs with no numeric adjacency.
   if (/£/.test(text)) return 'GBP';
   if (/€/.test(text)) return 'EUR';
   if (/\$/.test(text)) return 'USD';
