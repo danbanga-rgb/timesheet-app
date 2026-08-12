@@ -27,25 +27,25 @@ describe('xmlEscape', () => {
 });
 
 describe('buildBillQueryRq', () => {
-  it('emits a single RefNumberList entry for one ref', () => {
+  it('emits a single RefNumber entry for one ref', () => {
     const out = buildBillQueryRq({ refNumbers: ['INV 43'] });
     expect(out).toBe(
       [
         '<BillQueryRq>',
-        '  <RefNumberList>INV 43</RefNumberList>',
+        '  <RefNumber>INV 43</RefNumber>',
         '  <IncludeLineItems>false</IncludeLineItems>',
         '</BillQueryRq>',
       ].join('\n'),
     );
   });
 
-  it('emits one RefNumberList element per ref for multiple refs', () => {
+  it('emits one RefNumber element per ref for multiple refs', () => {
     const out = buildBillQueryRq({
       refNumbers: ['INV 178329594109', 'INV 002/07/2026', 'INV NT-cb019b'],
     });
-    expect(out).toContain('<RefNumberList>INV 178329594109</RefNumberList>');
-    expect(out).toContain('<RefNumberList>INV 002/07/2026</RefNumberList>');
-    expect(out).toContain('<RefNumberList>INV NT-cb019b</RefNumberList>');
+    expect(out).toContain('<RefNumber>INV 178329594109</RefNumber>');
+    expect(out).toContain('<RefNumber>INV 002/07/2026</RefNumber>');
+    expect(out).toContain('<RefNumber>INV NT-cb019b</RefNumber>');
     // Order preserved
     const idx = (needle: string) => out.indexOf(needle);
     expect(idx('178329594109')).toBeLessThan(idx('002/07/2026'));
@@ -95,7 +95,7 @@ describe('buildBillQueryRq', () => {
     // Contrived — real invoice numbers don't contain <, &, etc. — but guarantee safety anyway.
     const out = buildBillQueryRq({ refNumbers: ['A&B<C>D"E\'F'] });
     expect(out).toContain(
-      '<RefNumberList>A&amp;B&lt;C&gt;D&quot;E&apos;F</RefNumberList>',
+      '<RefNumber>A&amp;B&lt;C&gt;D&quot;E&apos;F</RefNumber>',
     );
   });
 

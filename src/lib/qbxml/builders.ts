@@ -40,8 +40,10 @@ function fmtAmount(n: number): string {
  * query-then-apply flow.
  *
  * Notes on RefNumber matching semantics in QB Desktop:
- *  - RefNumberList entries are matched by exact string equality (not substring).
- *  - Matching is case-INSENSITIVE by default. Use RefNumberCaseSensitiveList
+ *  - Multiple <RefNumber> elements (repeatable) filter for bills matching ANY of them.
+ *    The initial implementation used <RefNumberList> based on a misread of a schema
+ *    excerpt — QB Desktop 2020 Pro rejected that with HRESULT 0x80040400 (Aug 2026).
+ *  - Matching is case-INSENSITIVE by default. Use RefNumberCaseSensitive
  *    instead if we ever need case sensitivity (we don't today).
  *  - IncludeLineItems=false because we only need the header (RefNumber, TxnID,
  *    EditSequence). Avoids QB pulling line detail we won't consume.
@@ -55,7 +57,7 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
     : '';
   const parts: string[] = [`<BillQueryRq${attrs}>`];
   for (const ref of input.refNumbers) {
-    parts.push(`  <RefNumberList>${xmlEscape(ref)}</RefNumberList>`);
+    parts.push(`  <RefNumber>${xmlEscape(ref)}</RefNumber>`);
   }
   if (input.maxReturned != null) {
     parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
