@@ -14,7 +14,7 @@ import type {
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
 } from './types';
-import { xmlEscape } from './envelope';
+import { assertAscii, xmlEscape } from './envelope';
 import { DEFAULT_AP_ACCOUNT, DEFAULT_EXPENSE_ACCOUNT } from './constants';
 
 /** QB Desktop limit for BillPaymentCheck.RefNumber. Documented in Consolibyte's
@@ -52,6 +52,8 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
   if (input.refNumbers.length === 0) {
     throw new Error('buildBillQueryRq: refNumbers must not be empty');
   }
+  input.refNumbers.forEach((r, i) => assertAscii(`refNumbers[${i}]`, r));
+  if (input.requestId) assertAscii('requestId', input.requestId);
   const attrs = input.requestId
     ? ` requestID="${xmlEscape(input.requestId)}"`
     : '';
@@ -97,6 +99,19 @@ export function buildBillAddRq(input: BillAddRqInput): string {
   const apAccount = input.apAccountName ?? DEFAULT_AP_ACCOUNT;
   const defaultExpenseAccount =
     input.defaultExpenseAccountName ?? DEFAULT_EXPENSE_ACCOUNT;
+
+  assertAscii('vendorName', input.vendorName);
+  assertAscii('apAccountName', apAccount);
+  assertAscii('defaultExpenseAccountName', defaultExpenseAccount);
+  assertAscii('txnDate', input.txnDate);
+  if (input.dueDate) assertAscii('dueDate', input.dueDate);
+  assertAscii('refNumber', input.refNumber);
+  if (input.memo) assertAscii('memo', input.memo);
+  if (input.requestId) assertAscii('requestId', input.requestId);
+  input.lines.forEach((line, i) => {
+    if (line.memo) assertAscii(`lines[${i}].memo`, line.memo);
+    if (line.expenseAccountName) assertAscii(`lines[${i}].expenseAccountName`, line.expenseAccountName);
+  });
 
   const attrs = input.requestId
     ? ` requestID="${xmlEscape(input.requestId)}"`
@@ -208,6 +223,23 @@ export function buildBillPaymentCheckAddRq(
   }
 
   const apAccount = input.apAccountName ?? DEFAULT_AP_ACCOUNT;
+
+  assertAscii('payeeVendorName', input.payeeVendorName);
+  assertAscii('apAccountName', apAccount);
+  assertAscii('txnDate', input.txnDate);
+  assertAscii('bankAccountName', input.bankAccountName);
+  if (input.refNumber) assertAscii('refNumber', input.refNumber);
+  if (input.memo) assertAscii('memo', input.memo);
+  if (input.requestId) assertAscii('requestId', input.requestId);
+  input.applications.forEach((app, i) => {
+    assertAscii(`applications[${i}].billTxnId`, app.billTxnId);
+    if (app.discountAccountName) assertAscii(`applications[${i}].discountAccountName`, app.discountAccountName);
+    if (app.discountClassName) assertAscii(`applications[${i}].discountClassName`, app.discountClassName);
+    (app.setCredits || []).forEach((sc, j) => {
+      assertAscii(`applications[${i}].setCredits[${j}].creditTxnId`, sc.creditTxnId);
+    });
+  });
+
   const attrs = input.requestId
     ? ` requestID="${xmlEscape(input.requestId)}"`
     : '';

@@ -114,10 +114,10 @@ describe('buildBillAddRq', () => {
     txnDate: '2026-05-31',
     dueDate: '2026-06-30',
     refNumber: 'INV 178329594109',
-    memo: 'May 2026 — 30h @ $35 — Amar Pljevljak',
+    memo: 'May 2026 - 30h @ $35 - Amar Pljevljak',
     lines: [{
       amount: 1050,
-      memo: 'May 2026 — 30h @ $35 — Amar Pljevljak — INV 178329594109',
+      memo: 'May 2026 - 30h @ $35 - Amar Pljevljak - INV 178329594109',
     }],
   };
 
@@ -133,7 +133,7 @@ describe('buildBillAddRq', () => {
     expect(out).toContain('<TxnDate>2026-05-31</TxnDate>');
     expect(out).toContain('<DueDate>2026-06-30</DueDate>');
     expect(out).toContain('<RefNumber>INV 178329594109</RefNumber>');
-    expect(out).toContain('<Memo>May 2026 — 30h @ $35 — Amar Pljevljak</Memo>');
+    expect(out).toContain('<Memo>May 2026 - 30h @ $35 - Amar Pljevljak</Memo>');
     expect(out).toContain('<ExpenseLineAdd>');
     expect(out).toContain(`<FullName>${DEFAULT_EXPENSE_ACCOUNT}</FullName>`);
     expect(out).toContain('<Amount>1050.00</Amount>');
@@ -166,7 +166,7 @@ describe('buildBillAddRq', () => {
     const out = buildBillAddRq(baseSingleLine);
     const acctIdx = out.indexOf('<AccountRef>');
     const amtIdx = out.indexOf('<Amount>');
-    const memoIdx = out.indexOf('<Memo>May 2026 — 30h @ $35 — Amar Pljevljak — INV');
+    const memoIdx = out.indexOf('<Memo>May 2026 - 30h @ $35 - Amar Pljevljak - INV');
     expect(acctIdx).toBeLessThan(amtIdx);
     expect(amtIdx).toBeLessThan(memoIdx);
   });
@@ -186,11 +186,11 @@ describe('buildBillAddRq', () => {
       vendorName: 'Teal Crossroads',
       txnDate: '2026-05-31',
       refNumber: 'M-202605',
-      memo: 'May 2026 — 3 contractors — 120h total',
+      memo: 'May 2026 - 3 contractors - 120h total',
       lines: [
-        { amount: 1400, memo: 'May 2026 — 40h @ $35 — Aleksandar Brajkovic — INV 03/26' },
-        { amount: 1600, memo: 'May 2026 — 40h @ $40 — Zlatan Bekric — INV 03/26' },
-        { amount: 1200, memo: 'May 2026 — 40h @ $30 — Ivica Zlatar — INV 7-1-1' },
+        { amount: 1400, memo: 'May 2026 - 40h @ $35 - Aleksandar Brajkovic - INV 03/26' },
+        { amount: 1600, memo: 'May 2026 - 40h @ $40 - Zlatan Bekric - INV 03/26' },
+        { amount: 1200, memo: 'May 2026 - 40h @ $30 - Ivica Zlatar - INV 7-1-1' },
       ],
     });
     // Three ExpenseLineAdd blocks
@@ -239,27 +239,39 @@ describe('buildBillAddRq', () => {
       vendorName: 'Vrdoljak IT, obrt & Co',
       txnDate: '2026-05-31',
       refNumber: 'INV 6-1-1',
-      memo: 'May 2026 — 40h @ $30 — Josip Vrdoljak',
+      memo: 'May 2026 - 40h @ $30 - Josip Vrdoljak',
       lines: [{ amount: 1200, memo: 'a<b>c' }],
     });
     expect(out).toContain('Vrdoljak IT, obrt &amp; Co');
     expect(out).toContain('a&lt;b&gt;c');
   });
 
-  it('preserves Unicode (Croatian/Serbian diacritics) as-is', () => {
-    // These are NOT special chars in XML — they just need to survive.
-    // QB Desktop 2020 has known encoding quirks (see GOTCHAS) but the
-    // builder must pass them through cleanly regardless.
-    const out = buildBillAddRq({
+  it('REJECTS non-ASCII in vendorName / memo / line memo (fail fast)', () => {
+    // QB Desktop's Xerces parser rejects our stream when it contains non-ASCII
+    // (UTFDataFormatException, observed 2026-08-12). ASCII-only rule enforced
+    // at builder entry so caller sees a legible error instead of a wire failure.
+    expect(() => buildBillAddRq({
+      vendorName: 'OBAI DRUSTVO d.o.o.',  // ok
+      txnDate: '2026-05-31',
+      refNumber: 'INV 43',
+      memo: 'Marta Susek',                // ok
+      lines: [{ amount: 1000, memo: 'Ddj Z z C c C c S s' }],
+    })).not.toThrow();
+
+    expect(() => buildBillAddRq({
       vendorName: 'OBAI DRUŠTVO d.o.o.',
       txnDate: '2026-05-31',
       refNumber: 'INV 43',
+      lines: [{ amount: 1000 }],
+    })).toThrow(/vendorName.*non-ASCII/);
+
+    expect(() => buildBillAddRq({
+      vendorName: 'OK Vendor',
+      txnDate: '2026-05-31',
+      refNumber: 'INV 43',
       memo: 'Marta Sušek',
-      lines: [{ amount: 1000, memo: 'Đđ Ž ž Č č Ć ć Š š' }],
-    });
-    expect(out).toContain('OBAI DRUŠTVO d.o.o.');
-    expect(out).toContain('Marta Sušek');
-    expect(out).toContain('Đđ Ž ž Č č Ć ć Š š');
+      lines: [{ amount: 1000 }],
+    })).toThrow(/memo.*non-ASCII/);
   });
 
   it('carries requestID when provided', () => {
@@ -298,7 +310,7 @@ describe('buildBillPaymentCheckAddRq', () => {
     txnDate: '2026-06-30',
     bankAccountName: WU_HOLDING,
     refNumber: 'OTR6607568',
-    memo: 'Convera wire — INV 178329594109 — Amar Pljevljak',
+    memo: 'Convera wire - INV 178329594109 - Amar Pljevljak',
     applications: [{
       billTxnId: '12006-1196864828',
       paymentAmount: 1050,
@@ -318,7 +330,7 @@ describe('buildBillPaymentCheckAddRq', () => {
     expect(out).toContain('<BankAccountRef>');
     expect(out).toContain(`<FullName>${WU_HOLDING}</FullName>`);
     expect(out).toContain('<RefNumber>OTR6607568</RefNumber>');
-    expect(out).toContain('<Memo>Convera wire — INV 178329594109 — Amar Pljevljak</Memo>');
+    expect(out).toContain('<Memo>Convera wire - INV 178329594109 - Amar Pljevljak</Memo>');
     expect(out).toContain('<AppliedToTxnAdd>');
     expect(out).toContain('<TxnID>12006-1196864828</TxnID>');
     expect(out).toContain('<PaymentAmount>1050.00</PaymentAmount>');
@@ -611,24 +623,35 @@ describe('buildBillPaymentCheckAddRq', () => {
       txnDate: '2026-06-30',
       bankAccountName: WU_HOLDING,
       refNumber: 'a"b<c>d',
-      memo: 'wire — INV <42> & fees',
+      memo: 'wire - INV <42> & fees',
       applications: [{ billTxnId: 'X', paymentAmount: 100 }],
     });
     expect(out).toContain('<FullName>A &amp; B Ltd</FullName>');
     expect(out).toContain('<RefNumber>a&quot;b&lt;c&gt;d</RefNumber>');
-    expect(out).toContain('<Memo>wire — INV &lt;42&gt; &amp; fees</Memo>');
+    expect(out).toContain('<Memo>wire - INV &lt;42&gt; &amp; fees</Memo>');
   });
 
-  it('preserves Unicode (Croatian/Serbian diacritics) in payee and memo as-is', () => {
-    const out = buildBillPaymentCheckAddRq({
+  it('REJECTS non-ASCII in payeeVendorName (fail fast, ASCII-only rule)', () => {
+    // QB Desktop's Xerces parser decodes our stream as Windows-1252 despite our
+    // <?xml encoding="utf-8"?> declaration. Non-ASCII bytes raise
+    // UTFDataFormatException on QB (observed 2026-08-12). Rule: strip diacritics
+    // at the source or rename the QB entry.
+    expect(() => buildBillPaymentCheckAddRq({
       payeeVendorName: 'OBAI DRUŠTVO d.o.o.',
       txnDate: '2026-06-30',
       bankAccountName: WU_HOLDING,
-      memo: 'Đđ Ž ž Č č Ć ć Š š — Marta Sušek',
       applications: [{ billTxnId: 'X', paymentAmount: 100 }],
-    });
-    expect(out).toContain('OBAI DRUŠTVO d.o.o.');
-    expect(out).toContain('Đđ Ž ž Č č Ć ć Š š — Marta Sušek');
+    })).toThrow(/payeeVendorName.*non-ASCII/);
+  });
+
+  it('REJECTS em-dash in memo (common trap in default memo strings)', () => {
+    expect(() => buildBillPaymentCheckAddRq({
+      payeeVendorName: 'ASCII Vendor Inc',
+      txnDate: '2026-06-30',
+      bankAccountName: WU_HOLDING,
+      memo: 'Jun 2026 — 160h @ $30 — Zejd Koco',  // em-dashes U+2014
+      applications: [{ billTxnId: 'X', paymentAmount: 100 }],
+    })).toThrow(/memo.*non-ASCII/);
   });
 
   it('bare skeleton still emits the required (IsToBePrinted|RefNumber) choice slot', () => {
