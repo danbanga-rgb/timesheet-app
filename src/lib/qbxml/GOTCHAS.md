@@ -11,9 +11,11 @@ Each session appends; nothing is removed.
   Rationale: 13.0 is the highest version Intuit shipped with QB Desktop Pro 2020 SDK. Higher versions (14.0+) target QB 2021+. Using the exact target version avoids "unrecognized element" errors from features QB 2020 doesn't understand.
   **UNVERIFIED — TODO: confirm against Intuit's compat matrix before Aug 9 live testing.** If QB 2020 accepts 14.0 gracefully we can bump to widen future capability, but 13.0 is the safe conservative pick.
 
-- **BillQueryRq uses `RefNumberList` (repeatable), not `RefNumber` (single).**
-  Multiple `<RefNumberList>` elements in the request → QB returns bills matching any of them. Confirmed from Consolibyte's schema.
-  Alternative shape `RefNumberCaseSensitiveList` exists for case-sensitive matching — not needed today.
+- **BillQueryRq uses `<RefNumber>` (repeatable), NOT `<RefNumberList>`.**
+  Multiple `<RefNumber>` elements in the request → QB returns bills matching any of them.
+  Initial implementation used `<RefNumberList>` based on a misread of a schema excerpt;
+  QB Desktop 2020 Pro rejected it with HRESULT 0x80040400 (Aug 2026 live test).
+  Alternative shape `<RefNumberCaseSensitive>` exists for case-sensitive matching — not needed today.
 
 - **`IncludeLineItems=false`** on every query.
   We only need `RefNumber → TxnID` mapping. Line items are wasted bytes and QB CPU. If a future need arises (e.g. verifying bill amount before paying), flip this per-call rather than globally.
