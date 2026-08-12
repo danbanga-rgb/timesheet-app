@@ -416,13 +416,17 @@ serve(async (req: Request) => {
     // scheme (Cloudflare terminates TLS upstream), both wrong for the .qwc file.
     const supabaseUrl = (Deno.env.get('SUPABASE_URL') || '').replace(/\/$/, '');
     const appUrl = `${supabaseUrl}/functions/v1/qb-web-connector`;
+    // QBWC1000: Web Connector requires AppURL and AppSupport to share a domain.
+    // Point AppSupport at the same edge fn URL — health probe response is JSON but
+    // functionally the "get help" link opens a valid endpoint, and the domain matches.
+    const appSupport = appUrl;
     const qwc = `<?xml version="1.0"?>
 <QBWCXML>
   <AppName>Synergie Timesheet App</AppName>
   <AppID>{14a3de1c-b2e0-4048-9e8c-87924a13fa4c}</AppID>
   <AppURL>${xmlEscape(appUrl)}</AppURL>
   <AppDescription>Sync bills and payments from the Synergie timesheet system into QuickBooks Desktop.</AppDescription>
-  <AppSupport>https://time.mysynergie.net</AppSupport>
+  <AppSupport>${xmlEscape(appSupport)}</AppSupport>
   <UserName>${xmlEscape(wcUser)}</UserName>
   <OwnerID>{f354b289-aa7f-454a-a2ea-3680b800347b}</OwnerID>
   <FileID>{652f2b08-9806-4a8f-a056-bfdf01bf7421}</FileID>
