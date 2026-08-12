@@ -24,11 +24,24 @@ export interface ParsedInvoice {
     rate: number | null;
     amount: number;
   }>;
+  // Company name as printed on the parsed invoice (from paymentDetails.companyName).
+  // Used by identity_mismatch to detect on-behalf-of forwarders (e.g. Naretena forwarding
+  // Sivakumar's Procal invoice — Aug 2026 incident).
+  parsedCompanyName?: string | null;
 }
 
 export interface DetectorContext {
   timesheetHours?: number | null;   // from reconcile; null if unknown
   priorRate?: number | null;         // most common rate from contractor's recent approved invoices
+  // Normalized company names from the resolved user's payment_profiles.
+  // Empty array = new contractor, skip identity check.
+  expectedCompanies?: string[];
+  // Currencies from the resolved user's last N approved/paid invoices, most recent first.
+  // Empty = no history, skip currency drift check.
+  priorCurrencies?: string[];
+  // profiles.name for the resolved user. Fallback identity signal when the parsed
+  // company doesn't match any expectedCompany (e.g. contractor bills under own name).
+  expectedContractorName?: string | null;
 }
 
 export interface AnomalyFix {
@@ -60,6 +73,39 @@ function isCleanRate(r: number): boolean {
   // Whole dollar, half dollar, or quarter — the shapes contractors actually bill at.
   const cents = Math.round(r * 100) % 100;
   return cents === 0 || cents === 25 || cents === 50 || cents === 75;
+}
+
+// Normalize a company/person name for fuzzy matching. Uppercase, strip common legal
+// suffixes and punctuation, collapse whitespace. Keeps distinctive tokens intact.
+// Example: "Bimosoft E OÜ" → "BIMOSOFT E", "Procal Technologies Inc." → "PROCAL TECHNOLOGIES"
+function normalizeCompanyName(s: string): string {
+  return s
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[\.\,\/\\\-\_&'"`]/g, ' ')
+    .replace(/\b(INC|LLC|LTD|LIMITED|GMBH|CORP|CO|COMPANY|OU|OÜ|D\s*O\s*O|DOO|SRO|SPA|SL|SARL|PLLC|PLC|PVT|PRIVATE|SOLUTIONS|TECHNOLOGIES|TECH)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Fuzzy match: does normalized `parsed` share any distinctive token (≥4 chars) with
+// any of the normalized `candidates`, OR is one a substring of another after normalization?
+// Returns the matched candidate or null.
+function fuzzyCompanyMatch(parsed: string, candidates: string[]): string | null {
+  if (!parsed || candidates.length === 0) return null;
+  const pn = normalizeCompanyName(parsed);
+  if (!pn) return null;
+  const pTokens = pn.split(/\s+/).filter(t => t.length >= 4);
+  for (const cand of candidates) {
+    const cn = normalizeCompanyName(cand);
+    if (!cn) continue;
+    // Substring either direction (handles "BIMOSOFT" vs "BIMOSOFT AMAR PLJEVLJAK")
+    if (pn === cn || pn.includes(cn) || cn.includes(pn)) return cand;
+    // Any shared distinctive token
+    const cTokens = new Set(cn.split(/\s+/).filter(t => t.length >= 4));
+    if (pTokens.some(t => cTokens.has(t))) return cand;
+  }
+  return null;
 }
 
 export function detectAnomalies(
@@ -207,6 +253,53 @@ export function detectAnomalies(
     } else if (ctx.timesheetHours < corrected.hours * 0.5) {
       push('timesheet_far_below_invoice', 'medium',
         `timesheet ${ctx.timesheetHours}h vs invoice ${corrected.hours}h (ratio ${(ctx.timesheetHours/corrected.hours).toFixed(2)}); verify period`);
+    }
+  }
+
+  // ── Rule: identity_mismatch ────────────────────────────────────────────────
+  // The invoice's parsed company (or contractor line) doesn't fuzzy-match ANY of the
+  // resolved user's known payment_profile companies AND doesn't match the user's own
+  // name. This is the on-behalf-of forwarder signature (Aug 2026 Naretena→Sivakumar/
+  // Ismir incident where a sender's mailbox held invoices for 3 different contractors).
+  //
+  // Skips when: parsed name is empty, no expected companies AND no contractor name to
+  // compare against. Empty expectedCompanies with a name still checks against the name.
+  if (parsed.parsedCompanyName && parsed.parsedCompanyName.trim().length >= 3) {
+    const expected = ctx.expectedCompanies ?? [];
+    const contractorName = ctx.expectedContractorName ?? null;
+    const hasSignal = expected.length > 0 || (contractorName && contractorName.trim().length >= 3);
+    if (hasSignal) {
+      const matchedCompany = fuzzyCompanyMatch(parsed.parsedCompanyName, expected);
+      const matchedName    = contractorName
+        ? fuzzyCompanyMatch(parsed.parsedCompanyName, [contractorName])
+        : null;
+      if (!matchedCompany && !matchedName) {
+        const knownSummary = expected.length > 0
+          ? `known companies [${expected.join(', ')}]`
+          : `no payment profiles on file`;
+        const nameHint = contractorName ? ` and contractor name '${contractorName}'` : '';
+        push('identity_mismatch', 'high',
+          `parsed company '${parsed.parsedCompanyName}' does not match ${knownSummary}${nameHint}. Likely wrong-contractor attribution (on-behalf-of forwarder).`);
+      }
+    }
+  }
+
+  // ── Rule: currency_drift ───────────────────────────────────────────────────
+  // Parsed currency differs from the majority currency in the contractor's recent
+  // history. Aug 2026 Davor Buha incident: bilingual Croatian invoice with $ line
+  // total plus an informational "Ukupno za platiti u EUR" conversion — parser regex
+  // grabbed EUR from the header even though line total was in USD (matched all prior
+  // Davor invoices).
+  if (ctx.priorCurrencies && ctx.priorCurrencies.length >= 2 && parsed.currency) {
+    const counts = new Map<string, number>();
+    for (const c of ctx.priorCurrencies) counts.set(c, (counts.get(c) || 0) + 1);
+    let majority: string | null = null;
+    let majorityCount = 0;
+    for (const [c, n] of counts) if (n > majorityCount) { majority = c; majorityCount = n; }
+    // Majority must be a clear majority (> half of samples), else the history itself is mixed.
+    if (majority && majority !== parsed.currency && majorityCount > ctx.priorCurrencies.length / 2) {
+      push('currency_drift', 'medium',
+        `parsed currency ${parsed.currency} differs from contractor's recent majority ${majority} (${majorityCount}/${ctx.priorCurrencies.length}). Verify — may be bilingual/multi-currency parse error.`);
     }
   }
 

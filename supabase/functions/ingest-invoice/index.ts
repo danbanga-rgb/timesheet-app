@@ -258,6 +258,59 @@ async function sumTimesheetHours(
   return { hours, lastCoveredDate, hadTimesheets: true };
 }
 
+// Identity context for the anomaly detector: the list of company names on the
+// resolved user's payment_profiles, the currencies of their recent invoices, and
+// the profile name. Fed to detector so it can flag on-behalf-of forwarders and
+// bilingual-currency parse errors. Non-fatal on error (empty context = rules skip).
+async function getIdentityContext(
+  userId: string,
+  supabase: ReturnType<typeof createClient>,
+): Promise<{ companies: string[]; currencies: string[]; contractorName: string | null }> {
+  try {
+    const [profilesRes, invoicesRes, meRes] = await Promise.all([
+      supabase.from('payment_profiles').select('company_name').eq('user_id', userId),
+      supabase.from('invoices')
+        .select('currency')
+        .eq('user_id', userId)
+        .in('status', ['approved', 'paid'])
+        .not('currency', 'is', null)
+        .order('period_start', { ascending: false })
+        .limit(5),
+      supabase.from('profiles').select('name').eq('id', userId).maybeSingle(),
+    ]);
+    const companies = ((profilesRes.data ?? []) as Array<{ company_name: string | null }>)
+      .map(r => (r.company_name ?? '').trim())
+      .filter(s => s.length >= 3);
+    const currencies = ((invoicesRes.data ?? []) as Array<{ currency: string | null }>)
+      .map(r => (r.currency ?? '').trim())
+      .filter(s => s.length > 0);
+    const contractorName = ((meRes.data as { name?: string | null } | null)?.name ?? null);
+    return { companies, currencies, contractorName };
+  } catch {
+    return { companies: [], currencies: [], contractorName: null };
+  }
+}
+
+// Phantom-profile guard: does the parsed IBAN already belong to a DIFFERENT user's
+// payment_profile? If yes, the sender is almost certainly forwarding on-behalf-of
+// (or a Convera intermediary hit). Used to block auto-INSERT of a duplicate profile
+// under the sender's user_id (Aug 2026 Naretena pp id=100 phantom incident).
+// Returns list of {user_id, profile_id} pairs owning the IBAN under other users.
+async function findIbanOwnedByOtherUser(
+  iban: string,
+  userId: string,
+  supabase: ReturnType<typeof createClient>,
+): Promise<Array<{ userId: string; profileId: number }>> {
+  if (!iban || iban.length < 8) return [];
+  const { data } = await supabase
+    .from('payment_profiles')
+    .select('id, user_id, iban')
+    .ilike('iban', iban);
+  return ((data ?? []) as Array<{ id: number; user_id: string; iban: string | null }>)
+    .filter(r => r.user_id !== userId)
+    .map(r => ({ userId: r.user_id, profileId: r.id }));
+}
+
 // Most common rate from contractor's approved invoices in 6 months before
 // `beforeDate`. Used by the anomaly detector to fill missing rates or verify
 // implausible ones. Returns null if no prior approved invoices with a rate.
@@ -594,25 +647,38 @@ serve(async (req) => {
 
     // ── Anomaly detection ────────────────────────────────────────────────────
     // Runs before existing-invoice lookup so period corrections affect the
-    // duplicate check. Uses prior approved rates + timesheet hours as context.
+    // duplicate check. Uses prior approved rates + timesheet hours + identity
+    // context (company names, currency history, contractor name) as inputs.
     // Fixes rebind final* vars used by both correction and new-insert paths.
-    const priorRate = await getPriorRate(userId, parsedPeriodStart, supabase);
-    const preTsSum  = await sumTimesheetHours(userId, parsedPeriodStart, parsedPeriodEnd, supabase);
+    const priorRate      = await getPriorRate(userId, parsedPeriodStart, supabase);
+    const preTsSum       = await sumTimesheetHours(userId, parsedPeriodStart, parsedPeriodEnd, supabase);
+    const identityCtx    = await getIdentityContext(userId, supabase);
+    const parsedCompany  = (paymentDetails as Record<string, string | null> | null)?.companyName || null;
     const detectorResult = detectAnomalies(
       {
-        periodStart: parsedPeriodStart,
-        periodEnd:   parsedPeriodEnd,
-        hours:       parsedHours,
-        rate:        parsedRate,
-        amount:      initialComputedAmount,
-        currency:    parsedCurrency,
-        lines:       initialLines,
+        periodStart:       parsedPeriodStart,
+        periodEnd:         parsedPeriodEnd,
+        hours:             parsedHours,
+        rate:              parsedRate,
+        amount:            initialComputedAmount,
+        currency:          parsedCurrency,
+        lines:             initialLines,
+        parsedCompanyName: parsedCompany,
       },
       {
         priorRate,
-        timesheetHours: preTsSum ? preTsSum.hours : null,
+        timesheetHours:        preTsSum ? preTsSum.hours : null,
+        expectedCompanies:     identityCtx.companies,
+        priorCurrencies:       identityCtx.currencies,
+        expectedContractorName: identityCtx.contractorName,
       },
     );
+
+    // Identity mismatch (HIGH) short-circuits payment-profile auto-creation. The parsed
+    // company doesn't belong to this contractor — creating a profile under their user_id
+    // would leave a phantom pp behind (pre-hotfix Naretena pp id=100 was this bug).
+    // Snapshot stays null; accountant assigns during review.
+    const hasIdentityMismatch = detectorResult.flags.some(f => f.rule === 'identity_mismatch');
 
     finalPeriodStart       = detectorResult.corrected.periodStart;
     finalPeriodEnd         = detectorResult.corrected.periodEnd;
@@ -630,9 +696,11 @@ serve(async (req) => {
     const depMap = await loadDeprecatedBeneMap(supabase);
     const beneGuardrailEvents: Array<{ stage: string; original: number; resolved: number | null; note?: string }> = [];
 
-    // Build payment profile snapshot from parsed bank details (if any)
+    // Build payment profile snapshot from parsed bank details (if any).
+    // When identity_mismatch fires, we keep the snapshot null — the parsed bank details
+    // likely belong to a different contractor, and accountant assigns during review.
     const pd = paymentDetails as Record<string, string | null> | null;
-    let paymentProfileSnapshot = pd ? {
+    let paymentProfileSnapshot = (pd && !hasIdentityMismatch) ? {
       id:             0,
       userId,
       profileName:    'Imported',
@@ -744,11 +812,33 @@ serve(async (req) => {
           }
         }
 
+        // Phantom-profile guard: if Step 2 did not match, and the parsed IBAN already
+        // exists on another user's payment_profile, the sender is almost certainly
+        // forwarding on-behalf-of. Auto-creating a new profile under this user_id would
+        // leave a phantom (Aug 2026 Naretena pp id=100 bug). Skip Steps 3/3.5/4; leave
+        // snapshot null; accountant assigns. Shared-umbrella accounts (Bimosoft/Revolut
+        // etc.) are safe: if the sender legitimately shares the umbrella, they already
+        // have a profile linked to it and Step 2 matched above.
+        let phantomProfileBlocked = false;
+        if (!resolved && hasIban) {
+          const otherOwners = await findIbanOwnedByOtherUser(ibanN, userId, supabase);
+          if (otherOwners.length > 0) {
+            phantomProfileBlocked = true;
+            paymentProfileSnapshot = null;
+            beneGuardrailEvents.push({
+              stage: 'phantom_profile_blocked',
+              original: 0,
+              resolved: null,
+              note: `Parsed IBAN ${ibanN} exists on payment_profile(s) [${otherOwners.map(o => o.profileId).join(', ')}] owned by other user(s); sender has no matching profile of their own. Skipped auto-create to prevent phantom profile. Accountant to assign.`,
+            });
+          }
+        }
+
         // Step 3 — Convera beneficiary lookup. NOTE: convera_beneficiaries.bank_account
         // holds the IBAN (for non-US) or the account number (for US). iban_unique is a
         // BOOLEAN flag (true = unique to this beneficiary, false = shared intermediary like
         // Revolut/Bimosoft). We match the parsed IBAN against bank_account.
-        if (!resolved && hasIban) {
+        if (!resolved && hasIban && !phantomProfileBlocked) {
           const { data: benefs } = await supabase
             .from('convera_beneficiaries')
             .select('id, short_name, beneficiary_name, beneficiary_country, bank_name, bank_account, iban_unique')
@@ -843,8 +933,8 @@ serve(async (req) => {
 
         // Step 3.5 — Name-based beneficiary fallback (requires BOTH first and last name
         // as substring in short_name or beneficiary_name). Skips spelling variants by design;
-        // accountant handles those manually (one-time link).
-        if (!resolved) {
+        // accountant handles those manually (one-time link). Phantom guard also applies here.
+        if (!resolved && !phantomProfileBlocked) {
           const parts = unaccent((userName as string).toLowerCase()).split(/\s+/).filter(t => t.length >= 3);
           if (parts.length >= 2) {
             const first = parts[0];
@@ -917,7 +1007,9 @@ serve(async (req) => {
         // Step 3.6 — Last-used profile fallback. When neither IBAN nor name matched,
         // pull the contractor's most recent prior invoice's payment_profile if it has
         // usable bank data. This is the "they've been paid this way before" signal.
-        if (!resolved) {
+        // Skipped when phantom guard tripped — the "last-used" would carry over the wrong
+        // contractor's snapshot if the earlier ingest was itself misrouted.
+        if (!resolved && !phantomProfileBlocked) {
           const { data: priorInvoices } = await supabase
             .from('invoices')
             .select('payment_profile')
@@ -936,8 +1028,9 @@ serve(async (req) => {
           }
         }
 
-        // Step 4 — no beneficiary match, persist a "pending" profile from parsed data
-        if (!resolved) {
+        // Step 4 — no beneficiary match, persist a "pending" profile from parsed data.
+        // Phantom guard blocks this too — otherwise we'd create Naretena-pp-100-style ghosts.
+        if (!resolved && !phantomProfileBlocked) {
           const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
           const [pyear, pmonth] = finalPeriodStart.split('-');
           const periodLabel = `${monthNames[parseInt(pmonth) - 1]} ${pyear}`;
@@ -985,6 +1078,45 @@ serve(async (req) => {
                           && existingHours === finalHours
                           && existingRate  === finalRate
                           && Math.abs((existingAmount ?? 0) - computedAmount) < 0.01;
+
+      // Identity-mismatch correction refusal. The classic overwrite bug: an on-behalf-of
+      // forwarder's second email (different contractor's PDF, same sender, same month)
+      // silently replaced the first ingest's data. Refuse the correction; log as partial.
+      // Accountant handles both invoices manually. Aug 2026 Naretena incident: her sender
+      // mailbox held Ismir's DEVS IT invoice (parsed at 18:30) and Sivakumar's Procal
+      // invoice (parsed at 19:29 → overwrote to $12,880 with stale Ismir pp snapshot).
+      if (!isDuplicate && hasIdentityMismatch) {
+        const notes = [
+          parseNotes,
+          `Correction refused: identity_mismatch flag on the incoming parse. ` +
+          `Existing invoice id=${invoiceId} preserved. Both PDFs belong to different contractors — accountant to file separately.`,
+          ...detectorResult.flags.map(f => `[${f.severity}] ${f.rule}: ${f.message}`),
+        ].filter(Boolean).join(' | ');
+        await supabase.from('email_invoice_log').insert({
+          message_id:      messageId,
+          from_email:      contractorEmail,
+          subject:         subject || null,
+          attachment_name: attachmentName || null,
+          parse_status:    'partial',
+          parse_notes:     notes,
+          user_id:         userId,
+          invoice_id:      invoiceId,
+          period_start:    finalPeriodStart,
+          period_end:      finalPeriodEnd,
+          raw_extracted:   body.rawExtracted ?? null,
+          attempt_count:   attemptCount,
+          attachment_hash: (attachmentHash as string) || null,
+          groq_vision_verification: (groqVisionVerification as Record<string, unknown>) || null,
+        });
+        return new Response(JSON.stringify({
+          ok: false,
+          action: 'identity_mismatch_correction_refused',
+          parseStatus: 'partial',
+          userId, userName, invoiceId,
+          notes,
+          anomalyFlags: detectorResult.flags,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
 
       if (!isDuplicate) {
         // Correction: update invoice data and reset status for re-approval.
