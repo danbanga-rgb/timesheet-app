@@ -5,10 +5,27 @@
 // PaymentProfile in TimesheetSystem.tsx) to keep the builders decoupled from
 // UI/DB concerns and easy to unit-test with plain fixtures.
 
-/** BillQueryRq: look up bills by RefNumber (our invoice_number). */
+/** BillQueryRq: look up bills EITHER by RefNumber (our invoice_number) OR
+ *  by vendor via iterator filter. The two modes are mutually exclusive per
+ *  the qbXML XSD choice group.
+ *
+ *  Mode 1: key lookup — supply refNumbers[]. Fast, targeted.
+ *  Mode 2: iterator — supply entityVendorName (and optionally maxReturned,
+ *    fromModifiedDate, toModifiedDate). Returns ALL bills for that vendor
+ *    in the window. Useful for diagnostics ("what bills does QB actually
+ *    have for Vladimir?") and reconciliation.
+ */
 export interface BillQueryRqInput {
-  /** Ref numbers to search for. Corresponds to our `invoices.invoice_number`. */
-  refNumbers: string[];
+  /** Ref numbers to search for. Corresponds to our `invoices.invoice_number`.
+   *  Empty when using iterator mode. */
+  refNumbers?: string[];
+  /** Iterator mode: filter to bills for this vendor. Uses the vendor's exact
+   *  FullName (must match qb_vendors.name). Mutually exclusive with refNumbers. */
+  entityVendorName?: string;
+  /** Iterator mode: TxnDate lower bound. YYYY-MM-DD. */
+  fromTxnDate?: string;
+  /** Iterator mode: TxnDate upper bound. YYYY-MM-DD. */
+  toTxnDate?: string;
   /** Optional request correlation ID. Web Connector echoes this back on the
    *  response so we can pair request→response when batching multiple ops. */
   requestId?: string;

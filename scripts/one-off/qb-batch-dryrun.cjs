@@ -407,7 +407,7 @@ function printReport(batchId, plan, data) {
     console.log(`│          PayeeEntityRef.FullName = "${g.vendorName}"`);
     console.log(`│          BankAccountRef.FullName = "${BANK_ACCOUNT_FULL_NAME}"`);
     console.log(`│          TxnDate = ${wireDate}    RefNumber = "${conf}"`);
-    console.log(`│          Memo = "Convera wire ${conf} — ${invoiceCount} invoice${invoiceCount === 1 ? '' : 's'} — ${g.vendorName}"`);
+    console.log(`│          Memo = "Convera wire ${conf} - ${invoiceCount} invoice${invoiceCount === 1 ? '' : 's'} - ${g.vendorName}"`);
     console.log(`│          depends_on = <${applicationCount} bill_query job id${applicationCount === 1 ? '' : 's'}>`);
   }
   console.log(`│`);

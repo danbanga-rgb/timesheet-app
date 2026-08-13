@@ -51,20 +51,59 @@ function fmtAmount(n: number): string {
  *    EditSequence). Avoids QB pulling line detail we won't consume.
  */
 export function buildBillQueryRq(input: BillQueryRqInput): string {
-  if (input.refNumbers.length === 0) {
-    throw new Error('buildBillQueryRq: refNumbers must not be empty');
+  const hasRefs = (input.refNumbers?.length ?? 0) > 0;
+  const hasIterator = !!input.entityVendorName || !!input.fromTxnDate || !!input.toTxnDate;
+  if (!hasRefs && !hasIterator) {
+    throw new Error('buildBillQueryRq: supply refNumbers OR entityVendorName/date-range (iterator mode)');
   }
-  input.refNumbers.forEach((r, i) => assertAscii(`refNumbers[${i}]`, r));
+  if (hasRefs && hasIterator) {
+    throw new Error('buildBillQueryRq: refNumbers and iterator filters (entityVendorName/dates) are mutually exclusive per the qbXML XSD choice group');
+  }
   if (input.requestId) assertAscii('requestId', input.requestId);
   const attrs = input.requestId
     ? ` requestID="${xmlEscape(input.requestId)}"`
     : '';
   const parts: string[] = [`<BillQueryRq${attrs}>`];
-  for (const ref of input.refNumbers) {
-    parts.push(`  <RefNumber>${xmlEscape(ref)}</RefNumber>`);
-  }
-  if (input.maxReturned != null) {
-    parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+
+  if (hasRefs) {
+    (input.refNumbers as string[]).forEach((r, i) => assertAscii(`refNumbers[${i}]`, r));
+    for (const ref of input.refNumbers as string[]) {
+      parts.push(`  <RefNumber>${xmlEscape(ref)}</RefNumber>`);
+    }
+    if (input.maxReturned != null) {
+      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+    }
+  } else {
+    // Iterator mode per qbXML 13.0 XSD (BillQueryRq). Element ordering
+    // (verified via Intuit onscreen reference + Consolibyte schema):
+    //   FILTERS (TxnDateRangeFilter → EntityFilter → PaidStatus → CurrencyFilter)
+    //   → MaxReturned? → IncludeLineItems? → OwnerID*
+    // First attempt put MaxReturned BEFORE EntityFilter and QB Xerces
+    // rejected with hresult=0x80040400. MaxReturned goes AFTER filters.
+    // Discovered 2026-08-13 debugging Vladimir vendor probe.
+    if (input.fromTxnDate || input.toTxnDate) {
+      parts.push('  <TxnDateRangeFilter>');
+      if (input.fromTxnDate) {
+        assertAscii('fromTxnDate', input.fromTxnDate);
+        parts.push(`    <FromTxnDate>${xmlEscape(input.fromTxnDate)}</FromTxnDate>`);
+      }
+      if (input.toTxnDate) {
+        assertAscii('toTxnDate', input.toTxnDate);
+        parts.push(`    <ToTxnDate>${xmlEscape(input.toTxnDate)}</ToTxnDate>`);
+      }
+      parts.push('  </TxnDateRangeFilter>');
+    }
+    if (input.entityVendorName) {
+      assertAscii('entityVendorName', input.entityVendorName);
+      parts.push('  <EntityFilter>');
+      parts.push('    <FullNameList>');
+      parts.push(`      <FullName>${xmlEscape(input.entityVendorName)}</FullName>`);
+      parts.push('    </FullNameList>');
+      parts.push('  </EntityFilter>');
+    }
+    if (input.maxReturned != null) {
+      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+    }
   }
   parts.push('  <IncludeLineItems>false</IncludeLineItems>');
   parts.push('</BillQueryRq>');
