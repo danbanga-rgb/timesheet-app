@@ -20,9 +20,11 @@
 // test using a real BillQueryRs response containing LinkedTxn payload.
 
 import type {
+  AccountResult,
   BillAddResult,
   BillPaymentCheckAddResult,
   BillQueryResult,
+  ParsedAccountQueryRs,
   ParsedBillAddRs,
   ParsedBillPaymentCheckAddRs,
   ParsedBillQueryRs,
@@ -176,6 +178,29 @@ const BILLPAYMENTCHECKRET_SUBBLOCKS_TO_STRIP = [
   'DataExtRet',
 ];
 
+/** Sub-blocks to strip from an AccountRet BEFORE extracting leaves.
+ *
+ *  ParentRef contains a nested `<FullName>` (the parent account's path) that
+ *  would collide with the account's own `<FullName>` if we extracted first-
+ *  occurrence naively. We extract ParentRef.FullName specifically (via
+ *  getFirstElement(block, 'ParentRef')) BEFORE stripping, then strip so the
+ *  account's own leaves are clean.
+ *
+ *  CurrencyRef / TaxLineInfoRet / SalesTaxCodeRef / CashFlowClassification
+ *  are stripped defensively — none currently collide with our target leaves
+ *  (Name/FullName/AccountType/IsActive/ListID) but keeping this list explicit
+ *  makes future additions safe.
+ */
+const ACCOUNTRET_SUBBLOCKS_TO_STRIP = [
+  'ParentRef',
+  'CurrencyRef',
+  'SalesTaxCodeRef',
+  'TaxLineInfoRet',
+  'CashFlowClassification',
+  'CustomFieldRet',
+  'DataExtRet',
+];
+
 function stripSubBlocks(fragment: string, tags: string[]): string {
   let out = fragment;
   for (const t of tags) out = stripAllOccurrences(out, t);
@@ -263,6 +288,49 @@ export function parseBillAddRs(xml: string): ParsedBillAddRs {
   }
   const out: BillAddResult = { txnId, editSequence, refNumber };
   return { status, result: out };
+}
+
+/** Parse an `<AccountQueryRs>` response element.
+ *
+ *  Returns one `AccountResult` per `<AccountRet>` block, skipping any block
+ *  missing a required leaf (defensive — should never happen from QB but
+ *  wouldn't lose the entire result set if it did).
+ *
+ *  Zero results is a valid successful state — happens when a filter matches
+ *  nothing. Distinguish from error via `status.statusCode`.
+ */
+export function parseAccountQueryRs(xml: string): ParsedAccountQueryRs {
+  const el = getFirstElement(xml, 'AccountQueryRs');
+  if (!el) {
+    return {
+      status: { statusCode: '', statusSeverity: '', statusMessage: 'AccountQueryRs element not found' },
+      accounts: [],
+    };
+  }
+  const status = readStatus(el.openingTag);
+  const accounts: AccountResult[] = [];
+  for (const block of getAllBlocks(el.inner, 'AccountRet')) {
+    // Extract ParentRef.FullName BEFORE stripping ParentRef (otherwise its
+    // nested <FullName> would be indistinguishable from the account's own).
+    const parentEl = getFirstElement(block, 'ParentRef');
+    const parentFullName = parentEl ? getLeafText(parentEl.inner, 'FullName') : null;
+    const cleaned = stripSubBlocks(block, ACCOUNTRET_SUBBLOCKS_TO_STRIP);
+    const listId = getLeafText(cleaned, 'ListID');
+    const name = getLeafText(cleaned, 'Name');
+    const fullName = getLeafText(cleaned, 'FullName');
+    const accountType = getLeafText(cleaned, 'AccountType') ?? '';
+    const isActiveRaw = getLeafText(cleaned, 'IsActive');
+    if (listId == null || name == null || fullName == null) continue;
+    accounts.push({
+      listId,
+      name,
+      fullName,
+      accountType,
+      isActive: isActiveRaw === 'true',
+      parentFullName: parentFullName || null,
+    });
+  }
+  return { status, accounts };
 }
 
 /** Parse a `<BillPaymentCheckAddRs>` response element.

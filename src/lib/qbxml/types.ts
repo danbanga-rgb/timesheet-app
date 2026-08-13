@@ -157,6 +157,69 @@ export interface BillPaymentCheckAddResult {
   refNumber?: string;
 }
 
+/** AccountQueryRq: enumerate accounts from QB Desktop's chart of accounts.
+ *
+ *  Purpose: discovery. QB rejects our BillPaymentCheckAdd requests when the
+ *  supplied BankAccountRef.FullName doesn't match the accountant's chart
+ *  exactly (statusCode=3140, "invalid reference to QuickBooks Check Account").
+ *  We can't guess the right string — the accountant renames accounts and adds
+ *  account-number prefixes over time. This request pulls every account so we
+ *  can pick the correct FullName for constants.ts (and later, present the
+ *  chart in the admin UI so the accountant can wire things up themselves).
+ *
+ *  Element order in the XSD is a Big Choice:
+ *    Either lookup-by-key (ListID+ | FullName+)
+ *    OR iterator form: (MaxReturned? ActiveStatus? FromModifiedDate?
+ *      ToModifiedDate? (NameFilter | NameRangeFilter)? AccountType*)
+ *    followed by IncludeRetElement* and OwnerID*.
+ *
+ *  We only ship the iterator form — discovery use case. Lookup-by-key can
+ *  be added when a caller needs it.
+ */
+export interface AccountQueryRqInput {
+  /** Iterator: cap results. Default: unbounded (QB returns all). */
+  maxReturned?: number;
+  /** ActiveOnly (default in QB), InactiveOnly, or All. We default to All so
+   *  historical accounts referenced by old bills still resolve. */
+  activeStatus?: 'ActiveOnly' | 'InactiveOnly' | 'All';
+  /** Filter to specific account types. Empty/undefined = all types.
+   *  Common values: Bank, AccountsPayable, AccountsReceivable, Expense,
+   *  CostOfGoodsSold, Income, Equity, FixedAsset, OtherAsset, OtherCurrentAsset,
+   *  LongTermLiability, OtherCurrentLiability, CreditCard, OtherIncome,
+   *  OtherExpense, NonPosting. */
+  accountTypes?: string[];
+  /** Optional request correlation ID. */
+  requestId?: string;
+}
+
+/** One account returned by parseAccountQueryRs. */
+export interface AccountResult {
+  /** QB-assigned unique identifier. Stable across renames. */
+  listId: string;
+  /** Short (leaf) name — e.g. "Checking". */
+  name: string;
+  /** Colon-delimited hierarchy path — e.g. "Bank:Checking".
+   *  THIS is what plugs into BankAccountRef.FullName / APAccountRef.FullName /
+   *  ExpenseLineAdd.AccountRef.FullName in downstream requests. */
+  fullName: string;
+  /** Bank | AccountsPayable | Expense | ... See AccountQueryRqInput comment
+   *  for the full enum. Empty string if QB omitted it (shouldn't happen). */
+  accountType: string;
+  /** True = usable in new transactions. False = archived; still valid as a
+   *  target for querying historical bills. */
+  isActive: boolean;
+  /** Parent account's FullName if this is a sub-account, else null.
+   *  Extracted from the nested ParentRef block before it's stripped. */
+  parentFullName: string | null;
+}
+
+/** Return shape of parseAccountQueryRs. `accounts` is empty when statusCode !== 0
+ *  OR when the filter matched zero rows (rare — a fresh QB always has defaults). */
+export interface ParsedAccountQueryRs {
+  status: QbxmlResponseStatus;
+  accounts: AccountResult[];
+}
+
 /** Common shape for any parsed qbXML response. */
 export interface QbxmlResponseStatus {
   /** statusCode="0" is success; anything else is an error. */

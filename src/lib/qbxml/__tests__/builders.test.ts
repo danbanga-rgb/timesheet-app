@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  buildAccountQueryRq,
   buildBillAddRq,
   buildBillPaymentCheckAddRq,
   buildBillQueryRq,
@@ -669,6 +670,48 @@ describe('buildBillPaymentCheckAddRq', () => {
     expect(out).toContain('<IsToBePrinted>false</IsToBePrinted>');
     expect(out).not.toContain('<DiscountAmount>');
     expect(out).not.toContain('<SetCredit>');
+  });
+});
+
+describe('buildAccountQueryRq', () => {
+  it('emits the minimum request (defaults ActiveStatus=All)', () => {
+    const out = buildAccountQueryRq();
+    expect(out).toBe(
+      [
+        '<AccountQueryRq>',
+        '  <ActiveStatus>All</ActiveStatus>',
+        '</AccountQueryRq>',
+      ].join('\n'),
+    );
+  });
+
+  it('emits filters in the required XSD order (MaxReturned → ActiveStatus → AccountType*)', () => {
+    const out = buildAccountQueryRq({
+      maxReturned: 500,
+      activeStatus: 'ActiveOnly',
+      accountTypes: ['Bank', 'AccountsPayable'],
+      requestId: 'q-1',
+    });
+    const lines = out.split('\n');
+    // Order matters — QB rejects out-of-order children with a schema error.
+    expect(lines[0]).toBe('<AccountQueryRq requestID="q-1">');
+    expect(lines[1]).toBe('  <MaxReturned>500</MaxReturned>');
+    expect(lines[2]).toBe('  <ActiveStatus>ActiveOnly</ActiveStatus>');
+    expect(lines[3]).toBe('  <AccountType>Bank</AccountType>');
+    expect(lines[4]).toBe('  <AccountType>AccountsPayable</AccountType>');
+    expect(lines[5]).toBe('</AccountQueryRq>');
+  });
+
+  it('rejects invalid ActiveStatus at build time', () => {
+    expect(() =>
+      buildAccountQueryRq({ activeStatus: 'Active' as unknown as 'ActiveOnly' }),
+    ).toThrow(/activeStatus/);
+  });
+
+  it('assertAscii applies to filter values', () => {
+    expect(() =>
+      buildAccountQueryRq({ accountTypes: ['Baünk'] }),
+    ).toThrow(/non-ASCII/);
   });
 });
 

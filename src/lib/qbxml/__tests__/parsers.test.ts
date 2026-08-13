@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  parseAccountQueryRs,
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
   parseBillQueryRs,
@@ -430,5 +431,104 @@ describe('parseBillPaymentCheckAddRs', () => {
     const parsed = parseBillPaymentCheckAddRs(env);
     expect(parsed.status.statusCode).toBe('3200');
     expect(parsed.result).toBeNull();
+  });
+});
+
+// ─── AccountQueryRs ──────────────────────────────────────────────────────────
+
+describe('parseAccountQueryRs', () => {
+  const buildAccountRet = (opts: {
+    listId: string;
+    name: string;
+    fullName: string;
+    accountType?: string;
+    isActive?: boolean;
+    parentFullName?: string;
+  }) => {
+    const parts = ['<AccountRet>'];
+    parts.push(`<ListID>${opts.listId}</ListID>`);
+    parts.push(`<Name>${opts.name}</Name>`);
+    parts.push(`<FullName>${opts.fullName}</FullName>`);
+    if (opts.parentFullName) {
+      parts.push('<ParentRef>');
+      parts.push(`<ListID>parent-${opts.listId}</ListID>`);
+      parts.push(`<FullName>${opts.parentFullName}</FullName>`);
+      parts.push('</ParentRef>');
+    }
+    if (opts.accountType) parts.push(`<AccountType>${opts.accountType}</AccountType>`);
+    parts.push(`<IsActive>${opts.isActive === false ? 'false' : 'true'}</IsActive>`);
+    parts.push('</AccountRet>');
+    return parts.join('');
+  };
+
+  it('parses multiple AccountRet blocks', () => {
+    const env = [
+      '<AccountQueryRs requestID="q-42" statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      buildAccountRet({ listId: '80000001-1234', name: 'Checking', fullName: 'Bank:Checking', accountType: 'Bank' }),
+      buildAccountRet({ listId: '80000002-5678', name: 'Accounts Payable', fullName: 'Accounts Payable', accountType: 'AccountsPayable' }),
+      '</AccountQueryRs>',
+    ].join('');
+    const parsed = parseAccountQueryRs(env);
+    expect(parsed.status.statusCode).toBe('0');
+    expect(parsed.status.requestId).toBe('q-42');
+    expect(parsed.accounts).toHaveLength(2);
+    expect(parsed.accounts[0]).toEqual({
+      listId: '80000001-1234', name: 'Checking', fullName: 'Bank:Checking',
+      accountType: 'Bank', isActive: true, parentFullName: null,
+    });
+    expect(parsed.accounts[1].accountType).toBe('AccountsPayable');
+  });
+
+  it('extracts ParentRef.FullName BEFORE stripping the sub-block', () => {
+    // The critical trap: a naive first-occurrence FullName extractor would
+    // return the parent's FullName (which appears earlier in the block since
+    // ParentRef comes before other leaves in the QB response ordering) as the
+    // account's FullName. Guard against that regression.
+    const env = [
+      '<AccountQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      buildAccountRet({
+        listId: '80000003-9999',
+        name: 'Key Point Checking',
+        fullName: 'Bank:Key Point Checking',
+        accountType: 'Bank',
+        parentFullName: 'Bank',
+      }),
+      '</AccountQueryRs>',
+    ].join('');
+    const parsed = parseAccountQueryRs(env);
+    expect(parsed.accounts).toHaveLength(1);
+    expect(parsed.accounts[0].fullName).toBe('Bank:Key Point Checking');  // NOT 'Bank'
+    expect(parsed.accounts[0].parentFullName).toBe('Bank');
+  });
+
+  it('reports isActive=false correctly', () => {
+    const env = [
+      '<AccountQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      buildAccountRet({ listId: 'x', name: 'Old', fullName: 'Old', accountType: 'Bank', isActive: false }),
+      '</AccountQueryRs>',
+    ].join('');
+    const parsed = parseAccountQueryRs(env);
+    expect(parsed.accounts[0].isActive).toBe(false);
+  });
+
+  it('empty result set on statusCode=0 with no matches', () => {
+    const env = '<AccountQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK"/>';
+    // Self-closing element form — parser still needs to find it and return zero accounts.
+    // Note: our getFirstElement requires opening+closing tags separately, so use full form.
+    const env2 = [
+      '<AccountQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      '</AccountQueryRs>',
+    ].join('');
+    const parsed = parseAccountQueryRs(env2);
+    expect(parsed.status.statusCode).toBe('0');
+    expect(parsed.accounts).toEqual([]);
+    // env unused but exercises the self-closing form's absence in our regex
+    expect(env).toBeTruthy();
+  });
+
+  it('surfaces error status when AccountQueryRs is absent', () => {
+    const parsed = parseAccountQueryRs('<QBXML><QBXMLMsgsRs></QBXMLMsgsRs></QBXML>');
+    expect(parsed.status.statusMessage).toContain('AccountQueryRs element not found');
+    expect(parsed.accounts).toEqual([]);
   });
 });

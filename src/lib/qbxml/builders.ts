@@ -10,6 +10,7 @@
 // against previously-recorded bills using TxnID (replaces IIF DOCNUM matching).
 
 import type {
+  AccountQueryRqInput,
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
@@ -193,6 +194,60 @@ export function buildBillAddRq(input: BillAddRqInput): string {
  * See GOTCHAS.md Session 3 for RefNumber length rationale and remaining
  * questions for Aug 9 live testing.
  */
+/** Valid ActiveStatus values per qbXML 13.0 XSD. Used to catch typos at build
+ *  time (QB rejects invalid values with a schema error). */
+const VALID_ACTIVE_STATUS = new Set(['ActiveOnly', 'InactiveOnly', 'All']);
+
+/** Build an <AccountQueryRq> element.
+ *
+ * Enumerates accounts from QB Desktop's chart of accounts for discovery
+ * (bank / A/P / expense account FullNames that plug into other requests).
+ * See types.ts / AccountQueryRqInput for the "why".
+ *
+ * qbXML element ordering inside the iterator branch is STRICT:
+ *
+ *    MaxReturned? → ActiveStatus? → FromModifiedDate? → ToModifiedDate? →
+ *    (NameFilter | NameRangeFilter)? → AccountType* →
+ *    IncludeRetElement* → OwnerID*
+ *
+ * We only expose the fields the discovery use case needs — MaxReturned,
+ * ActiveStatus, AccountType filter. NameFilter and per-field include-list
+ * would go here if a future caller wants finer control.
+ *
+ * Returns EVERY field on AccountRet by default (no IncludeRetElement filter);
+ * ParsedAccountQueryRs surfaces just the header ones we care about, so the
+ * extra bytes are only paid on the wire, not in DB.
+ */
+export function buildAccountQueryRq(input: AccountQueryRqInput = {}): string {
+  if (input.requestId) assertAscii('requestId', input.requestId);
+  if (input.activeStatus && !VALID_ACTIVE_STATUS.has(input.activeStatus)) {
+    throw new Error(
+      `buildAccountQueryRq: activeStatus must be one of ${Array.from(VALID_ACTIVE_STATUS).join(', ')}, ` +
+        `got '${input.activeStatus}'.`,
+    );
+  }
+  if (input.accountTypes) {
+    input.accountTypes.forEach((t, i) => assertAscii(`accountTypes[${i}]`, t));
+  }
+  const attrs = input.requestId
+    ? ` requestID="${xmlEscape(input.requestId)}"`
+    : '';
+  const parts: string[] = [`<AccountQueryRq${attrs}>`];
+  if (input.maxReturned != null) {
+    parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+  }
+  // Default to All when no filter supplied — discovery use case wants inactive
+  // accounts too (historical bills may reference them).
+  parts.push(`  <ActiveStatus>${input.activeStatus ?? 'All'}</ActiveStatus>`);
+  if (input.accountTypes && input.accountTypes.length > 0) {
+    for (const t of input.accountTypes) {
+      parts.push(`  <AccountType>${xmlEscape(t)}</AccountType>`);
+    }
+  }
+  parts.push('</AccountQueryRq>');
+  return parts.join('\n');
+}
+
 export function buildBillPaymentCheckAddRq(
   input: BillPaymentCheckAddRqInput,
 ): string {
