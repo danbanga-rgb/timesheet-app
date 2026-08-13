@@ -1,30 +1,35 @@
 // qbXML batch dry-run — DOES NOT WRITE. Prints the plan for a Convera import_batch_id
-// as (a) bill_query jobs (one per unique invoice_number to fetch missing qb_bill_txn_id),
-// and (b) bill_pmt_add jobs (one per (wire, qb_vendor_name) group).
+// as (a) bill_query jobs (unique per QB bill, populates invoices.qb_bill_txn_id), and
+// (b) bill_pmt_add jobs (one per (wire, qb_vendor_name) with one Application per QB bill).
 //
-// Model — discovered 2026-08-13 from qb_vendors + IIF payment builder + payment_profiles:
+// Model — discovered 2026-08-13 from qb_vendors + IIF bill/payment builders + probe of
+// QB bill 4137C-1784758977 (RefNumber=MULTI-2026-05, Teal Crossroads, $32k):
+//
 //   - payment_profiles.qb_vendor_name is the source of truth for each invoice's QB vendor.
-//   - Umbrella payments group differently per umbrella:
-//       * Bimosoft has per-contractor QB vendors ("Bimosoft - <Name>") → one wire may
-//         yield multiple BillPaymentChecks (one per contractor vendor).
-//       * Teal Crossroads has ONE umbrella QB vendor → all contractor bills roll up to
-//         one BillPaymentCheck.
-//   - Grouping happens after per-invoice vendor lookup, so it's data-driven, not per-umbrella.
+//   - QB bills are grouped by (qb_vendor_name, period_end YYYY-MM) at IIF export time:
+//       * Group size >  1 → one QB bill with RefNumber="MULTI-<YYYY-MM>", N line items,
+//         AmountDue = sum of all lines.
+//       * Group size == 1 → one QB bill with RefNumber=<invoice_number>.
+//     Verified live: 6 Teal Crossroads May 2026 invoices → ONE bill MULTI-2026-05.
+//   - Umbrella wires may fan out across multiple vendors within one Convera confirmation
+//     (e.g. Bimosoft wire → "Bimosoft - Bojan" + "Bimosoft - Edin" as distinct vendors).
+//     Each vendor sub-group emits its own BillPaymentCheck.
 //
 // BillPaymentCheck payload:
 //   - BankAccountRef.FullName = 'BANK/CASH:8220 - Key Point Checking' (all payments direct
 //     from Key Point; bank fees handled by accountant as a separate manual item).
 //   - PayeeEntityRef.FullName = the grouped qb_vendor_name.
-//   - AppliedToTxnAdd[].TxnID = invoices.qb_bill_txn_id (populated by prerequisite bill_query).
-//   - AppliedToTxnAdd[].PaymentAmount = per-invoice share (bridge amount_share OR full invoice
-//     amount if single-matched).
+//   - AppliedToTxnAdd[]: one entry per unique QB bill covered by this wire+vendor combo.
+//     TxnID from prerequisite bill_query; PaymentAmount = SUM of invoice shares that
+//     belong to this QB bill (supports partial-MULTI payment where only some line items
+//     from a MULTI bill are being paid in this batch).
 //   - RefNumber = confirmation_number (max 11 chars).
 //   - Memo = "Convera wire <conf> — <n> bill(s) — <vendor>"
 //   - TxnDate = date_of_order.
 //
 // Dependencies:
-//   - Each bill_pmt_add depends on ALL its constituent invoices' bill_query jobs.
-//   - Same invoice referenced by multiple wires shares one bill_query job.
+//   - Each bill_pmt_add depends on ALL bill_query jobs whose RefNumbers it references.
+//   - Same (vendor, RefNumber) referenced by multiple wires shares one bill_query job.
 //
 // Usage:
 //   SUPABASE_SERVICE_ROLE_KEY=<key> node scripts/one-off/qb-batch-dryrun.cjs [batch_id]
@@ -64,20 +69,41 @@ async function loadBatch(batchId) {
   for (const t of txns) if (t.matched_invoice_id) invIds.add(t.matched_invoice_id);
   for (const b of bridge) if (b.invoice_id) invIds.add(b.invoice_id);
 
-  const { data: invoices, error: e3 } = await supabase
+  const { data: batchInvoices, error: e3 } = await supabase
     .from('invoices')
-    .select('id, user_id, invoice_number, total_amount, currency, payment_profile, qb_bill_txn_id, qb_export_status, status, paid_date')
+    .select('id, user_id, invoice_number, total_amount, currency, period_start, period_end, payment_profile, qb_bill_txn_id, qb_export_status, status, paid_date')
     .in('id', Array.from(invIds));
   if (e3) throw e3;
 
   // Load payment_profiles for LIVE lookup (invoice.payment_profile snapshot may have
   // stale/null qb_vendor_name — see the Aug 2026 pre-batch-15 investigation).
-  const userIds = Array.from(new Set(invoices.map(i => i.user_id)));
   const { data: profiles, error: e4 } = await supabase
     .from('payment_profiles')
     .select('id, user_id, qb_vendor_name, is_default, company_name');
   if (e4) throw e4;
 
+  // Load ALL exported invoices — needed to compute (vendor, month) group sizes
+  // and thus determine whether each batch invoice's QB bill uses RefNumber=<invoice_number>
+  // or RefNumber=MULTI-<YYYY-MM>. See project_qb_web_connector_design; verified via
+  // job 18 probe against MULTI-2026-05 which returned TxnID 4137C-1784758977.
+  //
+  // Paginate: invoices table can exceed the 1000-row default cap.
+  const allExported = [];
+  const INV_PAGE_SIZE = 1000;
+  for (let from = 0; ; from += INV_PAGE_SIZE) {
+    const { data: page, error: eE } = await supabase
+      .from('invoices')
+      .select('id, user_id, invoice_number, period_end, payment_profile, qb_bill_txn_id')
+      .eq('qb_export_status', 'exported')
+      .order('id')
+      .range(from, from + INV_PAGE_SIZE - 1);
+    if (eE) throw eE;
+    if (!page || page.length === 0) break;
+    allExported.push(...page);
+    if (page.length < INV_PAGE_SIZE) break;
+  }
+
+  const userIds = Array.from(new Set(batchInvoices.map(i => i.user_id)));
   const { data: users, error: e5 } = await supabase
     .from('profiles')
     .select('id, name, email')
@@ -87,21 +113,61 @@ async function loadBatch(batchId) {
   // Load qb_vendors for final verification (name must exist in QB).
   // Supabase caps single .select() at 1000 rows — paginate manually since we
   // have 1,165 vendors.
+  const PAGE_SIZE = 1000;
   const qbVendors = [];
-  const PAGE = 1000;
-  for (let from = 0; ; from += PAGE) {
+  for (let from = 0; ; from += PAGE_SIZE) {
     const { data: page, error: e6 } = await supabase
       .from('qb_vendors')
       .select('list_id, name, is_active')
       .order('list_id')
-      .range(from, from + PAGE - 1);
+      .range(from, from + PAGE_SIZE - 1);
     if (e6) throw e6;
     if (!page || page.length === 0) break;
     qbVendors.push(...page);
-    if (page.length < PAGE) break;
+    if (page.length < PAGE_SIZE) break;
   }
 
-  return { txns, bridge, invoices, profiles, users, qbVendors };
+  return { txns, bridge, batchInvoices, allExported, profiles, users, qbVendors };
+}
+
+// ─── Bill grouping ──────────────────────────────────────────────────────────
+//
+// For each exported invoice, determine which QB bill it belongs to. The bill's
+// RefNumber is MULTI-<YYYY-MM> if the (vendor, month) group has >1 exported
+// invoice, else the invoice_number itself. Returns Map<invoice_id, { vendor,
+// refNumber, groupSize }>.
+
+function computeBillIndex(allExported, profiles) {
+  // Step 1: resolve vendor for each exported invoice
+  const invVendor = new Map();  // inv_id → vendor name (or null)
+  const invMonth  = new Map();  // inv_id → period_end YYYY-MM (or null)
+  for (const inv of allExported) {
+    const { name: vendor } = resolveQbVendorName(inv, profiles);
+    invVendor.set(inv.id, vendor);
+    const month = (inv.period_end || '').slice(0, 7);
+    invMonth.set(inv.id, month || null);
+  }
+  // Step 2: count invoices per (vendor, month)
+  const groupCount = new Map();  // "vendor::month" → count
+  for (const inv of allExported) {
+    const vendor = invVendor.get(inv.id);
+    const month = invMonth.get(inv.id);
+    if (!vendor || !month) continue;
+    const key = `${vendor}::${month}`;
+    groupCount.set(key, (groupCount.get(key) || 0) + 1);
+  }
+  // Step 3: assign RefNumber per invoice
+  const billIndex = new Map();  // inv_id → { vendor, refNumber, groupSize }
+  for (const inv of allExported) {
+    const vendor = invVendor.get(inv.id);
+    const month = invMonth.get(inv.id);
+    if (!vendor || !month) { billIndex.set(inv.id, { vendor, refNumber: null, groupSize: 0 }); continue; }
+    const key = `${vendor}::${month}`;
+    const size = groupCount.get(key);
+    const refNumber = size > 1 ? `MULTI-${month}` : inv.invoice_number;
+    billIndex.set(inv.id, { vendor, refNumber, groupSize: size });
+  }
+  return billIndex;
 }
 
 function resolveQbVendorName(invoice, profiles) {
@@ -136,14 +202,26 @@ function resolveQbVendorName(invoice, profiles) {
 // ─── Plan generation ────────────────────────────────────────────────────────
 
 function buildPlan(data) {
-  const { txns, bridge, invoices, profiles, users, qbVendors } = data;
-  const invById = new Map(invoices.map(i => [i.id, i]));
+  const { txns, bridge, batchInvoices, allExported, profiles, users, qbVendors } = data;
+  const invById = new Map(batchInvoices.map(i => [i.id, i]));
   const userById = new Map(users.map(u => [u.id, u]));
   const qbVendorSet = new Set(qbVendors.filter(v => v.is_active).map(v => v.name));
 
+  // Compute bill index from ALL exported invoices, so batch invoices can look up
+  // their QB bill's RefNumber (which may be MULTI-<YYYY-MM> if part of a group).
+  const billIndex = computeBillIndex(allExported, profiles);
+  // Also index by RefNumber for known-txn-id lookup (we already have qb_bill_txn_id
+  // populated on some rows from earlier probes)
+  const knownTxnByBillRef = new Map();  // "vendor::refNumber" → qb_bill_txn_id
+  for (const inv of allExported) {
+    const bi = billIndex.get(inv.id);
+    if (!bi || !bi.refNumber || !inv.qb_bill_txn_id) continue;
+    const key = `${bi.vendor}::${bi.refNumber}`;
+    if (!knownTxnByBillRef.has(key)) knownTxnByBillRef.set(key, inv.qb_bill_txn_id);
+  }
+
   const anomalies = [];
-  const paymentGroups = [];  // { wire: txn, vendorName, invoices: [{ inv, share, user }] }
-  const uniqueInvoiceIds = new Set();  // for bill_query prerequisites
+  const paymentGroups = [];  // { wire, vendorName, bills: Map<refNumber, { items:[{inv, share, user}], knownTxnId }> }
 
   for (const txn of txns) {
     if (txn.matcher_ignore) {
@@ -177,43 +255,52 @@ function buildPlan(data) {
       continue;
     }
 
-    // Resolve QB vendor per invoice; group within this wire by vendor
-    const vendorMap = new Map();  // vendor name → [{ inv, share, user }]
+    // Group items in this wire by (vendor, billRefNumber)
+    // vendorMap: vendor → Map<refNumber, { items: [{inv, share, user}], knownTxnId }>
+    const vendorMap = new Map();
     for (const item of perInvoice) {
-      const { name: vendor, source } = resolveQbVendorName(item.inv, profiles);
-      if (!vendor) {
+      const bi = billIndex.get(item.inv.id);
+      if (!bi || !bi.vendor) {
+        const { source } = resolveQbVendorName(item.inv, profiles);
         anomalies.push({ severity: 'error', txn: txn.id, invoice: item.inv.id, msg: `qb_vendor_name unresolved (source=${source}); wire ${txn.confirmation_number} contractor=${userById.get(item.inv.user_id)?.name}` });
         continue;
       }
-      if (!qbVendorSet.has(vendor)) {
-        anomalies.push({ severity: 'error', txn: txn.id, invoice: item.inv.id, msg: `qb_vendor_name '${vendor}' not found in qb_vendors (active). Rename in QB or update payment_profiles.qb_vendor_name.` });
+      if (!qbVendorSet.has(bi.vendor)) {
+        anomalies.push({ severity: 'error', txn: txn.id, invoice: item.inv.id, msg: `qb_vendor_name '${bi.vendor}' not found in qb_vendors (active).` });
         continue;
       }
-      if (!item.inv.invoice_number) {
-        anomalies.push({ severity: 'error', txn: txn.id, invoice: item.inv.id, msg: `Invoice has no invoice_number` });
+      if (!bi.refNumber) {
+        anomalies.push({ severity: 'error', txn: txn.id, invoice: item.inv.id, msg: `Invoice not part of any exported QB bill (missing invoice_number or period_end)` });
         continue;
       }
       if (item.inv.qb_export_status !== 'exported') {
         anomalies.push({ severity: 'warn', txn: txn.id, invoice: item.inv.id, msg: `Invoice qb_export_status='${item.inv.qb_export_status}' — bill may not exist in QB yet` });
       }
-      uniqueInvoiceIds.add(item.inv.id);
-      if (!vendorMap.has(vendor)) vendorMap.set(vendor, []);
-      vendorMap.get(vendor).push({ inv: item.inv, share: item.share, user: userById.get(item.inv.user_id) });
+      if (!vendorMap.has(bi.vendor)) vendorMap.set(bi.vendor, new Map());
+      const billMap = vendorMap.get(bi.vendor);
+      if (!billMap.has(bi.refNumber)) {
+        billMap.set(bi.refNumber, { items: [], knownTxnId: knownTxnByBillRef.get(`${bi.vendor}::${bi.refNumber}`) || null, groupSize: bi.groupSize });
+      }
+      billMap.get(bi.refNumber).items.push({ inv: item.inv, share: item.share, user: userById.get(item.inv.user_id) });
     }
 
-    for (const [vendorName, items] of vendorMap) {
-      paymentGroups.push({ wire: txn, vendorName, items });
+    for (const [vendorName, billMap] of vendorMap) {
+      paymentGroups.push({ wire: txn, vendorName, bills: billMap });
     }
   }
 
-  // Bill_query prerequisites: one per unique invoice_number (only those with qb_bill_txn_id NULL)
-  const billQueryPlan = [];
-  for (const invId of uniqueInvoiceIds) {
-    const inv = invById.get(invId);
-    if (!inv) continue;
-    if (inv.qb_bill_txn_id) continue;  // already known — no query needed
-    billQueryPlan.push({ invoiceId: inv.id, invoiceNumber: inv.invoice_number });
+  // Deduplicate bill_query jobs by (vendor, refNumber). Only queue ones without known TxnID.
+  const billQuerySet = new Map();  // key "vendor::refNumber" → { vendor, refNumber, dependents: [] }
+  for (const g of paymentGroups) {
+    for (const [refNumber, bill] of g.bills) {
+      if (bill.knownTxnId) continue;  // already known — no query needed
+      const key = `${g.vendorName}::${refNumber}`;
+      if (!billQuerySet.has(key)) {
+        billQuerySet.set(key, { vendor: g.vendorName, refNumber, groupSize: bill.groupSize });
+      }
+    }
   }
+  const billQueryPlan = Array.from(billQuerySet.values());
 
   return { paymentGroups, billQueryPlan, anomalies };
 }
@@ -223,8 +310,26 @@ function buildPlan(data) {
 function fmt$(n) { return `$${Number(n).toFixed(2)}`; }
 
 function printReport(batchId, plan, data) {
-  const { txns, invoices } = data;
+  const { txns } = data;
   const { paymentGroups, billQueryPlan, anomalies } = plan;
+
+  // Aggregations
+  const uniqueInvIds = new Set();
+  const wireTotalPaid = new Map();  // txn_id → sum across all vendor groups + bills
+  const wireGroupCount = new Map(); // txn_id → # vendor groups
+  let grandTotal = 0;
+  for (const g of paymentGroups) {
+    let groupTotal = 0;
+    for (const [, bill] of g.bills) {
+      for (const it of bill.items) {
+        uniqueInvIds.add(it.inv.id);
+        groupTotal += it.share;
+      }
+    }
+    wireTotalPaid.set(g.wire.id, (wireTotalPaid.get(g.wire.id) || 0) + groupTotal);
+    wireGroupCount.set(g.wire.id, (wireGroupCount.get(g.wire.id) || 0) + 1);
+    grandTotal += groupTotal;
+  }
 
   console.log('\n═══════════════════════════════════════════════════════════════════════════');
   console.log(`   qbXML BATCH DRY-RUN — import_batch_id = ${batchId}`);
@@ -233,13 +338,12 @@ function printReport(batchId, plan, data) {
   // ── Summary ──
   console.log('┌─ SUMMARY ─────────────────────────────────────────────────────────────────');
   console.log(`│ Total convera_transactions in batch:  ${txns.length}`);
-  console.log(`│ Unique invoices to be paid:           ${new Set(paymentGroups.flatMap(g => g.items.map(i => i.inv.id))).size}`);
+  console.log(`│ Unique invoices to be paid:           ${uniqueInvIds.size}`);
   console.log(`│ Payment groups (BillPaymentCheck):    ${paymentGroups.length}`);
   console.log(`│ Prerequisite bill_query jobs:         ${billQueryPlan.length}`);
   console.log(`│ Total jobs to enqueue:                ${billQueryPlan.length + paymentGroups.length}`);
   console.log(`│ Anomalies flagged:                    ${anomalies.length}`);
-  const totalDollar = paymentGroups.reduce((s, g) => s + g.items.reduce((ss, i) => ss + i.share, 0), 0);
-  console.log(`│ Sum of payment amounts:               ${fmt$(totalDollar)}`);
+  console.log(`│ Sum of payment amounts:               ${fmt$(grandTotal)}`);
   console.log(`│ BankAccountRef:                       ${BANK_ACCOUNT_FULL_NAME}`);
   console.log('└───────────────────────────────────────────────────────────────────────────\n');
 
@@ -255,28 +359,19 @@ function printReport(batchId, plan, data) {
   }
 
   // ── Bill query plan ──
-  console.log('┌─ BILL_QUERY JOBS (prerequisite — populate invoices.qb_bill_txn_id) ───────');
-  console.log(`│ ${billQueryPlan.length} unique invoice_numbers to query. Each job depends on nothing;`);
-  console.log(`│ payment jobs depend on these. Enqueue all together — WC processes in one session.`);
+  console.log('┌─ BILL_QUERY JOBS (prerequisite — populate qb_bill_txn_id per QB bill) ────');
+  console.log(`│ ${billQueryPlan.length} unique QB bill(s) to query. MULTI-* refs cover N invoices in one QB bill;`);
+  console.log(`│ single-invoice refs cover exactly one. Each payment job depends on the bill_query`);
+  console.log(`│ for the QB bills it references. WC drains all in one session.`);
   console.log('│');
-  console.log('│ RefNumbers to send in BillQueryRq requests:');
-  for (const q of billQueryPlan) {
-    console.log(`│   • inv_id=${q.invoiceId}  →  RefNumber='${q.invoiceNumber}'`);
+  for (let i = 0; i < billQueryPlan.length; i++) {
+    const q = billQueryPlan[i];
+    const multi = q.refNumber.startsWith('MULTI-') ? `  (grouped: ${q.groupSize} line items)` : '';
+    console.log(`│   [${i + 1}] vendor="${q.vendor}"  RefNumber="${q.refNumber}"${multi}`);
   }
   console.log('└───────────────────────────────────────────────────────────────────────────\n');
 
   // ── Payment groups ──
-  // Pre-compute per-wire totals across ALL vendor groups so multi-vendor wires
-  // (e.g. Bimosoft split across Bojan + Edin) reconcile against the wire
-  // subtotal correctly. Per-group sum vs wire is only meaningful when the wire
-  // has ONE vendor group; multi-vendor wires reconcile at the wire level.
-  const wireTotalPaid = new Map();  // txn_id → sum of all shares across all groups
-  const wireGroupCount = new Map(); // txn_id → group count
-  for (const g of paymentGroups) {
-    wireTotalPaid.set(g.wire.id, (wireTotalPaid.get(g.wire.id) || 0) + g.items.reduce((s, it) => s + it.share, 0));
-    wireGroupCount.set(g.wire.id, (wireGroupCount.get(g.wire.id) || 0) + 1);
-  }
-
   console.log('┌─ BILL_PMT_ADD JOBS (one per (wire × vendor) group) ───────────────────────');
   let totalCheck = 0;
   for (let i = 0; i < paymentGroups.length; i++) {
@@ -285,27 +380,35 @@ function printReport(batchId, plan, data) {
     const wireDate = w.date_of_order;
     const conf = w.confirmation_number;
     const refNumberOk = conf.length <= REF_NUMBER_MAX;
-    const sumShare = g.items.reduce((s, it) => s + it.share, 0);
-    totalCheck += sumShare;
+    let groupTotal = 0;
+    for (const [, bill] of g.bills) for (const it of bill.items) groupTotal += it.share;
+    totalCheck += groupTotal;
     const wireTotal = wireTotalPaid.get(w.id);
     const groupsInWire = wireGroupCount.get(w.id);
     const wireReconciled = Math.abs(Number(w.subtotal) - wireTotal) < 0.01;
+    const applicationCount = g.bills.size;
+    const invoiceCount = Array.from(g.bills.values()).reduce((s, b) => s + b.items.length, 0);
+
     console.log(`│`);
     console.log(`│ [${i + 1}/${paymentGroups.length}]  vendor: ${g.vendorName}`);
     console.log(`│        txn_id=${w.id}  wire=${conf}${refNumberOk ? '' : ' ⚠ EXCEEDS 11-CHAR REFNUMBER LIMIT'}  date=${wireDate}`);
-    console.log(`│        Applications (${g.items.length}):`);
-    for (const it of g.items) {
-      const inv = it.inv;
-      const knownTxnId = inv.qb_bill_txn_id || '<await bill_query>';
-      console.log(`│          - ${inv.invoice_number}  (${it.user?.name || '?'})  ${fmt$(it.share)}  bill_txn=${knownTxnId}`);
+    console.log(`│        ${applicationCount} application${applicationCount === 1 ? '' : 's'} covering ${invoiceCount} invoice${invoiceCount === 1 ? '' : 's'}:`);
+    for (const [refNumber, bill] of g.bills) {
+      const billShare = bill.items.reduce((s, it) => s + it.share, 0);
+      const txnIdShown = bill.knownTxnId || '<await bill_query>';
+      const partial = bill.items.length < bill.groupSize ? `  [PARTIAL: paying ${bill.items.length} of ${bill.groupSize} MULTI line items]` : '';
+      console.log(`│          Bill RefNumber="${refNumber}"  TxnID=${txnIdShown}  PaymentAmount=${fmt$(billShare)}${partial}`);
+      for (const it of bill.items) {
+        console.log(`│             ↳ ${it.inv.invoice_number}  (${it.user?.name || '?'})  share=${fmt$(it.share)}  inv_id=${it.inv.id}`);
+      }
     }
-    console.log(`│        Group share: ${fmt$(sumShare)}   Wire subtotal: ${fmt$(w.subtotal)}   Wire total paid (${groupsInWire} group${groupsInWire === 1 ? '' : 's'}): ${fmt$(wireTotal)}${wireReconciled ? ' ✅' : ' ⚠ MISMATCH'}`);
+    console.log(`│        Group share: ${fmt$(groupTotal)}   Wire subtotal: ${fmt$(w.subtotal)}   Wire total paid (${groupsInWire} vendor group${groupsInWire === 1 ? '' : 's'}): ${fmt$(wireTotal)}${wireReconciled ? ' ✅' : ' ⚠ MISMATCH'}`);
     console.log(`│        Payload preview:`);
     console.log(`│          PayeeEntityRef.FullName = "${g.vendorName}"`);
     console.log(`│          BankAccountRef.FullName = "${BANK_ACCOUNT_FULL_NAME}"`);
     console.log(`│          TxnDate = ${wireDate}    RefNumber = "${conf}"`);
-    console.log(`│          Memo = "Convera wire ${conf} — ${g.items.length} bill${g.items.length === 1 ? '' : 's'} — ${g.vendorName}"`);
-    console.log(`│          depends_on = <${g.items.length} bill_query job id${g.items.length === 1 ? '' : 's'}>`);
+    console.log(`│          Memo = "Convera wire ${conf} — ${invoiceCount} invoice${invoiceCount === 1 ? '' : 's'} — ${g.vendorName}"`);
+    console.log(`│          depends_on = <${applicationCount} bill_query job id${applicationCount === 1 ? '' : 's'}>`);
   }
   console.log(`│`);
   console.log(`│ Total across all payment groups: ${fmt$(totalCheck)}`);
@@ -319,7 +422,7 @@ function printReport(batchId, plan, data) {
 (async () => {
   console.log(`Loading batch ${BATCH_ID}...`);
   const data = await loadBatch(BATCH_ID);
-  console.log(`Loaded ${data.txns.length} transactions, ${data.invoices.length} invoices, ${data.profiles.length} payment profiles, ${data.qbVendors.length} qb_vendors.`);
+  console.log(`Loaded ${data.txns.length} transactions, ${data.batchInvoices.length} batch invoices, ${data.allExported.length} exported invoices (for MULTI grouping), ${data.profiles.length} payment profiles, ${data.qbVendors.length} qb_vendors.`);
   const plan = buildPlan(data);
   printReport(BATCH_ID, plan, data);
 })().catch(e => {
