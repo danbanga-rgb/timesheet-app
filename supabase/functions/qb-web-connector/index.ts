@@ -272,23 +272,44 @@ async function validateTicket(
 
 // ─── Session progress ─────────────────────────────────────────────────────────
 
-/** Count of jobs done vs total for the current WC session — used to feed the
- *  int return of receiveResponseXML (0..100 percent complete). We scope by
- *  "jobs older than the session started_at that weren't already done at
- *  session start". Simpler heuristic for MVP: total pending+in_flight+done
- *  where started_at >= session.started_at. */
+/** Return value for receiveResponseXML — governs whether WC continues the
+ *  session (< 100 = more work; WC calls sendRequestXML again) or ends it
+ *  (>= 100 = done; WC calls closeConnection).
+ *
+ *  Prior implementation counted only jobs already dispatched THIS session
+ *  (started_at >= sessionStart). After the first job completed, denominator
+ *  and numerator matched (1/1) → returned 100 → WC closed after one job.
+ *  This bit us on batch 15 (2026-08-13): 29 queries queued, only 1 ran per
+ *  session, throughput reduced to one-job-per-15-min-poll instead of drain-
+ *  in-one-session.
+ *
+ *  New behavior: peek at the queue. If another runnable job exists, return a
+ *  progress signal < 100 so WC keeps the session alive. When nothing runnable
+ *  remains, return 100 to close cleanly. Progress denominator = done +
+ *  remaining, so the number climbs toward 100 as we drain. */
 async function sessionProgress(
   supabase: ReturnType<typeof makeSupabase>,
   sessionStartedAt: string,
 ): Promise<number> {
-  const { data } = await supabase
+  const { data: sessionRows } = await supabase
     .from('qb_sync_jobs')
     .select('status')
     .gte('started_at', sessionStartedAt);
-  const rows = (data || []) as Array<{ status: string }>;
-  if (rows.length === 0) return 100;
+  const rows = (sessionRows || []) as Array<{ status: string }>;
   const done = rows.filter(r => r.status === 'done' || r.status === 'error' || r.status === 'skipped').length;
-  return Math.min(100, Math.round((done / rows.length) * 100));
+
+  // Is there ANY runnable job still pending? nextRunnableJob checks deps.
+  const nextJob = await nextRunnableJob(supabase);
+  if (!nextJob) {
+    // No more work — close the session cleanly.
+    return 100;
+  }
+  // More work waiting — keep session alive. Report progress as if the next
+  // job is one of N remaining, so the number climbs monotonically.
+  const denom = done + 1;
+  const pct = Math.round((done / denom) * 100);
+  // Clamp to 99 to guarantee WC calls sendRequestXML again (100 = close).
+  return Math.min(99, Math.max(0, pct));
 }
 
 // ─── SOAP handlers ────────────────────────────────────────────────────────────
