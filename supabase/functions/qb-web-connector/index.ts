@@ -24,17 +24,20 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 import { wrapQbxmlRequests } from './qbxml/envelope.ts';
 import {
+  buildAccountQueryRq,
   buildBillAddRq,
   buildBillPaymentCheckAddRq,
   buildBillQueryRq,
 } from './qbxml/builders.ts';
 import {
+  parseAccountQueryRs,
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
   parseBillQueryRs,
   unwrapQbxmlResponses,
 } from './qbxml/parsers.ts';
 import type {
+  AccountQueryRqInput,
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
@@ -50,7 +53,7 @@ import {
 
 interface JobRow {
   id: number;
-  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add';
+  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query';
   payload: Record<string, unknown>;
   depends_on: number[] | null;
   status: 'pending' | 'in_flight' | 'done' | 'error' | 'skipped';
@@ -125,6 +128,9 @@ function renderJobRequest(job: JobRow): string {
     case 'bill_pmt_add':
       element = buildBillPaymentCheckAddRq({ ...(job.payload as BillPaymentCheckAddRqInput), requestId });
       break;
+    case 'account_query':
+      element = buildAccountQueryRq({ ...(job.payload as AccountQueryRqInput), requestId });
+      break;
     default:
       throw new Error(`Unknown job kind: ${(job as JobRow).kind}`);
   }
@@ -166,6 +172,32 @@ async function persistJobResponse(
       .from('invoices')
       .update({ qb_bill_txn_id: parsed.result.txnId })
       .eq('invoice_number', parsed.result.refNumber);
+    return { ok: true, errorMsg: null };
+  }
+
+  if (job.kind === 'account_query') {
+    const parsed = parseAccountQueryRs(first);
+    if (parsed.status.statusCode !== '0' && parsed.accounts.length === 0) {
+      return { ok: false, errorMsg: `AccountQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
+    }
+    // Upsert each account into qb_accounts. Primary key = list_id (stable across
+    // renames — QB assigns it on create and never changes it). This is the
+    // authoritative snapshot of the accountant's chart of accounts.
+    if (parsed.accounts.length > 0) {
+      const rows = parsed.accounts.map(a => ({
+        list_id:          a.listId,
+        name:             a.name,
+        full_name:        a.fullName,
+        account_type:     a.accountType,
+        parent_full_name: a.parentFullName,
+        is_active:        a.isActive,
+        synced_at:        new Date().toISOString(),
+      }));
+      const { error } = await supabase.from('qb_accounts').upsert(rows, { onConflict: 'list_id' });
+      if (error) {
+        return { ok: false, errorMsg: `AccountQuery upsert failed: ${error.message}` };
+      }
+    }
     return { ok: true, errorMsg: null };
   }
 
