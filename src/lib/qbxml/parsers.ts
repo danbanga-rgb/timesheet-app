@@ -28,7 +28,9 @@ import type {
   ParsedBillAddRs,
   ParsedBillPaymentCheckAddRs,
   ParsedBillQueryRs,
+  ParsedVendorQueryRs,
   QbxmlResponseStatus,
+  VendorResult,
 } from './types';
 
 // ─── Private helpers ────────────────────────────────────────────────────────
@@ -201,6 +203,37 @@ const ACCOUNTRET_SUBBLOCKS_TO_STRIP = [
   'DataExtRet',
 ];
 
+/** Sub-blocks to strip from a VendorRet BEFORE extracting leaves.
+ *
+ *  VendorAddress / ShipAddress / BillAddress / VendorAddressBlock all contain
+ *  nested address sub-fields (Addr1..Addr5, City, State, PostalCode, Country,
+ *  Note) that would collide with any similarly-named vendor-level leaves.
+ *  ClassRef / VendorTypeRef / TermsRef / SalesTaxCodeRef / CurrencyRef /
+ *  BillingRateRef / PrefillAccountRef all contain <FullName> / <ListID>
+ *  children that would collide with the vendor's own ListID/Name if we
+ *  extracted first-occurrence naively.
+ *
+ *  We extract Name/CompanyName/ListID/IsActive AFTER stripping — the strip
+ *  set is deliberately broad to be safe against future qbXML schema growth. */
+const VENDORRET_SUBBLOCKS_TO_STRIP = [
+  'VendorAddress',
+  'VendorAddressBlock',
+  'ShipAddress',
+  'BillAddress',
+  'ClassRef',
+  'CurrencyRef',
+  'VendorTypeRef',
+  'TermsRef',
+  'SalesTaxCodeRef',
+  'BillingRateRef',
+  'PrefillAccountRef',
+  'AdditionalContactRef',
+  'AdditionalNotesRet',
+  'CustomFieldRet',
+  'DataExtRet',
+  'ContactsRet',
+];
+
 function stripSubBlocks(fragment: string, tags: string[]): string {
   let out = fragment;
   for (const t of tags) out = stripAllOccurrences(out, t);
@@ -331,6 +364,42 @@ export function parseAccountQueryRs(xml: string): ParsedAccountQueryRs {
     });
   }
   return { status, accounts };
+}
+
+/** Parse a `<VendorQueryRs>` response element.
+ *
+ *  Returns one `VendorResult` per `<VendorRet>` block, skipping any block
+ *  missing a required leaf (defensive — should never happen from QB but
+ *  wouldn't lose the entire result set if it did).
+ *
+ *  Zero results is a valid successful state (empty vendor list or
+ *  filter matched nothing). Distinguish from error via `status.statusCode`.
+ */
+export function parseVendorQueryRs(xml: string): ParsedVendorQueryRs {
+  const el = getFirstElement(xml, 'VendorQueryRs');
+  if (!el) {
+    return {
+      status: { statusCode: '', statusSeverity: '', statusMessage: 'VendorQueryRs element not found' },
+      vendors: [],
+    };
+  }
+  const status = readStatus(el.openingTag);
+  const vendors: VendorResult[] = [];
+  for (const block of getAllBlocks(el.inner, 'VendorRet')) {
+    const cleaned = stripSubBlocks(block, VENDORRET_SUBBLOCKS_TO_STRIP);
+    const listId = getLeafText(cleaned, 'ListID');
+    const name = getLeafText(cleaned, 'Name');
+    const companyName = getLeafText(cleaned, 'CompanyName');
+    const isActiveRaw = getLeafText(cleaned, 'IsActive');
+    if (listId == null || name == null) continue;
+    vendors.push({
+      listId,
+      name,
+      companyName: companyName || null,
+      isActive: isActiveRaw === 'true',
+    });
+  }
+  return { status, vendors };
 }
 
 /** Parse a `<BillPaymentCheckAddRs>` response element.

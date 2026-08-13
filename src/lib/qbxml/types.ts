@@ -250,3 +250,50 @@ export interface ParsedBillPaymentCheckAddRs {
   status: QbxmlResponseStatus;
   result: BillPaymentCheckAddResult | null;
 }
+
+/** VendorQueryRq: enumerate vendors from QB Desktop's vendor list.
+ *
+ *  Purpose: golden-copy verification. Before enqueueing a batch of
+ *  BillPaymentCheckAdd requests, we cross-check every payment_profiles
+ *  .qb_vendor_name against this snapshot. Mismatches indicate the accountant
+ *  renamed a vendor in QB without our DB being updated (or vice versa), which
+ *  would cause bill_pmt_add to fail with statusCode=3140 "Object not found"
+ *  or — worst case — silently create a duplicate shadow vendor.
+ *
+ *  Element order in the XSD (iterator branch):
+ *    MaxReturned? → ActiveStatus? → FromModifiedDate? → ToModifiedDate? →
+ *    (NameFilter | NameRangeFilter)? → CurrencyFilter? →
+ *    IncludeRetElement* → OwnerID*
+ *
+ *  We ship the iterator form only — discovery / verification use case. */
+export interface VendorQueryRqInput {
+  /** Iterator: cap results. Default: unbounded (QB returns all). */
+  maxReturned?: number;
+  /** ActiveOnly, InactiveOnly, or All. Default All so historical vendors
+   *  referenced by old bills still resolve. */
+  activeStatus?: 'ActiveOnly' | 'InactiveOnly' | 'All';
+  /** Optional request correlation ID. */
+  requestId?: string;
+}
+
+/** One vendor returned by parseVendorQueryRs. */
+export interface VendorResult {
+  /** QB-assigned unique identifier. Stable across renames. */
+  listId: string;
+  /** Vendor Name — the leaf name that plugs into PayeeEntityRef.FullName
+   *  and VendorRef.FullName. This is what MUST match payment_profiles
+   *  .qb_vendor_name exactly for bill_pmt_add / bill_add to succeed. */
+  name: string;
+  /** CompanyName field on the vendor record — the "as printed" business
+   *  name. Distinct from Name; used for display/reporting, not references. */
+  companyName: string | null;
+  /** True = usable in new transactions. False = archived. */
+  isActive: boolean;
+}
+
+/** Return shape of parseVendorQueryRs. `vendors` is empty when statusCode !== 0
+ *  OR when the filter matched zero rows. */
+export interface ParsedVendorQueryRs {
+  status: QbxmlResponseStatus;
+  vendors: VendorResult[];
+}

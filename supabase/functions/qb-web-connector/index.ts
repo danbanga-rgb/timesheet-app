@@ -28,12 +28,14 @@ import {
   buildBillAddRq,
   buildBillPaymentCheckAddRq,
   buildBillQueryRq,
+  buildVendorQueryRq,
 } from './qbxml/builders.ts';
 import {
   parseAccountQueryRs,
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
   parseBillQueryRs,
+  parseVendorQueryRs,
   unwrapQbxmlResponses,
 } from './qbxml/parsers.ts';
 import type {
@@ -41,6 +43,7 @@ import type {
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
+  VendorQueryRqInput,
 } from './qbxml/types.ts';
 import {
   buildSoapFault,
@@ -53,7 +56,7 @@ import {
 
 interface JobRow {
   id: number;
-  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query';
+  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query';
   payload: Record<string, unknown>;
   depends_on: number[] | null;
   status: 'pending' | 'in_flight' | 'done' | 'error' | 'skipped';
@@ -131,6 +134,9 @@ function renderJobRequest(job: JobRow): string {
     case 'account_query':
       element = buildAccountQueryRq({ ...(job.payload as AccountQueryRqInput), requestId });
       break;
+    case 'vendor_query':
+      element = buildVendorQueryRq({ ...(job.payload as VendorQueryRqInput), requestId });
+      break;
     default:
       throw new Error(`Unknown job kind: ${(job as JobRow).kind}`);
   }
@@ -196,6 +202,32 @@ async function persistJobResponse(
       const { error } = await supabase.from('qb_accounts').upsert(rows, { onConflict: 'list_id' });
       if (error) {
         return { ok: false, errorMsg: `AccountQuery upsert failed: ${error.message}` };
+      }
+    }
+    return { ok: true, errorMsg: null };
+  }
+
+  if (job.kind === 'vendor_query') {
+    const parsed = parseVendorQueryRs(first);
+    if (parsed.status.statusCode !== '0' && parsed.vendors.length === 0) {
+      return { ok: false, errorMsg: `VendorQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
+    }
+    // Upsert each vendor into qb_vendors. Primary key = list_id (stable across
+    // renames — QB assigns it on create and never changes it). Authoritative
+    // snapshot of the accountant's vendor list; consumed by pre-batch verification
+    // (payment_profiles.qb_vendor_name must match a row here before enqueueing
+    // bill_pmt_add / bill_add).
+    if (parsed.vendors.length > 0) {
+      const rows = parsed.vendors.map(v => ({
+        list_id:      v.listId,
+        name:         v.name,
+        company_name: v.companyName,
+        is_active:    v.isActive,
+        synced_at:    new Date().toISOString(),
+      }));
+      const { error } = await supabase.from('qb_vendors').upsert(rows, { onConflict: 'list_id' });
+      if (error) {
+        return { ok: false, errorMsg: `VendorQuery upsert failed: ${error.message}` };
       }
     }
     return { ok: true, errorMsg: null };

@@ -4,6 +4,7 @@ import {
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
   parseBillQueryRs,
+  parseVendorQueryRs,
   unwrapQbxmlResponses,
 } from '../parsers';
 
@@ -530,5 +531,109 @@ describe('parseAccountQueryRs', () => {
     const parsed = parseAccountQueryRs('<QBXML><QBXMLMsgsRs></QBXMLMsgsRs></QBXML>');
     expect(parsed.status.statusMessage).toContain('AccountQueryRs element not found');
     expect(parsed.accounts).toEqual([]);
+  });
+});
+
+// ─── VendorQueryRs ───────────────────────────────────────────────────────────
+
+describe('parseVendorQueryRs', () => {
+  const buildVendorRet = (opts: {
+    listId: string;
+    name: string;
+    companyName?: string | null;
+    isActive?: boolean;
+    withAddress?: boolean;
+  }) => {
+    const parts = ['<VendorRet>'];
+    parts.push(`<ListID>${opts.listId}</ListID>`);
+    parts.push(`<Name>${opts.name}</Name>`);
+    if (opts.companyName !== null && opts.companyName !== undefined) {
+      parts.push(`<CompanyName>${opts.companyName}</CompanyName>`);
+    }
+    parts.push(`<IsActive>${opts.isActive === false ? 'false' : 'true'}</IsActive>`);
+    if (opts.withAddress) {
+      // VendorAddress contains a nested <Note> and address lines that could
+      // trap a naive first-occurrence extractor if we ever added a Note leaf.
+      // Also embeds a nested <Name> to prove the strip clears it.
+      parts.push('<VendorAddress>');
+      parts.push('<Addr1>123 Fake St</Addr1>');
+      parts.push('<City>Nowhere</City>');
+      parts.push('<Name>Nested vendor address name</Name>');
+      parts.push('</VendorAddress>');
+    }
+    parts.push('</VendorRet>');
+    return parts.join('');
+  };
+
+  it('parses multiple VendorRet blocks', () => {
+    const env = [
+      '<VendorQueryRs requestID="v-42" statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      buildVendorRet({ listId: '80000010-1234', name: 'CodeWorks o.d.', companyName: 'CodeWorks o.d.' }),
+      buildVendorRet({ listId: '80000011-5678', name: 'Bosona Agency OU', companyName: 'BOSONA AGENCY OÜ' }),
+      '</VendorQueryRs>',
+    ].join('');
+    const parsed = parseVendorQueryRs(env);
+    expect(parsed.status.statusCode).toBe('0');
+    expect(parsed.status.requestId).toBe('v-42');
+    expect(parsed.vendors).toHaveLength(2);
+    expect(parsed.vendors[0]).toEqual({
+      listId: '80000010-1234',
+      name: 'CodeWorks o.d.',
+      companyName: 'CodeWorks o.d.',
+      isActive: true,
+    });
+    // Company name preserves original non-ASCII chars — this is display-only,
+    // the wire-facing `name` field is what must be ASCII-clean.
+    expect(parsed.vendors[1].companyName).toBe('BOSONA AGENCY OÜ');
+  });
+
+  it('strips VendorAddress before extracting vendor Name (regression guard)', () => {
+    // Nested <Name>Nested vendor address name</Name> inside VendorAddress must
+    // NOT be pulled as the vendor's own Name. Same trap pattern as ParentRef
+    // in AccountRet.
+    const env = [
+      '<VendorQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      buildVendorRet({ listId: 'a', name: 'Real Vendor Name', withAddress: true }),
+      '</VendorQueryRs>',
+    ].join('');
+    const parsed = parseVendorQueryRs(env);
+    expect(parsed.vendors).toHaveLength(1);
+    expect(parsed.vendors[0].name).toBe('Real Vendor Name');
+  });
+
+  it('handles missing CompanyName (nullable field)', () => {
+    const env = [
+      '<VendorQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      buildVendorRet({ listId: 'a', name: 'V', companyName: null }),
+      '</VendorQueryRs>',
+    ].join('');
+    const parsed = parseVendorQueryRs(env);
+    expect(parsed.vendors[0].companyName).toBeNull();
+  });
+
+  it('reports isActive=false correctly', () => {
+    const env = [
+      '<VendorQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      buildVendorRet({ listId: 'a', name: 'Old Vendor', isActive: false }),
+      '</VendorQueryRs>',
+    ].join('');
+    const parsed = parseVendorQueryRs(env);
+    expect(parsed.vendors[0].isActive).toBe(false);
+  });
+
+  it('empty result set on statusCode=0 with no matches', () => {
+    const env = [
+      '<VendorQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
+      '</VendorQueryRs>',
+    ].join('');
+    const parsed = parseVendorQueryRs(env);
+    expect(parsed.status.statusCode).toBe('0');
+    expect(parsed.vendors).toEqual([]);
+  });
+
+  it('surfaces error status when VendorQueryRs is absent', () => {
+    const parsed = parseVendorQueryRs('<QBXML><QBXMLMsgsRs></QBXMLMsgsRs></QBXML>');
+    expect(parsed.status.statusMessage).toContain('VendorQueryRs element not found');
+    expect(parsed.vendors).toEqual([]);
   });
 });

@@ -14,6 +14,7 @@ import type {
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
+  VendorQueryRqInput,
 } from './types';
 import { assertAscii, xmlEscape } from './envelope';
 import { DEFAULT_AP_ACCOUNT, DEFAULT_EXPENSE_ACCOUNT } from './constants';
@@ -245,6 +246,45 @@ export function buildAccountQueryRq(input: AccountQueryRqInput = {}): string {
     }
   }
   parts.push('</AccountQueryRq>');
+  return parts.join('\n');
+}
+
+/** Build a <VendorQueryRq> element.
+ *
+ * Enumerates vendors from QB Desktop's vendor list. Purpose: pre-batch
+ * verification that every payment_profiles.qb_vendor_name we're about to
+ * reference in bill_pmt_add / bill_add actually exists in QB — catches drift
+ * from accountant renames and prevents statusCode=3140 "Object not found"
+ * mid-batch failures. See types.ts / VendorQueryRqInput for full rationale.
+ *
+ * qbXML element ordering inside the iterator branch:
+ *
+ *    MaxReturned? → ActiveStatus? → FromModifiedDate? → ToModifiedDate? →
+ *    (NameFilter | NameRangeFilter)? → CurrencyFilter? →
+ *    IncludeRetElement* → OwnerID*
+ *
+ * We expose only MaxReturned + ActiveStatus. Name filters and per-field
+ * include-lists would go here if a future caller needs finer control.
+ * Returns EVERY field on VendorRet by default; ParsedVendorQueryRs surfaces
+ * just Name/CompanyName/IsActive/ListID.
+ */
+export function buildVendorQueryRq(input: VendorQueryRqInput = {}): string {
+  if (input.requestId) assertAscii('requestId', input.requestId);
+  if (input.activeStatus && !VALID_ACTIVE_STATUS.has(input.activeStatus)) {
+    throw new Error(
+      `buildVendorQueryRq: activeStatus must be one of ${Array.from(VALID_ACTIVE_STATUS).join(', ')}, ` +
+        `got '${input.activeStatus}'.`,
+    );
+  }
+  const attrs = input.requestId
+    ? ` requestID="${xmlEscape(input.requestId)}"`
+    : '';
+  const parts: string[] = [`<VendorQueryRq${attrs}>`];
+  if (input.maxReturned != null) {
+    parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+  }
+  parts.push(`  <ActiveStatus>${input.activeStatus ?? 'All'}</ActiveStatus>`);
+  parts.push('</VendorQueryRq>');
   return parts.join('\n');
 }
 

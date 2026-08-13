@@ -4,6 +4,7 @@ import {
   buildBillAddRq,
   buildBillPaymentCheckAddRq,
   buildBillQueryRq,
+  buildVendorQueryRq,
 } from '../builders';
 import { wrapQbxmlRequests, xmlEscape } from '../envelope';
 import {
@@ -711,6 +712,44 @@ describe('buildAccountQueryRq', () => {
   it('assertAscii applies to filter values', () => {
     expect(() =>
       buildAccountQueryRq({ accountTypes: ['Baünk'] }),
+    ).toThrow(/non-ASCII/);
+  });
+});
+
+describe('buildVendorQueryRq', () => {
+  it('emits the minimum request (defaults ActiveStatus=All)', () => {
+    const out = buildVendorQueryRq();
+    expect(out).toBe(
+      [
+        '<VendorQueryRq>',
+        '  <ActiveStatus>All</ActiveStatus>',
+        '</VendorQueryRq>',
+      ].join('\n'),
+    );
+  });
+
+  it('emits filters in the required XSD order (MaxReturned → ActiveStatus)', () => {
+    const out = buildVendorQueryRq({
+      maxReturned: 500,
+      activeStatus: 'ActiveOnly',
+      requestId: 'v-1',
+    });
+    const lines = out.split('\n');
+    expect(lines[0]).toBe('<VendorQueryRq requestID="v-1">');
+    expect(lines[1]).toBe('  <MaxReturned>500</MaxReturned>');
+    expect(lines[2]).toBe('  <ActiveStatus>ActiveOnly</ActiveStatus>');
+    expect(lines[3]).toBe('</VendorQueryRq>');
+  });
+
+  it('rejects invalid ActiveStatus at build time', () => {
+    expect(() =>
+      buildVendorQueryRq({ activeStatus: 'Active' as unknown as 'ActiveOnly' }),
+    ).toThrow(/activeStatus/);
+  });
+
+  it('assertAscii applies to requestId', () => {
+    expect(() =>
+      buildVendorQueryRq({ requestId: 'v-ü' }),
     ).toThrow(/non-ASCII/);
   });
 });
