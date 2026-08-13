@@ -95,10 +95,13 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
     }
     if (input.entityVendorName) {
       assertAscii('entityVendorName', input.entityVendorName);
+      // EntityFilter's direct children per qbXML XSD are the choice group
+      //   (ListID+ | FullName+ | ListIDWithChildren | FullNameWithChildren)
+      // NOT wrapped in a list container (that's how EntityRef differs from
+      // EntityFilter — first attempt used ListName wrapper which QB rejected
+      // with hresult=0x80040400).
       parts.push('  <EntityFilter>');
-      parts.push('    <FullNameList>');
-      parts.push(`      <FullName>${xmlEscape(input.entityVendorName)}</FullName>`);
-      parts.push('    </FullNameList>');
+      parts.push(`    <FullName>${xmlEscape(input.entityVendorName)}</FullName>`);
       parts.push('  </EntityFilter>');
     }
     if (input.maxReturned != null) {
