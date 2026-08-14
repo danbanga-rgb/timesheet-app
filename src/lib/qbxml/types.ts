@@ -21,6 +21,10 @@ export interface BillQueryResult {
   refNumber: string;
   txnId: string;
   editSequence: string;
+  /** VendorRef.FullName from the BillRet. Needed to persist TxnIDs for MULTI-YYYY-MM
+   *  grouped bills, where refNumber alone doesn't identify the target invoices —
+   *  every invoice for that vendor in that period_end month shares the same bill. */
+  vendorFullName?: string;
 }
 
 /** BillAddRq: create a Vendor Bill in QB.

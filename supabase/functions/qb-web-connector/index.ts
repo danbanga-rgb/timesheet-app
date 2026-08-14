@@ -158,12 +158,36 @@ async function persistJobResponse(
     if (parsed.status.statusCode !== '0' && parsed.results.length === 0) {
       return { ok: false, errorMsg: `BillQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Persist TxnID by RefNumber → invoices.qb_bill_txn_id
+    // Persist TxnID → invoices.qb_bill_txn_id.
+    //   MULTI-YYYY-MM RefNumber: no invoice literally matches that number; the bill covers
+    //   every invoice for that vendor whose period_end falls in that month. Fan out the
+    //   TxnID to all of them (identified via payment_profiles.qb_vendor_name → user_id).
+    //   Direct RefNumber: matches invoice_number 1:1 (typical single-invoice bill).
     for (const r of parsed.results) {
-      await supabase
-        .from('invoices')
-        .update({ qb_bill_txn_id: r.txnId })
-        .eq('invoice_number', r.refNumber);
+      const multi = /^MULTI-(\d{4})-(\d{2})$/.exec(r.refNumber);
+      if (multi && r.vendorFullName) {
+        const [, y, m] = multi;
+        const first = `${y}-${m}-01`;
+        const last  = new Date(Number(y), Number(m), 0).toISOString().slice(0, 10);
+        const { data: pps } = await supabase
+          .from('payment_profiles')
+          .select('user_id')
+          .eq('qb_vendor_name', r.vendorFullName);
+        const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
+        if (userIds.length > 0) {
+          await supabase
+            .from('invoices')
+            .update({ qb_bill_txn_id: r.txnId })
+            .in('user_id', userIds)
+            .gte('period_end', first)
+            .lte('period_end', last);
+        }
+      } else {
+        await supabase
+          .from('invoices')
+          .update({ qb_bill_txn_id: r.txnId })
+          .eq('invoice_number', r.refNumber);
+      }
     }
     return { ok: true, errorMsg: null };
   }

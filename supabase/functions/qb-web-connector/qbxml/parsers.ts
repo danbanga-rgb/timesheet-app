@@ -288,8 +288,17 @@ export function parseBillQueryRs(xml: string): ParsedBillQueryRs {
     const txnId = getLeafText(cleaned, 'TxnID');
     const editSequence = getLeafText(cleaned, 'EditSequence');
     const refNumber = getLeafText(cleaned, 'RefNumber');
+    // Pull VendorRef.FullName from the ORIGINAL block (VendorRef is stripped in `cleaned`
+    // to avoid FullName collisions; we need it back for MULTI-YYYY-MM persist logic).
+    const vendorRefBlock = getAllBlocks(block, 'VendorRef')[0];
+    const vendorFullName = vendorRefBlock ? getLeafText(vendorRefBlock, 'FullName') : null;
     if (txnId != null && editSequence != null && refNumber != null) {
-      results.push({ txnId, editSequence, refNumber });
+      results.push({
+        txnId,
+        editSequence,
+        refNumber,
+        ...(vendorFullName != null ? { vendorFullName } : {}),
+      });
     }
   }
   return { status, results };
