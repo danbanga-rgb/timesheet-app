@@ -45,6 +45,7 @@ import type {
   BillQueryRqInput,
   VendorQueryRqInput,
 } from './qbxml/types.ts';
+import { validatePayload } from './qbxml/job-payloads.ts';
 import {
   buildSoapFault,
   buildSoapResponse,
@@ -150,6 +151,15 @@ async function persistJobResponse(
   responseXml: string,
   supabase: ReturnType<typeof makeSupabase>,
 ): Promise<{ ok: boolean; errorMsg: string | null }> {
+  // Fail-fast payload contract check. If enqueue script drift removed a key
+  // this branch depends on, catch here with a specific "missing X" error
+  // instead of silently no-op'ing downstream. Kinds with no required keys
+  // (account_query, vendor_query) pass through cleanly.
+  const pv = validatePayload(job.kind, job.payload);
+  if (!pv.ok) {
+    return { ok: false, errorMsg: `Payload contract violation on ${job.kind}: missing required key(s) [${pv.missing.join(', ')}]. Check the enqueue script for drift from src/lib/qbxml/job-payloads.ts.` };
+  }
+
   const fragments = unwrapQbxmlResponses(responseXml);
   const first = fragments[0] ?? responseXml;
 
@@ -180,7 +190,12 @@ async function persistJobResponse(
         .select('user_id')
         .eq('qb_vendor_name', r.vendorFullName);
       const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
-      if (userIds.length === 0) continue; // vendor unmapped — no invoices to touch
+      if (userIds.length === 0) {
+        // QB has a bill for a vendor we can't map to any payment_profile. Data drift —
+        // fail-fast so a human notices instead of silent no-op. Fix: add the vendor
+        // mapping (payment_profiles.qb_vendor_name = "<QB name>") then rerun.
+        return { ok: false, errorMsg: `BillQuery persist: no payment_profile.qb_vendor_name matches "${r.vendorFullName}" (refNumber=${r.refNumber})` };
+      }
       const multi = /^MULTI-(\d{4})-(\d{2})$/.exec(r.refNumber);
       let update = supabase
         .from('invoices')
@@ -194,7 +209,14 @@ async function persistJobResponse(
       } else {
         update = update.eq('invoice_number', r.refNumber);
       }
-      await update;
+      // Fail-fast: chain .select() so we can inspect affected rows. 0 rows = drift.
+      const { data: updated, error: updErr } = await update.select('id');
+      if (updErr) {
+        return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${updErr.message}` };
+      }
+      if (!updated || updated.length === 0) {
+        return { ok: false, errorMsg: `BillQuery persist: 0 rows updated for vendor="${r.vendorFullName}" refNumber="${r.refNumber}". Invoice(s) may have been deleted/renumbered after enqueue.` };
+      }
     }
     return { ok: true, errorMsg: null };
   }
@@ -215,12 +237,23 @@ async function persistJobResponse(
       .select('user_id')
       .eq('qb_vendor_name', vendorName);
     const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
-    if (userIds.length > 0) {
-      await supabase
-        .from('invoices')
-        .update({ qb_bill_txn_id: parsed.result.txnId, qb_export_status: 'exported' })
-        .in('user_id', userIds)
-        .eq('invoice_number', parsed.result.refNumber);
+    if (userIds.length === 0) {
+      // Bill successfully created in QB but our DB has no mapping for the vendor —
+      // silent orphan. Fail-fast: the QB bill exists (with TxnID `parsed.result.txnId`)
+      // but we can't attribute it. Human must add the mapping and manually re-link.
+      return { ok: false, errorMsg: `BillAdd persist: no payment_profile.qb_vendor_name matches "${vendorName}". QB bill created (TxnID=${parsed.result.txnId}) but not linked to any invoice.` };
+    }
+    const { data: updated, error: updErr } = await supabase
+      .from('invoices')
+      .update({ qb_bill_txn_id: parsed.result.txnId, qb_export_status: 'exported' })
+      .in('user_id', userIds)
+      .eq('invoice_number', parsed.result.refNumber)
+      .select('id');
+    if (updErr) {
+      return { ok: false, errorMsg: `BillAdd persist DB error for vendor="${vendorName}" refNumber="${parsed.result.refNumber}": ${updErr.message}` };
+    }
+    if (!updated || updated.length === 0) {
+      return { ok: false, errorMsg: `BillAdd persist: 0 rows updated for vendor="${vendorName}" refNumber="${parsed.result.refNumber}". QB bill was created (TxnID=${parsed.result.txnId}) but our invoice can't be found — was it renumbered or deleted after enqueue?` };
     }
     return { ok: true, errorMsg: null };
   }
@@ -288,11 +321,21 @@ async function persistJobResponse(
     // updated every row for that wire — wrong for multi-vendor wires. Discovered
     // 2026-08-14 after batch 17 payments were re-enqueued as duplicates.
     const sourceTxnId = (job.payload as { sourceConveraTxnId?: number }).sourceConveraTxnId;
-    if (sourceTxnId != null) {
-      await supabase
-        .from('convera_transactions')
-        .update({ qb_billpmt_txn_id: parsed.result.txnId })
-        .eq('id', sourceTxnId);
+    if (sourceTxnId == null) {
+      // Payment succeeded in QB but we can't attribute it back to a source convera_transaction.
+      // Fail-fast so a human handles the orphan.
+      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing sourceConveraTxnId. QB payment created (TxnID=${parsed.result.txnId}) but not linked to any convera_transaction row.` };
+    }
+    const { data: updated, error: updErr } = await supabase
+      .from('convera_transactions')
+      .update({ qb_billpmt_txn_id: parsed.result.txnId })
+      .eq('id', sourceTxnId)
+      .select('id');
+    if (updErr) {
+      return { ok: false, errorMsg: `BillPaymentCheckAdd persist DB error for sourceConveraTxnId=${sourceTxnId}: ${updErr.message}` };
+    }
+    if (!updated || updated.length === 0) {
+      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: 0 rows updated for sourceConveraTxnId=${sourceTxnId}. QB payment was created (TxnID=${parsed.result.txnId}) but source convera_transaction not found — was it deleted after enqueue?` };
     }
     return { ok: true, errorMsg: null };
   }
