@@ -159,35 +159,42 @@ async function persistJobResponse(
       return { ok: false, errorMsg: `BillQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
     // Persist TxnID → invoices.qb_bill_txn_id.
-    //   MULTI-YYYY-MM RefNumber: no invoice literally matches that number; the bill covers
-    //   every invoice for that vendor whose period_end falls in that month. Fan out the
-    //   TxnID to all of them (identified via payment_profiles.qb_vendor_name → user_id).
-    //   Direct RefNumber: matches invoice_number 1:1 (typical single-invoice bill).
+    //   All persist paths must key on (vendor, refNumber) — never refNumber alone —
+    //   because Croatian contractors routinely share invoice numbers ("INV 7-1-1",
+    //   "INV 04/26", "INV 20260701"). Vendor-blind updates cross-pollute TxnIDs
+    //   between contractors. Discovered 2026-08-13 on batch 15 for payments; found
+    //   again 2026-08-14 in this same persist path for bills.
+    //
+    //   MULTI-YYYY-MM RefNumber: no invoice literally matches that number; the bill
+    //   covers every invoice for that vendor whose period_end falls in that month.
+    //   Fan out via payment_profiles.qb_vendor_name → user_id.
+    //   Direct RefNumber: matches invoice_number 1:1 for that vendor's invoices only.
     for (const r of parsed.results) {
+      if (!r.vendorFullName) {
+        // Without vendor we can't disambiguate — fail loudly rather than silently
+        // overwrite the wrong contractor's TxnID.
+        return { ok: false, errorMsg: `BillQuery response missing VendorRef.FullName for refNumber=${r.refNumber}` };
+      }
+      const { data: pps } = await supabase
+        .from('payment_profiles')
+        .select('user_id')
+        .eq('qb_vendor_name', r.vendorFullName);
+      const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
+      if (userIds.length === 0) continue; // vendor unmapped — no invoices to touch
       const multi = /^MULTI-(\d{4})-(\d{2})$/.exec(r.refNumber);
-      if (multi && r.vendorFullName) {
+      let update = supabase
+        .from('invoices')
+        .update({ qb_bill_txn_id: r.txnId })
+        .in('user_id', userIds);
+      if (multi) {
         const [, y, m] = multi;
         const first = `${y}-${m}-01`;
         const last  = new Date(Number(y), Number(m), 0).toISOString().slice(0, 10);
-        const { data: pps } = await supabase
-          .from('payment_profiles')
-          .select('user_id')
-          .eq('qb_vendor_name', r.vendorFullName);
-        const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
-        if (userIds.length > 0) {
-          await supabase
-            .from('invoices')
-            .update({ qb_bill_txn_id: r.txnId })
-            .in('user_id', userIds)
-            .gte('period_end', first)
-            .lte('period_end', last);
-        }
+        update = update.gte('period_end', first).lte('period_end', last);
       } else {
-        await supabase
-          .from('invoices')
-          .update({ qb_bill_txn_id: r.txnId })
-          .eq('invoice_number', r.refNumber);
+        update = update.eq('invoice_number', r.refNumber);
       }
+      await update;
     }
     return { ok: true, errorMsg: null };
   }
@@ -197,11 +204,24 @@ async function persistJobResponse(
     if (!parsed.result) {
       return { ok: false, errorMsg: `BillAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Persist TxnID by refNumber → invoices.qb_bill_txn_id
-    await supabase
-      .from('invoices')
-      .update({ qb_bill_txn_id: parsed.result.txnId })
-      .eq('invoice_number', parsed.result.refNumber);
+    // Persist TxnID scoped by (vendor, refNumber) — vendorName is baked into the payload.
+    // Same cross-vendor-collision reasoning as bill_query above.
+    const vendorName = (job.payload as { vendorName?: string }).vendorName;
+    if (!vendorName) {
+      return { ok: false, errorMsg: `BillAdd payload missing vendorName; cannot safely persist TxnID for refNumber=${parsed.result.refNumber}` };
+    }
+    const { data: pps } = await supabase
+      .from('payment_profiles')
+      .select('user_id')
+      .eq('qb_vendor_name', vendorName);
+    const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
+    if (userIds.length > 0) {
+      await supabase
+        .from('invoices')
+        .update({ qb_bill_txn_id: parsed.result.txnId, qb_export_status: 'exported' })
+        .in('user_id', userIds)
+        .eq('invoice_number', parsed.result.refNumber);
+    }
     return { ok: true, errorMsg: null };
   }
 
@@ -262,13 +282,17 @@ async function persistJobResponse(
     if (!parsed.result) {
       return { ok: false, errorMsg: `BillPaymentCheckAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Persist to convera_transactions.qb_billpmt_txn_id by payload's confirmation_number
-    const conf = (job.payload as { confirmationNumber?: string }).confirmationNumber;
-    if (conf) {
+    // Persist to convera_transactions.qb_billpmt_txn_id by the source convera_transaction id
+    // baked into the payload at enqueue time. Prior version keyed on confirmation_number
+    // which (a) referenced a field the enqueue script doesn't set, and (b) would have
+    // updated every row for that wire — wrong for multi-vendor wires. Discovered
+    // 2026-08-14 after batch 17 payments were re-enqueued as duplicates.
+    const sourceTxnId = (job.payload as { sourceConveraTxnId?: number }).sourceConveraTxnId;
+    if (sourceTxnId != null) {
       await supabase
         .from('convera_transactions')
         .update({ qb_billpmt_txn_id: parsed.result.txnId })
-        .eq('confirmation_number', conf);
+        .eq('id', sourceTxnId);
     }
     return { ok: true, errorMsg: null };
   }

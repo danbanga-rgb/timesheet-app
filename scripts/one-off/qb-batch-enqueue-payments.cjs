@@ -32,6 +32,19 @@ function resolveQbVendorName(invoice, profiles) {
   return { name: null };
 }
 
+// Decode common XML entities QB Xerces emits. Vendor names with quotes (e.g.
+// `Obrtnicka djelatnost "ENCODE"vl. Enis Ba`) come back with `&quot;` in the
+// response XML. Our DB's payment_profiles.qb_vendor_name has real quotes, so
+// map keys must match after decoding. Bit us 2026-08-14 (5 stragglers on batch 17).
+function decodeXmlEntities(s) {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
 // Extract TxnIDs from a bill_query response XML, indexed by VendorRef.FullName.
 // Multiple bills can share a RefNumber across different vendors (e.g. "INV 03/26"
 // exists for BIT-IO AND Zex Network) — this bit us on the 2026-08-13 batch 15
@@ -44,8 +57,9 @@ function extractTxnIdsFromResponseByVendor(xml) {
   for (const b of billRets) {
     const txnMatch = b.match(/<TxnID>([^<]+)<\/TxnID>/);
     const vendorMatch = b.match(/<VendorRef>[\s\S]*?<FullName>([^<]+)<\/FullName>/);
-    if (txnMatch && vendorMatch && !out.has(vendorMatch[1])) {
-      out.set(vendorMatch[1], txnMatch[1]);
+    if (txnMatch && vendorMatch) {
+      const vendor = decodeXmlEntities(vendorMatch[1]);
+      if (!out.has(vendor)) out.set(vendor, txnMatch[1]);
     }
   }
   return out;
@@ -139,12 +153,11 @@ function extractTxnIdsFromResponseByVendor(xml) {
       const bi = billIndex.get(item.inv.id);
       if (!bi || !bi.vendor || !bi.refNumber) continue;
       const cached = refToTxnId.get(`${bi.vendor}::${bi.refNumber}`);
-      // Fall back to invoices.qb_bill_txn_id if the response-map lookup missed.
-      // The response-based map re-parses raw XML and can miss due to HTML-entity
-      // escaping (e.g. QB's <FullName>Obrtnicka djelatnost &quot;ENCODE &quot;vl. Enis Ba</FullName>
-      // vs our DB's qb_vendor_name with real double quotes). invoices.qb_bill_txn_id
-      // is already the persisted result of prior bill_query runs and is safe to trust.
-      const txnId = cached?.txnId || item.inv.qb_bill_txn_id || null;
+      // Response map now decodes XML entities in vendor names — no fallback needed.
+      // (Prior fallback to invoices.qb_bill_txn_id was UNSAFE: that DB value could
+      // hold a cross-vendor collision from the pre-vendor-scoped persist bug, and
+      // silently paying the wrong bill would be worse than erroring out.)
+      const txnId = cached?.txnId || null;
       const jobId = cached?.jobId || null;
       if (!txnId) {
         missingTxnIds.push({ vendor: bi.vendor, refNumber: bi.refNumber, invoiceId: item.inv.id });
@@ -192,6 +205,10 @@ function extractTxnIdsFromResponseByVendor(xml) {
         bankAccountName: BANK_ACCOUNT_FULL_NAME,
         txnDate: g.wire.date_of_order,
         refNumber: g.wire.confirmation_number,
+        // Source convera_transaction id — used by the edge fn to persist qb_billpmt_txn_id
+        // back to the specific row after the payment succeeds. Without this, the persist
+        // step no-ops and re-enqueues will produce duplicate payments (2026-08-14 incident).
+        sourceConveraTxnId: g.wire.id,
         // NOTE: use ASCII hyphens, not em-dashes. project_qbxml_ascii_rule.
         memo: `Convera wire ${g.wire.confirmation_number} - ${invoiceCount} invoice${invoiceCount === 1 ? '' : 's'} - ${g.vendorName}`,
         applications: Array.from(g.bills.entries()).map(([refNumber, bill]) => ({
