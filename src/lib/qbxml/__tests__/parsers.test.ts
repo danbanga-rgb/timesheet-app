@@ -173,6 +173,25 @@ describe('parseBillQueryRs', () => {
     expect(parsed.results[0].refNumber).not.toBe('OTR6607568');
   });
 
+  it('extracts VendorRef.FullName when present (MULTI-YYYY-MM persist depends on this)', () => {
+    const env = wrap(buildBillRet({
+      txnId: '412A0-1784756817',
+      editSeq: '1784756817',
+      refNumber: 'MULTI-2026-06',
+      withVendor: 'Teal Crossroads',
+    }));
+    const parsed = parseBillQueryRs(env);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].vendorFullName).toBe('Teal Crossroads');
+    expect(parsed.results[0].refNumber).toBe('MULTI-2026-06');
+  });
+
+  it('vendorFullName is omitted when VendorRef is absent (single-invoice bills)', () => {
+    const env = wrap(buildBillRet({ txnId: 'T', editSeq: 'E', refNumber: 'INV 42' }));
+    const parsed = parseBillQueryRs(env);
+    expect(parsed.results[0]).not.toHaveProperty('vendorFullName');
+  });
+
   it('returns [] on zero-match success', () => {
     const env = wrap('', 'statusCode="0" statusSeverity="Info" statusMessage="Status OK"');
     const parsed = parseBillQueryRs(env);
