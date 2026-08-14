@@ -1080,8 +1080,20 @@ const TimesheetSystem = () => {
   const [showProcessPreview, setShowProcessPreview] = useState(false);
   // Staged edits (transient — only committed to DB on Process): map txn id → chosen invoice id(s) or 'no_invoice'
   const [stagedMatches, setStagedMatches] = useState<Record<number, number[] | 'no_invoice'>>({});
+  // Notes edited in-place per row (saves directly to convera_transactions.notes on blur;
+  // not staged through Process — notes are metadata, no downstream effect on invoices).
+  const [notesDrafts, setNotesDrafts] = useState<Record<number, string>>({});
   // Which transaction row currently has the "+ Add invoice" picker open (single popover at a time)
   const [addInvoicePickerFor, setAddInvoicePickerFor] = useState<number | null>(null);
+  // Search text for the "+ Add invoice" dropdown. Global (only one picker open at a time
+  // per addInvoicePickerFor). Reset on each open. Filters candidate list by userName +
+  // invoiceNumber substring — helps with beneficiaries like Bimosoft that have many months
+  // of invoices across multiple contractors.
+  const [addInvoicePickerSearch, setAddInvoicePickerSearch] = useState<string>('');
+  // Disables the Confirm & Process button while handleProcess is running to prevent
+  // double-click, and gives clear visual feedback so the UI doesn't look frozen during
+  // the 5-15s of sequential DB updates.
+  const [processCommitting, setProcessCommitting] = useState<boolean>(false);
   const [paymentsImportSummary, setPaymentsImportSummary] = useState<{
     newCount: number;
     refreshedCount: number;
@@ -3913,6 +3925,9 @@ const TimesheetSystem = () => {
   const handleProcess = async () => {
     const stagedIds = Object.keys(stagedMatches).map(Number);
     if (!stagedIds.length) return;
+    if (processCommitting) return;
+    setProcessCommitting(true);
+    try {
     const now = new Date().toISOString();
     const actor = currentUser?.name || 'unknown';
 
@@ -4023,6 +4038,9 @@ const TimesheetSystem = () => {
       await fetchInvoices();
     } catch (e: unknown) {
       alert(`Process failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+    } finally {
+      setProcessCommitting(false);
     }
   };
 
@@ -8542,7 +8560,10 @@ const TimesheetSystem = () => {
             if (paymentsStateFilter === 'processed') {
               rows = rows.filter(t => { const s = effStateOf(t); return s === 'matched' || s === 'no_invoice'; });
             } else if (paymentsStateFilter !== 'all') {
-              rows = rows.filter(t => effStateOf(t) === paymentsStateFilter);
+              // Keep staged rows visible in their original pill even after the stage
+              // pushes them into a different effective state — otherwise the accountant
+              // stages a match and the row vanishes mid-workflow.
+              rows = rows.filter(t => t.matchState === paymentsStateFilter || stagedMatches[t.id] !== undefined);
             }
             const historicalCount = converaTransactions.filter(t => t.matcherIgnore).length;
 
@@ -8931,6 +8952,16 @@ const TimesheetSystem = () => {
                             return Array.isArray(effMatch) ? effMatch : [];
                           };
 
+                          // Stacked-chip delta: helps accountant see whether picked invoices sum to the payment.
+                          // Small deltas (≤ $50) are typically per-wire fees Convera passes through — treated as OK.
+                          const selectedSum = selectedInvs.reduce((s, inv) => s + inv.totalAmount, 0);
+                          const payAmount = t.foreignAmount ?? 0;
+                          const delta = selectedSum - payAmount;
+                          const deltaAbs = Math.abs(delta);
+                          const deltaOk = deltaAbs <= 50;
+                          const showDelta = selectedInvs.length > 0;
+                          const fmt$ = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
                           // Match cell content
                           const matchCell = editable ? (
                             effMatch === 'no_invoice' ? (
@@ -8969,6 +9000,17 @@ const TimesheetSystem = () => {
                                     ))}
                                   </div>
                                 )}
+                                {showDelta && (
+                                  <div className={`text-xs px-2 py-0.5 rounded inline-flex items-center gap-1.5 ${deltaOk ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
+                                    <span>Selected <strong>${fmt$(selectedSum)}</strong> vs Payment <strong>${fmt$(payAmount)}</strong></span>
+                                    <span className="opacity-80">·</span>
+                                    <span>
+                                      {delta === 0 ? 'exact match'
+                                        : delta > 0 ? `over by $${fmt$(deltaAbs)}${deltaOk ? ' (within fee tolerance)' : ''}`
+                                        : `short by $${fmt$(deltaAbs)}${deltaOk ? ' (likely wire fee)' : ''}`}
+                                    </span>
+                                  </div>
+                                )}
                                 <div className="flex items-center gap-3 relative">
                                   {(() => {
                                     const sameAvailable  = cands.same.filter(inv => !selectedIds.includes(inv.id));
@@ -9000,37 +9042,67 @@ const TimesheetSystem = () => {
                                         </button>
                                       );
                                     };
+                                    const q = addInvoicePickerSearch.trim().toLowerCase();
+                                    const matchesQ = (inv: Invoice) =>
+                                      !q
+                                      || inv.userName.toLowerCase().includes(q)
+                                      || inv.invoiceNumber.toLowerCase().includes(q)
+                                      || String(inv.totalAmount).includes(q);
+                                    const sameFiltered  = sameAvailable.filter(matchesQ);
+                                    const widerFiltered = widerAvailable.filter(matchesQ);
                                     return (
                                       <>
                                         <button
-                                          onClick={() => setAddInvoicePickerFor(addInvoicePickerFor === t.id ? null : t.id)}
+                                          onClick={() => {
+                                            const opening = addInvoicePickerFor !== t.id;
+                                            setAddInvoicePickerFor(opening ? t.id : null);
+                                            if (opening) setAddInvoicePickerSearch('');
+                                          }}
                                           className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
                                         >
                                           + Add invoice ▾
                                         </button>
                                         {addInvoicePickerFor === t.id && (
-                                          <div className="absolute left-0 top-6 z-20 bg-white border border-gray-300 rounded shadow-lg max-h-56 overflow-y-auto min-w-[300px]">
-                                            {sameAvailable.map(inv => renderInv(inv))}
-                                            {sameAvailable.length === 0 && !showWider && widerAvailable.length > 0 && (
-                                              <div className="px-3 py-1.5 text-xs italic text-gray-500">No same-beneficiary candidates.</div>
+                                          <div className="absolute left-0 top-6 z-20 bg-white border border-gray-300 rounded shadow-lg max-h-72 overflow-hidden min-w-[340px] flex flex-col">
+                                            {(sameAvailable.length + widerAvailable.length) > 8 && (
+                                              <input
+                                                type="text"
+                                                autoFocus
+                                                value={addInvoicePickerSearch}
+                                                onChange={e => setAddInvoicePickerSearch(e.target.value)}
+                                                placeholder="Search name, invoice #, or amount…"
+                                                className="w-full px-2.5 py-1.5 text-xs border-b border-gray-200 focus:outline-none focus:bg-indigo-50 placeholder:text-gray-400"
+                                              />
                                             )}
-                                            {widerAvailable.length > 0 && (
-                                              <>
-                                                {!showWider ? (
-                                                  <button
-                                                    onClick={(e) => { e.stopPropagation(); setShowWiderForTxn(prev => ({ ...prev, [t.id]: true })); }}
-                                                    className="block w-full text-left px-3 py-1.5 text-xs text-indigo-600 hover:bg-indigo-50 border-t border-gray-200"
-                                                  >
-                                                    Show wider matches ({widerAvailable.length})
-                                                  </button>
-                                                ) : (
-                                                  <>
-                                                    <div className="px-3 py-1 text-[10px] uppercase tracking-wider font-semibold text-gray-400 border-t border-gray-200 bg-gray-50">Wider matches (other beneficiaries)</div>
-                                                    {widerAvailable.map(inv => renderInv(inv, true))}
-                                                  </>
-                                                )}
-                                              </>
-                                            )}
+                                            <div className="overflow-y-auto">
+                                              {sameFiltered.map(inv => renderInv(inv))}
+                                              {sameFiltered.length === 0 && sameAvailable.length > 0 && (
+                                                <div className="px-3 py-1.5 text-xs italic text-gray-500">No same-beneficiary matches for "{addInvoicePickerSearch}".</div>
+                                              )}
+                                              {sameAvailable.length === 0 && !showWider && widerAvailable.length > 0 && (
+                                                <div className="px-3 py-1.5 text-xs italic text-gray-500">No same-beneficiary candidates.</div>
+                                              )}
+                                              {widerAvailable.length > 0 && (
+                                                <>
+                                                  {!showWider ? (
+                                                    <button
+                                                      onClick={(e) => { e.stopPropagation(); setShowWiderForTxn(prev => ({ ...prev, [t.id]: true })); }}
+                                                      className="block w-full text-left px-3 py-1.5 text-xs text-indigo-600 hover:bg-indigo-50 border-t border-gray-200"
+                                                    >
+                                                      Show wider matches ({widerFiltered.length}{q ? ` filtered / ${widerAvailable.length}` : ''})
+                                                    </button>
+                                                  ) : (
+                                                    <>
+                                                      <div className="px-3 py-1 text-[10px] uppercase tracking-wider font-semibold text-gray-400 border-t border-gray-200 bg-gray-50">Wider matches (other beneficiaries)</div>
+                                                      {widerFiltered.map(inv => renderInv(inv, true))}
+                                                      {widerFiltered.length === 0 && widerAvailable.length > 0 && (
+                                                        <div className="px-3 py-1.5 text-xs italic text-gray-500">No wider matches for "{addInvoicePickerSearch}".</div>
+                                                      )}
+                                                    </>
+                                                  )}
+                                                </>
+                                              )}
+                                            </div>
                                           </div>
                                         )}
                                       </>
@@ -9065,7 +9137,33 @@ const TimesheetSystem = () => {
                               <td className="px-3 py-2 text-gray-800">{t.beneficiaryName}</td>
                               <td className="px-3 py-2 text-right font-medium text-gray-800 whitespace-nowrap">${(t.foreignAmount ?? 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
                               <td className="px-3 py-2 text-gray-600 font-mono text-xs">{t.ref1 || '—'}</td>
-                              <td className="px-3 py-2 text-gray-800 min-w-[240px]">{matchCell}</td>
+                              <td className="px-3 py-2 text-gray-800 min-w-[240px]">
+                                {matchCell}
+                                <textarea
+                                  value={notesDrafts[t.id] !== undefined ? notesDrafts[t.id] : (t.notes || '')}
+                                  onChange={e => setNotesDrafts(prev => ({ ...prev, [t.id]: e.target.value }))}
+                                  onBlur={async () => {
+                                    const draft = notesDrafts[t.id];
+                                    if (draft === undefined) return;
+                                    const trimmed = draft.trim();
+                                    const nextValue = trimmed || null;
+                                    if (nextValue === (t.notes || null)) {
+                                      setNotesDrafts(prev => { const n = { ...prev }; delete n[t.id]; return n; });
+                                      return;
+                                    }
+                                    const { error } = await supabase
+                                      .from('convera_transactions')
+                                      .update({ notes: nextValue })
+                                      .eq('id', t.id);
+                                    if (error) { alert(`Failed to save note: ${error.message}`); return; }
+                                    setConveraTransactions(prev => prev.map(x => x.id === t.id ? { ...x, notes: nextValue } : x));
+                                    setNotesDrafts(prev => { const n = { ...prev }; delete n[t.id]; return n; });
+                                  }}
+                                  placeholder="Note (optional) — saves on blur"
+                                  rows={1}
+                                  className="mt-1.5 w-full text-xs px-2 py-1 border border-gray-200 rounded resize-y focus:ring-1 focus:ring-indigo-400 focus:border-indigo-300 text-gray-700 placeholder:text-gray-400"
+                                />
+                              </td>
                               <td className="px-3 py-2 text-center">
                                 {conf === 'strong' && <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">strong</span>}
                                 {conf === 'weak'   && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium">weak</span>}
@@ -9163,8 +9261,26 @@ const TimesheetSystem = () => {
                           )}
                         </div>
                         <div className="p-6 border-t border-gray-200 flex justify-end gap-2">
-                          <button onClick={() => setShowProcessPreview(false)} className="px-4 py-2 text-gray-600 hover:text-gray-800">Cancel</button>
-                          <button onClick={handleProcess} className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium">Confirm & Process</button>
+                          <button
+                            onClick={() => setShowProcessPreview(false)}
+                            disabled={processCommitting}
+                            className="px-4 py-2 text-gray-600 hover:text-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >Cancel</button>
+                          <button
+                            onClick={handleProcess}
+                            disabled={processCommitting}
+                            className={`px-6 py-2 rounded-lg font-medium text-white ${processCommitting ? 'bg-indigo-400 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                          >
+                            {processCommitting ? (
+                              <span className="inline-flex items-center gap-2">
+                                <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                                </svg>
+                                Processing…
+                              </span>
+                            ) : 'Confirm & Process'}
+                          </button>
                         </div>
                       </div>
                     </div>
