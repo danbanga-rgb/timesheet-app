@@ -45,6 +45,7 @@ import type {
   BillQueryRqInput,
   VendorQueryRqInput,
 } from './qbxml/types.ts';
+import { validatePayload } from './qbxml/job-payloads.ts';
 import {
   buildSoapFault,
   buildSoapResponse,
@@ -150,6 +151,15 @@ async function persistJobResponse(
   responseXml: string,
   supabase: ReturnType<typeof makeSupabase>,
 ): Promise<{ ok: boolean; errorMsg: string | null }> {
+  // Fail-fast payload contract check. If enqueue script drift removed a key
+  // this branch depends on, catch here with a specific "missing X" error
+  // instead of silently no-op'ing downstream. Kinds with no required keys
+  // (account_query, vendor_query) pass through cleanly.
+  const pv = validatePayload(job.kind, job.payload);
+  if (!pv.ok) {
+    return { ok: false, errorMsg: `Payload contract violation on ${job.kind}: missing required key(s) [${pv.missing.join(', ')}]. Check the enqueue script for drift from src/lib/qbxml/job-payloads.ts.` };
+  }
+
   const fragments = unwrapQbxmlResponses(responseXml);
   const first = fragments[0] ?? responseXml;
 
