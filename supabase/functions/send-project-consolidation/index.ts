@@ -57,6 +57,19 @@ interface EmployeeRow {
   statuses: Record<string, string>;
   rowTotal: number;
 }
+interface LocationSubtotal {
+  locationType: string;
+  perWeek: Record<string, number>;
+  groupTotal: number;
+  rowCount: number;
+}
+interface PendingSubmission {
+  name: string;
+  locationType: string;
+  weekStart: string; // Monday
+  isPartial: boolean;
+  daysInMonth: number;
+}
 interface ConsolidatedReport {
   projectName: string;
   projectCode: string;
@@ -65,6 +78,8 @@ interface ConsolidatedReport {
   employeeRows: EmployeeRow[];
   colTotals: Record<string, number>;
   grandTotal: number;
+  subtotals: LocationSubtotal[];
+  pending: PendingSubmission[];
 }
 
 function buildConsolidatedReport(
@@ -77,6 +92,12 @@ function buildConsolidatedReport(
 ): ConsolidatedReport {
   const startD = parseLocalDate(monthStart);
   const endD   = parseLocalDate(monthEnd);
+
+  // "Today" in PT for "not yet due" detection — weeks whose Sunday hasn't passed
+  // aren't overdue, they just aren't due yet.
+  const nowPtStr = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const [_pM, _pD, _pY] = nowPtStr.split(/\D+/).filter(Boolean).map(Number);
+  const todayPt = new Date(_pY, _pM - 1, _pD);
 
   // Timesheets whose Mon-Sun overlaps the month
   const inRange = timesheets.filter(t => {
@@ -93,8 +114,15 @@ function buildConsolidatedReport(
     if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
   });
 
-  // Filter users assigned to this project, excluding test accounts
-  const projectUsers = users.filter(u => u.projectId === project.id && !isTestAccount(u.name));
+  // Filter users assigned to this project, excluding test accounts and anyone whose
+  // employment window doesn't overlap the report month (hadn't started yet, or already left).
+  const projectUsers = users.filter(u => {
+    if (u.projectId !== project.id) return false;
+    if (isTestAccount(u.name)) return false;
+    if (u.startDate && u.startDate > monthEnd) return false;   // hadn't started by end of month
+    if (u.endDate && u.endDate < monthStart) return false;     // had left before month began
+    return true;
+  });
 
   const employeeRows: EmployeeRow[] = projectUsers.map(user => {
     const hours: Record<string, number | null> = {};
@@ -122,7 +150,9 @@ function buildConsolidatedReport(
       } else if (!user.startDate || user.startDate > weEnd || (user.endDate && user.endDate < we)) {
         hours[we] = null; statuses[we] = 'n/a';
       } else {
-        hours[we] = null; statuses[we] = 'not submitted';
+        // Weeks whose Sunday hasn't passed yet aren't 'pending', they just aren't due yet.
+        hours[we] = null;
+        statuses[we] = weSunday >= todayPt ? 'not yet due' : 'not submitted';
       }
     });
     const latestTs = inRange.filter(t => t.userId === user.id).sort((a, b) => b.weekStart.localeCompare(a.weekStart))[0];
@@ -139,7 +169,55 @@ function buildConsolidatedReport(
   weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
   const grandTotal = employeeRows.reduce((s, r) => s + r.rowTotal, 0);
 
-  return { projectName: project.name, projectCode: project.code, weekEndings, partialWeeks, employeeRows, colTotals, grandTotal };
+  // Location subtotals — grouped by locationType label, preserving row order
+  const subtotalMap = new Map<string, LocationSubtotal>();
+  const subtotals: LocationSubtotal[] = [];
+  employeeRows.forEach(row => {
+    let group = subtotalMap.get(row.locationType);
+    if (!group) {
+      group = { locationType: row.locationType, perWeek: {}, groupTotal: 0, rowCount: 0 };
+      weekEndings.forEach(we => { group!.perWeek[we] = 0; });
+      subtotalMap.set(row.locationType, group);
+      subtotals.push(group);
+    }
+    weekEndings.forEach(we => { group!.perWeek[we] += (row.hours[we] || 0); });
+    group.groupTotal += row.rowTotal;
+    group.rowCount += 1;
+  });
+
+  // Pending submissions — status 'not submitted' already excludes 'not yet due' (set upstream).
+  const pending: PendingSubmission[] = [];
+  employeeRows.forEach(row => {
+    weekEndings.forEach(we => {
+      if (row.statuses[we] !== 'not submitted') return;
+      const weekMon = parseLocalDate(we);
+      const isPartial = partialWeeks.has(we);
+      let daysInMonth = 0;
+      for (let i = 0; i < 7; i++) {
+        const d = addDays(weekMon, i);
+        if (d >= startD && d <= endD) daysInMonth++;
+      }
+      pending.push({ name: row.name, locationType: row.locationType, weekStart: we, isPartial, daysInMonth });
+    });
+  });
+  // Sort pending: location, then name, then week
+  pending.sort((a, b) =>
+    a.locationType.localeCompare(b.locationType)
+    || a.name.localeCompare(b.name)
+    || a.weekStart.localeCompare(b.weekStart)
+  );
+
+  return { projectName: project.name, projectCode: project.code, weekEndings, partialWeeks, employeeRows, colTotals, grandTotal, subtotals, pending };
+}
+
+// Format hours: drop trailing '.0' for whole-hour values (people don't submit fractional hours),
+// and use commas as thousands separator.
+function fmtH(n: number): string {
+  const rounded = Math.round(n * 10) / 10;
+  return rounded.toLocaleString('en-US', {
+    minimumFractionDigits: rounded % 1 === 0 ? 0 : 1,
+    maximumFractionDigits: 1,
+  });
 }
 
 // ─── HTML renderer (matches the accountant Consolidated view visual) ────────
@@ -163,34 +241,68 @@ function renderReportHtml(report: ConsolidatedReport, monthLabel: string): strin
     </th>`;
   }).join('');
 
-  const bodyRows = employeeRows.map((row, i) => {
+  const showSubtotals = report.subtotals.length >= 2;
+  const renderSubtotalRow = (sub: LocationSubtotal) => {
+    const cells = weekEndings.map(we => {
+      const isPartial = partialWeeks.has(we);
+      const cellBg = isPartial ? '#fde68a' : '#bbf7d0';
+      const cellColor = isPartial ? '#78350f' : '#14532d';
+      return `<td style="background:${cellBg};border:1px solid #d1d5db;padding:8px 12px;text-align:center;color:${cellColor};font-weight:700;font-size:13px">${fmtH(sub.perWeek[we])}</td>`;
+    }).join('');
+    return `<tr>
+      <td colspan="3" style="background:#e5e7eb;border:1px solid #d1d5db;padding:8px 12px;font-weight:700;font-size:12px;color:#374151;text-transform:uppercase;letter-spacing:.03em">${escapeHtml(sub.locationType)} subtotal (${sub.rowCount})</td>
+      ${cells}
+      <td style="background:#bbf7d0;border:1px solid #d1d5db;padding:8px 12px;text-align:center;color:#14532d;font-weight:700;font-size:13px">${fmtH(sub.groupTotal)}</td>
+    </tr>`;
+  };
+
+  const bodyRows: string[] = [];
+  let currentLocation: string | null = null;
+  employeeRows.forEach((row, i) => {
+    if (showSubtotals && currentLocation !== null && currentLocation !== row.locationType) {
+      const prevSub = report.subtotals.find(s => s.locationType === currentLocation);
+      if (prevSub) bodyRows.push(renderSubtotalRow(prevSub));
+    }
+    currentLocation = row.locationType;
     const bg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
     const cells = weekEndings.map(we => {
       const h = row.hours[we];
+      const status = row.statuses[we];
+      const isPending = status === 'not submitted';
       const isPartial = partialWeeks.has(we);
-      const cellBg = isPartial ? '#fef3c7' : (i % 2 === 0 ? '#f0fdf4' : '#dcfce7');
-      const cellColor = isPartial ? '#b45309' : '#166534';
-      const display = h == null ? '<span style="color:#9ca3af">–</span>' : h.toFixed(1);
-      return `<td style="background:${cellBg};border:1px solid #e5e7eb;padding:8px 12px;text-align:center;color:${cellColor};font-weight:${h != null && h > 0 ? '600' : '400'};font-size:13px">${display}</td>`;
+      const cellBg = isPending ? '#fef3c7' : isPartial ? '#fef3c7' : (i % 2 === 0 ? '#f0fdf4' : '#dcfce7');
+      const cellColor = isPending ? '#b45309' : isPartial ? '#b45309' : '#166534';
+      let display: string;
+      if (isPending) display = '<strong style="color:#b45309">P</strong>';
+      else if (h == null) display = '<span style="color:#9ca3af">–</span>';
+      else display = fmtH(h);
+      const weight = isPending ? '700' : (h != null && h > 0 ? '600' : '400');
+      return `<td style="background:${cellBg};border:1px solid #e5e7eb;padding:8px 12px;text-align:center;color:${cellColor};font-weight:${weight};font-size:13px">${display}</td>`;
     }).join('');
     const totalCellBg = (i % 2 === 0 ? '#f0fdf4' : '#dcfce7');
-    return `<tr>
+    bodyRows.push(`<tr>
       <td style="background:${bg};border:1px solid #e5e7eb;padding:8px 12px;font-weight:700;font-size:13px">${escapeHtml(row.name)}</td>
       <td style="background:${bg};border:1px solid #e5e7eb;padding:8px 12px;color:#6b7280;font-size:13px">${escapeHtml(row.locationType)}</td>
       <td style="background:${bg};border:1px solid #e5e7eb;padding:8px 12px;color:#4f46e5;font-size:12px">${escapeHtml(row.project)}</td>
       ${cells}
-      <td style="background:${totalCellBg};border:1px solid #e5e7eb;padding:8px 12px;text-align:center;color:#166534;font-weight:700;font-size:13px">${row.rowTotal.toFixed(1)}</td>
-    </tr>`;
-  }).join('');
+      <td style="background:${totalCellBg};border:1px solid #e5e7eb;padding:8px 12px;text-align:center;color:#166534;font-weight:700;font-size:13px">${fmtH(row.rowTotal)}</td>
+    </tr>`);
+  });
+  // Trailing subtotal for the last group
+  if (showSubtotals && currentLocation !== null) {
+    const lastSub = report.subtotals.find(s => s.locationType === currentLocation);
+    if (lastSub) bodyRows.push(renderSubtotalRow(lastSub));
+  }
+  const bodyRowsHtml = bodyRows.join('');
 
   const totalRow = `<tr style="background:#16a34a;color:#fff">
-    <td colspan="3" style="border:1px solid #15803d;padding:10px 12px;font-weight:700;font-size:13px">Total</td>
+    <td colspan="3" style="border:1px solid #15803d;padding:10px 12px;font-weight:700;font-size:13px">Total (${employeeRows.length})</td>
     ${weekEndings.map(we => {
       const isPartial = partialWeeks.has(we);
       const cellBg = isPartial ? '#d97706' : '#16a34a';
-      return `<td style="background:${cellBg};border:1px solid #15803d;padding:10px 12px;text-align:center;font-weight:700;font-size:14px">${colTotals[we].toFixed(1)}</td>`;
+      return `<td style="background:${cellBg};border:1px solid #15803d;padding:10px 12px;text-align:center;font-weight:700;font-size:14px">${fmtH(colTotals[we])}</td>`;
     }).join('')}
-    <td style="background:#15803d;border:1px solid #14532d;padding:10px 12px;text-align:center;font-weight:700;font-size:14px">${grandTotal.toFixed(1)}</td>
+    <td style="background:#15803d;border:1px solid #14532d;padding:10px 12px;text-align:center;font-weight:700;font-size:14px">${fmtH(grandTotal)}</td>
   </tr>`;
 
   return `
@@ -209,7 +321,7 @@ function renderReportHtml(report: ConsolidatedReport, monthLabel: string): strin
         </tr>
       </thead>
       <tbody>
-        ${bodyRows}
+        ${bodyRowsHtml}
         ${totalRow}
       </tbody>
     </table>
@@ -220,10 +332,52 @@ function escapeHtml(s: string): string {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function renderPendingHtml(report: ConsolidatedReport, asOfLabel: string): string {
+  if (report.pending.length === 0) {
+    return `
+      <p style="font-family:system-ui,sans-serif;color:#166534;font-size:13px;margin:8px 0 32px;padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px">
+        <strong>No pending submissions</strong> — all in-scope contractors have submitted every week in the period (as of ${escapeHtml(asOfLabel)}).
+      </p>`;
+  }
+  const rows = report.pending.map((p, i) => {
+    const bg = i % 2 === 0 ? '#ffffff' : '#fffbeb';
+    const weekMon = parseLocalDate(p.weekStart);
+    const weekSun = addDays(weekMon, 6);
+    const weLabel = weekSun.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const partialTag = p.isPartial
+      ? ` <span style="color:#b45309;font-weight:600">[Partial — ${p.daysInMonth} day${p.daysInMonth === 1 ? '' : 's'} in month]</span>`
+      : '';
+    return `<tr>
+      <td style="background:${bg};border:1px solid #fed7aa;padding:6px 12px;font-weight:600;font-size:13px">${escapeHtml(p.name)}</td>
+      <td style="background:${bg};border:1px solid #fed7aa;padding:6px 12px;color:#6b7280;font-size:12px">${escapeHtml(p.locationType)}</td>
+      <td style="background:${bg};border:1px solid #fed7aa;padding:6px 12px;color:#b45309;font-size:13px">W/E ${escapeHtml(weLabel)}${partialTag}</td>
+    </tr>`;
+  }).join('');
+  const uniqueNames = new Set(report.pending.map(p => p.name)).size;
+  return `
+    <div style="margin:-16px 0 32px">
+      <h3 style="font-family:system-ui,sans-serif;color:#b45309;font-size:14px;margin:0 0 8px">
+        Pending submissions <span style="color:#78716c;font-weight:400;font-size:12px">(${uniqueNames} contractor${uniqueNames === 1 ? '' : 's'} · ${report.pending.length} week${report.pending.length === 1 ? '' : 's'} — as of ${escapeHtml(asOfLabel)})</span>
+      </h3>
+      <table style="border-collapse:collapse;width:100%;font-family:system-ui,sans-serif">
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="font-family:system-ui,sans-serif;color:#78716c;font-size:12px;margin:8px 0 0">
+        Missing hours may still land after this report. Consider waiting on any pending row before processing client-facing invoicing for this period.
+      </p>
+    </div>`;
+}
+
 // ─── Month resolution ────────────────────────────────────────────────────────
-// Returns YYYY-MM. Default: current month. Fallback: if the current PT week starts in the prior month, use prior month.
-function resolveMonth(override: string | null, nowInPt: Date): string {
+// Returns YYYY-MM.
+//   mode='weekly'  → default: current month (with split-week fallback to prior month if week's Monday is in prior month).
+//   mode='monthly' → default: the PREVIOUS calendar month (report fires on the 8th to cover the month just ended).
+function resolveMonth(override: string | null, nowInPt: Date, mode: 'weekly' | 'monthly'): string {
   if (override && /^\d{4}-\d{2}$/.test(override)) return override;
+  if (mode === 'monthly') {
+    const prev = new Date(nowInPt.getFullYear(), nowInPt.getMonth() - 1, 1);
+    return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+  }
   const weekMon = getMondayOf(nowInPt);
   return `${weekMon.getFullYear()}-${String(weekMon.getMonth() + 1).padStart(2, '0')}`;
 }
@@ -254,6 +408,10 @@ serve(async (req) => {
   const projectsParam = url.searchParams.get('projects');
   const monthOverride = url.searchParams.get('month');
   const force         = url.searchParams.get('force') === 'true';
+  const modeParam     = (url.searchParams.get('mode') || 'weekly').toLowerCase();
+  const mode: 'weekly' | 'monthly' = modeParam === 'monthly' ? 'monthly' : 'weekly';
+  const expectedHourParam = parseInt(url.searchParams.get('expectedHour') || '', 10);
+  const expectedHour = Number.isFinite(expectedHourParam) ? expectedHourParam : 12;
   const recipientsParam = url.searchParams.get('to') || DEFAULT_RECIPIENT;
   const recipients = recipientsParam.split(',').map(e => e.trim()).filter(e => e.includes('@'));
 
@@ -263,15 +421,22 @@ serve(async (req) => {
   // Each project token can be a numeric ID, a code (APFM-061), or a name (APFM). Case-insensitive.
   const projectTokens = projectsParam.split(',').map(s => s.trim()).filter(s => s.length > 0);
 
-  // PT noon Wednesday guard (cron fires at both 19:00 and 20:00 UTC; only the one matching noon PT proceeds)
+  // Time guards — cron fires at both 19:00 and 20:00 UTC; only the one matching noon PT proceeds.
+  //   weekly  : Wed noon PT
+  //   monthly : 8th of month, noon PT
   const nowUtc = new Date();
-  const ptStr  = nowUtc.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false, weekday: 'short', year: 'numeric', month: 'numeric', day: 'numeric' });
-  // Parse PT hour and weekday
   const ptHour = parseInt(nowUtc.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }), 10);
   const ptWeekday = nowUtc.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'short' });
+  const ptDom = parseInt(nowUtc.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', day: 'numeric' }), 10);
   if (!force) {
-    if (ptWeekday !== 'Wed' || ptHour !== 12) {
-      return new Response(JSON.stringify({ ok: true, skipped: `not Wed noon PT (weekday=${ptWeekday}, hour=${ptHour})` }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (mode === 'monthly') {
+      if (ptDom !== 8 || ptHour !== expectedHour) {
+        return new Response(JSON.stringify({ ok: true, skipped: `not 8th at PT hour=${expectedHour} (dom=${ptDom}, hour=${ptHour})` }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    } else {
+      if (ptWeekday !== 'Wed' || ptHour !== expectedHour) {
+        return new Response(JSON.stringify({ ok: true, skipped: `not Wed at PT hour=${expectedHour} (weekday=${ptWeekday}, hour=${ptHour})` }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
     }
   }
 
@@ -279,7 +444,7 @@ serve(async (req) => {
   const ptDateStr = nowUtc.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' });
   const [ptM, ptD, ptY] = ptDateStr.split(/\D+/).filter(Boolean).map(Number);
   const nowInPt = new Date(ptY, ptM - 1, ptD);
-  const monthKey = resolveMonth(monthOverride, nowInPt);
+  const monthKey = resolveMonth(monthOverride, nowInPt, mode);
   const { start: monthStart, end: monthEnd, label: monthLabel } = monthBounds(monthKey);
 
   const supabase = createClient(SUPABASE_URL, SERVICE_KEY);
@@ -338,21 +503,32 @@ serve(async (req) => {
   const reports = projects.map(project => buildConsolidatedReport(project, users, timesheets, projects, monthStart, monthEnd));
 
   // Compose email
-  const subject = `[Consolidated Monthly Report] ${projects.map(p => p.name).join(', ')} — ${monthLabel}`;
+  const asOfLabel = nowUtc.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric' });
+  const subjectPrefix = mode === 'monthly' ? '[Monthly Report]' : '[Consolidated Monthly Report]';
+  const subject = `${subjectPrefix} ${projects.map(p => p.name).join(', ')} — ${monthLabel}`;
+  const introBlurb = mode === 'monthly'
+    ? `Month-end hours for <strong>${projects.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.code)})`).join(', ')}</strong> — <strong>${escapeHtml(monthLabel)}</strong>. Hours are summed by day within the calendar month; partial weeks show only the days that fall inside the month.`
+    : `Consolidated hours for ${projects.length === 1 ? 'project' : 'projects'} <strong>${projects.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.code)})`).join(', ')}</strong> — <strong>${escapeHtml(monthLabel)}</strong>.`;
   const introHtml = `
-    <p style="font-family:system-ui,sans-serif;color:#374151;font-size:14px;margin:0 0 20px">
-      Consolidated hours for ${projects.length === 1 ? 'project' : 'projects'} <strong>${projects.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.code)})`).join(', ')}</strong> — <strong>${escapeHtml(monthLabel)}</strong>.
-    </p>`;
+    <p style="font-family:system-ui,sans-serif;color:#374151;font-size:14px;margin:0 0 20px">${introBlurb}</p>`;
+  const perProjectHtml = reports.map(r => {
+    return renderReportHtml(r, monthLabel) + (mode === 'monthly' ? renderPendingHtml(r, asOfLabel) : '');
+  }).join('');
   const html = `<html><body style="margin:0;padding:0;background:#f9fafb"><div style="max-width:1200px;margin:0 auto;padding:24px">
     ${introHtml}
-    ${reports.map(r => renderReportHtml(r, monthLabel)).join('')}
+    ${perProjectHtml}
     <p style="font-family:system-ui,sans-serif;color:#9ca3af;font-size:11px;border-top:1px solid #e5e7eb;padding-top:12px;margin-top:24px">
-      ${new Date().toISOString()} · timesheets@mysynergie.net
+      ${new Date().toISOString()} · timesheets@mysynergie.net · mode=${mode}
     </p>
   </div></body></html>`;
-  const text = `Consolidated Monthly Report — ${monthLabel}\n\n${reports.map(r => {
-    return `${r.projectName} (${r.projectCode})\n${'─'.repeat(60)}\n${r.employeeRows.map(row => `  ${row.name.padEnd(28)} ${row.locationType.padEnd(12)} ${row.rowTotal.toFixed(1)}h`).join('\n')}\n  Total: ${r.grandTotal.toFixed(1)}h\n`;
-  }).join('\n')}\n\n${new Date().toISOString()} · timesheets@mysynergie.net`;
+  const text = `${subjectPrefix} — ${monthLabel}\n\n${reports.map(r => {
+    const body = `${r.projectName} (${r.projectCode})\n${'─'.repeat(60)}\n${r.employeeRows.map(row => `  ${row.name.padEnd(28)} ${row.locationType.padEnd(12)} ${fmtH(row.rowTotal)}h`).join('\n')}\n  Total: ${fmtH(r.grandTotal)}h`;
+    if (mode !== 'monthly') return `${body}\n`;
+    const pendText = r.pending.length === 0
+      ? '  Pending: none.'
+      : `  Pending (${r.pending.length}):\n${r.pending.map(p => `    - ${p.name.padEnd(28)} W/E ${p.weekStart}${p.isPartial ? ` [partial, ${p.daysInMonth}d in month]` : ''}`).join('\n')}`;
+    return `${body}\n${pendText}\n`;
+  }).join('\n')}\n\n${new Date().toISOString()} · timesheets@mysynergie.net · mode=${mode}`;
 
   // Send via Brevo — one Brevo call with multiple `to` addresses
   if (!BREVO_API_KEY) return errorResponse('BREVO_API_KEY not configured');
@@ -371,11 +547,16 @@ serve(async (req) => {
 
   return new Response(JSON.stringify({
     ok: true,
+    mode,
     month: monthKey,
     monthLabel,
     recipients,
     unresolvedProjects: unresolved,
-    projects: reports.map(r => ({ name: r.projectName, code: r.projectCode, employees: r.employeeRows.length, totalHours: r.grandTotal, weeks: r.weekEndings.length })),
+    projects: reports.map(r => ({
+      name: r.projectName, code: r.projectCode,
+      employees: r.employeeRows.length, totalHours: r.grandTotal, weeks: r.weekEndings.length,
+      pendingWeeks: r.pending.length, pendingContractors: new Set(r.pending.map(p => p.name)).size,
+    })),
   }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
 
