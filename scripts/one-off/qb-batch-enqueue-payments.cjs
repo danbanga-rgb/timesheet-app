@@ -139,7 +139,12 @@ function extractTxnIdsFromResponseByVendor(xml) {
       const bi = billIndex.get(item.inv.id);
       if (!bi || !bi.vendor || !bi.refNumber) continue;
       const cached = refToTxnId.get(`${bi.vendor}::${bi.refNumber}`);
-      const txnId = cached?.txnId || null;
+      // Fall back to invoices.qb_bill_txn_id if the response-map lookup missed.
+      // The response-based map re-parses raw XML and can miss due to HTML-entity
+      // escaping (e.g. QB's <FullName>Obrtnicka djelatnost &quot;ENCODE &quot;vl. Enis Ba</FullName>
+      // vs our DB's qb_vendor_name with real double quotes). invoices.qb_bill_txn_id
+      // is already the persisted result of prior bill_query runs and is safe to trust.
+      const txnId = cached?.txnId || item.inv.qb_bill_txn_id || null;
       const jobId = cached?.jobId || null;
       if (!txnId) {
         missingTxnIds.push({ vendor: bi.vendor, refNumber: bi.refNumber, invoiceId: item.inv.id });
