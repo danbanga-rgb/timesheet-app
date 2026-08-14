@@ -9795,23 +9795,56 @@ const TimesheetSystem = () => {
                     <table className="w-full text-sm">
                       <thead className="bg-gray-50 text-xs uppercase text-gray-500 sticky top-0">
                         <tr>
-                          <th className="text-left px-3 py-2 font-medium">Vendor</th>
+                          <th className="text-left px-3 py-2 font-medium">Payee (Intuit)</th>
                           <th className="text-left px-3 py-2 font-medium">Invoice #</th>
                           <th className="text-right px-3 py-2 font-medium">Amount</th>
                         </tr>
                       </thead>
                       <tbody>
                         {intuitBatchInvoices.map((inv, i) => {
+                          const pp = inv.paymentProfile;
+                          const payee = pp?.companyName || pp?.qbVendorName || inv.userName || '';
+                          const payeeKey = `payee-${inv.id}`;
                           const invKey = `inv-${inv.id}`;
                           const amtKey = `amt-${inv.id}`;
+                          const payeeCopied = copiedIntuitField === payeeKey;
                           const invCopied = copiedIntuitField === invKey;
                           const amtCopied = copiedIntuitField === amtKey;
                           const amountRaw = inv.totalAmount.toFixed(2);
                           const amountDisplay = inv.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                          const missingPayee = !payee;
+                          const acctTail = pp?.accountNumber ? pp.accountNumber.replace(/\s/g, '').slice(-4) : null;
                           return (
                             <tr key={inv.id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                              <td className="px-3 py-2 font-medium text-gray-800">{inv.userName || '—'}</td>
-                              <td className="px-3 py-2">
+                              <td className="px-3 py-2 align-top">
+                                {missingPayee ? (
+                                  <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">
+                                    <AlertTriangle className="w-3 h-3" /> no payment profile
+                                  </span>
+                                ) : (
+                                  <button
+                                    onClick={() => copyIntuitField(payeeKey, payee)}
+                                    title="Click to copy payee name as it should appear in Intuit"
+                                    className={`inline-flex items-center gap-1.5 text-sm px-2 py-1 rounded border transition-colors font-medium ${payeeCopied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-gray-300 text-gray-800 hover:border-emerald-400 hover:bg-emerald-50'}`}
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                    {payeeCopied ? '✓ copied' : payee}
+                                  </button>
+                                )}
+                                <div className="text-xs text-gray-500 mt-1 leading-tight">
+                                  <div>{inv.userName || '—'}</div>
+                                  {pp && (
+                                    <div className="text-gray-400">
+                                      {pp.profileName && pp.profileName !== payee ? pp.profileName : null}
+                                      {pp.profileName && pp.profileName !== payee && (pp.bankName || acctTail) ? ' · ' : ''}
+                                      {pp.bankName || ''}
+                                      {pp.bankName && acctTail ? ' ' : ''}
+                                      {acctTail ? `…${acctTail}` : ''}
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-3 py-2 align-top">
                                 <button
                                   onClick={() => copyIntuitField(invKey, inv.invoiceNumber)}
                                   title="Click to copy"
@@ -9821,7 +9854,7 @@ const TimesheetSystem = () => {
                                   {invCopied ? '✓ copied' : inv.invoiceNumber}
                                 </button>
                               </td>
-                              <td className="px-3 py-2 text-right">
+                              <td className="px-3 py-2 text-right align-top">
                                 <button
                                   onClick={() => copyIntuitField(amtKey, amountRaw)}
                                   title={`Click to copy ${amountRaw}`}
