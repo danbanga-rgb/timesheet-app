@@ -186,7 +186,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
 
 import { useState, useEffect, useRef, Fragment } from 'react';
 import { createPortal } from 'react-dom';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronLeft, ChevronRight, Building2, ArrowUpDown } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronLeft, ChevronRight, Building2, ArrowUpDown, Copy } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 
@@ -966,6 +966,13 @@ const TimesheetSystem = () => {
   type ConveraBatchManualRow = { id: string; beneficiaryId: number; shortName: string; vendorId: string; country: string; amount: number; ref1: string };
   const [converaBatchManualRows, setConveraBatchManualRows] = useState<ConveraBatchManualRow[]>([]);
   const [converaBatchManualEditor, setConveraBatchManualEditor] = useState<{ open: boolean; search: string; benef: ConveraBeneficiary | null; amount: string; ref1: string }>({ open: false, search: '', benef: null, amount: '', ref1: '' });
+  // Intuit Batch popup — copy-paste aid for accountant manually entering approved unpaid US
+  // invoices into Intuit Online Payment (which has no upload integration). Filters to
+  // status=approved + paymentMethod=Intuit + !paidDate. Field-level copy buttons.
+  // Paid status auto-reconciles via parseIntuitEmails when Intuit's confirmation email arrives.
+  const [showIntuitBatchModal, setShowIntuitBatchModal] = useState(false);
+  const [intuitBatchInvoices, setIntuitBatchInvoices] = useState<Invoice[]>([]);
+  const [copiedIntuitField, setCopiedIntuitField] = useState<string | null>(null);
   // QB Payment IIF preview modal state
   const [paymentIifPreview, setPaymentIifPreview] = useState<PaymentIifPreview | null>(null);
   const [expandedProfileUsers, setExpandedProfileUsers] = useState<Set<string>>(new Set());
@@ -4574,6 +4581,32 @@ const TimesheetSystem = () => {
     }
   };
 
+  // Intuit Batch popup — approved unpaid US invoices for manual entry into Intuit Online Payment.
+  // Also auto-applies the payment-method filter chip to Intuit so the underlying invoice list
+  // matches what's inside the modal (no cross-pollution with Convera invoices left in view).
+  const openIntuitBatchPreview = (list: Invoice[]) => {
+    setInvoicePaymentMethodPreset(new Set(['Intuit']));
+    const eligible = list.filter(inv =>
+      inv.status === 'approved'
+      && paymentMethod(inv) === 'Intuit'
+      && !inv.paidDate
+    );
+    if (eligible.length === 0) {
+      alert('No approved unpaid Intuit invoices in the current filter view.');
+      return;
+    }
+    // Sort by vendor name for scan-ability
+    eligible.sort((a, b) => (a.userName || '').localeCompare(b.userName || ''));
+    setIntuitBatchInvoices(eligible);
+    setShowIntuitBatchModal(true);
+  };
+
+  const copyIntuitField = (fieldKey: string, value: string) => {
+    navigator.clipboard.writeText(value).catch(() => { /* clipboard may fail in insecure contexts */ });
+    setCopiedIntuitField(fieldKey);
+    setTimeout(() => setCopiedIntuitField(prev => prev === fieldKey ? null : prev), 1500);
+  };
+
   // Step 2: called by the modal's "Download CSV" button. Applies the accountant's combine
   // choices to generate the final Convera batch CSV.
   const downloadConveraBatchCSV = () => {
@@ -7793,7 +7826,8 @@ const TimesheetSystem = () => {
                       <button onClick={() => { setShowConveraModal(true); loadConveraBeneficiaries(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"><UploadCloud className="w-4 h-4" /> Import Payments</button>
                       <button onClick={() => { setShowConveraMatchingModal(true); loadConveraBeneficiaries(); loadConveraLastPaymentDates(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 text-sm"><Users className="w-4 h-4" /> Convera Matching</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
-                      <button onClick={() => openConveraBatchPreview(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 text-sm"><Download className="w-4 h-4" /> Convera Batch</button>
+                      <button onClick={() => { setInvoicePaymentMethodPreset(new Set(['Convera'])); openConveraBatchPreview(filtered); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 text-sm"><Download className="w-4 h-4" /> Convera Batch</button>
+                      <button onClick={() => openIntuitBatchPreview(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm"><Copy className="w-4 h-4" /> Intuit Batch</button>
                       <button
                         onClick={() => {
                           // Snapshot filter view + pre-select ready (mapped + not_exported)
@@ -9726,6 +9760,95 @@ const TimesheetSystem = () => {
                       <button onClick={() => { setShowConveraBatchModal(false); setConveraBatchManualRows([]); setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' }); }} className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">Cancel</button>
                       <button onClick={downloadConveraBatchCSV} className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium text-sm flex items-center gap-2"><Download className="w-4 h-4" /> Download CSV</button>
                     </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Intuit Batch popup — copy-paste aid for manual entry into Intuit Online Payment */}
+          {showIntuitBatchModal && (() => {
+            const totalByCurrency = intuitBatchInvoices.reduce<Record<string, number>>((acc, inv) => {
+              const cur = inv.currency || 'USD';
+              acc[cur] = (acc[cur] || 0) + inv.totalAmount;
+              return acc;
+            }, {});
+            const totalDisplay = Object.entries(totalByCurrency)
+              .map(([cur, sum]) => `${cur} ${sum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)
+              .join(' · ');
+            return (
+              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowIntuitBatchModal(false)}>
+                <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                  <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Copy className="w-5 h-5 text-emerald-600" /> Intuit Batch</h3>
+                      <p className="text-sm text-gray-600 mt-1"><strong>{intuitBatchInvoices.length}</strong> approved unpaid Intuit invoice{intuitBatchInvoices.length === 1 ? '' : 's'} · Total <strong>{totalDisplay}</strong></p>
+                    </div>
+                    <button onClick={() => setShowIntuitBatchModal(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+                  </div>
+                  <div className="px-5 pt-4">
+                    <div className="p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900">
+                      Intuit Online Payment has no upload integration — enter these field-by-field into Intuit's UI. Click any <strong>Invoice #</strong> or <strong>Amount</strong> to copy that value to your clipboard. Paid status will auto-reconcile when Intuit's confirmation email is imported.
+                    </div>
+                  </div>
+                  <div className="p-5 overflow-auto flex-1">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 text-xs uppercase text-gray-500 sticky top-0">
+                        <tr>
+                          <th className="text-left px-3 py-2 font-medium">Vendor</th>
+                          <th className="text-left px-3 py-2 font-medium">Invoice #</th>
+                          <th className="text-right px-3 py-2 font-medium">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {intuitBatchInvoices.map((inv, i) => {
+                          const invKey = `inv-${inv.id}`;
+                          const amtKey = `amt-${inv.id}`;
+                          const invCopied = copiedIntuitField === invKey;
+                          const amtCopied = copiedIntuitField === amtKey;
+                          const amountRaw = inv.totalAmount.toFixed(2);
+                          const amountDisplay = inv.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                          return (
+                            <tr key={inv.id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                              <td className="px-3 py-2 font-medium text-gray-800">{inv.userName || '—'}</td>
+                              <td className="px-3 py-2">
+                                <button
+                                  onClick={() => copyIntuitField(invKey, inv.invoiceNumber)}
+                                  title="Click to copy"
+                                  className={`inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded border transition-colors ${invCopied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-gray-300 text-gray-700 hover:border-emerald-400 hover:bg-emerald-50'}`}
+                                >
+                                  <Copy className="w-3 h-3" />
+                                  {invCopied ? '✓ copied' : inv.invoiceNumber}
+                                </button>
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <button
+                                  onClick={() => copyIntuitField(amtKey, amountRaw)}
+                                  title={`Click to copy ${amountRaw}`}
+                                  className={`inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded border transition-colors ${amtCopied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-gray-300 text-gray-700 hover:border-emerald-400 hover:bg-emerald-50'}`}
+                                >
+                                  <Copy className="w-3 h-3" />
+                                  {amtCopied ? '✓ copied' : `${inv.currency || 'USD'} ${amountDisplay}`}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t-2 border-gray-300 bg-gray-100 font-semibold">
+                          <td className="px-3 py-2 text-gray-700">Total ({intuitBatchInvoices.length})</td>
+                          <td className="px-3 py-2"></td>
+                          <td className="px-3 py-2 text-right text-gray-800">{totalDisplay}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                  <div className="p-4 border-t border-gray-200 bg-gray-50 flex justify-between items-center">
+                    <button onClick={() => window.print()} className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm">
+                      <Printer className="w-4 h-4" /> Print
+                    </button>
+                    <button onClick={() => setShowIntuitBatchModal(false)} className="px-4 py-1.5 bg-gray-700 text-white rounded-lg hover:bg-gray-800 text-sm">Close</button>
                   </div>
                 </div>
               </div>
