@@ -3,7 +3,7 @@
 // Generates a per-week timesheet summary and emails it to
 // accounting@synergietechsolutions.com via Brevo after each poller run.
 //
-// Covers all completed weeks since 2026-04-27 (the cutoff).
+// Covers the last LOOKBACK_WEEKS completed weeks (rolling window).
 // Only includes weeks where at least one eligible contractor is missing.
 // Attaches a separate CSV for each such week.
 //
@@ -22,7 +22,13 @@ const ACCOUNTING_EMAIL = 'accounting@synergietechsolutions.com';
 const LEADERSHIP_EMAIL = 'dbanga@synergietechsolutions.com';
 const FROM_EMAIL       = 'timesheets@mysynergie.net';
 const FROM_NAME        = 'Synergie Timesheet System';
-const CUTOFF           = '2026-04-27';
+// Rolling window: covers detail cards (per-week missing), timing table (last 8w),
+// digest chart (last 12w), and contractor-movement (last 8w) all in one bounded fetch.
+// See feedback_no_hardcoded_cutoff — don't reintroduce a fixed launch-date CUTOFF.
+const LOOKBACK_WEEKS   = 12;
+// Belt-and-suspenders row cap. PostgREST defaults to 1000; explicit .range() defends
+// against silent truncation as the user base grows.
+const ROW_CAP          = 5000;
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -59,13 +65,12 @@ function isFridayOrLaterUtc(): boolean {
   return dow === 5 || dow === 6 || dow === 0;
 }
 
-function completedWeeksSince(cutoff: string): string[] {
+function completedWeeksWindow(lookback: number): string[] {
   const weeks: string[] = [];
-  let cur = cutoff;
-  const end = lastCompletedMonday();
-  while (cur <= end) {
-    weeks.push(cur);
-    cur = addDays(cur, 7);
+  let cur = lastCompletedMonday();
+  for (let i = 0; i < lookback; i++) {
+    weeks.unshift(cur);
+    cur = addDays(cur, -7);
   }
   return weeks;
 }
@@ -544,7 +549,7 @@ serve(async (req) => {
 
   // ─── Weeks to cover ───────────────────────────────────────────────────────────
 
-  const completedWeeks           = completedWeeksSince(CUTOFF);
+  const completedWeeks           = completedWeeksWindow(LOOKBACK_WEEKS);
   const currentWeekStart         = currentMonday();
   const fetchCurrentWeek         = isFridayOrLaterUtc();   // fetch data Fri/Sat/Sun
   const weeks                    = [...completedWeeks];
@@ -592,7 +597,8 @@ serve(async (req) => {
     .from('timesheets')
     .select('id, user_id, week_start, entries, submitted_at, source')
     .in('week_start', weeks)
-    .neq('status', 'rejected');
+    .neq('status', 'rejected')
+    .range(0, ROW_CAP - 1);
 
   if (tsErr) {
     return new Response(JSON.stringify({ error: `Timesheet query: ${tsErr.message}` }), {
@@ -617,7 +623,8 @@ serve(async (req) => {
     const { data: logRows } = await db
       .from('email_import_log')
       .select('timesheet_id, from_email, resolved_email, message_id')
-      .in('timesheet_id', allTimesheetIds);
+      .in('timesheet_id', allTimesheetIds)
+      .range(0, ROW_CAP - 1);
 
     for (const row of (logRows ?? [])) {
       if (!row.timesheet_id) continue;
@@ -784,7 +791,12 @@ serve(async (req) => {
       `<span style="display:inline-block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;border-radius:4px;padding:3px 10px;margin:3px 4px 3px 0;font-size:13px;font-weight:600">${n}</span>`
     ).join('');
 
-    const weekTitle = `Week ending ${label.split('–')[1]?.trim() ?? label}`;
+    // Format Sunday date directly instead of splitting `label` on '–' — the split
+    // silently dropped the month for same-month weeks (e.g. "Jul 13–19, 2026" →
+    // "Week ending 19, 2026"). Latent since 2026-06-12 (e4e05e6f), first exposed
+    // 2026-08-12 when the last cross-month card resolved.
+    const [wtY, wtM, wtD] = addDays(weekStart, 6).split('-').map(Number);
+    const weekTitle = `Week ending ${WK_MONTHS[wtM - 1]} ${wtD}, ${wtY}`;
 
     const htmlSection = `
       <div style="margin-top:20px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
@@ -817,14 +829,14 @@ serve(async (req) => {
 
   if (totalMissingWeeks === 0) {
     subject  = `Timesheet Report — All Weeks Submitted ✓`;
-    bodyText = `All contractors have submitted their timesheets for all weeks since ${CUTOFF}. Nothing outstanding.`;
+    bodyText = `All contractors have submitted their timesheets for the last ${LOOKBACK_WEEKS} weeks. Nothing outstanding.`;
     bodyHtml = `<div style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto;padding:20px">
       <div style="background:#1e40af;color:white;padding:20px;border-radius:8px 8px 0 0">
         <h2 style="margin:0">Timesheet Report</h2>
       </div>
       <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;border-radius:0 0 8px 8px">
         <p style="color:#16a34a;font-weight:bold;font-size:16px">✓ All contractors are up to date.</p>
-        <p style="color:#6b7280;font-size:13px">No outstanding timesheets for any week since ${CUTOFF}.</p>
+        <p style="color:#6b7280;font-size:13px">No outstanding timesheets for the last ${LOOKBACK_WEEKS} weeks.</p>
       </div>
     </div>`;
   } else {
