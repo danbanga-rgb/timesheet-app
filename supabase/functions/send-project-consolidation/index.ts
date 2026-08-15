@@ -486,11 +486,14 @@ serve(async (req) => {
 
   const monthStartD = parseLocalDate(monthStart);
   const rangeStartD = addDays(monthStartD, -6); // catch weeks whose Monday is up to 6 days before month start
+  // Explicit .range() guards against PostgREST's 1000-row default cap as project
+  // headcount grows. See feedback_no_hardcoded_cutoff.
   const { data: tsRows, error: tErr } = await supabase.from('timesheets')
     .select('user_id, week_start, entries, status, project_id')
     .in('user_id', userIdsInProjects)
     .gte('week_start', formatDate(rangeStartD))
-    .lte('week_start', monthEnd);
+    .lte('week_start', monthEnd)
+    .range(0, 4999);
   if (tErr) return errorResponse(tErr.message);
 
   const timesheets = (tsRows ?? []).map(t => ({
