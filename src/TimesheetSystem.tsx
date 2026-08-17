@@ -396,6 +396,7 @@ interface ConveraTransaction {
   matcherIgnore: boolean;  // pre-2026-06-20 historical Convera transactions
   qbPaymentExportStatus: 'not_exported' | 'exported' | 'confirmed' | 'skipped';
   qbPaymentExportStatusAt: string | null;
+  qbBillpmtTxnId: string | null;
 }
 
 interface ReminderEmail {
@@ -2107,6 +2108,7 @@ const TimesheetSystem = () => {
       matcherIgnore:        Boolean(r.matcher_ignore),
       qbPaymentExportStatus: ((r.qb_payment_export_status as string) || 'not_exported') as ConveraTransaction['qbPaymentExportStatus'],
       qbPaymentExportStatusAt: (r.qb_payment_export_status_at as string) || null,
+      qbBillpmtTxnId: (r.qb_billpmt_txn_id as string) ?? null,
     };
   }
 
@@ -2777,6 +2779,7 @@ const TimesheetSystem = () => {
       else if (!inv.invoiceNumber) reason = 'Missing invoice number';
       else if (inv.qbExportStatus === 'not_exported') reason = 'BILL not yet exported to QB';
       else if (inv.qbExportStatus === 'skipped') reason = 'BILL was skipped in QB export';
+      else if (txn.qbBillpmtTxnId) reason = 'Payment already recorded via Web Connector';
       else if (txn.qbPaymentExportStatus === 'exported' || txn.qbPaymentExportStatus === 'confirmed') reason = 'Payment already exported';
       return { txn, invoice: inv, vendorName: vendor, excludeReason: reason };
     });
