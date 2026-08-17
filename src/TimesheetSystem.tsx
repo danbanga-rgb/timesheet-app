@@ -189,6 +189,7 @@ import { createPortal } from 'react-dom';
 import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronLeft, ChevronRight, Building2, ArrowUpDown, Copy } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
+import { tzMap } from '../supabase/functions/_shared/tz-map';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -437,20 +438,6 @@ interface ProjectForm {
   description: string;
 }
 
-const tzMap: Record<string, string> = {
-  'US-California': 'America/Los_Angeles', 'US-New York': 'America/New_York',
-  'US-Texas': 'America/Chicago', 'US-Florida': 'America/New_York',
-  'GB-England': 'Europe/London', 'GB-Scotland': 'Europe/London', 'GB-Wales': 'Europe/London',
-  'CA-Ontario': 'America/Toronto', 'CA-Quebec': 'America/Toronto', 'CA-British Columbia': 'America/Vancouver',
-  'HR-': 'Europe/Zagreb', 'RS-': 'Europe/Belgrade', 'BA-': 'Europe/Sarajevo',
-  'SI-': 'Europe/Ljubljana', 'MK-': 'Europe/Skopje',
-  'HR-Croatia': 'Europe/Zagreb', 'RS-Serbia': 'Europe/Belgrade',
-  'BA-Bosnia and Herzegovina': 'Europe/Sarajevo', 'SI-Slovenia': 'Europe/Ljubljana',
-  'MK-North Macedonia': 'Europe/Skopje',
-  'IN-': 'Asia/Kolkata',
-  'NL-': 'Europe/Amsterdam',
-  'AM-': 'Asia/Yerevan',
-};
 
 
 // World countries for payment profile (excludes sanctioned countries)

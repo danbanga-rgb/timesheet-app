@@ -10,29 +10,15 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { lookupTimezone } from '../_shared/tz-map.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const tzMap: Record<string, string> = {
-  'US-California': 'America/Los_Angeles', 'US-New York': 'America/New_York',
-  'US-Texas': 'America/Chicago', 'US-Florida': 'America/New_York',
-  'GB-England': 'Europe/London', 'GB-Scotland': 'Europe/London', 'GB-Wales': 'Europe/London',
-  'CA-Ontario': 'America/Toronto', 'CA-Quebec': 'America/Toronto', 'CA-British Columbia': 'America/Vancouver',
-  'HR-': 'Europe/Zagreb', 'RS-': 'Europe/Belgrade', 'BA-': 'Europe/Sarajevo',
-  'SI-': 'Europe/Ljubljana', 'MK-': 'Europe/Skopje',
-  'HR-Croatia': 'Europe/Zagreb', 'RS-Serbia': 'Europe/Belgrade',
-  'BA-Bosnia and Herzegovina': 'Europe/Sarajevo', 'SI-Slovenia': 'Europe/Ljubljana',
-  'MK-North Macedonia': 'Europe/Skopje',
-  'IN-': 'Asia/Kolkata',
-  'NL-': 'Europe/Amsterdam',
-  'AM-': 'Asia/Yerevan',
-};
-
 function getUserLocalTime(country: string, region: string): Date {
-  const tz = tzMap[`${country}-${region}`] || tzMap[`${country}-`] || 'America/New_York';
+  const tz = lookupTimezone(country, region);
   return new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
 }
 
