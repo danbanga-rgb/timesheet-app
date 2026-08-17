@@ -18,7 +18,7 @@
 // script wasn't updated to include it, the very first live job will fail
 // with a clear "missing key X" — instead of silently no-op'ing forever.
 
-export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query';
+export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query' | 'bill_pmt_query';
 
 /** Keys the edge fn's persist step MUST see in the payload for each kind. */
 export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
@@ -35,6 +35,10 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
   // Query-only jobs — the response IS the payload from our POV. Nothing required.
   account_query: [],
   vendor_query: [],
+  // Exploratory read-only query. Payload carries a raw qbxml_request string that
+  // the dispatcher sends through unmodified. Persist is a no-op — response is
+  // inspected manually via qb_sync_jobs.qbxml_response.
+  bill_pmt_query: ['rawQbxmlRequest'],
 };
 
 export interface ValidatePayloadResult {

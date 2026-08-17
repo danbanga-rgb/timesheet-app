@@ -1,7 +1,7 @@
 // Runtime contract for qb_sync_jobs.payload shapes.
 // See src/lib/qbxml/job-payloads.ts for full docs. Keep in sync.
 
-export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query';
+export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query' | 'bill_pmt_query';
 
 export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
   bill_query: ['refNumbers'],
@@ -9,6 +9,7 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
   bill_pmt_add: ['sourceConveraTxnId', 'refNumber', 'payeeVendorName', 'applications'],
   account_query: [],
   vendor_query: [],
+  bill_pmt_query: ['rawQbxmlRequest'],
 };
 
 export interface ValidatePayloadResult {

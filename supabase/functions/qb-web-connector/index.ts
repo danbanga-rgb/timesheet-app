@@ -138,6 +138,14 @@ function renderJobRequest(job: JobRow): string {
     case 'vendor_query':
       element = buildVendorQueryRq({ ...(job.payload as VendorQueryRqInput), requestId });
       break;
+    case 'bill_pmt_query': {
+      // Exploratory read-only query. Payload provides pre-built XML; we splice
+      // in the requestID and pass through. No structured builder yet — this
+      // kind exists for one-off discovery of historic payment patterns.
+      const raw = (job.payload as { rawQbxmlRequest: string }).rawQbxmlRequest;
+      element = raw.replace(/<BillPaymentCheckQueryRq(\s|>)/, `<BillPaymentCheckQueryRq requestID="${requestId}"$1`);
+      break;
+    }
     default:
       throw new Error(`Unknown job kind: ${(job as JobRow).kind}`);
   }
@@ -337,6 +345,13 @@ async function persistJobResponse(
     if (!updated || updated.length === 0) {
       return { ok: false, errorMsg: `BillPaymentCheckAdd persist: 0 rows updated for sourceConveraTxnId=${sourceTxnId}. QB payment was created (TxnID=${parsed.result.txnId}) but source convera_transaction not found — was it deleted after enqueue?` };
     }
+    return { ok: true, errorMsg: null };
+  }
+
+  if (job.kind === 'bill_pmt_query') {
+    // Exploratory kind. Response XML is already stored in qb_sync_jobs.qbxml_response
+    // (the outer WC pipeline handles that). Nothing to persist structurally —
+    // caller reads the raw response to eyeball patterns.
     return { ok: true, errorMsg: null };
   }
 
