@@ -824,18 +824,34 @@ const TimesheetSystem = () => {
 
   const countryName = (code: string) => countries.find(c => c.code === code)?.name || code;
   const paymentMethod = (inv: Invoice) => {
-    const override = inv.paymentMethodOverride;
-    if (override) {
-      // Older data has lowercase 'intuit'/'convera' overrides; canonicalise so
-      // downstream === comparisons match consistently.
-      const lc = override.toLowerCase();
+    // Older data has lowercase 'intuit'/'convera'; canonicalise so downstream === matches.
+    const canonicalise = (raw: string | null | undefined): string => {
+      if (!raw) return '';
+      const lc = raw.toLowerCase();
       if (lc === 'intuit') return 'Intuit';
       if (lc === 'convera') return 'Convera';
-      return override;
-    }
-    const country = inv.paymentProfile?.country || '';
-    return (country === 'United States' || country === 'US') ? 'Intuit' : 'Convera';
+      return raw;
+    };
+    const own = canonicalise(inv.paymentMethodOverride);
+    if (own) return own;
+    // Fall back to the accountant's most recent explicit choice for this contractor.
+    // Country/location_type can't capture anomalies (offshore contractor billed at onshore
+    // rate, umbrella switches, etc.); prior accountant choices can.
+    const prior = invoices
+      .filter(i => i.userId === inv.userId && i.id !== inv.id && i.paymentMethodOverride)
+      .sort((a, b) => b.id - a.id)[0];
+    if (prior) return canonicalise(prior.paymentMethodOverride);
+    // No prior signal — accountant must pick on first approval. Empty renders as "Unassigned".
+    return '';
   };
+  // Colour classes for the payment-method chip. '' → gray (Unassigned).
+  const paymentMethodChipClass = (inv: Invoice) => {
+    const pm = paymentMethod(inv);
+    if (pm === 'Intuit') return 'bg-green-50 text-green-700';
+    if (pm === 'Convera') return 'bg-purple-50 text-purple-700';
+    return 'bg-gray-100 text-gray-500';
+  };
+  const paymentMethodLabel = (inv: Invoice) => paymentMethod(inv) || 'Unassigned';
 
   const [timesheets, setTimesheets] = useState<Timesheet[]>([]);
   const timesheetsRef = useRef<Timesheet[]>([]);
@@ -8011,7 +8027,7 @@ const TimesheetSystem = () => {
                                     </td>
                                     <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
                                       {(inv.paymentProfile || inv.paymentMethodOverride)
-                                        ? <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethod(inv) === 'Intuit' ? 'bg-green-50 text-green-700' : 'bg-purple-50 text-purple-700'}`}>{paymentMethod(inv)}</span>
+                                        ? <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethodChipClass(inv)}`}>{paymentMethodLabel(inv)}</span>
                                         : <span className="text-gray-300 text-xs">—</span>}
                                     </td>
                                     <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
@@ -8123,8 +8139,8 @@ const TimesheetSystem = () => {
                                   <td className="border border-indigo-200 px-4 py-2.5 text-center" onClick={e => e.stopPropagation()}>
                                     {allShareProfile && sharedProfile ? (
                                       <div className="flex flex-col items-center gap-1">
-                                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${paymentMethod(group[0]) === 'Intuit' ? 'bg-green-50 text-green-700' : 'bg-purple-50 text-purple-700'}`}>
-                                          {paymentMethod(group[0])}
+                                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${paymentMethodChipClass(group[0])}`}>
+                                          {paymentMethodLabel(group[0])}
                                         </span>
                                         <button
                                           onClick={() => toggleCombinePayments(sharedProfile.id, sharedProfile.combinePayments)}
@@ -11094,12 +11110,18 @@ const TimesheetSystem = () => {
                       {inv.paidDate && (
                         <div className="bg-green-50 rounded-lg p-3 border border-green-200"><div className="text-green-600 mb-0.5">Paid Date</div><div className="font-medium text-green-800">{parseLocalDate(inv.paidDate!).toLocaleDateString()}</div></div>
                       )}
-                      {inv.paymentProfile && (
-                        <div className={`rounded-lg p-3 border col-span-2 ${paymentMethod(inv) === 'Intuit' ? 'bg-green-50 border-green-200' : 'bg-purple-50 border-purple-200'}`}>
-                          <div className={`mb-0.5 text-xs ${paymentMethod(inv) === 'Intuit' ? 'text-green-600' : 'text-purple-600'}`}>Payment Method</div>
-                          <div className={`font-bold text-lg ${paymentMethod(inv) === 'Intuit' ? 'text-green-800' : 'text-purple-800'}`}>{paymentMethod(inv)}</div>
-                        </div>
-                      )}
+                      {inv.paymentProfile && (() => {
+                        const pm = paymentMethod(inv);
+                        const border = pm === 'Intuit' ? 'bg-green-50 border-green-200' : pm === 'Convera' ? 'bg-purple-50 border-purple-200' : 'bg-gray-50 border-gray-300';
+                        const labelClr = pm === 'Intuit' ? 'text-green-600' : pm === 'Convera' ? 'text-purple-600' : 'text-gray-500';
+                        const valueClr = pm === 'Intuit' ? 'text-green-800' : pm === 'Convera' ? 'text-purple-800' : 'text-gray-600';
+                        return (
+                          <div className={`rounded-lg p-3 border col-span-2 ${border}`}>
+                            <div className={`mb-0.5 text-xs ${labelClr}`}>Payment Method</div>
+                            <div className={`font-bold text-lg ${valueClr}`}>{pm || 'Unassigned'}</div>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <table className="w-full text-sm border-collapse mb-5">
                       <thead className="bg-indigo-600 text-white">
@@ -11566,6 +11588,7 @@ const TimesheetSystem = () => {
                               }}
                               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm bg-white"
                             >
+                              <option value="" disabled>— Select —</option>
                               <option value="Intuit">Intuit</option>
                               <option value="Convera">Convera</option>
                             </select>
@@ -11579,8 +11602,16 @@ const TimesheetSystem = () => {
                             </div>
                           </div>
                         )}
+                        {(!pendingPaymentMethod && !paymentMethod(inv)) && (
+                          <div className="mb-3 p-3 bg-gray-100 border border-gray-300 rounded-lg text-xs text-gray-700">
+                            No payment method on file for this contractor. Select Intuit or Convera above before approving.
+                          </div>
+                        )}
                         <div className="flex gap-3">
-                          <button onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined, undefined, pendingPaymentMethod || paymentMethod(inv), pendingPaymentTerms || undefined)} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium"><CheckCircle className="w-5 h-5" /> Approve</button>
+                          <button
+                            disabled={!pendingPaymentMethod && !paymentMethod(inv)}
+                            onClick={() => handleInvoiceAction(inv.id, 'approved', pendingPayOnDate || undefined, undefined, pendingPaymentMethod || paymentMethod(inv), pendingPaymentTerms || undefined)}
+                            className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium disabled:bg-gray-300 disabled:cursor-not-allowed"><CheckCircle className="w-5 h-5" /> Approve</button>
                           <button onClick={() => handleInvoiceAction(inv.id, 'rejected')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium"><XCircle className="w-5 h-5" /> Reject</button>
                         </div>
                       </div>
@@ -11656,6 +11687,7 @@ const TimesheetSystem = () => {
                                 onChange={e => setPendingPaymentMethod(e.target.value)}
                                 className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-400 text-sm bg-white"
                               >
+                                <option value="" disabled>— Select —</option>
                                 <option value="Intuit">Intuit</option>
                                 <option value="Convera">Convera</option>
                               </select>
