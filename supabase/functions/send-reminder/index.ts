@@ -21,11 +21,14 @@ const tzMap: Record<string, string> = {
   'US-Texas': 'America/Chicago', 'US-Florida': 'America/New_York',
   'GB-England': 'Europe/London', 'GB-Scotland': 'Europe/London', 'GB-Wales': 'Europe/London',
   'CA-Ontario': 'America/Toronto', 'CA-Quebec': 'America/Toronto', 'CA-British Columbia': 'America/Vancouver',
+  'HR-': 'Europe/Zagreb', 'RS-': 'Europe/Belgrade', 'BA-': 'Europe/Sarajevo',
+  'SI-': 'Europe/Ljubljana', 'MK-': 'Europe/Skopje',
   'HR-Croatia': 'Europe/Zagreb', 'RS-Serbia': 'Europe/Belgrade',
   'BA-Bosnia and Herzegovina': 'Europe/Sarajevo', 'SI-Slovenia': 'Europe/Ljubljana',
   'MK-North Macedonia': 'Europe/Skopje',
   'IN-': 'Asia/Kolkata',
   'NL-': 'Europe/Amsterdam',
+  'AM-': 'Asia/Yerevan',
 };
 
 function getUserLocalTime(country: string, region: string): Date {

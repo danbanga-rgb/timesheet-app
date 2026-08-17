@@ -449,6 +449,7 @@ const tzMap: Record<string, string> = {
   'MK-North Macedonia': 'Europe/Skopje',
   'IN-': 'Asia/Kolkata',
   'NL-': 'Europe/Amsterdam',
+  'AM-': 'Asia/Yerevan',
 };
 
 
