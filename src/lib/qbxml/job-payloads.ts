@@ -22,9 +22,10 @@ export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_quer
 
 /** Keys the edge fn's persist step MUST see in the payload for each kind. */
 export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
-  // bill_query response persist looks up (vendor, refNumber) from the RESPONSE XML,
-  // not the payload — so payload requirements are minimal (just what the builder needs).
-  bill_query: ['refNumbers'],
+  // bill_query supports three mutually-exclusive modes (txnIds, refNumbers, iterator).
+  // buildBillQueryRq validates the mode contract and throws if payload is under-specified.
+  // Persist reads results from the response XML, not the payload — no single required key.
+  bill_query: [],
   // bill_add persist uses vendorName from the payload (response echoes it back but
   // reading from payload is simpler and always correct).
   bill_add: ['vendorName', 'refNumber'],

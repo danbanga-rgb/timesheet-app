@@ -134,11 +134,33 @@ function extractTxnIdsFromResponseByVendor(xml) {
 
   const invById = new Map(batchInvoices.map(i => [i.id, i]));
 
+  // Per-(wire, vendor) skip gate. convera_transaction_billpmts is the umbrella-safe
+  // link table introduced 2026-08-18. Presence of a row means "QB payment already
+  // created for this (wire, vendor) pair" — skip that group. The old boolean gate
+  // (`t.qb_billpmt_txn_id` set → skip whole wire) is retained ONLY for wires that
+  // pre-date the link table AND aren't in the link table yet — in that case we
+  // conservatively skip to avoid double-paying, since we can't tell which vendor
+  // the legacy TxnID belongs to (last-persisted wins for umbrella wires).
+  const { data: existingLinks } = await supabase
+    .from('convera_transaction_billpmts')
+    .select('convera_transaction_id, qb_vendor_name')
+    .in('convera_transaction_id', txnIds);
+  const alreadyPaidPairs = new Set();  // "wire::vendor" for already-recorded payments
+  const wiresWithAnyLink = new Set();  // wires that have any link row (used to override legacy gate)
+  for (const l of (existingLinks || [])) {
+    alreadyPaidPairs.add(`${l.convera_transaction_id}::${l.qb_vendor_name}`);
+    wiresWithAnyLink.add(l.convera_transaction_id);
+  }
+
   // Build payment groups
   const paymentGroups = [];  // { wire, vendorName, bills: Map<refNumber, { items:[{inv, share}], txnId, jobId }> }
   const missingTxnIds = [];
+  const skippedAlreadyPaid = [];  // { wire, vendor } — logged for visibility
   for (const t of txns) {
-    if (t.matcher_ignore || t.qb_billpmt_txn_id || t.match_state !== 'matched') continue;
+    if (t.matcher_ignore || t.match_state !== 'matched') continue;
+    // Legacy skip: qb_billpmt_txn_id set BUT no link rows exist yet → pre-link-table
+    // legacy state, conservatively skip (see comment above).
+    if (t.qb_billpmt_txn_id && !wiresWithAnyLink.has(t.id)) continue;
     const bridgeRows = bridge.filter(b => b.transaction_id === t.id);
     const perInvoice = [];
     if (bridgeRows.length > 0) {
@@ -169,8 +191,16 @@ function extractTxnIdsFromResponseByVendor(xml) {
       billMap.get(bi.refNumber).items.push({ inv: item.inv, share: item.share });
     }
     for (const [vendorName, billMap] of vendorMap) {
+      if (alreadyPaidPairs.has(`${t.id}::${vendorName}`)) {
+        skippedAlreadyPaid.push({ wire: t.confirmation_number, vendor: vendorName });
+        continue;
+      }
       paymentGroups.push({ wire: t, vendorName, bills: billMap });
     }
+  }
+  if (skippedAlreadyPaid.length > 0) {
+    console.log(`\nSkipped ${skippedAlreadyPaid.length} (wire, vendor) pair(s) — already recorded in convera_transaction_billpmts:`);
+    for (const s of skippedAlreadyPaid) console.log(`   wire=${s.wire}  vendor="${s.vendor}"`);
   }
 
   if (missingTxnIds.length > 0) {

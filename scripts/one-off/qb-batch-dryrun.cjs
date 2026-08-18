@@ -127,7 +127,14 @@ async function loadBatch(batchId) {
     if (page.length < PAGE_SIZE) break;
   }
 
-  return { txns, bridge, batchInvoices, allExported, profiles, users, qbVendors };
+  // Umbrella-safe per-(wire, vendor) skip gate. See convera_transaction_billpmts (2026-08-18).
+  const { data: existingLinks, error: e7 } = await supabase
+    .from('convera_transaction_billpmts')
+    .select('convera_transaction_id, qb_vendor_name')
+    .in('convera_transaction_id', txnIds);
+  if (e7) throw e7;
+
+  return { txns, bridge, batchInvoices, allExported, profiles, users, qbVendors, existingLinks };
 }
 
 // ─── Bill grouping ──────────────────────────────────────────────────────────
@@ -202,10 +209,18 @@ function resolveQbVendorName(invoice, profiles) {
 // ─── Plan generation ────────────────────────────────────────────────────────
 
 function buildPlan(data) {
-  const { txns, bridge, batchInvoices, allExported, profiles, users, qbVendors } = data;
+  const { txns, bridge, batchInvoices, allExported, profiles, users, qbVendors, existingLinks } = data;
   const invById = new Map(batchInvoices.map(i => [i.id, i]));
   const userById = new Map(users.map(u => [u.id, u]));
   const qbVendorSet = new Set(qbVendors.filter(v => v.is_active).map(v => v.name));
+
+  // Per-(wire, vendor) already-paid skip gate. See convera_transaction_billpmts (2026-08-18).
+  const alreadyPaidPairs = new Set();
+  const wiresWithAnyLink = new Set();
+  for (const l of (existingLinks || [])) {
+    alreadyPaidPairs.add(`${l.convera_transaction_id}::${l.qb_vendor_name}`);
+    wiresWithAnyLink.add(l.convera_transaction_id);
+  }
 
   // Compute bill index from ALL exported invoices, so batch invoices can look up
   // their QB bill's RefNumber (which may be MULTI-<YYYY-MM> if part of a group).
@@ -228,8 +243,10 @@ function buildPlan(data) {
       anomalies.push({ severity: 'info', txn: txn.id, msg: `Skipped: matcher_ignore` });
       continue;
     }
-    if (txn.qb_billpmt_txn_id) {
-      anomalies.push({ severity: 'info', txn: txn.id, msg: `Skipped: already has qb_billpmt_txn_id=${txn.qb_billpmt_txn_id}` });
+    if (txn.qb_billpmt_txn_id && !wiresWithAnyLink.has(txn.id)) {
+      // Legacy pre-link-table state — no link rows exist for this wire, so we can't
+      // tell which vendor was paid. Conservatively skip to avoid double-paying.
+      anomalies.push({ severity: 'info', txn: txn.id, msg: `Skipped: legacy qb_billpmt_txn_id=${txn.qb_billpmt_txn_id} (no link rows — cannot resolve per-vendor payment status)` });
       continue;
     }
     if (txn.match_state !== 'matched') {
@@ -285,6 +302,10 @@ function buildPlan(data) {
     }
 
     for (const [vendorName, billMap] of vendorMap) {
+      if (alreadyPaidPairs.has(`${txn.id}::${vendorName}`)) {
+        anomalies.push({ severity: 'info', txn: txn.id, msg: `Skipped (wire, vendor): already recorded in convera_transaction_billpmts — vendor="${vendorName}"` });
+        continue;
+      }
       paymentGroups.push({ wire: txn, vendorName, bills: billMap });
     }
   }

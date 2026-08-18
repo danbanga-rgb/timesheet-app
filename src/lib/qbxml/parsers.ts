@@ -113,16 +113,29 @@ function getAllBlocks(fragment: string, tag: string): string[] {
 }
 
 /** Return the opening tag string and inner content of the FIRST occurrence
- *  of `<tag ...>...</tag>` in `fragment`. Used for the top-level response
- *  element (e.g. `<BillQueryRs ...>...</BillQueryRs>`) whose attributes
- *  carry statusCode / statusSeverity / statusMessage / requestID.
+ *  of `<tag ...>...</tag>` OR `<tag ... />` in `fragment`. Used for the
+ *  top-level response element (e.g. `<BillQueryRs ...>...</BillQueryRs>`)
+ *  whose attributes carry statusCode / statusSeverity / statusMessage /
+ *  requestID.
  *
- *  Returns null if not found. Ignores self-closing forms (no response element
- *  is self-closing). */
+ *  Query-shape responses (BillQueryRs, AccountQueryRs, VendorQueryRs,
+ *  BillPaymentCheckQueryRs) arrive self-closed when QB has zero matches —
+ *  status attributes are still present on the opening tag, so callers still
+ *  get the "we asked, no match" signal. Inner is empty string for the
+ *  self-closing case.
+ *
+ *  Returns null if the tag is absent entirely (malformed response). */
 function getFirstElement(
   fragment: string,
   tag: string,
 ): { openingTag: string; inner: string } | null {
+  // Self-closing first: <BillQueryRs .../>
+  const selfClosingPattern = new RegExp(
+    `<${tag}(?:\\s[^>]*)?/>`,
+  );
+  const sc = fragment.match(selfClosingPattern);
+  if (sc) return { openingTag: sc[0], inner: '' };
+  // Standard: <tag ...>content</tag>
   const pattern = new RegExp(
     `(<${tag}(?:\\s[^>]*)?>)([\\s\\S]*?)</${tag}>`,
   );

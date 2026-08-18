@@ -51,13 +51,15 @@ function fmtAmount(n: number): string {
  *    EditSequence). Avoids QB pulling line detail we won't consume.
  */
 export function buildBillQueryRq(input: BillQueryRqInput): string {
+  const hasTxnIds = (input.txnIds?.length ?? 0) > 0;
   const hasRefs = (input.refNumbers?.length ?? 0) > 0;
   const hasIterator = !!input.entityVendorName || !!input.fromTxnDate || !!input.toTxnDate;
-  if (!hasRefs && !hasIterator) {
-    throw new Error('buildBillQueryRq: supply refNumbers OR entityVendorName/date-range (iterator mode)');
+  const modeCount = (hasTxnIds ? 1 : 0) + (hasRefs ? 1 : 0) + (hasIterator ? 1 : 0);
+  if (modeCount === 0) {
+    throw new Error('buildBillQueryRq: supply txnIds OR refNumbers OR entityVendorName/date-range (iterator mode)');
   }
-  if (hasRefs && hasIterator) {
-    throw new Error('buildBillQueryRq: refNumbers and iterator filters (entityVendorName/dates) are mutually exclusive per the qbXML XSD choice group');
+  if (modeCount > 1) {
+    throw new Error('buildBillQueryRq: txnIds, refNumbers, and iterator filters are mutually exclusive per the qbXML XSD choice group');
   }
   if (input.requestId) assertAscii('requestId', input.requestId);
   const attrs = input.requestId
@@ -65,7 +67,15 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
     : '';
   const parts: string[] = [`<BillQueryRq${attrs}>`];
 
-  if (hasRefs) {
+  if (hasTxnIds) {
+    (input.txnIds as string[]).forEach((t, i) => assertAscii(`txnIds[${i}]`, t));
+    for (const txnId of input.txnIds as string[]) {
+      parts.push(`  <TxnID>${xmlEscape(txnId)}</TxnID>`);
+    }
+    if (input.maxReturned != null) {
+      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+    }
+  } else if (hasRefs) {
     (input.refNumbers as string[]).forEach((r, i) => assertAscii(`refNumbers[${i}]`, r));
     for (const ref of input.refNumbers as string[]) {
       parts.push(`  <RefNumber>${xmlEscape(ref)}</RefNumber>`);

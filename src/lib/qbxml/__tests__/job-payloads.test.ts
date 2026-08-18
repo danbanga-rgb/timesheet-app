@@ -6,7 +6,10 @@ describe('PAYLOAD_REQUIRED_KEYS', () => {
     // Lock in current state. If we intentionally add/remove a required key, this
     // test fails and forces us to review both sides (edge fn persist AND every
     // enqueue script that writes this payload kind).
-    expect(PAYLOAD_REQUIRED_KEYS.bill_query).toEqual(['refNumbers']);
+    // bill_query is [] because it has three mutually-exclusive modes (txnIds, refNumbers,
+    // iterator). buildBillQueryRq is the authoritative mode-contract validator; validatePayload
+    // can't express "any of these three" so we defer to the builder.
+    expect(PAYLOAD_REQUIRED_KEYS.bill_query).toEqual([]);
     expect(PAYLOAD_REQUIRED_KEYS.bill_add).toEqual(['vendorName', 'refNumber']);
     expect(PAYLOAD_REQUIRED_KEYS.bill_pmt_add).toEqual(['sourceConveraTxnId', 'refNumber', 'payeeVendorName', 'applications']);
     expect(PAYLOAD_REQUIRED_KEYS.account_query).toEqual([]);

@@ -87,10 +87,27 @@ describe('buildBillQueryRq', () => {
     expect(out).toContain('<IncludeLineItems>false</IncludeLineItems>');
   });
 
-  it('throws on empty refNumbers', () => {
+  it('throws when no mode is supplied (empty refNumbers, no txnIds, no iterator)', () => {
     // QB would accept an empty query and return every open bill — never what we want.
     // Failing fast prevents accidental full-table scans.
-    expect(() => buildBillQueryRq({ refNumbers: [] })).toThrow(/must not be empty/);
+    expect(() => buildBillQueryRq({ refNumbers: [] })).toThrow(/supply txnIds OR refNumbers/);
+    expect(() => buildBillQueryRq({})).toThrow(/supply txnIds OR refNumbers/);
+  });
+
+  it('emits <TxnID> per txnId in txnIds mode (audit / verification lookups)', () => {
+    // Used by the blast-radius audit scan: query each invoices.qb_bill_txn_id by TxnID
+    // and confirm the response's VendorRef.FullName matches the invoice's payment_profile
+    // qb_vendor_name. Unambiguous per-bill verification.
+    const out = buildBillQueryRq({ txnIds: ['79A9-1755375943', 'AC48-1755377100'] });
+    expect(out).toContain('<TxnID>79A9-1755375943</TxnID>');
+    expect(out).toContain('<TxnID>AC48-1755377100</TxnID>');
+    expect(out).not.toContain('<RefNumber>');
+    expect(out).not.toContain('<EntityFilter>');
+  });
+
+  it('throws when multiple modes are supplied together', () => {
+    expect(() => buildBillQueryRq({ txnIds: ['T1'], refNumbers: ['R1'] })).toThrow(/mutually exclusive/);
+    expect(() => buildBillQueryRq({ refNumbers: ['R1'], entityVendorName: 'V' })).toThrow(/mutually exclusive/);
   });
 
   it('escapes XML special chars in RefNumber values', () => {

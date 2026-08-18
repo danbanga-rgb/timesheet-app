@@ -152,6 +152,28 @@ function renderJobRequest(job: JobRow): string {
   return wrapQbxmlRequests([element]);
 }
 
+/** Classify a parsed query response's status.
+ *
+ *  QB WC convention for query-shape responses (BillQueryRs, AccountQueryRs,
+ *  VendorQueryRs, BillPaymentCheckQueryRs):
+ *   - statusCode="0"                       → success, N results
+ *   - statusCode="500" statusSeverity="Warn" + zero results
+ *                                          → success, no match (legitimate answer)
+ *   - anything else                        → real error
+ *
+ *  Prior code treated any non-zero code with empty results as an error, which
+ *  polluted the log with "Object cannot be found in QuickBooks" false alarms
+ *  (Aug 17 jobs 233/234/235 during Intuit Phase 1a discovery).
+ */
+function isQueryStatusOk(
+  status: { statusCode: string; statusSeverity: string; statusMessage: string },
+  resultsLen: number,
+): boolean {
+  if (status.statusCode === '0') return true;
+  if (status.statusCode === '500' && status.statusSeverity === 'Warn' && resultsLen === 0) return true;
+  return false;
+}
+
 /** Parse a qbXML response envelope and persist the result to the appropriate
  *  domain table. Returns { ok, errorMsg } for job status accounting. */
 async function persistJobResponse(
@@ -173,8 +195,12 @@ async function persistJobResponse(
 
   if (job.kind === 'bill_query') {
     const parsed = parseBillQueryRs(first);
-    if (parsed.status.statusCode !== '0' && parsed.results.length === 0) {
+    if (!isQueryStatusOk(parsed.status, parsed.results.length)) {
       return { ok: false, errorMsg: `BillQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
+    }
+    // No matches — the query legitimately answered "not found". Persist step is a no-op.
+    if (parsed.results.length === 0) {
+      return { ok: true, errorMsg: null };
     }
     // Persist TxnID → invoices.qb_bill_txn_id.
     //   All persist paths must key on (vendor, refNumber) — never refNumber alone —
@@ -268,7 +294,7 @@ async function persistJobResponse(
 
   if (job.kind === 'account_query') {
     const parsed = parseAccountQueryRs(first);
-    if (parsed.status.statusCode !== '0' && parsed.accounts.length === 0) {
+    if (!isQueryStatusOk(parsed.status, parsed.accounts.length)) {
       return { ok: false, errorMsg: `AccountQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
     // Upsert each account into qb_accounts. Primary key = list_id (stable across
@@ -294,7 +320,7 @@ async function persistJobResponse(
 
   if (job.kind === 'vendor_query') {
     const parsed = parseVendorQueryRs(first);
-    if (parsed.status.statusCode !== '0' && parsed.vendors.length === 0) {
+    if (!isQueryStatusOk(parsed.status, parsed.vendors.length)) {
       return { ok: false, errorMsg: `VendorQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
     // Upsert each vendor into qb_vendors. Primary key = list_id (stable across
@@ -323,27 +349,46 @@ async function persistJobResponse(
     if (!parsed.result) {
       return { ok: false, errorMsg: `BillPaymentCheckAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Persist to convera_transactions.qb_billpmt_txn_id by the source convera_transaction id
-    // baked into the payload at enqueue time. Prior version keyed on confirmation_number
-    // which (a) referenced a field the enqueue script doesn't set, and (b) would have
-    // updated every row for that wire — wrong for multi-vendor wires. Discovered
-    // 2026-08-14 after batch 17 payments were re-enqueued as duplicates.
-    const sourceTxnId = (job.payload as { sourceConveraTxnId?: number }).sourceConveraTxnId;
-    if (sourceTxnId == null) {
-      // Payment succeeded in QB but we can't attribute it back to a source convera_transaction.
-      // Fail-fast so a human handles the orphan.
+    // Umbrella-safe persist. A single Convera wire can span multiple vendors
+    // (BIMOSOFT, Native Teams, Teal) → multiple bill_pmt_add jobs share the same
+    // sourceConveraTxnId but produce distinct QB payment TxnIDs. Prior code wrote
+    // each to convera_transactions.qb_billpmt_txn_id (last-wins, silently lost the
+    // other N-1). We now insert per-(wire, vendor) into convera_transaction_billpmts
+    // and keep the old column populated as a "at least one recorded" cache.
+    const payload = job.payload as {
+      sourceConveraTxnId?: number;
+      payeeVendorName?: string;
+      applications?: { paymentAmount?: number }[];
+    };
+    if (payload.sourceConveraTxnId == null) {
       return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing sourceConveraTxnId. QB payment created (TxnID=${parsed.result.txnId}) but not linked to any convera_transaction row.` };
     }
-    const { data: updated, error: updErr } = await supabase
+    if (!payload.payeeVendorName) {
+      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing payeeVendorName. QB payment created (TxnID=${parsed.result.txnId}) for wire ${payload.sourceConveraTxnId} but vendor unknown — link table row cannot be built.` };
+    }
+    const paymentAmount = (payload.applications ?? []).reduce((s, a) => s + (Number(a.paymentAmount) || 0), 0);
+    const { error: linkErr } = await supabase
+      .from('convera_transaction_billpmts')
+      .upsert({
+        convera_transaction_id: payload.sourceConveraTxnId,
+        qb_vendor_name:         payload.payeeVendorName,
+        qb_billpmt_txn_id:      parsed.result.txnId,
+        payment_amount:         paymentAmount,
+      }, { onConflict: 'convera_transaction_id,qb_vendor_name' });
+    if (linkErr) {
+      return { ok: false, errorMsg: `BillPaymentCheckAdd persist DB error inserting link row for wire=${payload.sourceConveraTxnId} vendor="${payload.payeeVendorName}": ${linkErr.message}` };
+    }
+    // Legacy single-value cache. Deliberately last-write-wins — we don't check for
+    // an existing value; the link table is authoritative for per-vendor lookups.
+    // This column is a "was ever paid" bit for legacy consumers (matcher_ignore
+    // filter, older UI badges). Drop candidate for a future migration.
+    const { error: cacheErr } = await supabase
       .from('convera_transactions')
       .update({ qb_billpmt_txn_id: parsed.result.txnId })
-      .eq('id', sourceTxnId)
-      .select('id');
-    if (updErr) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist DB error for sourceConveraTxnId=${sourceTxnId}: ${updErr.message}` };
-    }
-    if (!updated || updated.length === 0) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: 0 rows updated for sourceConveraTxnId=${sourceTxnId}. QB payment was created (TxnID=${parsed.result.txnId}) but source convera_transaction not found — was it deleted after enqueue?` };
+      .eq('id', payload.sourceConveraTxnId);
+    if (cacheErr) {
+      // Non-fatal — link table is the source of truth. Log but don't fail.
+      console.warn(`BillPaymentCheckAdd: link row saved but legacy cache update failed for wire=${payload.sourceConveraTxnId}: ${cacheErr.message}`);
     }
     return { ok: true, errorMsg: null };
   }

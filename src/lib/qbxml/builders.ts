@@ -51,20 +51,63 @@ function fmtAmount(n: number): string {
  *    EditSequence). Avoids QB pulling line detail we won't consume.
  */
 export function buildBillQueryRq(input: BillQueryRqInput): string {
-  if (input.refNumbers.length === 0) {
-    throw new Error('buildBillQueryRq: refNumbers must not be empty');
+  const hasTxnIds = (input.txnIds?.length ?? 0) > 0;
+  const hasRefs = (input.refNumbers?.length ?? 0) > 0;
+  const hasIterator = !!input.entityVendorName || !!input.fromTxnDate || !!input.toTxnDate;
+  const modeCount = (hasTxnIds ? 1 : 0) + (hasRefs ? 1 : 0) + (hasIterator ? 1 : 0);
+  if (modeCount === 0) {
+    throw new Error('buildBillQueryRq: supply txnIds OR refNumbers OR entityVendorName/date-range (iterator mode)');
   }
-  input.refNumbers.forEach((r, i) => assertAscii(`refNumbers[${i}]`, r));
+  if (modeCount > 1) {
+    throw new Error('buildBillQueryRq: txnIds, refNumbers, and iterator filters are mutually exclusive per the qbXML XSD choice group');
+  }
   if (input.requestId) assertAscii('requestId', input.requestId);
   const attrs = input.requestId
     ? ` requestID="${xmlEscape(input.requestId)}"`
     : '';
   const parts: string[] = [`<BillQueryRq${attrs}>`];
-  for (const ref of input.refNumbers) {
-    parts.push(`  <RefNumber>${xmlEscape(ref)}</RefNumber>`);
-  }
-  if (input.maxReturned != null) {
-    parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+
+  if (hasTxnIds) {
+    (input.txnIds as string[]).forEach((t, i) => assertAscii(`txnIds[${i}]`, t));
+    for (const txnId of input.txnIds as string[]) {
+      parts.push(`  <TxnID>${xmlEscape(txnId)}</TxnID>`);
+    }
+    if (input.maxReturned != null) {
+      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+    }
+  } else if (hasRefs) {
+    (input.refNumbers as string[]).forEach((r, i) => assertAscii(`refNumbers[${i}]`, r));
+    for (const ref of input.refNumbers as string[]) {
+      parts.push(`  <RefNumber>${xmlEscape(ref)}</RefNumber>`);
+    }
+    if (input.maxReturned != null) {
+      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+    }
+  } else {
+    // Iterator mode per qbXML 13.0 XSD (BillQueryRq). Element ordering:
+    //   FILTERS (TxnDateRangeFilter → EntityFilter → PaidStatus → CurrencyFilter)
+    //   → MaxReturned? → IncludeLineItems? → OwnerID*
+    if (input.fromTxnDate || input.toTxnDate) {
+      parts.push('  <TxnDateRangeFilter>');
+      if (input.fromTxnDate) {
+        assertAscii('fromTxnDate', input.fromTxnDate);
+        parts.push(`    <FromTxnDate>${xmlEscape(input.fromTxnDate)}</FromTxnDate>`);
+      }
+      if (input.toTxnDate) {
+        assertAscii('toTxnDate', input.toTxnDate);
+        parts.push(`    <ToTxnDate>${xmlEscape(input.toTxnDate)}</ToTxnDate>`);
+      }
+      parts.push('  </TxnDateRangeFilter>');
+    }
+    if (input.entityVendorName) {
+      assertAscii('entityVendorName', input.entityVendorName);
+      parts.push('  <EntityFilter>');
+      parts.push(`    <FullName>${xmlEscape(input.entityVendorName)}</FullName>`);
+      parts.push('  </EntityFilter>');
+    }
+    if (input.maxReturned != null) {
+      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+    }
   }
   parts.push('  <IncludeLineItems>false</IncludeLineItems>');
   parts.push('</BillQueryRq>');

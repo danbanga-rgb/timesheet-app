@@ -5,22 +5,30 @@
 // PaymentProfile in TimesheetSystem.tsx) to keep the builders decoupled from
 // UI/DB concerns and easy to unit-test with plain fixtures.
 
-/** BillQueryRq: look up bills EITHER by RefNumber (our invoice_number) OR
- *  by vendor via iterator filter. The two modes are mutually exclusive per
- *  the qbXML XSD choice group.
+/** BillQueryRq: look up bills by TxnID, by RefNumber (our invoice_number),
+ *  or by vendor iterator. The three modes are mutually exclusive per the
+ *  qbXML XSD choice group.
  *
- *  Mode 1: key lookup — supply refNumbers[]. Fast, targeted.
- *  Mode 2: iterator — supply entityVendorName (and optionally maxReturned,
- *    fromModifiedDate, toModifiedDate). Returns ALL bills for that vendor
- *    in the window. Useful for diagnostics ("what bills does QB actually
- *    have for Vladimir?") and reconciliation.
+ *  Mode 1: TxnID lookup — supply txnIds[]. Unambiguous per-bill verification
+ *    (a TxnID belongs to exactly one bill). Used for the vendor-mismatch audit
+ *    scan that catches pre-4caef92 cross-vendor collisions in invoices.qb_bill_txn_id.
+ *  Mode 2: RefNumber lookup — supply refNumbers[]. Fast, targeted. RefNumbers
+ *    can collide across vendors (Croatian contractors share "INV 04/26" etc.);
+ *    the response returns one BillRet per matching bill, and callers must
+ *    disambiguate by VendorRef.FullName on the persist path.
+ *  Mode 3: Iterator — supply entityVendorName (and optionally maxReturned,
+ *    fromTxnDate, toTxnDate). Returns ALL bills for that vendor in the window.
+ *    Useful for diagnostics and reconciliation.
  */
 export interface BillQueryRqInput {
+  /** TxnIDs to look up. Unambiguous per-bill lookup. Mutually exclusive with
+   *  refNumbers and iterator mode. */
+  txnIds?: string[];
   /** Ref numbers to search for. Corresponds to our `invoices.invoice_number`.
-   *  Empty when using iterator mode. */
+   *  Empty when using another mode. */
   refNumbers?: string[];
   /** Iterator mode: filter to bills for this vendor. Uses the vendor's exact
-   *  FullName (must match qb_vendors.name). Mutually exclusive with refNumbers. */
+   *  FullName (must match qb_vendors.name). Mutually exclusive with refNumbers and txnIds. */
   entityVendorName?: string;
   /** Iterator mode: TxnDate lower bound. YYYY-MM-DD. */
   fromTxnDate?: string;

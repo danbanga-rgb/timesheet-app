@@ -207,6 +207,28 @@ describe('parseBillQueryRs', () => {
     expect(parsed.results).toEqual([]);
   });
 
+  it('parses self-closing response (QB emits <BillQueryRs .../> on zero matches)', () => {
+    // Real response observed 2026-08-17 for Intuit Phase 1a jobs 233/234/235.
+    // QB's Xerces-based emitter uses a self-closing tag when the BillQueryRs
+    // has no content (zero BillRet blocks). Prior getFirstElement only matched
+    // the standard <BillQueryRs>...</BillQueryRs> form, so status attributes
+    // were lost and the persist layer saw "BillQueryRs element not found".
+    const env = [
+      '<?xml version="1.0" ?>',
+      '<QBXML>',
+      '<QBXMLMsgsRs>',
+      '<BillQueryRs requestID="233" statusCode="500" statusSeverity="Warn" statusMessage="The query request has not been fully completed. There was a required element (&quot;INV PT-10631&quot;) that could not be found in QuickBooks." />',
+      '</QBXMLMsgsRs>',
+      '</QBXML>',
+    ].join('\n');
+    const parsed = parseBillQueryRs(env);
+    expect(parsed.status.statusCode).toBe('500');
+    expect(parsed.status.statusSeverity).toBe('Warn');
+    expect(parsed.status.statusMessage).toContain('INV PT-10631');
+    expect(parsed.status.requestId).toBe('233');
+    expect(parsed.results).toEqual([]);
+  });
+
   it('returns [] on error status', () => {
     const env = wrap('', 'statusCode="3000" statusSeverity="Error" statusMessage="Invalid ref"');
     const parsed = parseBillQueryRs(env);
@@ -531,19 +553,23 @@ describe('parseAccountQueryRs', () => {
     expect(parsed.accounts[0].isActive).toBe(false);
   });
 
-  it('empty result set on statusCode=0 with no matches', () => {
-    const env = '<AccountQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK"/>';
-    // Self-closing element form — parser still needs to find it and return zero accounts.
-    // Note: our getFirstElement requires opening+closing tags separately, so use full form.
-    const env2 = [
+  it('empty result set on statusCode=0 with no matches (paired open/close)', () => {
+    const env = [
       '<AccountQueryRs statusCode="0" statusSeverity="Info" statusMessage="Status OK">',
       '</AccountQueryRs>',
     ].join('');
-    const parsed = parseAccountQueryRs(env2);
+    const parsed = parseAccountQueryRs(env);
     expect(parsed.status.statusCode).toBe('0');
     expect(parsed.accounts).toEqual([]);
-    // env unused but exercises the self-closing form's absence in our regex
-    expect(env).toBeTruthy();
+  });
+
+  it('parses self-closing AccountQueryRs (QB emits <AccountQueryRs .../> for filter with no matches)', () => {
+    const env = '<QBXML><QBXMLMsgsRs><AccountQueryRs requestID="q-7" statusCode="500" statusSeverity="Warn" statusMessage="No matches" /></QBXMLMsgsRs></QBXML>';
+    const parsed = parseAccountQueryRs(env);
+    expect(parsed.status.statusCode).toBe('500');
+    expect(parsed.status.statusSeverity).toBe('Warn');
+    expect(parsed.status.requestId).toBe('q-7');
+    expect(parsed.accounts).toEqual([]);
   });
 
   it('surfaces error status when AccountQueryRs is absent', () => {
@@ -647,6 +673,15 @@ describe('parseVendorQueryRs', () => {
     ].join('');
     const parsed = parseVendorQueryRs(env);
     expect(parsed.status.statusCode).toBe('0');
+    expect(parsed.vendors).toEqual([]);
+  });
+
+  it('parses self-closing VendorQueryRs (QB emits <VendorQueryRs .../> when vendor filter has no match)', () => {
+    const env = '<QBXML><QBXMLMsgsRs><VendorQueryRs requestID="v-9" statusCode="500" statusSeverity="Warn" statusMessage="No vendor matches" /></QBXMLMsgsRs></QBXML>';
+    const parsed = parseVendorQueryRs(env);
+    expect(parsed.status.statusCode).toBe('500');
+    expect(parsed.status.statusSeverity).toBe('Warn');
+    expect(parsed.status.requestId).toBe('v-9');
     expect(parsed.vendors).toEqual([]);
   });
 
