@@ -193,6 +193,7 @@ import { tzMap } from '../supabase/functions/_shared/tz-map';
 import {
   normalizeEditEntry,
   periodEditEntry,
+  valueEditEntry,
   type InvoiceEditEntry,
 } from '../supabase/functions/_shared/edit-history';
 
@@ -1048,6 +1049,12 @@ const TimesheetSystem = () => {
   const [pendingEditReason, setPendingEditReason] = useState('');
   const [periodEditOpen, setPeriodEditOpen] = useState(false);
   const [periodEditPreviewShown, setPeriodEditPreviewShown] = useState(false);
+  // Value edit (hours/rate) — parallel state to the period-edit block above.
+  const [pendingHours, setPendingHours] = useState('');
+  const [pendingRate, setPendingRate] = useState('');
+  const [pendingValueReason, setPendingValueReason] = useState('');
+  const [valueEditOpen, setValueEditOpen] = useState(false);
+  const [valueEditPreviewShown, setValueEditPreviewShown] = useState(false);
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState<Set<string>>(new Set());
   const [invoicePayOnPreset, setInvoicePayOnPreset] = useState<Set<string>>(new Set()); // empty=all, 'none'=not assigned, 'YYYY-MM-DD'=specific date
   const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState<Set<string>>(new Set()); // empty=all
@@ -3106,6 +3113,69 @@ const TimesheetSystem = () => {
     setPeriodEditPreviewShown(false);
     setPeriodEditOpen(false);
     alert('Period updated.');
+  };
+
+  const saveValueEdit = async (inv: Invoice, newHours: number, newRate: number, reason: string) => {
+    // Single-line invariant. Multi-line invoices force the accountant to reject
+    // and re-request from the contractor — silent line-collapse or rescale would
+    // hide the mismatch from QB export and downstream reports.
+    if (inv.lines.length !== 1) { alert('Multi-line invoice — value editing not supported. Reject and ask contractor to re-submit.'); return; }
+    if (inv.status === 'paid') { alert('Cannot edit values on a paid invoice. Revert to approved first.'); return; }
+    if (!(newHours >= 0) || !(newRate >= 0)) { alert('Hours and rate must be non-negative numbers.'); return; }
+    if (!reason.trim()) { alert('Please enter a reason for this change.'); return; }
+
+    const newTotal = Math.round(newHours * newRate * 100) / 100;
+    const line0 = inv.lines[0];
+    const newLines = [{ ...line0, hours: newHours, rate: newRate, amount: newTotal }];
+
+    const nextInv: Invoice = { ...inv, totalHours: newHours, rate: newRate, totalAmount: newTotal, lines: newLines };
+    const nextRecon = reconcileInvoiceLive(nextInv, timesheets);
+    const reconNotes = nextRecon.timesheetHours != null
+      ? `Timesheet: ${nextRecon.timesheetHours}h · Invoice: ${newHours}h`
+      : 'No timesheets in period';
+
+    const newEntry = valueEditEntry({
+      by: currentUser!.name,
+      reason: reason.trim(),
+      beforeHours: inv.totalHours,
+      beforeRate: inv.rate,
+      beforeTotal: inv.totalAmount,
+      afterHours: newHours,
+      afterRate: newRate,
+      afterTotal: newTotal,
+    });
+    const nextHistory = [...(inv.editHistory || []), newEntry];
+
+    const { error } = await supabase.from('invoices').update({
+      total_hours: newHours,
+      rate: newRate,
+      total_amount: newTotal,
+      lines: newLines,
+      edit_history: nextHistory,
+      reconciliation_status: nextRecon.status,
+      reconciliation_delta: nextRecon.delta,
+      reconciliation_notes: reconNotes,
+    }).eq('id', inv.id);
+    if (error) { alert('Error saving value change: ' + error.message); return; }
+
+    await fetchInvoices();
+    setSelectedInvoice(prev => prev && prev.id === inv.id ? {
+      ...prev,
+      totalHours: newHours,
+      rate: newRate,
+      totalAmount: newTotal,
+      lines: newLines,
+      editHistory: nextHistory,
+      reconciliationStatus: nextRecon.status,
+      reconciliationDelta: nextRecon.delta,
+      reconciliationNotes: reconNotes,
+    } : prev);
+    setPendingHours('');
+    setPendingRate('');
+    setPendingValueReason('');
+    setValueEditPreviewShown(false);
+    setValueEditOpen(false);
+    alert('Invoice values updated.');
   };
 
   const switchInvoicePaymentProfile = async (invoiceId: number, newProfile: PaymentProfile) => {
@@ -11432,12 +11502,18 @@ const TimesheetSystem = () => {
                               <summary className="text-xs font-medium text-gray-600 cursor-pointer">Edit history ({inv.editHistory.length})</summary>
                               <ul className="mt-2 space-y-1.5 text-xs text-gray-700">
                                 {[...inv.editHistory].reverse().map((h, i) => {
-                                  const kindBadge = { period_edit: 'Period', guardrail: 'Guardrail', anomaly: 'Anomaly', manual_repair: 'Manual repair', other: 'Edit' }[h.kind] || 'Edit';
-                                  const kindColor = { period_edit: 'bg-indigo-100 text-indigo-700', guardrail: 'bg-amber-100 text-amber-700', anomaly: 'bg-rose-100 text-rose-700', manual_repair: 'bg-blue-100 text-blue-700', other: 'bg-gray-100 text-gray-600' }[h.kind] || 'bg-gray-100 text-gray-600';
+                                  const kindBadge = { period_edit: 'Period', value_edit: 'Values', guardrail: 'Guardrail', anomaly: 'Anomaly', manual_repair: 'Manual repair', other: 'Edit' }[h.kind] || 'Edit';
+                                  const kindColor = { period_edit: 'bg-indigo-100 text-indigo-700', value_edit: 'bg-emerald-100 text-emerald-700', guardrail: 'bg-amber-100 text-amber-700', anomaly: 'bg-rose-100 text-rose-700', manual_repair: 'bg-blue-100 text-blue-700', other: 'bg-gray-100 text-gray-600' }[h.kind] || 'bg-gray-100 text-gray-600';
                                   const bps = (h.before as { period_start?: string })?.period_start;
                                   const bpe = (h.before as { period_end?: string })?.period_end;
                                   const aps = (h.after as { period_start?: string })?.period_start;
                                   const ape = (h.after as { period_end?: string })?.period_end;
+                                  const bh  = (h.before as { total_hours?: number | null })?.total_hours;
+                                  const br  = (h.before as { rate?: number | null })?.rate;
+                                  const bt  = (h.before as { total_amount?: number })?.total_amount;
+                                  const ah  = (h.after  as { total_hours?: number | null })?.total_hours;
+                                  const ar  = (h.after  as { rate?: number | null })?.rate;
+                                  const at2 = (h.after  as { total_amount?: number })?.total_amount;
                                   return (
                                     <li key={i} className="border-l-2 border-gray-300 pl-2">
                                       <div className="text-gray-500 flex items-center gap-2">
@@ -11447,6 +11523,9 @@ const TimesheetSystem = () => {
                                       {h.kind === 'period_edit' && bps && aps && (
                                         <div className="font-mono">{bps}→{bpe || '?'}  ⇒  {aps}→{ape || '?'}</div>
                                       )}
+                                      {h.kind === 'value_edit' && ah != null && (
+                                        <div className="font-mono">{bh ?? '—'}h @ ${br ?? '—'} = ${bt?.toFixed(2) ?? '—'}  ⇒  {ah}h @ ${ar ?? '—'} = ${at2?.toFixed(2) ?? '—'}</div>
+                                      )}
                                       {h.reason && <div className="italic text-gray-600">{h.reason}</div>}
                                     </li>
                                   );
@@ -11455,6 +11534,102 @@ const TimesheetSystem = () => {
                             </details>
                           </div>
                         )}
+                      </div>
+                    )}
+                    {/* ── Edit invoice values (hours / rate) — accountant override ── */}
+                    {currentUser?.role === 'accountant' && inv.status !== 'paid' && (
+                      <div className="mb-5 border border-gray-200 rounded-lg overflow-hidden">
+                        <button
+                          onClick={() => {
+                            const opening = !valueEditOpen;
+                            setValueEditOpen(opening);
+                            if (opening) {
+                              setPendingHours(inv.totalHours != null ? String(inv.totalHours) : '');
+                              setPendingRate(inv.rate != null ? String(inv.rate) : '');
+                              setPendingValueReason('');
+                              setValueEditPreviewShown(false);
+                            }
+                          }}
+                          className="w-full px-4 py-2.5 bg-gray-50 hover:bg-gray-100 flex items-center justify-between text-sm"
+                        >
+                          <span className="font-semibold text-gray-700 flex items-center gap-2"><Edit2 className="w-4 h-4" /> Edit invoice values</span>
+                          <span className="text-xs text-gray-500">{valueEditOpen ? 'Hide' : `Current: ${inv.totalHours ?? '—'}h @ ${inv.rate != null ? `$${inv.rate}` : '—'} = ${sym}${inv.totalAmount.toFixed(2)}`}</span>
+                        </button>
+                        {valueEditOpen && (() => {
+                          if (inv.lines.length !== 1) {
+                            return (
+                              <div className="p-4 bg-white text-sm text-gray-700">
+                                <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                                  <div>
+                                    <p className="font-medium text-amber-900">Multi-line invoice ({inv.lines.length} lines) — value editing not supported.</p>
+                                    <p className="text-xs text-amber-800 mt-1">Editing here would silently discard the per-line breakdown that downstream QB export relies on. Reject the invoice and ask the contractor to re-submit with the corrected totals.</p>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }
+                          const parsedHours = parseFloat(pendingHours);
+                          const parsedRate = parseFloat(pendingRate);
+                          const hoursValid = pendingHours !== '' && !isNaN(parsedHours) && parsedHours >= 0;
+                          const rateValid = pendingRate !== '' && !isNaN(parsedRate) && parsedRate >= 0;
+                          const changed = (hoursValid && parsedHours !== (inv.totalHours ?? -1)) || (rateValid && parsedRate !== (inv.rate ?? -1));
+                          const newTotal = hoursValid && rateValid ? Math.round(parsedHours * parsedRate * 100) / 100 : null;
+                          const nextInv: Invoice = { ...inv, totalHours: hoursValid ? parsedHours : inv.totalHours, rate: rateValid ? parsedRate : inv.rate };
+                          const nextRecon = changed && hoursValid ? reconcileInvoiceLive(nextInv, timesheets) : null;
+                          const reconLabel = { matched: '✓ matched', mismatch: '⚠ mismatch', unverifiable: '· unverifiable' } as Record<string, string>;
+                          return (
+                            <div className="p-4 space-y-3 bg-white">
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <label className="block text-xs font-medium text-gray-600 mb-1">Hours</label>
+                                  <input type="number" step="0.01" min="0" value={pendingHours} onChange={e => { setPendingHours(e.target.value); setValueEditPreviewShown(false); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" />
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-medium text-gray-600 mb-1">Rate ({inv.currency})</label>
+                                  <input type="number" step="0.01" min="0" value={pendingRate} onChange={e => { setPendingRate(e.target.value); setValueEditPreviewShown(false); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" />
+                                </div>
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Reason for change <span className="text-red-500">*</span></label>
+                                <textarea
+                                  value={pendingValueReason}
+                                  onChange={e => setPendingValueReason(e.target.value)}
+                                  rows={2}
+                                  placeholder="e.g. Contractor invoiced 176h but timesheet shows 152h — corrected to match TS after confirmation"
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm"
+                                />
+                              </div>
+                              {changed && newTotal != null && (
+                                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 space-y-1.5">
+                                  <div className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> Preview of changes</div>
+                                  <div>Values will move from <span className="font-mono">{inv.totalHours ?? '—'}h @ {inv.rate != null ? `$${inv.rate}` : '—'} = {sym}{inv.totalAmount.toFixed(2)}</span> to <span className="font-mono">{parsedHours}h @ ${parsedRate} = {sym}{newTotal.toFixed(2)}</span>.</div>
+                                  {nextRecon && (
+                                    <div>
+                                      Reconciliation will become <strong>{reconLabel[nextRecon.status] || nextRecon.status}</strong>
+                                      {nextRecon.timesheetHours != null && ` (TS ${nextRecon.timesheetHours}h`}
+                                      {nextRecon.delta != null && nextRecon.delta !== 0 && `, Δ ${nextRecon.delta > 0 ? '+' : ''}${nextRecon.delta}h`}
+                                      {nextRecon.timesheetHours != null && ')'}.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => setValueEditPreviewShown(true)}
+                                  disabled={!changed || !hoursValid || !rateValid}
+                                  className="flex-1 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                >Preview</button>
+                                <button
+                                  onClick={() => saveValueEdit(inv, parsedHours, parsedRate, pendingValueReason)}
+                                  disabled={!changed || !hoursValid || !rateValid || !pendingValueReason.trim() || !valueEditPreviewShown}
+                                  className="flex-1 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                  title={!valueEditPreviewShown ? 'Click Preview first' : !pendingValueReason.trim() ? 'Reason required' : ''}
+                                >Confirm change</button>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                     {/* ── Timesheet reconciliation section ── */}

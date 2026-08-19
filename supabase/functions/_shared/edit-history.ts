@@ -9,6 +9,7 @@
 
 export type InvoiceEditKind =
   | 'period_edit'      // Accountant changed periodStart/periodEnd via UI, or claude-repair adjusted it.
+  | 'value_edit'       // Accountant overrode hours/rate/amount on a single-line invoice.
   | 'guardrail'        // Beneficiary guardrail deprecated-id resolution during ingest.
   | 'anomaly'          // Anomaly detector post-ingest fixes/flags.
   | 'manual_repair'    // Manual DB patch (rare — parse failure fallback recoveries).
@@ -42,6 +43,26 @@ export function periodEditEntry(args: {
     reason: args.reason,
     before: { period_start: args.beforePeriodStart, period_end: args.beforePeriodEnd },
     after: { period_start: args.afterPeriodStart, period_end: args.afterPeriodEnd },
+  };
+}
+
+export function valueEditEntry(args: {
+  by: string;
+  reason: string;
+  beforeHours: number | null;
+  beforeRate: number | null;
+  beforeTotal: number;
+  afterHours: number;
+  afterRate: number;
+  afterTotal: number;
+}): InvoiceEditEntry {
+  return {
+    at: new Date().toISOString(),
+    by: args.by,
+    kind: 'value_edit',
+    reason: args.reason,
+    before: { total_hours: args.beforeHours, rate: args.beforeRate, total_amount: args.beforeTotal },
+    after:  { total_hours: args.afterHours,  rate: args.afterRate,  total_amount: args.afterTotal  },
   };
 }
 
