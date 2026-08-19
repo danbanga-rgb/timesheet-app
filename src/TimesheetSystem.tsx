@@ -4623,7 +4623,13 @@ const TimesheetSystem = () => {
       setIntuitXlsxPreview(null);
       setIntuitXlsxFile(null);
     } catch (e) {
-      setConveraError(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+      // Format Supabase/PostgREST errors ({ message, details, hint, code }) as well
+      // as regular Error instances. Prior String(e) rendered them as "[object Object]".
+      const err = e as { message?: string; details?: string; hint?: string; code?: string };
+      const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
+        .filter((s): s is string => !!s);
+      const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
+      setConveraError(`Import failed: ${msg}`);
     } finally {
       setIntuitXlsxImporting(false);
     }
