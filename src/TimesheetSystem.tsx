@@ -4694,7 +4694,10 @@ const TimesheetSystem = () => {
         const cands = vendorInvoices.slice(0, 20);
         const targetCents = Math.round(r.amount * 100);
         const size = r.invoiceRefs.length;
-        let found: number[] | null = null;
+        // Cast the initializer so TS keeps the union type — otherwise it narrows
+        // `found` to `null` since the closure's reassignment isn't reflected in
+        // outer control-flow analysis.
+        let found = null as number[] | null;
         function rec(start: number, chosen: number[], sumCents: number) {
           if (found) return;
           if (chosen.length === size) {
