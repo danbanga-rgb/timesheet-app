@@ -2265,7 +2265,14 @@ const TimesheetSystem = () => {
   // current matcher + current invoices state. Never touches ready/ignored/posted.
   // Silent no-op for events whose matches didn't change. Called automatically on
   // Inbox tab load, and manually via the "Recompute matches" button.
-  const recomputeMatchesForPending = async (): Promise<{ scanned: number; updated: number }> => {
+  const recomputeMatchesForPending = async (): Promise<{ scanned: number; updated: number; skipped?: string }> => {
+    // Guard: if invoices haven't loaded yet, DO NOT run the matcher. An empty
+    // invoices set would produce empty matches and diff-write them back over
+    // whatever good matches are already stored — real destructive bug.
+    if (invoices.length === 0) {
+      console.warn('QB Automation recompute: invoices state empty — skipping to avoid clobbering matched_invoice_ids');
+      return { scanned: 0, updated: 0, skipped: 'invoices-not-loaded' };
+    }
     const { data: pendingRows } = await supabase
       .from('qb_ingest_events')
       .select('id, source, txn_date, counterparty_raw, amount, matched_invoice_ids, raw_data')
@@ -2299,9 +2306,13 @@ const TimesheetSystem = () => {
   const runRecomputeButton = async () => {
     setRecomputeBusy(true);
     try {
-      const { scanned, updated } = await recomputeMatchesForPending();
+      const result = await recomputeMatchesForPending();
       await loadQbIngestEvents();
-      alert(`Recomputed matches: scanned ${scanned} pending event${scanned === 1 ? '' : 's'}, updated ${updated}.`);
+      if (result.skipped === 'invoices-not-loaded') {
+        alert('Cannot recompute yet — invoices are still loading. Wait a moment and try again.');
+      } else {
+        alert(`Recomputed matches: scanned ${result.scanned} pending event${result.scanned === 1 ? '' : 's'}, updated ${result.updated}.`);
+      }
     } finally { setRecomputeBusy(false); }
   };
 
@@ -2340,8 +2351,9 @@ const TimesheetSystem = () => {
       loadQbVendorMappings();
       loadQbVendorsAndAccounts();
       // Auto-recompute matches for pending events using current invoices.
-      // Silent no-op unless something changed. Guarantees a matcher upgrade or
-      // a late-created invoice self-heals without re-import.
+      // Guarded — skips silently if invoices state is empty (see the guard in
+      // recomputeMatchesForPending). The invoices.length dependency below
+      // ensures we re-run once invoices actually load.
       try {
         const { updated } = await recomputeMatchesForPending();
         if (updated > 0) await loadQbIngestEvents();
@@ -2349,8 +2361,11 @@ const TimesheetSystem = () => {
         console.warn('QB Automation: auto-recompute failed', e);
       }
     })();
+    // Depend on invoices.length so tab-opens-before-invoices-load still triggers
+    // the recompute when they arrive. Recompute is idempotent (only writes when
+    // matches actually change) so re-firing on later invoice changes is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountantTab, currentUser?.role]);
+  }, [accountantTab, currentUser?.role, invoices.length]);
 
   // Slice D — save a vendor mapping and apply it to all pending events with the same counterparty.
   const openMapWidget = (counterparty: string, source: string) => {
