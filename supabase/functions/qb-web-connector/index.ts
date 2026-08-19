@@ -213,11 +213,32 @@ async function persistJobResponse(
     //   covers every invoice for that vendor whose period_end falls in that month.
     //   Fan out via payment_profiles.qb_vendor_name → user_id.
     //   Direct RefNumber: matches invoice_number 1:1 for that vendor's invoices only.
+    //
+    //   Mode-aware tolerance:
+    //     Targeted mode (payload supplied txnIds[] or refNumbers[]) — every returned
+    //       BillRet is expected to map to something in our DB. Unmatched vendor or
+    //       0-row-update = drift; fail-fast so a human notices.
+    //     Iterator mode (entityVendorName + date range, no txnIds/refNumbers) —
+    //       the query is enumerating ALL bills for a vendor, including historic
+    //       pre-our-system bills that WON'T be linkable. Skip those silently,
+    //       opportunistically persist matches, summarise counters at the end.
+    //       (Root-caused 2026-08-19 on audit jobs 326-329: iterator returned 6
+    //       BillRets per vendor, the first was always a pre-our-system historic
+    //       invoice, and the loop errored on row 1 before reaching the newer
+    //       bills we actually wanted to reconcile.)
+    const payload = job.payload as BillQueryRqInput;
+    const isIteratorMode = !payload.txnIds?.length && !payload.refNumbers?.length;
+    let linked = 0;
+    let skippedUnmappedVendor = 0;
+    let skippedUnknownInvoice = 0;
+    const errors: string[] = [];
     for (const r of parsed.results) {
       if (!r.vendorFullName) {
-        // Without vendor we can't disambiguate — fail loudly rather than silently
-        // overwrite the wrong contractor's TxnID.
-        return { ok: false, errorMsg: `BillQuery response missing VendorRef.FullName for refNumber=${r.refNumber}` };
+        // Without vendor we can't disambiguate. Even in iterator mode this is
+        // structurally wrong (VendorRef.FullName is always present in a BillRet)
+        // and worth surfacing.
+        errors.push(`missing VendorRef.FullName for refNumber=${r.refNumber}`);
+        continue;
       }
       const { data: pps } = await supabase
         .from('payment_profiles')
@@ -225,9 +246,7 @@ async function persistJobResponse(
         .eq('qb_vendor_name', r.vendorFullName);
       const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
       if (userIds.length === 0) {
-        // QB has a bill for a vendor we can't map to any payment_profile. Data drift —
-        // fail-fast so a human notices instead of silent no-op. Fix: add the vendor
-        // mapping (payment_profiles.qb_vendor_name = "<QB name>") then rerun.
+        if (isIteratorMode) { skippedUnmappedVendor++; continue; }
         return { ok: false, errorMsg: `BillQuery persist: no payment_profile.qb_vendor_name matches "${r.vendorFullName}" (refNumber=${r.refNumber})` };
       }
       const multi = /^MULTI-(\d{4})-(\d{2})$/.exec(r.refNumber);
@@ -243,14 +262,22 @@ async function persistJobResponse(
       } else {
         update = update.eq('invoice_number', r.refNumber);
       }
-      // Fail-fast: chain .select() so we can inspect affected rows. 0 rows = drift.
       const { data: updated, error: updErr } = await update.select('id');
       if (updErr) {
         return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${updErr.message}` };
       }
       if (!updated || updated.length === 0) {
+        if (isIteratorMode) { skippedUnknownInvoice++; continue; }
         return { ok: false, errorMsg: `BillQuery persist: 0 rows updated for vendor="${r.vendorFullName}" refNumber="${r.refNumber}". Invoice(s) may have been deleted/renumbered after enqueue.` };
       }
+      linked += updated.length;
+    }
+    if (errors.length > 0) {
+      // Structural issues (missing VendorRef) — surface even in iterator mode.
+      return { ok: false, errorMsg: `BillQuery persist structural errors: ${errors.join('; ')}` };
+    }
+    if (isIteratorMode) {
+      console.log(`[bill_query iterator job=${job.id} vendor="${payload.entityVendorName}"] results=${parsed.results.length} linked=${linked} skipped_unmapped_vendor=${skippedUnmappedVendor} skipped_unknown_invoice=${skippedUnknownInvoice}`);
     }
     return { ok: true, errorMsg: null };
   }
