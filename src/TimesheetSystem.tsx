@@ -476,6 +476,79 @@ const WORLD_COUNTRIES = [
   "Uzbekistan","Vanuatu","Vatican City","Vietnam","Zambia"
 ].sort();
 
+// ─── Intuit XLSX loader (Slice B of QB Automation Layer) ─────────────────────
+// Parses the QuickBooks "Transaction Detail by Account" export that carries
+// Intuit BillPay payments. Feeds qb_ingest_events (source='intuit_xlsx').
+//
+// Format notes (from 2026-08-19 sample):
+//   - Header at row 4: Date | Transaction Type | Num | Name | Memo/Description | Split | Amount | Balance
+//   - Each payment appears TWICE — once viewed from each account (positive-amount
+//     = expense/AP side with memo; negative-amount = bank side mirror). Dedupe by
+//     taking positive-amount rows only.
+//   - Memo carries "Inv# XXX" for single-invoice; "Inv# 03, 04" for multi-invoice.
+//   - Vendor-name-only rows and "Total for X" rows separate groups — skip.
+interface IntuitXlsxRow {
+  date: string;              // YYYY-MM-DD
+  transactionType: string;   // 'Expense' | 'Bill Payment' | ...
+  num: string;               // e.g. 'DD' (direct debit)
+  name: string;              // vendor/counterparty as QB shows it
+  memo: string;
+  split: string;             // offsetting account name (e.g. 'Business Checking')
+  amount: number;            // absolute value (positive)
+  invoiceRefs: string[];     // parsed from memo (e.g. ['03', '04'] from 'Inv# 03, 04')
+  matchedInvoiceIds: number[]; // resolved against invoices.invoice_number (later)
+  sourceRef: string;         // sha256 of (date|type|num|name|memo|amount)
+}
+
+function extractIntuitInvoiceRefs(memo: string): string[] {
+  // Match "Inv# XYZ" then any trailing ", XYZ2, XYZ3" comma-separated tokens.
+  const m = memo.match(/Inv#\s+([^\s,][^,]*(?:,\s*[^,]+)*)/i);
+  if (!m) return [];
+  return m[1].split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const buf = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow[]> {
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
+  const headerIdx = raw.findIndex(r => String(r[0]).trim() === 'Date' && String(r[1]).trim() === 'Transaction Type');
+  if (headerIdx < 0) throw new Error('No header row found. Expected "Date | Transaction Type | Num | Name | Memo/Description | Split | Amount | Balance". Is this the QuickBooks "Transaction Detail by Account" export?');
+  const out: IntuitXlsxRow[] = [];
+  for (let i = headerIdx + 1; i < raw.length; i++) {
+    const r = raw[i];
+    const rawDate = String(r[0] ?? '').trim();
+    // Skip vendor-name-only rows, blank rows, and "Total for X" rows — only real data rows have MM/DD/YYYY.
+    if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDate)) continue;
+    const amount = typeof r[6] === 'number' ? r[6] : parseFloat(String(r[6] ?? '0'));
+    // Two-sides-of-split dedup: keep only the positive-amount row (expense/AP side, has memo).
+    if (!(amount > 0)) continue;
+    const [mo, dy, yr] = rawDate.split('/');
+    const date = `${yr}-${mo.padStart(2, '0')}-${dy.padStart(2, '0')}`;
+    const memo = String(r[4] ?? '').trim();
+    const row: IntuitXlsxRow = {
+      date,
+      transactionType: String(r[1] ?? '').trim(),
+      num: String(r[2] ?? '').trim(),
+      name: String(r[3] ?? '').trim(),
+      memo,
+      split: String(r[5] ?? '').trim(),
+      amount,
+      invoiceRefs: extractIntuitInvoiceRefs(memo),
+      matchedInvoiceIds: [],
+      sourceRef: '',
+    };
+    row.sourceRef = await sha256Hex([row.date, row.transactionType, row.num, row.name, row.memo, String(row.amount)].join('|'));
+    out.push(row);
+  }
+  return out;
+}
+
 // ─── Live invoice reconciliation (pure, no DB writes) ────────────────────────
 // Called on every render so it always reflects the latest loaded timesheets.
 interface ReconTimesheetRow {
@@ -1066,15 +1139,20 @@ const TimesheetSystem = () => {
   const [beneficiaryFilter, setBeneficiaryFilter] = useState<BeneficiaryFilter>('all');
   type BeneficiarySortKey = 'shortName' | 'vendorId' | 'bankAccount' | 'country' | 'lastUsed' | 'linked';
   const [beneficiarySort, setBeneficiarySort] = useState<{ key: BeneficiarySortKey; dir: 'asc' | 'desc' }>({ key: 'shortName', dir: 'asc' });
-  // Payment import (QuickBooks XLSX + Intuit emails + Convera Beneficiaries)
+  // Payment import (QuickBooks XLSX + Intuit emails + Intuit XLSX + Convera Beneficiaries)
   const [showConveraModal, setShowConveraModal] = useState(false);
-  const [converaTab, setConveraTab] = useState<'quickbooks' | 'intuit' | 'beneficiaries'>('quickbooks');
+  const [converaTab, setConveraTab] = useState<'quickbooks' | 'intuit' | 'intuitXlsx' | 'beneficiaries'>('quickbooks');
   const [qbFile, setQbFile] = useState<File | null>(null);
   const [intuitText, setIntuitText] = useState('');
   const [converaRows, setConveraRows] = useState<ConveraPaymentRow[]>([]);
   const [converaApplying, setConveraApplying] = useState(false);
   const [converaPaidDate, setConveraPaidDate] = useState('');
   const [converaError, setConveraError] = useState('');
+  // Intuit XLSX → qb_ingest_events (Slice B of QB Automation Layer)
+  const [intuitXlsxFile, setIntuitXlsxFile] = useState<File | null>(null);
+  const [intuitXlsxPreview, setIntuitXlsxPreview] = useState<IntuitXlsxRow[] | null>(null);
+  const [intuitXlsxImporting, setIntuitXlsxImporting] = useState(false);
+  const [intuitXlsxResult, setIntuitXlsxResult] = useState<{ inserted: number; skipped: number } | null>(null);
   // Convera beneficiaries
   const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
 
@@ -4329,6 +4407,72 @@ const TimesheetSystem = () => {
     // Pre-populate paid date from first entry if all same
     const dates = [...new Set(rows.map(r => r.suggestedDate).filter(Boolean))];
     if (dates.length === 1 && !converaPaidDate) setConveraPaidDate(dates[0]);
+  };
+
+  // ─── Intuit XLSX → qb_ingest_events (Slice B of QB Automation Layer) ────────
+  const parseIntuitXlsxPreview = async () => {
+    if (!intuitXlsxFile) return;
+    setConveraError('');
+    setIntuitXlsxResult(null);
+    try {
+      const buffer = await intuitXlsxFile.arrayBuffer();
+      const rows = await parseIntuitXlsxBuffer(buffer);
+      if (rows.length === 0) {
+        setConveraError('No payment rows found in this file. Positive-amount rows in the expense/AP account (with "Inv# XXX" memos) are what we look for.');
+        return;
+      }
+      // Resolve invoiceRefs → invoice ids using current invoices state.
+      // Match is case-insensitive; also compares against invoice_number with all runs of
+      // consecutive dashes collapsed (handles "Inv# INV---000043" → "INV-000043" variants).
+      const norm = (s: string) => s.toLowerCase().trim().replace(/-+/g, '-');
+      const invByNum = new Map<string, number>();
+      for (const inv of invoices) {
+        if (inv.invoiceNumber) invByNum.set(norm(inv.invoiceNumber), inv.id);
+      }
+      for (const r of rows) {
+        r.matchedInvoiceIds = r.invoiceRefs
+          .map(ref => invByNum.get(norm(ref)))
+          .filter((id): id is number => id != null);
+      }
+      setIntuitXlsxPreview(rows);
+    } catch (e) {
+      setConveraError(`Parse failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const commitIntuitXlsxToInbox = async () => {
+    if (!intuitXlsxPreview || intuitXlsxPreview.length === 0) return;
+    setIntuitXlsxImporting(true);
+    setConveraError('');
+    try {
+      const inserts = intuitXlsxPreview.map(r => ({
+        source: 'intuit_xlsx' as const,
+        source_ref: r.sourceRef,
+        txn_date: r.date,
+        amount: r.amount,
+        counterparty_raw: r.name,
+        memo: r.memo || null,
+        matched_invoice_ids: r.matchedInvoiceIds,
+        status: 'pending' as const,
+        raw_data: { transaction_type: r.transactionType, num: r.num, split: r.split, invoice_refs: r.invoiceRefs },
+      }));
+      // Upsert with ignoreDuplicates so (source, source_ref) UNIQUE quietly skips
+      // rows we've already seen from a prior import of the same date range.
+      const { data, error } = await supabase
+        .from('qb_ingest_events')
+        .upsert(inserts, { onConflict: 'source,source_ref', ignoreDuplicates: true })
+        .select('id');
+      if (error) throw error;
+      const inserted = data?.length ?? 0;
+      const skipped = intuitXlsxPreview.length - inserted;
+      setIntuitXlsxResult({ inserted, skipped });
+      setIntuitXlsxPreview(null);
+      setIntuitXlsxFile(null);
+    } catch (e) {
+      setConveraError(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setIntuitXlsxImporting(false);
+    }
   };
 
   const applyConveraPayments = async () => {
@@ -10826,6 +10970,7 @@ const TimesheetSystem = () => {
                     <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-5 w-fit">
                       <button onClick={() => { setConveraTab('quickbooks'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'quickbooks' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>QuickBooks Export</button>
                       <button onClick={() => { setConveraTab('intuit'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Intuit Emails</button>
+                      <button onClick={() => { setConveraTab('intuitXlsx'); setConveraError(''); setIntuitXlsxResult(null); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuitXlsx' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Intuit XLSX</button>
                       <button onClick={() => { setConveraTab('beneficiaries'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'beneficiaries' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera Beneficiaries</button>
                     </div>
                   )}
@@ -10876,6 +11021,91 @@ const TimesheetSystem = () => {
                         <button onClick={parseIntuitEmails} disabled={!intuitText.trim()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
                           <FileText className="w-4 h-4" /> Parse Emails
                         </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Intuit XLSX → QB Automation Inbox (Slice B of QB Automation Layer) */}
+                  {converaRows.length === 0 && converaTab === 'intuitXlsx' && (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-1">Upload the QuickBooks <strong>Transaction Detail by Account</strong> export (.xlsx) filtered to Intuit's account. Rows land in the <strong>QB Automation Inbox</strong> for classification and push.</p>
+                      <p className="text-xs text-gray-400 mb-4">In QuickBooks: Reports → Transaction Detail by Account → filter to Intuit's account → export to Excel</p>
+                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
+                        {intuitXlsxFile ? (
+                          <div className="flex items-center justify-center gap-2 text-indigo-700">
+                            <FileText className="w-5 h-5" />
+                            <span className="text-sm font-medium">{intuitXlsxFile.name}</span>
+                            <button onClick={() => { setIntuitXlsxFile(null); setIntuitXlsxPreview(null); }} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                          </div>
+                        ) : (
+                          <label className="cursor-pointer">
+                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
+                            <p className="text-sm text-gray-600">Click to select .xlsx file</p>
+                            <input type="file" accept=".xlsx" className="hidden" onChange={e => { setIntuitXlsxFile(e.target.files?.[0] ?? null); setIntuitXlsxPreview(null); setIntuitXlsxResult(null); }} />
+                          </label>
+                        )}
+                      </div>
+                      {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
+                      {intuitXlsxResult && (
+                        <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+                          ✓ Imported <strong>{intuitXlsxResult.inserted}</strong> event{intuitXlsxResult.inserted === 1 ? '' : 's'} to the Inbox
+                          {intuitXlsxResult.skipped > 0 && <> · skipped <strong>{intuitXlsxResult.skipped}</strong> duplicate{intuitXlsxResult.skipped === 1 ? '' : 's'} (already ingested)</>}.
+                        </div>
+                      )}
+                      {intuitXlsxPreview && intuitXlsxPreview.length > 0 && (() => {
+                        const matched = intuitXlsxPreview.filter(r => r.matchedInvoiceIds.length > 0).length;
+                        const unmatched = intuitXlsxPreview.length - matched;
+                        return (
+                          <div className="mb-3">
+                            <div className="text-sm text-gray-700 mb-2">
+                              <strong>{intuitXlsxPreview.length}</strong> payment row{intuitXlsxPreview.length === 1 ? '' : 's'} detected · <span className="text-green-700">{matched} matched to invoices</span>{unmatched > 0 && <> · <span className="text-amber-700">{unmatched} unmatched</span></>}
+                            </div>
+                            <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto">
+                              <table className="w-full text-xs">
+                                <thead className="bg-gray-50 text-gray-600 sticky top-0">
+                                  <tr>
+                                    <th className="px-2 py-1.5 text-left">Date</th>
+                                    <th className="px-2 py-1.5 text-left">Vendor</th>
+                                    <th className="px-2 py-1.5 text-right">Amount</th>
+                                    <th className="px-2 py-1.5 text-left">Memo</th>
+                                    <th className="px-2 py-1.5 text-left">Match</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {intuitXlsxPreview.map((r, i) => (
+                                    <tr key={i} className="border-t border-gray-100">
+                                      <td className="px-2 py-1 font-mono">{r.date}</td>
+                                      <td className="px-2 py-1">{r.name}</td>
+                                      <td className="px-2 py-1 text-right font-mono">${r.amount.toFixed(2)}</td>
+                                      <td className="px-2 py-1 text-gray-600 truncate max-w-xs" title={r.memo}>{r.memo || '—'}</td>
+                                      <td className="px-2 py-1">
+                                        {r.matchedInvoiceIds.length > 0
+                                          ? <span className="text-green-700">✓ {r.matchedInvoiceIds.length} invoice{r.matchedInvoiceIds.length === 1 ? '' : 's'}</span>
+                                          : r.invoiceRefs.length > 0
+                                            ? <span className="text-amber-700">? {r.invoiceRefs.join(', ')} not found</span>
+                                            : <span className="text-gray-400">no invoice ref</span>}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      <div className="flex justify-end gap-2">
+                        {intuitXlsxPreview ? (
+                          <>
+                            <button onClick={() => setIntuitXlsxPreview(null)} className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
+                            <button onClick={commitIntuitXlsxToInbox} disabled={intuitXlsxImporting} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                              {intuitXlsxImporting ? 'Importing…' : `Import ${intuitXlsxPreview.length} to Inbox`}
+                            </button>
+                          </>
+                        ) : (
+                          <button onClick={parseIntuitXlsxPreview} disabled={!intuitXlsxFile} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                            <FileText className="w-4 h-4" /> Parse & Preview
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
