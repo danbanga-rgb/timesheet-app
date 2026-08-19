@@ -476,15 +476,70 @@ const WORLD_COUNTRIES = [
   "Uzbekistan","Vanuatu","Vatican City","Vietnam","Zambia"
 ].sort();
 
+// ─── QB Automation Layer types (Slice C onward) ──────────────────────────────
+// Frontend-facing shape of qb_ingest_events rows. Camel-case; DB is snake_case.
+// See supabase/migrations/20260819000000_qb_ingest_events.sql for the source of
+// truth on columns and enums.
+type QbIngestKind = 'bill_pmt' | 'bill_add_and_pmt' | 'check' | 'ignore';
+type QbIngestStatus = 'pending' | 'ready' | 'queued' | 'posted' | 'failed' | 'ignored';
+
+interface QbIngestEvent {
+  id: number;
+  ingestedAt: string;
+  source: string;                       // 'intuit_xlsx' | 'convera' | 'manual' | ...
+  sourceRef: string;
+  txnDate: string;                      // YYYY-MM-DD
+  amount: number;                       // positive = money out
+  counterpartyRaw: string;
+  memo: string | null;
+  counterpartyQbVendorListId: string | null;
+  targetQbTxnKind: QbIngestKind | null;
+  qbBankAccountListId: string | null;
+  qbExpenseAccountListId: string | null;
+  matchedInvoiceIds: number[];
+  status: QbIngestStatus;
+  qbSyncJobIds: number[];
+  postedQbRefs: Record<string, unknown> | null;
+  lastError: string | null;
+  rawData: Record<string, unknown> | null;
+  notes: string | null;
+}
+
+function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
+  return {
+    id: r.id as number,
+    ingestedAt: (r.ingested_at as string) ?? '',
+    source: (r.source as string) ?? '',
+    sourceRef: (r.source_ref as string) ?? '',
+    txnDate: (r.txn_date as string) ?? '',
+    amount: Number(r.amount ?? 0),
+    counterpartyRaw: (r.counterparty_raw as string) ?? '',
+    memo: (r.memo as string) ?? null,
+    counterpartyQbVendorListId: (r.counterparty_qb_vendor_list_id as string) ?? null,
+    targetQbTxnKind: (r.target_qb_txn_kind as QbIngestKind) ?? null,
+    qbBankAccountListId: (r.qb_bank_account_list_id as string) ?? null,
+    qbExpenseAccountListId: (r.qb_expense_account_list_id as string) ?? null,
+    matchedInvoiceIds: Array.isArray(r.matched_invoice_ids) ? (r.matched_invoice_ids as number[]) : [],
+    status: (r.status as QbIngestStatus) ?? 'pending',
+    qbSyncJobIds: Array.isArray(r.qb_sync_job_ids) ? (r.qb_sync_job_ids as number[]) : [],
+    postedQbRefs: (r.posted_qb_refs as Record<string, unknown>) ?? null,
+    lastError: (r.last_error as string) ?? null,
+    rawData: (r.raw_data as Record<string, unknown>) ?? null,
+    notes: (r.notes as string) ?? null,
+  };
+}
+
 // ─── Intuit XLSX loader (Slice B of QB Automation Layer) ─────────────────────
-// Parses the QuickBooks "Transaction Detail by Account" export that carries
-// Intuit BillPay payments. Feeds qb_ingest_events (source='intuit_xlsx').
+// Parses the Intuit BillPay payment report — a spreadsheet of payments Intuit
+// sent on our behalf. NOT a QuickBooks export; column labels are Intuit's own.
+// Feeds qb_ingest_events (source='intuit_xlsx') as the source of truth for what
+// Intuit paid; later slices classify and push corresponding entries into QB.
 //
 // Format notes (from 2026-08-19 sample):
 //   - Header at row 4: Date | Transaction Type | Num | Name | Memo/Description | Split | Amount | Balance
 //   - Each payment appears TWICE — once viewed from each account (positive-amount
-//     = expense/AP side with memo; negative-amount = bank side mirror). Dedupe by
-//     taking positive-amount rows only.
+//     side has the memo; negative-amount side is the mirror). Dedupe by taking
+//     positive-amount rows only.
 //   - Memo carries "Inv# XXX" for single-invoice; "Inv# 03, 04" for multi-invoice.
 //   - Vendor-name-only rows and "Total for X" rows separate groups — skip.
 interface IntuitXlsxRow {
@@ -1153,6 +1208,13 @@ const TimesheetSystem = () => {
   const [intuitXlsxPreview, setIntuitXlsxPreview] = useState<IntuitXlsxRow[] | null>(null);
   const [intuitXlsxImporting, setIntuitXlsxImporting] = useState(false);
   const [intuitXlsxResult, setIntuitXlsxResult] = useState<{ inserted: number; skipped: number } | null>(null);
+
+  // QB Automation Inbox (Slice C — read-only view of qb_ingest_events)
+  const [qbIngestEvents, setQbIngestEvents] = useState<QbIngestEvent[]>([]);
+  const [qbIngestLoading, setQbIngestLoading] = useState(false);
+  const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
+    pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
+  });
   // Convera beneficiaries
   const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
 
@@ -2235,6 +2297,23 @@ const TimesheetSystem = () => {
     fetchImportBatches();
     fetchConveraTransactions();
     loadConveraBeneficiaries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountantTab, currentUser?.role]);
+
+  // Load QB Automation Inbox lazily when tab is opened
+  const loadQbIngestEvents = async () => {
+    setQbIngestLoading(true);
+    const { data, error } = await supabase
+      .from('qb_ingest_events')
+      .select('*')
+      .order('ingested_at', { ascending: false });
+    if (!error) setQbIngestEvents((data ?? []).map(normaliseQbIngestEvent));
+    setQbIngestLoading(false);
+  };
+  useEffect(() => {
+    if (accountantTab !== 'qb-automation') return;
+    if (currentUser?.role !== 'accountant') return;
+    loadQbIngestEvents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountantTab, currentUser?.role]);
 
@@ -6968,6 +7047,10 @@ const TimesheetSystem = () => {
                 </span>
                 <span>Payments</span>
               </button>
+              <button onClick={() => setAccountantTab('qb-automation')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'qb-automation' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <UploadCloud className="w-5 h-5 flex-shrink-0" />
+                <span className="hidden sm:inline">QB </span><span>Automation</span>
+              </button>
               <button onClick={() => setAccountantTab('profiles')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'profiles' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
                 <CreditCard className="w-5 h-5 flex-shrink-0" />
                 <span>Payment Profiles</span>
@@ -9513,6 +9596,118 @@ const TimesheetSystem = () => {
             );
           })()}
 
+          {accountantTab === 'qb-automation' && (() => {
+            // Read-only Inbox — Slice C of QB Automation Layer.
+            // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
+            // that arrives with Slice F (preview modal) and Slice G (real enqueue).
+            const invById = new Map(invoices.map(i => [i.id, i]));
+            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual' }[s] || s);
+            const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
+              { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
+              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored') },
+              { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored') },
+              { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored') },
+              { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: 'Deliberately never pushed. Advance-payment cases (US Signature) or retired vendors (CLOUDYGON).',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
+              { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: qbIngestEvents.filter(e => e.status === 'posted') },
+            ];
+            const total = qbIngestEvents.length;
+            const ready = qbIngestEvents.filter(e => e.status === 'ready').length;
+            const needsMapping = groups.find(g => g.key === 'pending')?.events.length ?? 0;
+            const toggle = (k: string) => setQbInboxExpanded(prev => ({ ...prev, [k]: !prev[k] }));
+            return (
+              <div className="p-6 max-w-6xl mx-auto">
+                <div className="flex items-baseline justify-between mb-4">
+                  <div>
+                    <h2 className="text-2xl font-bold text-gray-800">QB Automation — Inbox</h2>
+                    <p className="text-sm text-gray-500 mt-0.5">Financial events pending classification and push to QuickBooks. Import via Payments → Import Payments.</p>
+                  </div>
+                  <button onClick={loadQbIngestEvents} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3 mb-6">
+                  <div className="p-3 border border-gray-200 rounded-lg bg-white">
+                    <div className="text-xs text-gray-500">Total events</div>
+                    <div className="text-2xl font-bold text-gray-800">{total}</div>
+                  </div>
+                  <div className={`p-3 border rounded-lg ${needsMapping > 0 ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-white'}`}>
+                    <div className="text-xs text-gray-500">Need classification</div>
+                    <div className={`text-2xl font-bold ${needsMapping > 0 ? 'text-amber-800' : 'text-gray-800'}`}>{needsMapping}</div>
+                  </div>
+                  <div className="p-3 border border-gray-200 rounded-lg bg-white">
+                    <div className="text-xs text-gray-500">Ready to push</div>
+                    <div className="text-2xl font-bold text-gray-800">{ready}</div>
+                  </div>
+                </div>
+
+                {total === 0 && !qbIngestLoading && (
+                  <div className="p-8 border border-dashed border-gray-300 rounded-lg text-center text-gray-500">
+                    <UploadCloud className="w-10 h-10 mx-auto text-gray-300 mb-2" />
+                    <p className="text-sm">Inbox is empty. Import Intuit payments via <strong>Payments → Import Payments → Intuit XLSX</strong>.</p>
+                  </div>
+                )}
+
+                {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => (
+                  <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                    <button onClick={() => toggle(g.key)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left">
+                      <div>
+                        <span className="font-semibold text-gray-800">{g.title}</span>
+                        <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
+                        {g.events.length > 0 && (
+                          <span className="ml-2 text-sm text-gray-500">· ${g.events.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}</span>
+                        )}
+                      </div>
+                      <span className="text-xs text-gray-400">{qbInboxExpanded[g.key] ? '▼' : '▶'}</span>
+                    </button>
+                    {qbInboxExpanded[g.key] && (
+                      <div>
+                        {g.events.length === 0 ? (
+                          <div className="p-4 text-sm text-gray-500 italic">{g.hint}</div>
+                        ) : (
+                          <>
+                            <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint}</p>
+                            <table className="w-full text-xs">
+                              <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
+                                <tr>
+                                  <th className="px-3 py-1.5 text-left">Src</th>
+                                  <th className="px-3 py-1.5 text-left">Date</th>
+                                  <th className="px-3 py-1.5 text-left">Counterparty</th>
+                                  <th className="px-3 py-1.5 text-right">Amount</th>
+                                  <th className="px-3 py-1.5 text-left">Memo</th>
+                                  <th className="px-3 py-1.5 text-left">Matched invoices</th>
+                                  <th className="px-3 py-1.5 text-left">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {g.events.map(e => {
+                                  const invLinks = e.matchedInvoiceIds.map(id => invById.get(id)).filter(Boolean);
+                                  return (
+                                    <tr key={e.id} className="border-t border-gray-100 hover:bg-indigo-50/40">
+                                      <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
+                                      <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
+                                      <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
+                                      <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
+                                      <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
+                                      <td className="px-3 py-1.5">
+                                        {invLinks.length === 0
+                                          ? <span className="text-gray-400">—</span>
+                                          : invLinks.map(i => <span key={i!.id} className="inline-block mr-1 px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[10px] font-mono">{i!.invoiceNumber}</span>)}
+                                      </td>
+                                      <td className="px-3 py-1.5"><span className="text-gray-500">{e.status}</span></td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
           {accountantTab === 'profiles' && (() => {
             const accountantManagedRoles = ['timesheetuser', 'vendormanager'];
             const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
@@ -11028,8 +11223,8 @@ const TimesheetSystem = () => {
                   {/* Intuit XLSX → QB Automation Inbox (Slice B of QB Automation Layer) */}
                   {converaRows.length === 0 && converaTab === 'intuitXlsx' && (
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">Upload the QuickBooks <strong>Transaction Detail by Account</strong> export (.xlsx) filtered to Intuit's account. Rows land in the <strong>QB Automation Inbox</strong> for classification and push.</p>
-                      <p className="text-xs text-gray-400 mb-4">In QuickBooks: Reports → Transaction Detail by Account → filter to Intuit's account → export to Excel</p>
+                      <p className="text-sm text-gray-600 mb-1">Upload the <strong>Intuit BillPay payment report</strong> (.xlsx) — the list of payments Intuit sent on your behalf. Rows land in the <strong>QB Automation Inbox</strong> for classification and push into QuickBooks.</p>
+                      <p className="text-xs text-gray-400 mb-4">Source: Intuit (not QuickBooks). Each row is a payment Intuit made; we don't require anything to be in QB yet.</p>
                       <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
                         {intuitXlsxFile ? (
                           <div className="flex items-center justify-center gap-2 text-indigo-700">
