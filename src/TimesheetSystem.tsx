@@ -535,13 +535,17 @@ function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
 // Feeds qb_ingest_events (source='intuit_xlsx') as the source of truth for what
 // Intuit paid; later slices classify and push corresponding entries into QB.
 //
-// Format notes (from 2026-08-19 sample):
-//   - Header at row 4: Date | Transaction Type | Num | Name | Memo/Description | Split | Amount | Balance
+// Format notes (verified against 2026-08-19 sample via SheetJS):
+//   - Column A is EMPTY on data rows (indentation for the vendor-grouping
+//     structure). Section-header rows put the vendor name in column A instead.
+//     Data columns start at B:
+//       B=Date, C=Transaction Type, D=Num, E=Name, F=Memo/Description,
+//       G=Split, H=Amount, I=Balance
 //   - Each payment appears TWICE — once viewed from each account (positive-amount
 //     side has the memo; negative-amount side is the mirror). Dedupe by taking
 //     positive-amount rows only.
 //   - Memo carries "Inv# XXX" for single-invoice; "Inv# 03, 04" for multi-invoice.
-//   - Vendor-name-only rows and "Total for X" rows separate groups — skip.
+//   - Section-header rows (vendor name in A) and "Total for X" rows separate groups — skip.
 interface IntuitXlsxRow {
   date: string;              // YYYY-MM-DD
   transactionType: string;   // 'Expense' | 'Bill Payment' | ...
@@ -601,19 +605,20 @@ async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow
   const out: IntuitXlsxRow[] = [];
   for (let i = 0; i < raw.length; i++) {
     const r = raw[i];
-    const date = excelDateToIso(r[0]);
-    if (!date) continue;  // header, section-header, blank, or "Total for X" rows
-    const amount = typeof r[6] === 'number' ? r[6] : parseFloat(String(r[6] ?? '0'));
+    // Data columns are B..I (indices 1..8). Column A is empty on data rows.
+    const date = excelDateToIso(r[1]);
+    if (!date) continue;  // section-header (vendor name in col A), blank, "Total for X", etc.
+    const amount = typeof r[7] === 'number' ? r[7] : parseFloat(String(r[7] ?? '0'));
     // Two-sides-of-split dedup: keep only the positive-amount row (expense/AP side, has memo).
     if (!(amount > 0)) continue;
-    const memo = String(r[4] ?? '').trim();
+    const memo = String(r[5] ?? '').trim();
     const row: IntuitXlsxRow = {
       date,
-      transactionType: String(r[1] ?? '').trim(),
-      num: String(r[2] ?? '').trim(),
-      name: String(r[3] ?? '').trim(),
+      transactionType: String(r[2] ?? '').trim(),
+      num: String(r[3] ?? '').trim(),
+      name: String(r[4] ?? '').trim(),
       memo,
-      split: String(r[5] ?? '').trim(),
+      split: String(r[6] ?? '').trim(),
       amount,
       invoiceRefs: extractIntuitInvoiceRefs(memo),
       matchedInvoiceIds: [],
@@ -624,7 +629,7 @@ async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow
   }
   if (out.length === 0) {
     const preview = raw.slice(0, 5).map(r => r.map(c => String(c ?? '').slice(0, 40)).join(' | ')).join('\n  ');
-    throw new Error(`No payment rows found in the file (${raw.length} total rows scanned). Expected rows with a MM/DD/YYYY date in column A and a positive amount in column G. First rows saw:\n  ${preview}`);
+    throw new Error(`No payment rows found in the file (${raw.length} total rows scanned). Expected rows with a date in column B and a positive amount in column H. First rows saw:\n  ${preview}`);
   }
   return out;
 }
