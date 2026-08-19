@@ -569,13 +569,15 @@ async function sha256Hex(input: string): Promise<string> {
 }
 
 async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow[]> {
-  const wb = XLSX.read(buffer, { type: 'array' });
+  const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
-  const headerIdx = raw.findIndex(r => String(r[0]).trim() === 'Date' && String(r[1]).trim() === 'Transaction Type');
-  if (headerIdx < 0) throw new Error('No header row found. Expected "Date | Transaction Type | Num | Name | Memo/Description | Split | Amount | Balance". Is this the QuickBooks "Transaction Detail by Account" export?');
+  // Data rows are the ones where col 0 is a MM/DD/YYYY date. Don't require an
+  // exact header string — the report label/spacing varies enough that strict
+  // header-matching is fragile. If we find zero data rows, error with counts
+  // so a human can see what we got.
   const out: IntuitXlsxRow[] = [];
-  for (let i = headerIdx + 1; i < raw.length; i++) {
+  for (let i = 0; i < raw.length; i++) {
     const r = raw[i];
     const rawDate = String(r[0] ?? '').trim();
     // Skip vendor-name-only rows, blank rows, and "Total for X" rows — only real data rows have MM/DD/YYYY.
@@ -600,6 +602,10 @@ async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow
     };
     row.sourceRef = await sha256Hex([row.date, row.transactionType, row.num, row.name, row.memo, String(row.amount)].join('|'));
     out.push(row);
+  }
+  if (out.length === 0) {
+    const preview = raw.slice(0, 5).map(r => r.map(c => String(c ?? '').slice(0, 40)).join(' | ')).join('\n  ');
+    throw new Error(`No payment rows found in the file (${raw.length} total rows scanned). Expected rows with a MM/DD/YYYY date in column A and a positive amount in column G. First rows saw:\n  ${preview}`);
   }
   return out;
 }
@@ -9619,7 +9625,7 @@ const TimesheetSystem = () => {
                 <div className="flex items-baseline justify-between mb-4">
                   <div>
                     <h2 className="text-2xl font-bold text-gray-800">QB Automation — Inbox</h2>
-                    <p className="text-sm text-gray-500 mt-0.5">Financial events pending classification and push to QuickBooks. Import via Payments → Import Payments.</p>
+                    <p className="text-sm text-gray-500 mt-0.5">Financial events pending classification and push to QuickBooks. Import via Invoices → Import Payments.</p>
                   </div>
                   <button onClick={loadQbIngestEvents} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
                 </div>
@@ -9642,7 +9648,7 @@ const TimesheetSystem = () => {
                 {total === 0 && !qbIngestLoading && (
                   <div className="p-8 border border-dashed border-gray-300 rounded-lg text-center text-gray-500">
                     <UploadCloud className="w-10 h-10 mx-auto text-gray-300 mb-2" />
-                    <p className="text-sm">Inbox is empty. Import Intuit payments via <strong>Payments → Import Payments → Intuit XLSX</strong>.</p>
+                    <p className="text-sm">Inbox is empty. Import Intuit payments via <strong>Invoices → Import Payments → Intuit XLSX</strong>.</p>
                   </div>
                 )}
 
