@@ -196,6 +196,13 @@ import {
   valueEditEntry,
   type InvoiceEditEntry,
 } from '../supabase/functions/_shared/edit-history';
+import { excelDateToIso } from './lib/xlsxHelpers';
+import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
+import {
+  matchEventsToInvoices,
+  type MatchableEvent,
+  type MatcherInvoice,
+} from './lib/matchQbIngestEvents';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -539,194 +546,6 @@ function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
     rawData: (r.raw_data as Record<string, unknown>) ?? null,
     notes: (r.notes as string) ?? null,
   };
-}
-
-// ─── Intuit XLSX loader (Slice B of QB Automation Layer) ─────────────────────
-// Parses the Intuit BillPay payment report — a spreadsheet of payments Intuit
-// sent on our behalf. NOT a QuickBooks export; column labels are Intuit's own.
-// Feeds qb_ingest_events (source='intuit_xlsx') as the source of truth for what
-// Intuit paid; later slices classify and push corresponding entries into QB.
-//
-// Format notes (verified against 2026-08-19 sample via SheetJS):
-//   - Column A is EMPTY on data rows (indentation for the vendor-grouping
-//     structure). Section-header rows put the vendor name in column A instead.
-//     Data columns start at B:
-//       B=Date, C=Transaction Type, D=Num, E=Name, F=Memo/Description,
-//       G=Split, H=Amount, I=Balance
-//   - Each payment appears TWICE — once viewed from each account (positive-amount
-//     side has the memo; negative-amount side is the mirror). Dedupe by taking
-//     positive-amount rows only.
-//   - Memo carries "Inv# XXX" for single-invoice; "Inv# 03, 04" for multi-invoice.
-//   - Section-header rows (vendor name in A) and "Total for X" rows separate groups — skip.
-interface IntuitXlsxRow {
-  date: string;              // YYYY-MM-DD
-  transactionType: string;   // 'Expense' | 'Bill Payment' | ...
-  num: string;               // e.g. 'DD' (direct debit)
-  name: string;              // vendor/counterparty as QB shows it
-  memo: string;
-  split: string;             // offsetting account name (e.g. 'Business Checking')
-  amount: number;            // absolute value (positive)
-  invoiceRefs: string[];     // parsed from memo (e.g. ['03', '04'] from 'Inv# 03, 04')
-  matchedInvoiceIds: number[]; // resolved against invoices.invoice_number (later)
-  sourceRef: string;         // sha256 of (date|type|num|name|memo|amount)
-}
-
-function extractIntuitInvoiceRefs(memo: string): string[] {
-  // Match "Inv# XYZ" then any trailing ", XYZ2, XYZ3" comma-separated tokens.
-  const m = memo.match(/Inv#\s+([^\s,][^,]*(?:,\s*[^,]+)*)/i);
-  if (!m) return [];
-  return m[1].split(',').map(s => s.trim()).filter(Boolean);
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const buf = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest('SHA-256', buf);
-  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-// Excel date cell → YYYY-MM-DD. SheetJS returns date-typed cells as their
-// serial number (days since 1900-01-01), NOT as the display string. Handles
-// both numeric serials and pre-formatted string dates (MM/DD/YYYY or ISO).
-function excelDateToIso(v: unknown): string {
-  if (v == null || v === '') return '';
-  if (typeof v === 'number') {
-    // Excel epoch quirk: serial 25569 = 1970-01-01
-    const d = new Date((v - 25569) * 86400 * 1000);
-    return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-  }
-  const s = String(v).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
-  if (m) {
-    const [, a, b, y] = m;
-    // American MM/DD/YYYY when first token > 12 is impossible → must be DD/MM
-    return parseInt(a) > 12
-      ? `${y}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`
-      : `${y}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`;
-  }
-  return '';
-}
-
-async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow[]> {
-  const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
-  // Data rows are the ones where col 0 is a real date. SheetJS may return
-  // date cells as Excel serials (numbers) or pre-formatted strings depending
-  // on how QB/Intuit exported the workbook — excelDateToIso handles both.
-  const out: IntuitXlsxRow[] = [];
-  for (let i = 0; i < raw.length; i++) {
-    const r = raw[i];
-    // Data columns are B..I (indices 1..8). Column A is empty on data rows.
-    const date = excelDateToIso(r[1]);
-    if (!date) continue;  // section-header (vendor name in col A), blank, "Total for X", etc.
-    const amount = typeof r[7] === 'number' ? r[7] : parseFloat(String(r[7] ?? '0'));
-    // Two-sides-of-split dedup: keep only the positive-amount row (expense/AP side, has memo).
-    if (!(amount > 0)) continue;
-    const memo = String(r[5] ?? '').trim();
-    const row: IntuitXlsxRow = {
-      date,
-      transactionType: String(r[2] ?? '').trim(),
-      num: String(r[3] ?? '').trim(),
-      name: String(r[4] ?? '').trim(),
-      memo,
-      split: String(r[6] ?? '').trim(),
-      amount,
-      invoiceRefs: extractIntuitInvoiceRefs(memo),
-      matchedInvoiceIds: [],
-      sourceRef: '',
-    };
-    row.sourceRef = await sha256Hex([row.date, row.transactionType, row.num, row.name, row.memo, String(row.amount)].join('|'));
-    out.push(row);
-  }
-  if (out.length === 0) {
-    const preview = raw.slice(0, 5).map(r => r.map(c => String(c ?? '').slice(0, 40)).join(' | ')).join('\n  ');
-    throw new Error(`No payment rows found in the file (${raw.length} total rows scanned). Expected rows with a date in column B and a positive amount in column H. First rows saw:\n  ${preview}`);
-  }
-  return out;
-}
-
-// ─── Match qb_ingest_events → invoices (pure, reusable) ─────────────────────
-// Single source of truth for the layered matcher — used both at ingest preview
-// time (IntuitXlsxRow → matched_invoice_ids) and by the on-load / manual
-// recompute path (existing QbIngestEvent rows). Extract lets a matcher upgrade
-// benefit already-imported events without re-import. See Option 4 discussion.
-//
-// Requires a minimal shape from callers: date + counterpartyRaw + amount + invoiceRefs.
-// Returns matched invoice ids in the same order as input events.
-interface MatchableEvent { date: string; counterpartyRaw: string; amount: number; invoiceRefs: string[]; }
-interface MatcherInvoice { id: number; invoiceNumber: string | null; totalAmount: number; periodEnd: string | null; userName: string; companyName: string | null; }
-
-function matchEventsToInvoices(events: MatchableEvent[], invoices: MatcherInvoice[]): number[][] {
-  const AMT_EPS = 0.02;
-  const norm = (s: string) => s.toLowerCase().trim().replace(/-+/g, '-');
-  const stripWs = (s: string) => s.replace(/\s+/g, '');
-  const normalise = (s: string) => (s || '').toLowerCase()
-    .replace(/\b(inc|corp|llc|ltd|d\.?o\.?o\.?|s\.?r\.?o\.?|gmbh|co|technologies|solutions|services|agency|group|digital|labs?|tech)\b\.?/gi, '')
-    .replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-  const invByNum = new Map<string, number>();
-  for (const inv of invoices) if (inv.invoiceNumber) invByNum.set(norm(inv.invoiceNumber), inv.id);
-  // Chronological pass with "claimed" set so each invoice is matched to at most one event.
-  const orderedIdx = events.map((_, i) => i).sort((a, b) => events[a].date.localeCompare(events[b].date));
-  const results: number[][] = events.map(() => []);
-  const claimed = new Set<number>();
-  for (const idx of orderedIdx) {
-    const r = events[idx];
-    const l1: number[] = [];
-    for (const ref of r.invoiceRefs) {
-      const hit = invByNum.get(norm(ref));
-      if (hit != null && !l1.includes(hit) && !claimed.has(hit)) l1.push(hit);
-    }
-    if (r.invoiceRefs.length > 0 && l1.length === r.invoiceRefs.length) {
-      results[idx] = l1; l1.forEach(id => claimed.add(id));
-      continue;
-    }
-    const eventCompanyC = stripWs(normalise(r.counterpartyRaw));
-    if (!eventCompanyC) { results[idx] = l1; l1.forEach(id => claimed.add(id)); continue; }
-    const evtMs = new Date(r.date + 'T00:00:00Z').getTime();
-    const vendorInvoices = invoices.filter(inv => {
-      if (claimed.has(inv.id)) return false;
-      const invComp = stripWs(normalise(inv.companyName || inv.userName));
-      if (!invComp) return false;
-      if (!(invComp.includes(eventCompanyC) || eventCompanyC.includes(invComp))) return false;
-      if (inv.periodEnd) {
-        const daysDelta = (evtMs - new Date(inv.periodEnd + 'T00:00:00Z').getTime()) / 86400000;
-        if (daysDelta < -30 || daysDelta > 120) return false;
-      }
-      return true;
-    });
-    if (vendorInvoices.length === 0) { results[idx] = l1; l1.forEach(id => claimed.add(id)); continue; }
-    if (r.invoiceRefs.length <= 1) {
-      const amtHit = vendorInvoices.find(inv => Math.abs(inv.totalAmount - r.amount) < AMT_EPS);
-      if (amtHit) { results[idx] = [amtHit.id]; claimed.add(amtHit.id); continue; }
-      results[idx] = l1; l1.forEach(id => claimed.add(id));
-      continue;
-    }
-    // Multi-invoice subset-sum.
-    const cands = vendorInvoices.slice(0, 20);
-    const targetCents = Math.round(r.amount * 100);
-    const size = r.invoiceRefs.length;
-    let found = null as number[] | null;
-    function rec(start: number, chosen: number[], sumCents: number) {
-      if (found) return;
-      if (chosen.length === size) {
-        if (Math.abs(sumCents - targetCents) <= 2) found = chosen.slice();
-        return;
-      }
-      for (let i = start; i < cands.length; i++) {
-        const next = sumCents + Math.round(cands[i].totalAmount * 100);
-        if (next > targetCents + 5) continue;
-        chosen.push(cands[i].id);
-        rec(i + 1, chosen, next);
-        chosen.pop();
-        if (found) return;
-      }
-    }
-    rec(0, [], 0);
-    if (found) { results[idx] = found; found.forEach((id: number) => claimed.add(id)); }
-    else { results[idx] = l1; l1.forEach(id => claimed.add(id)); }
-  }
-  return results;
 }
 
 // ─── Live invoice reconciliation (pure, no DB writes) ────────────────────────
@@ -4131,8 +3950,8 @@ const TimesheetSystem = () => {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
 
-      // Excel date conversion lives in the top-level excelDateToIso helper (line ~578).
-      // Same logic as the previous inline excelSerial — deduped 2026-08-19.
+      // Excel date conversion is imported from ./lib/xlsxHelpers — same function
+      // used by the Intuit XLSX parser and the QB Automation matcher.
 
       const hdrs = rawRows[0].map(h => String(h).trim().toLowerCase());
       // Flexible column resolver — first tries exact match, then falls back to substring match
