@@ -4,12 +4,14 @@ import {
   buildBillAddRq,
   buildBillPaymentCheckAddRq,
   buildBillQueryRq,
+  buildCheckAddRq,
   buildVendorQueryRq,
 } from '../builders';
 import { wrapQbxmlRequests, xmlEscape } from '../envelope';
 import {
   DEFAULT_AP_ACCOUNT,
   DEFAULT_EXPENSE_ACCOUNT,
+  KEY_POINT_CHECKING,
   WU_HOLDING,
 } from '../constants';
 
@@ -688,6 +690,95 @@ describe('buildBillPaymentCheckAddRq', () => {
     expect(out).toContain('<IsToBePrinted>false</IsToBePrinted>');
     expect(out).not.toContain('<DiscountAmount>');
     expect(out).not.toContain('<SetCredit>');
+  });
+});
+
+describe('buildCheckAddRq', () => {
+  // Base fixture — mirrors the Lucien C Pinto Intuit-passthrough case
+  // from the QB Automation Layer meeting: single-line check, bank = 8220
+  // Key Point Checking, expense account = Administration salaries.
+  const baseCheck = {
+    bankAccountName: KEY_POINT_CHECKING,
+    payeeVendorName: 'Lucien C Pinto',
+    txnDate: '2026-09-15',
+    memo: 'Intuit BillPay 2026-09-15',
+    lines: [{
+      expenseAccountName: 'Payroll Expenses:Administration salaries',
+      amount: 400,
+      memo: 'September 2026 admin salary',
+    }],
+  };
+
+  it('emits a minimal valid check with all required elements', () => {
+    const out = buildCheckAddRq(baseCheck);
+    expect(out).toContain('<CheckAddRq>');
+    expect(out).toContain('<CheckAdd>');
+    expect(out).toContain('<AccountRef>');
+    expect(out).toContain(`<FullName>${KEY_POINT_CHECKING}</FullName>`);
+    expect(out).toContain('<PayeeEntityRef>');
+    expect(out).toContain('<FullName>Lucien C Pinto</FullName>');
+    expect(out).toContain('<TxnDate>2026-09-15</TxnDate>');
+    expect(out).toContain('<Memo>Intuit BillPay 2026-09-15</Memo>');
+    expect(out).toContain('<ExpenseLineAdd>');
+    expect(out).toContain('<FullName>Payroll Expenses:Administration salaries</FullName>');
+    expect(out).toContain('<Amount>400.00</Amount>');
+    expect(out).toContain('<Memo>September 2026 admin salary</Memo>');
+    expect(out).toContain('</CheckAdd>');
+    expect(out).toContain('</CheckAddRq>');
+  });
+
+  it('emits CheckAdd children in the strict qbXML spec order', () => {
+    // AccountRef → PayeeEntityRef → RefNumber? → TxnDate → Memo? →
+    // IsToBePrinted? → ExpenseLineAdd+
+    const out = buildCheckAddRq({
+      ...baseCheck,
+      refNumber: 'CK-0001',
+      isToBePrinted: false,
+    });
+    const order = [
+      '<AccountRef>',
+      '<PayeeEntityRef>',
+      '<RefNumber>',
+      '<TxnDate>',
+      '<Memo>',
+      '<IsToBePrinted>',
+      '<ExpenseLineAdd>',
+    ];
+    let cursor = 0;
+    for (const tag of order) {
+      const idx = out.indexOf(tag, cursor);
+      expect(idx, `${tag} should appear after cursor ${cursor}`).toBeGreaterThan(-1);
+      cursor = idx;
+    }
+  });
+
+  it('omits optional elements when not supplied', () => {
+    const out = buildCheckAddRq(baseCheck);  // no refNumber, no isToBePrinted
+    expect(out).not.toContain('<RefNumber>');
+    expect(out).not.toContain('<IsToBePrinted>');
+  });
+
+  it('supports multi-line splits (sum of amounts = total check)', () => {
+    const out = buildCheckAddRq({
+      ...baseCheck,
+      lines: [
+        { expenseAccountName: 'Rent', amount: 2000 },
+        { expenseAccountName: 'Utilities', amount: 350 },
+      ],
+    });
+    const linesCount = (out.match(/<ExpenseLineAdd>/g) || []).length;
+    expect(linesCount).toBe(2);
+    expect(out).toContain('<Amount>2000.00</Amount>');
+    expect(out).toContain('<Amount>350.00</Amount>');
+  });
+
+  it('throws if lines is empty', () => {
+    expect(() => buildCheckAddRq({ ...baseCheck, lines: [] })).toThrow(/at least one line required/);
+  });
+
+  it('carries requestId through as an XML attribute', () => {
+    const out = buildCheckAddRq({ ...baseCheck, requestId: '42' });
+    expect(out).toContain('<CheckAddRq requestID="42">');
   });
 });
 

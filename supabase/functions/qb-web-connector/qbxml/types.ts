@@ -101,6 +101,66 @@ export interface BillAddResult {
   refNumber: string;
 }
 
+/** CheckAddRq: create a Check transaction in QB — direct expense payment
+ *  from a bank account to a payee, with no A/P Bill involved. Distinct from
+ *  BillPaymentCheckAddRq (which pays down existing Bills). Used for the
+ *  passthrough / direct-expense flow — e.g. Lucien C Pinto's Intuit payments
+ *  posted straight to Administration salaries.
+ *
+ *  Represents ONE check to ONE payee, with 1..N expense lines. Multi-line
+ *  supports splitting a single check across categories (e.g. rent + utilities
+ *  in one check) but the MVP flow always writes single-line.
+ *
+ *  qbXML element ordering inside <CheckAdd> per QB SDK v13:
+ *
+ *    AccountRef → PayeeEntityRef → RefNumber? → TxnDate → Memo? →
+ *    Address? → IsToBePrinted? → IsTaxIncluded? → SalesTaxCodeRef? →
+ *    ExpenseLineAdd+
+ *
+ *  We only support the fields needed for direct-expense passthrough. Item
+ *  lines are for inventory purchases (not our use case).
+ */
+export interface CheckAddRqInput {
+  /** Bank account paying out. FullName from qb_accounts.full_name (e.g.
+   *  "BANK/CASH:8220 - Key Point Checking"). Required. */
+  bankAccountName: string;
+  /** Payee — QB vendor or other entity name. Required. */
+  payeeVendorName: string;
+  /** Check date. YYYY-MM-DD. Required. */
+  txnDate: string;
+  /** Check number / reference. Optional. */
+  refNumber?: string;
+  /** Check-level memo. Optional. */
+  memo?: string;
+  /** Whether QB should queue this for printing. Leave unset (default) for
+   *  electronic-only checks like Intuit BillPay passthroughs. */
+  isToBePrinted?: boolean;
+  /** One or more expense-account line splits. Required, min 1. Sum of line
+   *  amounts equals the total check amount. */
+  lines: CheckAddRqLine[];
+  /** Optional request correlation ID. */
+  requestId?: string;
+}
+
+export interface CheckAddRqLine {
+  /** Expense account FullName from qb_accounts.full_name (e.g.
+   *  "Payroll Expenses:Administration salaries"). Required. */
+  expenseAccountName: string;
+  /** Positive amount (debit to the expense account). Required. */
+  amount: number;
+  /** Per-line memo. Optional. */
+  memo?: string;
+}
+
+/** Result of parseCheckAddRs — the newly-created check's identity. RefNumber
+ *  is optional because it's optional on the request (unlike BillAdd where
+ *  it's always echoed). */
+export interface CheckAddResult {
+  txnId: string;
+  editSequence: string;
+  refNumber?: string;
+}
+
 /** BillPaymentCheckAddRq: record a check-style bill payment (Convera wire, ACH,
  *  or physical check) tied to a bank account and applied to one or more bills.
  *
@@ -278,6 +338,12 @@ export interface ParsedBillAddRs {
 export interface ParsedBillPaymentCheckAddRs {
   status: QbxmlResponseStatus;
   result: BillPaymentCheckAddResult | null;
+}
+
+/** Return shape of parseCheckAddRs. `result` is null on any non-success status. */
+export interface ParsedCheckAddRs {
+  status: QbxmlResponseStatus;
+  result: CheckAddResult | null;
 }
 
 /** VendorQueryRq: enumerate vendors from QB Desktop's vendor list.

@@ -28,6 +28,7 @@ import {
   buildBillAddRq,
   buildBillPaymentCheckAddRq,
   buildBillQueryRq,
+  buildCheckAddRq,
   buildVendorQueryRq,
 } from './qbxml/builders.ts';
 import {
@@ -35,6 +36,7 @@ import {
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
   parseBillQueryRs,
+  parseCheckAddRs,
   parseVendorQueryRs,
   unwrapQbxmlResponses,
 } from './qbxml/parsers.ts';
@@ -43,6 +45,7 @@ import type {
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
+  CheckAddRqInput,
   VendorQueryRqInput,
 } from './qbxml/types.ts';
 import { validatePayload } from './qbxml/job-payloads.ts';
@@ -57,7 +60,7 @@ import {
 
 interface JobRow {
   id: number;
-  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query';
+  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'check_add' | 'account_query' | 'vendor_query';
   payload: Record<string, unknown>;
   depends_on: number[] | null;
   status: 'pending' | 'in_flight' | 'done' | 'error' | 'skipped';
@@ -131,6 +134,9 @@ function renderJobRequest(job: JobRow): string {
       break;
     case 'bill_pmt_add':
       element = buildBillPaymentCheckAddRq({ ...(job.payload as BillPaymentCheckAddRqInput), requestId });
+      break;
+    case 'check_add':
+      element = buildCheckAddRq({ ...(job.payload as CheckAddRqInput), requestId });
       break;
     case 'account_query':
       element = buildAccountQueryRq({ ...(job.payload as AccountQueryRqInput), requestId });
@@ -416,6 +422,47 @@ async function persistJobResponse(
     if (cacheErr) {
       // Non-fatal — link table is the source of truth. Log but don't fail.
       console.warn(`BillPaymentCheckAdd: link row saved but legacy cache update failed for wire=${payload.sourceConveraTxnId}: ${cacheErr.message}`);
+    }
+    return { ok: true, errorMsg: null };
+  }
+
+  if (job.kind === 'check_add') {
+    // Slice E of QB Automation Layer. Direct-expense check written on behalf
+    // of a qb_ingest_events row. Persist writes the returned TxnID back to
+    // qb_ingest_events.posted_qb_refs.check + flips status to 'posted' + adds
+    // this job's id to qb_sync_job_ids.
+    const parsed = parseCheckAddRs(first);
+    if (!parsed.result) {
+      return { ok: false, errorMsg: `CheckAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
+    }
+    const payload = job.payload as { sourceIngestEventId?: number };
+    if (payload.sourceIngestEventId == null) {
+      return { ok: false, errorMsg: `CheckAdd persist: payload missing sourceIngestEventId. QB check created (TxnID=${parsed.result.txnId}) but not linked to any qb_ingest_events row.` };
+    }
+    // Merge into posted_qb_refs jsonb + append this job id + flip status.
+    const { data: existing, error: readErr } = await supabase
+      .from('qb_ingest_events')
+      .select('posted_qb_refs, qb_sync_job_ids')
+      .eq('id', payload.sourceIngestEventId)
+      .maybeSingle();
+    if (readErr) {
+      return { ok: false, errorMsg: `CheckAdd persist DB read error for event ${payload.sourceIngestEventId}: ${readErr.message}` };
+    }
+    const existingRefs = (existing as { posted_qb_refs?: Record<string, unknown> } | null)?.posted_qb_refs ?? {};
+    const existingJobIds = (existing as { qb_sync_job_ids?: number[] } | null)?.qb_sync_job_ids ?? [];
+    const nextRefs = { ...existingRefs, check: parsed.result.txnId };
+    const nextJobIds = existingJobIds.includes(job.id) ? existingJobIds : [...existingJobIds, job.id];
+    const { error: updErr } = await supabase
+      .from('qb_ingest_events')
+      .update({
+        status: 'posted',
+        status_updated_at: new Date().toISOString(),
+        posted_qb_refs: nextRefs,
+        qb_sync_job_ids: nextJobIds,
+      })
+      .eq('id', payload.sourceIngestEventId);
+    if (updErr) {
+      return { ok: false, errorMsg: `CheckAdd persist DB update error for event ${payload.sourceIngestEventId}: ${updErr.message}` };
     }
     return { ok: true, errorMsg: null };
   }

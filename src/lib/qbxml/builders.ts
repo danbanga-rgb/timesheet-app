@@ -14,6 +14,7 @@ import type {
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
+  CheckAddRqInput,
   VendorQueryRqInput,
 } from './types';
 import { assertAscii, xmlEscape } from './envelope';
@@ -190,6 +191,94 @@ export function buildBillAddRq(input: BillAddRqInput): string {
   }
   parts.push('  </BillAdd>');
   parts.push('</BillAddRq>');
+  return parts.join('\n');
+}
+
+/** Build a <CheckAddRq> element.
+ *
+ * Direct-expense check (bank → expense) with no A/P Bill involved. Used by
+ * the passthrough flow (Lucien C Pinto → Administration salaries) where the
+ * accountant wants the payment recorded as an immediate expense rather than
+ * pushed through A/P.
+ *
+ * qbXML element ordering inside <CheckAdd> per QB SDK v13 is STRICT (QB
+ * rejects out-of-order children with a schema error):
+ *
+ *   AccountRef → PayeeEntityRef → RefNumber? → TxnDate → Memo? →
+ *   Address? → IsToBePrinted? → IsTaxIncluded? → SalesTaxCodeRef? →
+ *   ExpenseLineAdd+
+ *
+ * We only emit fields we use. ItemLineAdd (for inventory) is intentionally
+ * out of scope — direct-expense is the only use case today.
+ *
+ * ExpenseLineAdd.Amount is entered as POSITIVE. QB debits the expense
+ * account and credits the bank account for the sum of all line amounts.
+ * Same convention as BillAddRq's ExpenseLineAdd.
+ */
+export function buildCheckAddRq(input: CheckAddRqInput): string {
+  if (input.lines.length === 0) {
+    throw new Error('buildCheckAddRq: at least one line required');
+  }
+
+  assertAscii('bankAccountName', input.bankAccountName);
+  assertAscii('payeeVendorName', input.payeeVendorName);
+  assertAscii('txnDate', input.txnDate);
+  if (input.refNumber) assertAscii('refNumber', input.refNumber);
+  if (input.memo) assertAscii('memo', input.memo);
+  if (input.requestId) assertAscii('requestId', input.requestId);
+  input.lines.forEach((line, i) => {
+    assertAscii(`lines[${i}].expenseAccountName`, line.expenseAccountName);
+    if (line.memo) assertAscii(`lines[${i}].memo`, line.memo);
+  });
+
+  const attrs = input.requestId
+    ? ` requestID="${xmlEscape(input.requestId)}"`
+    : '';
+  const parts: string[] = [`<CheckAddRq${attrs}>`, '  <CheckAdd>'];
+
+  // AccountRef (bank)
+  parts.push('    <AccountRef>');
+  parts.push(`      <FullName>${xmlEscape(input.bankAccountName)}</FullName>`);
+  parts.push('    </AccountRef>');
+
+  // PayeeEntityRef
+  parts.push('    <PayeeEntityRef>');
+  parts.push(`      <FullName>${xmlEscape(input.payeeVendorName)}</FullName>`);
+  parts.push('    </PayeeEntityRef>');
+
+  // RefNumber (optional, before TxnDate per XSD ordering)
+  if (input.refNumber) {
+    parts.push(`    <RefNumber>${xmlEscape(input.refNumber)}</RefNumber>`);
+  }
+
+  // TxnDate
+  parts.push(`    <TxnDate>${xmlEscape(input.txnDate)}</TxnDate>`);
+
+  // Memo (optional)
+  if (input.memo) {
+    parts.push(`    <Memo>${xmlEscape(input.memo)}</Memo>`);
+  }
+
+  // IsToBePrinted (optional)
+  if (input.isToBePrinted !== undefined) {
+    parts.push(`    <IsToBePrinted>${input.isToBePrinted ? 'true' : 'false'}</IsToBePrinted>`);
+  }
+
+  // ExpenseLineAdd (1..N)
+  for (const line of input.lines) {
+    parts.push('    <ExpenseLineAdd>');
+    parts.push('      <AccountRef>');
+    parts.push(`        <FullName>${xmlEscape(line.expenseAccountName)}</FullName>`);
+    parts.push('      </AccountRef>');
+    parts.push(`      <Amount>${fmtAmount(line.amount)}</Amount>`);
+    if (line.memo) {
+      parts.push(`      <Memo>${xmlEscape(line.memo)}</Memo>`);
+    }
+    parts.push('    </ExpenseLineAdd>');
+  }
+
+  parts.push('  </CheckAdd>');
+  parts.push('</CheckAddRq>');
   return parts.join('\n');
 }
 
