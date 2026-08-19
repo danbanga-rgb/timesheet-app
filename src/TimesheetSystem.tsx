@@ -568,25 +568,44 @@ async function sha256Hex(input: string): Promise<string> {
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Excel date cell → YYYY-MM-DD. SheetJS returns date-typed cells as their
+// serial number (days since 1900-01-01), NOT as the display string. Handles
+// both numeric serials and pre-formatted string dates (MM/DD/YYYY or ISO).
+function excelDateToIso(v: unknown): string {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number') {
+    // Excel epoch quirk: serial 25569 = 1970-01-01
+    const d = new Date((v - 25569) * 86400 * 1000);
+    return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  }
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m) {
+    const [, a, b, y] = m;
+    // American MM/DD/YYYY when first token > 12 is impossible → must be DD/MM
+    return parseInt(a) > 12
+      ? `${y}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`
+      : `${y}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`;
+  }
+  return '';
+}
+
 async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow[]> {
   const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
-  // Data rows are the ones where col 0 is a MM/DD/YYYY date. Don't require an
-  // exact header string — the report label/spacing varies enough that strict
-  // header-matching is fragile. If we find zero data rows, error with counts
-  // so a human can see what we got.
+  // Data rows are the ones where col 0 is a real date. SheetJS may return
+  // date cells as Excel serials (numbers) or pre-formatted strings depending
+  // on how QB/Intuit exported the workbook — excelDateToIso handles both.
   const out: IntuitXlsxRow[] = [];
   for (let i = 0; i < raw.length; i++) {
     const r = raw[i];
-    const rawDate = String(r[0] ?? '').trim();
-    // Skip vendor-name-only rows, blank rows, and "Total for X" rows — only real data rows have MM/DD/YYYY.
-    if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDate)) continue;
+    const date = excelDateToIso(r[0]);
+    if (!date) continue;  // header, section-header, blank, or "Total for X" rows
     const amount = typeof r[6] === 'number' ? r[6] : parseFloat(String(r[6] ?? '0'));
     // Two-sides-of-split dedup: keep only the positive-amount row (expense/AP side, has memo).
     if (!(amount > 0)) continue;
-    const [mo, dy, yr] = rawDate.split('/');
-    const date = `${yr}-${mo.padStart(2, '0')}-${dy.padStart(2, '0')}`;
     const memo = String(r[4] ?? '').trim();
     const row: IntuitXlsxRow = {
       date,
