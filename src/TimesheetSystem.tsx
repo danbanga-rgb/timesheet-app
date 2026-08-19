@@ -190,6 +190,11 @@ import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, File
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 import { tzMap } from '../supabase/functions/_shared/tz-map';
+import {
+  normalizeEditEntry,
+  periodEditEntry,
+  type InvoiceEditEntry,
+} from '../supabase/functions/_shared/edit-history';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -331,14 +336,11 @@ interface Invoice {
   editHistory: InvoiceEditEntry[];
 }
 
-interface InvoiceEditEntry {
-  at: string;              // ISO timestamp
-  by: string;              // accountant name
-  field: 'period';         // only period edits today; more later
-  old: { periodStart: string; periodEnd: string };
-  new: { periodStart: string; periodEnd: string };
-  reason: string;
-}
+// Canonical shape + normalizer live in supabase/functions/_shared/edit-history.ts.
+// All writers use the factories there; the parse-time normalizer coerces
+// any legacy shape a stale DB row might still hold. Type re-exported for
+// downstream consumers.
+export type { InvoiceEditEntry };
 
 interface ConveraPaymentRow {
   source: 'convera' | 'quickbooks' | 'intuit';
@@ -2387,7 +2389,7 @@ const TimesheetSystem = () => {
       qbExportStatus: ((r.qb_export_status as string) || 'not_exported') as Invoice['qbExportStatus'],
       matcherIgnore: Boolean(r.matcher_ignore),
       qbExportStatusAt: (r.qb_export_status_at as string) || null,
-      editHistory: Array.isArray(r.edit_history) ? (r.edit_history as InvoiceEditEntry[]) : [],
+      editHistory: Array.isArray(r.edit_history) ? (r.edit_history as unknown[]).map(normalizeEditEntry) : [],
     };
   }
 
@@ -3026,14 +3028,14 @@ const TimesheetSystem = () => {
 
     const nextInv: Invoice = { ...inv, periodStart: newStart, periodEnd: newEnd };
     const nextRecon = reconcileInvoiceLive(nextInv, timesheets);
-    const newEntry: InvoiceEditEntry = {
-      at: new Date().toISOString(),
+    const newEntry = periodEditEntry({
       by: currentUser!.name,
-      field: 'period',
-      old: { periodStart: inv.periodStart, periodEnd: inv.periodEnd },
-      new: { periodStart: newStart, periodEnd: newEnd },
       reason: reason.trim(),
-    };
+      beforePeriodStart: inv.periodStart,
+      beforePeriodEnd: inv.periodEnd,
+      afterPeriodStart: newStart,
+      afterPeriodEnd: newEnd,
+    });
     const nextHistory = [...(inv.editHistory || []), newEntry];
 
     const reconNotes = nextRecon.timesheetHours != null
@@ -11429,13 +11431,26 @@ const TimesheetSystem = () => {
                             <details>
                               <summary className="text-xs font-medium text-gray-600 cursor-pointer">Edit history ({inv.editHistory.length})</summary>
                               <ul className="mt-2 space-y-1.5 text-xs text-gray-700">
-                                {[...inv.editHistory].reverse().map((h, i) => (
-                                  <li key={i} className="border-l-2 border-gray-300 pl-2">
-                                    <div className="text-gray-500">{new Date(h.at).toLocaleString()} · {h.by}</div>
-                                    <div className="font-mono">{h.old.periodStart}→{h.old.periodEnd}  ⇒  {h.new.periodStart}→{h.new.periodEnd}</div>
-                                    <div className="italic text-gray-600">{h.reason}</div>
-                                  </li>
-                                ))}
+                                {[...inv.editHistory].reverse().map((h, i) => {
+                                  const kindBadge = { period_edit: 'Period', guardrail: 'Guardrail', anomaly: 'Anomaly', manual_repair: 'Manual repair', other: 'Edit' }[h.kind] || 'Edit';
+                                  const kindColor = { period_edit: 'bg-indigo-100 text-indigo-700', guardrail: 'bg-amber-100 text-amber-700', anomaly: 'bg-rose-100 text-rose-700', manual_repair: 'bg-blue-100 text-blue-700', other: 'bg-gray-100 text-gray-600' }[h.kind] || 'bg-gray-100 text-gray-600';
+                                  const bps = (h.before as { period_start?: string })?.period_start;
+                                  const bpe = (h.before as { period_end?: string })?.period_end;
+                                  const aps = (h.after as { period_start?: string })?.period_start;
+                                  const ape = (h.after as { period_end?: string })?.period_end;
+                                  return (
+                                    <li key={i} className="border-l-2 border-gray-300 pl-2">
+                                      <div className="text-gray-500 flex items-center gap-2">
+                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${kindColor}`}>{kindBadge}</span>
+                                        <span>{new Date(h.at).toLocaleString()} · {h.by}</span>
+                                      </div>
+                                      {h.kind === 'period_edit' && bps && aps && (
+                                        <div className="font-mono">{bps}→{bpe || '?'}  ⇒  {aps}→{ape || '?'}</div>
+                                      )}
+                                      {h.reason && <div className="italic text-gray-600">{h.reason}</div>}
+                                    </li>
+                                  );
+                                })}
                               </ul>
                             </details>
                           </div>

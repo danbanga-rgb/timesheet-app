@@ -16,6 +16,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { detectAnomalies } from './anomaly-detector.ts';
+import { anomalyEntry, guardrailEntry } from '../_shared/edit-history.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -76,11 +77,7 @@ async function appendGuardrailEditHistory(
     const current = Array.isArray((data as { edit_history?: unknown[] } | null)?.edit_history)
       ? ((data as { edit_history: unknown[] }).edit_history)
       : [];
-    const entry = {
-      at: new Date().toISOString(),
-      by: 'beneficiary-guardrail',
-      events,
-    };
+    const entry = guardrailEntry({ events });
     await supabase
       .from('invoices')
       .update({ edit_history: [...current, entry] })
@@ -168,12 +165,7 @@ async function appendAnomalyEditHistory(
     const current = Array.isArray((data as { edit_history?: unknown[] } | null)?.edit_history)
       ? ((data as { edit_history: unknown[] }).edit_history)
       : [];
-    const entry = {
-      at: new Date().toISOString(),
-      by: 'anomaly-detector',
-      fixes,
-      flags,
-    };
+    const entry = anomalyEntry({ fixes, flags });
     await supabase
       .from('invoices')
       .update({ edit_history: [...current, entry] })
