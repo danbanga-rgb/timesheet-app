@@ -483,6 +483,18 @@ const WORLD_COUNTRIES = [
 type QbIngestKind = 'bill_pmt' | 'bill_add_and_pmt' | 'check' | 'ignore';
 type QbIngestStatus = 'pending' | 'ready' | 'queued' | 'posted' | 'failed' | 'ignored';
 
+interface QbVendor { listId: string; name: string; isActive: boolean; }
+interface QbAccount { listId: string; fullName: string; accountType: string; isActive: boolean; }
+interface QbVendorMapping {
+  id: number;
+  source: string;
+  counterpartyPattern: string;
+  qbVendorListId: string;
+  defaultTargetKind: QbIngestKind | null;
+  defaultBankAccountListId: string | null;
+  defaultExpenseAccountListId: string | null;
+}
+
 interface QbIngestEvent {
   id: number;
   ingestedAt: string;
@@ -1245,6 +1257,13 @@ const TimesheetSystem = () => {
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
   });
+  // Slice D — vendor mapping widget state
+  const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
+  const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
+  const [qbVendorMappings, setQbVendorMappings] = useState<QbVendorMapping[]>([]);
+  const [mapVendorOpenFor, setMapVendorOpenFor] = useState<string | null>(null);  // counterparty currently being mapped
+  const [mapForm, setMapForm] = useState<{ kind: QbIngestKind; vendorListId: string; bankListId: string; expenseListId: string; vendorSearch: string; }>({ kind: 'bill_pmt', vendorListId: '', bankListId: '', expenseListId: '', vendorSearch: '' });
+  const [mapSaving, setMapSaving] = useState(false);
   // Convera beneficiaries
   const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
 
@@ -2340,12 +2359,102 @@ const TimesheetSystem = () => {
     if (!error) setQbIngestEvents((data ?? []).map(normaliseQbIngestEvent));
     setQbIngestLoading(false);
   };
+  const loadQbVendorMappings = async () => {
+    const { data } = await supabase.from('qb_vendor_mappings').select('*');
+    setQbVendorMappings((data ?? []).map((r: Record<string, unknown>) => ({
+      id: r.id as number,
+      source: (r.source as string) ?? '',
+      counterpartyPattern: (r.counterparty_pattern as string) ?? '',
+      qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
+      defaultTargetKind: (r.default_target_kind as QbIngestKind | null) ?? null,
+      defaultBankAccountListId: (r.default_bank_account_list_id as string) ?? null,
+      defaultExpenseAccountListId: (r.default_expense_account_list_id as string) ?? null,
+    })));
+  };
+  const loadQbVendorsAndAccounts = async () => {
+    // Lists rarely change during a session — only fetch if empty.
+    if (qbVendorsList.length === 0) {
+      const { data } = await supabase.from('qb_vendors').select('list_id, name, is_active').order('name');
+      setQbVendorsList((data ?? []).map((r: Record<string, unknown>) => ({
+        listId: (r.list_id as string) ?? '', name: (r.name as string) ?? '', isActive: Boolean(r.is_active),
+      })));
+    }
+    if (qbAccountsList.length === 0) {
+      const { data } = await supabase.from('qb_accounts').select('list_id, full_name, account_type, is_active').order('full_name');
+      setQbAccountsList((data ?? []).map((r: Record<string, unknown>) => ({
+        listId: (r.list_id as string) ?? '', fullName: (r.full_name as string) ?? '', accountType: (r.account_type as string) ?? '', isActive: Boolean(r.is_active),
+      })));
+    }
+  };
   useEffect(() => {
     if (accountantTab !== 'qb-automation') return;
     if (currentUser?.role !== 'accountant') return;
     loadQbIngestEvents();
+    loadQbVendorMappings();
+    loadQbVendorsAndAccounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountantTab, currentUser?.role]);
+
+  // Slice D — save a vendor mapping and apply it to all pending events with the same counterparty.
+  const openMapWidget = (counterparty: string, source: string) => {
+    // Prefill from existing mapping if one exists for this (source, counterparty).
+    const existing = qbVendorMappings.find(m => m.source === source && m.counterpartyPattern === counterparty);
+    setMapForm({
+      kind: existing?.defaultTargetKind ?? 'bill_pmt',
+      vendorListId: existing?.qbVendorListId ?? '',
+      bankListId: existing?.defaultBankAccountListId ?? '',
+      expenseListId: existing?.defaultExpenseAccountListId ?? '',
+      vendorSearch: '',
+    });
+    setMapVendorOpenFor(counterparty);
+  };
+  const saveVendorMapping = async (counterparty: string, source: string) => {
+    const kind = mapForm.kind;
+    if (kind !== 'ignore' && !mapForm.vendorListId) { alert('Pick a QB vendor.'); return; }
+    if (kind !== 'ignore' && !mapForm.bankListId) { alert('Pick a bank account.'); return; }
+    if ((kind === 'check' || kind === 'bill_add_and_pmt') && !mapForm.expenseListId) { alert('Pick an expense account.'); return; }
+    setMapSaving(true);
+    try {
+      // Upsert the mapping row so future imports auto-classify.
+      const mappingRow = {
+        source,
+        counterparty_pattern: counterparty,
+        qb_vendor_list_id: kind === 'ignore' ? '' : mapForm.vendorListId,
+        default_target_kind: kind,
+        default_bank_account_list_id: kind === 'ignore' ? null : mapForm.bankListId,
+        default_expense_account_list_id: (kind === 'check' || kind === 'bill_add_and_pmt') ? mapForm.expenseListId : null,
+        updated_at: new Date().toISOString(),
+      };
+      const { error: upsertErr } = await supabase.from('qb_vendor_mappings').upsert(mappingRow, { onConflict: 'source,counterparty_pattern' });
+      if (upsertErr) throw upsertErr;
+
+      // Retroactively apply to all pending events for this counterparty.
+      // kind='ignore' → status='ignored' (won't appear in push preview)
+      // kind='bill_pmt'/'bill_add_and_pmt'/'check' → status='ready'
+      const nextStatus = kind === 'ignore' ? 'ignored' : 'ready';
+      const eventUpdate = {
+        counterparty_qb_vendor_list_id: kind === 'ignore' ? null : mapForm.vendorListId,
+        target_qb_txn_kind: kind,
+        qb_bank_account_list_id: kind === 'ignore' ? null : mapForm.bankListId,
+        qb_expense_account_list_id: (kind === 'check' || kind === 'bill_add_and_pmt') ? mapForm.expenseListId : null,
+        status: nextStatus,
+        status_updated_at: new Date().toISOString(),
+      };
+      const { error: updErr } = await supabase.from('qb_ingest_events').update(eventUpdate)
+        .eq('source', source).eq('counterparty_raw', counterparty).eq('status', 'pending');
+      if (updErr) throw updErr;
+
+      await loadQbIngestEvents();
+      await loadQbVendorMappings();
+      setMapVendorOpenFor(null);
+    } catch (e) {
+      const err = e as { message?: string; details?: string; hint?: string; code?: string };
+      const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null].filter((s): s is string => !!s);
+      alert(`Save failed: ${parts.length ? parts.join(' — ') : JSON.stringify(e)}`);
+    } finally {
+      setMapSaving(false);
+    }
+  };
 
   async function loadConveraLastPaymentDates() {
     if (converaLastPaymentDates.size > 0) return;
@@ -4515,57 +4624,73 @@ const TimesheetSystem = () => {
         setConveraError('No payment rows found in this file. Positive-amount rows in the expense/AP account (with "Inv# XXX" memos) are what we look for.');
         return;
       }
-      // Layered invoice matcher (mirrors the parseIntuitEmails pattern that worked
-      // for the paste-emails flow — company-name + amount is more forgiving than
-      // exact invoice-number matching, which fails for short refs like "05" or
-      // multi-invoice memos like "Inv# 03, 04" that don't match our internal formats).
+      // Layered invoice matcher.
+      //   L1 exact invoice_number match
+      //   L2 vendor company + amount (single-invoice)
+      //   L3 vendor company + subset-sum (multi-invoice)
+      //
+      // Chronological pass with "claimed" set — an invoice matched to one event
+      // is off the table for later events. Prevents the 1:many bug where multiple
+      // same-amount events all point at the one $9625 invoice we have.
+      //
+      // Date-proximity guard — the vendor invoice's period_end must be within
+      // 120 days BEFORE (or up to 30 days AFTER) the event date. Otherwise
+      // historic pre-our-system payments (Jan-Mar 2026) would grab recent
+      // amount-matching invoices they have no real relationship to.
       const AMT_EPS = 0.02;
       const norm = (s: string) => s.toLowerCase().trim().replace(/-+/g, '-');
+      const stripWs = (s: string) => s.replace(/\s+/g, '');
       const invByNum = new Map<string, number>();
       for (const inv of invoices) {
         if (inv.invoiceNumber) invByNum.set(norm(inv.invoiceNumber), inv.id);
       }
-      for (const r of rows) {
-        // Layer 1: exact invoice_number match on each memo ref. If ALL refs resolve,
-        // trust them and stop — most precise signal we have.
+      const claimed = new Set<number>();
+      // Chronological order: earliest events pick first.
+      const orderedRows = [...rows].sort((a, b) => a.date.localeCompare(b.date));
+      for (const r of orderedRows) {
+        // Layer 1: exact invoice_number match on each memo ref. If ALL refs resolve
+        // AND none are already claimed by an earlier event, trust them.
         const l1: number[] = [];
         for (const ref of r.invoiceRefs) {
           const hit = invByNum.get(norm(ref));
-          if (hit != null && !l1.includes(hit)) l1.push(hit);
+          if (hit != null && !l1.includes(hit) && !claimed.has(hit)) l1.push(hit);
         }
         if (r.invoiceRefs.length > 0 && l1.length === r.invoiceRefs.length) {
           r.matchedInvoiceIds = l1;
+          l1.forEach(id => claimed.add(id));
           continue;
         }
 
-        // Layer 2: normalised company name (event.name ↔ invoice.paymentProfile.companyName
-        // or invoice.userName) intersected with amount match. Handles Rumiya's "Inv# 05"
-        // → INV 5 case, and Ravi's non-standard refs.
-        // Also strip whitespace for the contains check — "hover cloud" (Intuit's
-        // spelling) vs "hovercloud" (our DB) should match even though normaliseCompany
-        // preserves the internal space.
-        const stripWs = (s: string) => s.replace(/\s+/g, '');
-        const eventCompany = normaliseCompany(r.name);
-        const eventCompanyC = stripWs(eventCompany);
-        if (!eventCompanyC) { r.matchedInvoiceIds = l1; continue; }
+        // Layer 2/3 candidate pool: unclaimed vendor invoices, filtered by date proximity.
+        const eventCompanyC = stripWs(normaliseCompany(r.name));
+        if (!eventCompanyC) { r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id)); continue; }
+        const evtMs = new Date(r.date + 'T00:00:00Z').getTime();
         const vendorInvoices = invoices.filter(inv => {
+          if (claimed.has(inv.id)) return false;
           const invComp = stripWs(normaliseCompany(inv.paymentProfile?.companyName || inv.userName));
           if (!invComp) return false;
-          return invComp.includes(eventCompanyC) || eventCompanyC.includes(invComp);
+          if (!(invComp.includes(eventCompanyC) || eventCompanyC.includes(invComp))) return false;
+          if (inv.periodEnd) {
+            const daysDelta = (evtMs - new Date(inv.periodEnd + 'T00:00:00Z').getTime()) / 86400000;
+            // Payment usually lands 0-120 days after period_end. Allow a small
+            // negative window (up to 30 days) for early payment / date-of-order quirks.
+            if (daysDelta < -30 || daysDelta > 120) return false;
+          }
+          return true;
         });
-        if (vendorInvoices.length === 0) { r.matchedInvoiceIds = l1; continue; }
+        if (vendorInvoices.length === 0) { r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id)); continue; }
 
         // Single-invoice event: one vendor invoice whose totalAmount matches.
         if (r.invoiceRefs.length <= 1) {
           const amtHit = vendorInvoices.find(inv => Math.abs(inv.totalAmount - r.amount) < AMT_EPS);
-          r.matchedInvoiceIds = amtHit ? [amtHit.id] : l1;
+          if (amtHit) { r.matchedInvoiceIds = [amtHit.id]; claimed.add(amtHit.id); continue; }
+          r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id));
           continue;
         }
 
         // Multi-invoice event (e.g. "Inv# 03, 04" $15,950): find a subset of vendor
         // invoices whose amounts sum to r.amount. Brute force, stop on first find,
-        // subset size = number of refs in the memo, candidates capped at 20 to keep
-        // combinatorial cost bounded.
+        // subset size = number of refs in the memo, candidates capped at 20.
         const cands = vendorInvoices.slice(0, 20);
         const targetCents = Math.round(r.amount * 100);
         const size = r.invoiceRefs.length;
@@ -4586,7 +4711,8 @@ const TimesheetSystem = () => {
           }
         }
         rec(0, [], 0);
-        r.matchedInvoiceIds = found ?? l1;
+        if (found) { r.matchedInvoiceIds = found; found.forEach(id => claimed.add(id)); }
+        else { r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id)); }
       }
       setIntuitXlsxPreview(rows);
     } catch (e) {
@@ -9743,6 +9869,123 @@ const TimesheetSystem = () => {
                       <div>
                         {g.events.length === 0 ? (
                           <div className="p-4 text-sm text-gray-500 italic">{g.hint}</div>
+                        ) : g.key === 'pending' ? (
+                          <>
+                            <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint} Map each counterparty once — future imports auto-classify.</p>
+                            <div className="p-3 space-y-2">
+                              {(() => {
+                                // Sub-group pending events by (source, counterpartyRaw) so accountant maps once per vendor.
+                                const groupsByCp = new Map<string, { source: string; counterparty: string; events: QbIngestEvent[]; total: number }>();
+                                for (const e of g.events) {
+                                  const key = `${e.source}||${e.counterpartyRaw}`;
+                                  const cur = groupsByCp.get(key) ?? { source: e.source, counterparty: e.counterpartyRaw, events: [], total: 0 };
+                                  cur.events.push(e);
+                                  cur.total += e.amount;
+                                  groupsByCp.set(key, cur);
+                                }
+                                const list = [...groupsByCp.values()].sort((a, b) => a.counterparty.localeCompare(b.counterparty));
+                                return list.map(grp => {
+                                  const widgetOpen = mapVendorOpenFor === grp.counterparty;
+                                  const bankAccounts = qbAccountsList.filter(a => a.accountType === 'Bank' && a.isActive);
+                                  const expenseAccounts = qbAccountsList.filter(a => (a.accountType === 'Expense' || a.accountType === 'CostOfGoodsSold' || a.accountType === 'OtherExpense') && a.isActive);
+                                  const vendorMatches = qbVendorsList
+                                    .filter(v => v.isActive && (!mapForm.vendorSearch || v.name.toLowerCase().includes(mapForm.vendorSearch.toLowerCase())))
+                                    .slice(0, 20);
+                                  const chosenVendor = qbVendorsList.find(v => v.listId === mapForm.vendorListId);
+                                  return (
+                                    <div key={grp.counterparty} className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                                      <div className="flex items-center justify-between px-3 py-2 bg-amber-50 border-b border-amber-100">
+                                        <div>
+                                          <span className="font-medium text-gray-800">{grp.counterparty}</span>
+                                          <span className="ml-2 text-xs text-gray-500">{sourceLabel(grp.source)} · {grp.events.length} event{grp.events.length === 1 ? '' : 's'} · ${grp.total.toFixed(2)}</span>
+                                        </div>
+                                        {!widgetOpen && (
+                                          <button onClick={() => openMapWidget(grp.counterparty, grp.source)} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">Map vendor</button>
+                                        )}
+                                      </div>
+                                      {widgetOpen && (
+                                        <div className="p-3 space-y-3 bg-white border-b border-gray-200">
+                                          <div>
+                                            <label className="block text-xs font-medium text-gray-600 mb-1">Action</label>
+                                            <div className="flex flex-wrap gap-2 text-xs">
+                                              {(['bill_pmt','bill_add_and_pmt','check','ignore'] as QbIngestKind[]).map(k => (
+                                                <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.kind === k ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                                                  <input type="radio" className="hidden" checked={mapForm.kind === k} onChange={() => setMapForm(f => ({ ...f, kind: k }))} />
+                                                  {({ bill_pmt: 'Pay Bill', bill_add_and_pmt: 'Create Bill + Pay', check: 'Check', ignore: 'Ignore' } as Record<string, string>)[k]}
+                                                </label>
+                                              ))}
+                                            </div>
+                                          </div>
+                                          {mapForm.kind !== 'ignore' && (
+                                            <>
+                                              <div>
+                                                <label className="block text-xs font-medium text-gray-600 mb-1">QB vendor</label>
+                                                {chosenVendor ? (
+                                                  <div className="flex items-center gap-2">
+                                                    <span className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded text-xs font-mono">{chosenVendor.name}</span>
+                                                    <button onClick={() => setMapForm(f => ({ ...f, vendorListId: '', vendorSearch: '' }))} className="text-xs text-red-500 hover:underline">clear</button>
+                                                  </div>
+                                                ) : (
+                                                  <>
+                                                    <input type="text" placeholder="Search vendors…" value={mapForm.vendorSearch} onChange={e => setMapForm(f => ({ ...f, vendorSearch: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs mb-1" />
+                                                    <div className="max-h-32 overflow-y-auto border border-gray-200 rounded text-xs divide-y divide-gray-100">
+                                                      {vendorMatches.length === 0 && <div className="p-2 text-gray-400">no matches</div>}
+                                                      {vendorMatches.map(v => (
+                                                        <button key={v.listId} onClick={() => setMapForm(f => ({ ...f, vendorListId: v.listId, vendorSearch: '' }))} className="w-full text-left px-2 py-1 hover:bg-indigo-50">{v.name}</button>
+                                                      ))}
+                                                    </div>
+                                                  </>
+                                                )}
+                                              </div>
+                                              <div>
+                                                <label className="block text-xs font-medium text-gray-600 mb-1">Bank account</label>
+                                                <select value={mapForm.bankListId} onChange={e => setMapForm(f => ({ ...f, bankListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
+                                                  <option value="">— pick a bank —</option>
+                                                  {bankAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
+                                                </select>
+                                              </div>
+                                              {(mapForm.kind === 'check' || mapForm.kind === 'bill_add_and_pmt') && (
+                                                <div>
+                                                  <label className="block text-xs font-medium text-gray-600 mb-1">Expense account</label>
+                                                  <select value={mapForm.expenseListId} onChange={e => setMapForm(f => ({ ...f, expenseListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
+                                                    <option value="">— pick an expense account —</option>
+                                                    {expenseAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
+                                                  </select>
+                                                </div>
+                                              )}
+                                            </>
+                                          )}
+                                          {mapForm.kind === 'ignore' && (
+                                            <div className="p-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+                                              Ignore means these events (all {grp.events.length} for {grp.counterparty}) will never be pushed to QB. Accountant handles them separately.
+                                            </div>
+                                          )}
+                                          <div className="flex justify-end gap-2 pt-1">
+                                            <button onClick={() => setMapVendorOpenFor(null)} className="text-xs px-3 py-1 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                                            <button onClick={() => saveVendorMapping(grp.counterparty, grp.source)} disabled={mapSaving} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">{mapSaving ? 'Saving…' : `Save & apply to ${grp.events.length}`}</button>
+                                          </div>
+                                        </div>
+                                      )}
+                                      <details className="text-xs">
+                                        <summary className="px-3 py-1.5 cursor-pointer text-gray-500 hover:bg-gray-50">Show {grp.events.length} event{grp.events.length === 1 ? '' : 's'}</summary>
+                                        <table className="w-full">
+                                          <tbody>
+                                            {grp.events.map(e => (
+                                              <tr key={e.id} className="border-t border-gray-100">
+                                                <td className="px-3 py-1 font-mono w-24">{e.txnDate}</td>
+                                                <td className="px-3 py-1 text-right font-mono w-24">${e.amount.toFixed(2)}</td>
+                                                <td className="px-3 py-1 text-gray-600">{e.memo || '—'}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </details>
+                                    </div>
+                                  );
+                                });
+                              })()}
+                            </div>
+                          </>
                         ) : (
                           <>
                             <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint}</p>
