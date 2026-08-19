@@ -3884,23 +3884,8 @@ const TimesheetSystem = () => {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
 
-      const excelSerial = (n: number | string): string => {
-        if (!n) return '';
-        if (typeof n === 'number') {
-          const d = new Date((n - 25569) * 86400 * 1000);
-          return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-        }
-        const s = String(n).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-        const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
-        if (m) {
-          const [, a, b, y] = m;
-          return parseInt(a) > 12
-            ? `${y}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`
-            : `${y}-${a.padStart(2,'0')}-${b.padStart(2,'0')}`;
-        }
-        return '';
-      };
+      // Excel date conversion lives in the top-level excelDateToIso helper (line ~578).
+      // Same logic as the previous inline excelSerial — deduped 2026-08-19.
 
       const hdrs = rawRows[0].map(h => String(h).trim().toLowerCase());
       // Flexible column resolver — first tries exact match, then falls back to substring match
@@ -3976,7 +3961,7 @@ const TimesheetSystem = () => {
 
       for (let i = 1; i < rawRows.length; i++) {
         const r = rawRows[i];
-        const dateOfOrder  = excelSerial(r[iDate] as number | string);
+        const dateOfOrder  = excelDateToIso(r[iDate]);
         const beneficiary  = String(r[iBenef] ?? '').trim();
         const amount       = parseFloat(String(r[iAmount]));
         const rawRef       = iRef1 >= 0 ? String(r[iRef1] ?? '').trim() : '';
