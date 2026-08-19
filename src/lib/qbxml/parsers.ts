@@ -24,10 +24,12 @@ import type {
   BillAddResult,
   BillPaymentCheckAddResult,
   BillQueryResult,
+  CheckAddResult,
   ParsedAccountQueryRs,
   ParsedBillAddRs,
   ParsedBillPaymentCheckAddRs,
   ParsedBillQueryRs,
+  ParsedCheckAddRs,
   ParsedVendorQueryRs,
   QbxmlResponseStatus,
   VendorResult,
@@ -193,6 +195,25 @@ const BILLPAYMENTCHECKRET_SUBBLOCKS_TO_STRIP = [
   'DataExtRet',
 ];
 
+/** Sub-blocks to strip from a CheckRet before leaf extraction.
+ *
+ *  Same reasoning as BILLRET_SUBBLOCKS_TO_STRIP. ExpenseLineRet blocks
+ *  contain nested TxnLineID and AccountRef; other Ref blocks contain
+ *  ListID/FullName. Strip all of them so the header-level TxnID +
+ *  EditSequence + RefNumber leaves are unambiguous. */
+const CHECKRET_SUBBLOCKS_TO_STRIP = [
+  'AccountRef',
+  'PayeeEntityRef',
+  'CurrencyRef',
+  'SalesTaxCodeRef',
+  'ExpenseLineRet',
+  'ItemLineRet',
+  'ItemGroupLineRet',
+  'CustomFieldRet',
+  'DataExtRet',
+  'LinkedTxn',
+];
+
 /** Sub-blocks to strip from an AccountRet BEFORE extracting leaves.
  *
  *  ParentRef contains a nested `<FullName>` (the parent account's path) that
@@ -342,6 +363,48 @@ export function parseBillAddRs(xml: string): ParsedBillAddRs {
     return { status, result: null };
   }
   const out: BillAddResult = { txnId, editSequence, refNumber };
+  return { status, result: out };
+}
+
+/** Parse a `<CheckAddRs>` response element.
+ *
+ *  Returns the newly-created check's identity. RefNumber is optional both
+ *  on the request and the response — if the caller supplied it, QB echoes
+ *  it back; otherwise the field is absent. Same pattern as
+ *  parseBillPaymentCheckAddRs.
+ *
+ *  Response shape:
+ *    <CheckAddRs statusCode="0" ...>
+ *      <CheckRet>
+ *        <TxnID>...</TxnID>
+ *        <EditSequence>...</EditSequence>
+ *        <RefNumber>...</RefNumber>          <!-- may be absent -->
+ *        <AccountRef>...</AccountRef>        <!-- stripped -->
+ *        <PayeeEntityRef>...</PayeeEntityRef> <!-- stripped -->
+ *        <ExpenseLineRet>...</ExpenseLineRet> <!-- stripped -->
+ *      </CheckRet>
+ *    </CheckAddRs>
+ */
+export function parseCheckAddRs(xml: string): ParsedCheckAddRs {
+  const el = getFirstElement(xml, 'CheckAddRs');
+  if (!el) {
+    return {
+      status: { statusCode: '', statusSeverity: '', statusMessage: 'CheckAddRs element not found' },
+      result: null,
+    };
+  }
+  const status = readStatus(el.openingTag);
+  const blocks = getAllBlocks(el.inner, 'CheckRet');
+  if (blocks.length === 0) return { status, result: null };
+  const cleaned = stripSubBlocks(blocks[0], CHECKRET_SUBBLOCKS_TO_STRIP);
+  const txnId = getLeafText(cleaned, 'TxnID');
+  const editSequence = getLeafText(cleaned, 'EditSequence');
+  const refNumber = getLeafText(cleaned, 'RefNumber');
+  if (txnId == null || editSequence == null) {
+    return { status, result: null };
+  }
+  const out: CheckAddResult = { txnId, editSequence };
+  if (refNumber != null) out.refNumber = refNumber;
   return { status, result: out };
 }
 

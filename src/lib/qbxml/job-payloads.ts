@@ -18,7 +18,7 @@
 // script wasn't updated to include it, the very first live job will fail
 // with a clear "missing key X" — instead of silently no-op'ing forever.
 
-export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query' | 'bill_pmt_query';
+export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'check_add' | 'account_query' | 'vendor_query' | 'bill_pmt_query';
 
 /** Keys the edge fn's persist step MUST see in the payload for each kind. */
 export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
@@ -33,6 +33,11 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
   // the payment. Without it, we can't attribute the payment back. Was the 2026-08-14
   // bug — enqueue omitted this field entirely and persist silently no-op'd.
   bill_pmt_add: ['sourceConveraTxnId', 'refNumber', 'payeeVendorName', 'applications'],
+  // check_add (Slice E of QB Automation Layer): direct expense check.
+  // persist uses sourceIngestEventId to update the ONE qb_ingest_events row that
+  // spawned the check, setting posted_qb_refs.check = TxnID and status = 'posted'.
+  // Also needs payeeVendorName + bankAccountName + lines for the build itself.
+  check_add: ['sourceIngestEventId', 'payeeVendorName', 'bankAccountName', 'lines'],
   // Query-only jobs — the response IS the payload from our POV. Nothing required.
   account_query: [],
   vendor_query: [],
