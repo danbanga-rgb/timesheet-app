@@ -646,6 +646,89 @@ async function parseIntuitXlsxBuffer(buffer: ArrayBuffer): Promise<IntuitXlsxRow
   return out;
 }
 
+// ─── Match qb_ingest_events → invoices (pure, reusable) ─────────────────────
+// Single source of truth for the layered matcher — used both at ingest preview
+// time (IntuitXlsxRow → matched_invoice_ids) and by the on-load / manual
+// recompute path (existing QbIngestEvent rows). Extract lets a matcher upgrade
+// benefit already-imported events without re-import. See Option 4 discussion.
+//
+// Requires a minimal shape from callers: date + counterpartyRaw + amount + invoiceRefs.
+// Returns matched invoice ids in the same order as input events.
+interface MatchableEvent { date: string; counterpartyRaw: string; amount: number; invoiceRefs: string[]; }
+interface MatcherInvoice { id: number; invoiceNumber: string | null; totalAmount: number; periodEnd: string | null; userName: string; companyName: string | null; }
+
+function matchEventsToInvoices(events: MatchableEvent[], invoices: MatcherInvoice[]): number[][] {
+  const AMT_EPS = 0.02;
+  const norm = (s: string) => s.toLowerCase().trim().replace(/-+/g, '-');
+  const stripWs = (s: string) => s.replace(/\s+/g, '');
+  const normalise = (s: string) => (s || '').toLowerCase()
+    .replace(/\b(inc|corp|llc|ltd|d\.?o\.?o\.?|s\.?r\.?o\.?|gmbh|co|technologies|solutions|services|agency|group|digital|labs?|tech)\b\.?/gi, '')
+    .replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  const invByNum = new Map<string, number>();
+  for (const inv of invoices) if (inv.invoiceNumber) invByNum.set(norm(inv.invoiceNumber), inv.id);
+  // Chronological pass with "claimed" set so each invoice is matched to at most one event.
+  const orderedIdx = events.map((_, i) => i).sort((a, b) => events[a].date.localeCompare(events[b].date));
+  const results: number[][] = events.map(() => []);
+  const claimed = new Set<number>();
+  for (const idx of orderedIdx) {
+    const r = events[idx];
+    const l1: number[] = [];
+    for (const ref of r.invoiceRefs) {
+      const hit = invByNum.get(norm(ref));
+      if (hit != null && !l1.includes(hit) && !claimed.has(hit)) l1.push(hit);
+    }
+    if (r.invoiceRefs.length > 0 && l1.length === r.invoiceRefs.length) {
+      results[idx] = l1; l1.forEach(id => claimed.add(id));
+      continue;
+    }
+    const eventCompanyC = stripWs(normalise(r.counterpartyRaw));
+    if (!eventCompanyC) { results[idx] = l1; l1.forEach(id => claimed.add(id)); continue; }
+    const evtMs = new Date(r.date + 'T00:00:00Z').getTime();
+    const vendorInvoices = invoices.filter(inv => {
+      if (claimed.has(inv.id)) return false;
+      const invComp = stripWs(normalise(inv.companyName || inv.userName));
+      if (!invComp) return false;
+      if (!(invComp.includes(eventCompanyC) || eventCompanyC.includes(invComp))) return false;
+      if (inv.periodEnd) {
+        const daysDelta = (evtMs - new Date(inv.periodEnd + 'T00:00:00Z').getTime()) / 86400000;
+        if (daysDelta < -30 || daysDelta > 120) return false;
+      }
+      return true;
+    });
+    if (vendorInvoices.length === 0) { results[idx] = l1; l1.forEach(id => claimed.add(id)); continue; }
+    if (r.invoiceRefs.length <= 1) {
+      const amtHit = vendorInvoices.find(inv => Math.abs(inv.totalAmount - r.amount) < AMT_EPS);
+      if (amtHit) { results[idx] = [amtHit.id]; claimed.add(amtHit.id); continue; }
+      results[idx] = l1; l1.forEach(id => claimed.add(id));
+      continue;
+    }
+    // Multi-invoice subset-sum.
+    const cands = vendorInvoices.slice(0, 20);
+    const targetCents = Math.round(r.amount * 100);
+    const size = r.invoiceRefs.length;
+    let found = null as number[] | null;
+    function rec(start: number, chosen: number[], sumCents: number) {
+      if (found) return;
+      if (chosen.length === size) {
+        if (Math.abs(sumCents - targetCents) <= 2) found = chosen.slice();
+        return;
+      }
+      for (let i = start; i < cands.length; i++) {
+        const next = sumCents + Math.round(cands[i].totalAmount * 100);
+        if (next > targetCents + 5) continue;
+        chosen.push(cands[i].id);
+        rec(i + 1, chosen, next);
+        chosen.pop();
+        if (found) return;
+      }
+    }
+    rec(0, [], 0);
+    if (found) { results[idx] = found; found.forEach((id: number) => claimed.add(id)); }
+    else { results[idx] = l1; l1.forEach(id => claimed.add(id)); }
+  }
+  return results;
+}
+
 // ─── Live invoice reconciliation (pure, no DB writes) ────────────────────────
 // Called on every render so it always reflects the latest loaded timesheets.
 interface ReconTimesheetRow {
@@ -2359,6 +2442,50 @@ const TimesheetSystem = () => {
     if (!error) setQbIngestEvents((data ?? []).map(normaliseQbIngestEvent));
     setQbIngestLoading(false);
   };
+  // Option 4: recompute matched_invoice_ids for all pending events in DB using the
+  // current matcher + current invoices state. Never touches ready/ignored/posted.
+  // Silent no-op for events whose matches didn't change. Called automatically on
+  // Inbox tab load, and manually via the "Recompute matches" button.
+  const recomputeMatchesForPending = async (): Promise<{ scanned: number; updated: number }> => {
+    const { data: pendingRows } = await supabase
+      .from('qb_ingest_events')
+      .select('id, source, txn_date, counterparty_raw, amount, matched_invoice_ids, raw_data')
+      .eq('status', 'pending');
+    const events = (pendingRows ?? []) as Array<{ id: number; source: string; txn_date: string; counterparty_raw: string; amount: number; matched_invoice_ids: number[]; raw_data: Record<string, unknown> | null }>;
+    if (events.length === 0) return { scanned: 0, updated: 0 };
+    const matcherInvoices: MatcherInvoice[] = invoices.map(i => ({
+      id: i.id, invoiceNumber: i.invoiceNumber, totalAmount: i.totalAmount,
+      periodEnd: i.periodEnd, userName: i.userName, companyName: i.paymentProfile?.companyName ?? null,
+    }));
+    const inputs: MatchableEvent[] = events.map(e => ({
+      date: e.txn_date,
+      counterpartyRaw: e.counterparty_raw,
+      amount: Number(e.amount),
+      invoiceRefs: Array.isArray(e.raw_data?.invoice_refs) ? (e.raw_data!.invoice_refs as string[]) : [],
+    }));
+    const results = matchEventsToInvoices(inputs, matcherInvoices);
+    // Diff — only PATCH rows whose match set actually changed. Sort for order-agnostic compare.
+    const eq = (a: number[], b: number[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+    let updated = 0;
+    for (let i = 0; i < events.length; i++) {
+      const oldIds = [...(events[i].matched_invoice_ids ?? [])].sort((a, b) => a - b);
+      const newIds = [...results[i]].sort((a, b) => a - b);
+      if (eq(oldIds, newIds)) continue;
+      const { error } = await supabase.from('qb_ingest_events').update({ matched_invoice_ids: newIds }).eq('id', events[i].id);
+      if (!error) updated++;
+    }
+    return { scanned: events.length, updated };
+  };
+  const [recomputeBusy, setRecomputeBusy] = useState(false);
+  const runRecomputeButton = async () => {
+    setRecomputeBusy(true);
+    try {
+      const { scanned, updated } = await recomputeMatchesForPending();
+      await loadQbIngestEvents();
+      alert(`Recomputed matches: scanned ${scanned} pending event${scanned === 1 ? '' : 's'}, updated ${updated}.`);
+    } finally { setRecomputeBusy(false); }
+  };
+
   const loadQbVendorMappings = async () => {
     const { data } = await supabase.from('qb_vendor_mappings').select('*');
     setQbVendorMappings((data ?? []).map((r: Record<string, unknown>) => ({
@@ -2389,9 +2516,20 @@ const TimesheetSystem = () => {
   useEffect(() => {
     if (accountantTab !== 'qb-automation') return;
     if (currentUser?.role !== 'accountant') return;
-    loadQbIngestEvents();
-    loadQbVendorMappings();
-    loadQbVendorsAndAccounts();
+    (async () => {
+      await loadQbIngestEvents();
+      loadQbVendorMappings();
+      loadQbVendorsAndAccounts();
+      // Auto-recompute matches for pending events using current invoices.
+      // Silent no-op unless something changed. Guarantees a matcher upgrade or
+      // a late-created invoice self-heals without re-import.
+      try {
+        const { updated } = await recomputeMatchesForPending();
+        if (updated > 0) await loadQbIngestEvents();
+      } catch (e) {
+        console.warn('QB Automation: auto-recompute failed', e);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountantTab, currentUser?.role]);
 
@@ -4624,99 +4762,18 @@ const TimesheetSystem = () => {
         setConveraError('No payment rows found in this file. Positive-amount rows in the expense/AP account (with "Inv# XXX" memos) are what we look for.');
         return;
       }
-      // Layered invoice matcher.
-      //   L1 exact invoice_number match
-      //   L2 vendor company + amount (single-invoice)
-      //   L3 vendor company + subset-sum (multi-invoice)
-      //
-      // Chronological pass with "claimed" set — an invoice matched to one event
-      // is off the table for later events. Prevents the 1:many bug where multiple
-      // same-amount events all point at the one $9625 invoice we have.
-      //
-      // Date-proximity guard — the vendor invoice's period_end must be within
-      // 120 days BEFORE (or up to 30 days AFTER) the event date. Otherwise
-      // historic pre-our-system payments (Jan-Mar 2026) would grab recent
-      // amount-matching invoices they have no real relationship to.
-      const AMT_EPS = 0.02;
-      const norm = (s: string) => s.toLowerCase().trim().replace(/-+/g, '-');
-      const stripWs = (s: string) => s.replace(/\s+/g, '');
-      const invByNum = new Map<string, number>();
-      for (const inv of invoices) {
-        if (inv.invoiceNumber) invByNum.set(norm(inv.invoiceNumber), inv.id);
-      }
-      const claimed = new Set<number>();
-      // Chronological order: earliest events pick first.
-      const orderedRows = [...rows].sort((a, b) => a.date.localeCompare(b.date));
-      for (const r of orderedRows) {
-        // Layer 1: exact invoice_number match on each memo ref. If ALL refs resolve
-        // AND none are already claimed by an earlier event, trust them.
-        const l1: number[] = [];
-        for (const ref of r.invoiceRefs) {
-          const hit = invByNum.get(norm(ref));
-          if (hit != null && !l1.includes(hit) && !claimed.has(hit)) l1.push(hit);
-        }
-        if (r.invoiceRefs.length > 0 && l1.length === r.invoiceRefs.length) {
-          r.matchedInvoiceIds = l1;
-          l1.forEach(id => claimed.add(id));
-          continue;
-        }
-
-        // Layer 2/3 candidate pool: unclaimed vendor invoices, filtered by date proximity.
-        const eventCompanyC = stripWs(normaliseCompany(r.name));
-        if (!eventCompanyC) { r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id)); continue; }
-        const evtMs = new Date(r.date + 'T00:00:00Z').getTime();
-        const vendorInvoices = invoices.filter(inv => {
-          if (claimed.has(inv.id)) return false;
-          const invComp = stripWs(normaliseCompany(inv.paymentProfile?.companyName || inv.userName));
-          if (!invComp) return false;
-          if (!(invComp.includes(eventCompanyC) || eventCompanyC.includes(invComp))) return false;
-          if (inv.periodEnd) {
-            const daysDelta = (evtMs - new Date(inv.periodEnd + 'T00:00:00Z').getTime()) / 86400000;
-            // Payment usually lands 0-120 days after period_end. Allow a small
-            // negative window (up to 30 days) for early payment / date-of-order quirks.
-            if (daysDelta < -30 || daysDelta > 120) return false;
-          }
-          return true;
-        });
-        if (vendorInvoices.length === 0) { r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id)); continue; }
-
-        // Single-invoice event: one vendor invoice whose totalAmount matches.
-        if (r.invoiceRefs.length <= 1) {
-          const amtHit = vendorInvoices.find(inv => Math.abs(inv.totalAmount - r.amount) < AMT_EPS);
-          if (amtHit) { r.matchedInvoiceIds = [amtHit.id]; claimed.add(amtHit.id); continue; }
-          r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id));
-          continue;
-        }
-
-        // Multi-invoice event (e.g. "Inv# 03, 04" $15,950): find a subset of vendor
-        // invoices whose amounts sum to r.amount. Brute force, stop on first find,
-        // subset size = number of refs in the memo, candidates capped at 20.
-        const cands = vendorInvoices.slice(0, 20);
-        const targetCents = Math.round(r.amount * 100);
-        const size = r.invoiceRefs.length;
-        // Cast the initializer so TS keeps the union type — otherwise it narrows
-        // `found` to `null` since the closure's reassignment isn't reflected in
-        // outer control-flow analysis.
-        let found = null as number[] | null;
-        function rec(start: number, chosen: number[], sumCents: number) {
-          if (found) return;
-          if (chosen.length === size) {
-            if (Math.abs(sumCents - targetCents) <= 2) found = chosen.slice();
-            return;
-          }
-          for (let i = start; i < cands.length; i++) {
-            const next = sumCents + Math.round(cands[i].totalAmount * 100);
-            if (next > targetCents + 5) continue;
-            chosen.push(cands[i].id);
-            rec(i + 1, chosen, next);
-            chosen.pop();
-            if (found) return;
-          }
-        }
-        rec(0, [], 0);
-        if (found) { r.matchedInvoiceIds = found; found.forEach(id => claimed.add(id)); }
-        else { r.matchedInvoiceIds = l1; l1.forEach(id => claimed.add(id)); }
-      }
+      // Layered invoice matcher — see matchEventsToInvoices at top of file for
+      // the algorithm. Same function used by the on-load / manual recompute path
+      // so an improvement propagates to already-imported events without re-ingest.
+      const matcherInvoices: MatcherInvoice[] = invoices.map(i => ({
+        id: i.id, invoiceNumber: i.invoiceNumber, totalAmount: i.totalAmount,
+        periodEnd: i.periodEnd, userName: i.userName, companyName: i.paymentProfile?.companyName ?? null,
+      }));
+      const matchInputs: MatchableEvent[] = rows.map(r => ({
+        date: r.date, counterpartyRaw: r.name, amount: r.amount, invoiceRefs: r.invoiceRefs,
+      }));
+      const matchResults = matchEventsToInvoices(matchInputs, matcherInvoices);
+      rows.forEach((r, i) => { r.matchedInvoiceIds = matchResults[i]; });
       setIntuitXlsxPreview(rows);
     } catch (e) {
       setConveraError(`Parse failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -9831,7 +9888,10 @@ const TimesheetSystem = () => {
                     <h2 className="text-2xl font-bold text-gray-800">QB Automation — Inbox</h2>
                     <p className="text-sm text-gray-500 mt-0.5">Financial events pending classification and push to QuickBooks. Import via Invoices → Import Payments.</p>
                   </div>
-                  <button onClick={loadQbIngestEvents} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
+                  <div className="flex gap-2">
+                    <button onClick={runRecomputeButton} disabled={recomputeBusy || qbIngestLoading} className="text-sm px-3 py-1.5 border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-50 disabled:opacity-50" title="Re-run the invoice matcher for all pending events. Use after creating/importing invoices, or after a matcher upgrade ships.">{recomputeBusy ? 'Recomputing…' : 'Recompute matches'}</button>
+                    <button onClick={loadQbIngestEvents} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-3 gap-3 mb-6">
