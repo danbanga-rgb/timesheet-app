@@ -118,8 +118,21 @@ async function nextRunnableJob(supabase: ReturnType<typeof makeSupabase>): Promi
   return null;
 }
 
-/** Render a job's payload into a qbXML request envelope. */
-function renderJobRequest(job: JobRow): string {
+/** Render a job's payload into a qbXML request envelope.
+ *
+ *  Async because bill_pmt_add supports dispatch-time TxnID resolution: an
+ *  `applications[]` entry may arrive with `billTxnId=null` + an `invoiceId`,
+ *  and we look up `invoices.qb_bill_txn_id` here. This lets a bill_pmt_add
+ *  job chain via `depends_on` from a preceding bill_add whose TxnID isn't
+ *  known at enqueue time — WC drains the bill_add, the persist writes
+ *  qb_bill_txn_id, and by the time bill_pmt_add's turn comes the lookup
+ *  finds it. Enables single-Apply UX for future ingest flows without
+ *  requiring two-phase enqueue.
+ */
+async function renderJobRequest(
+  job: JobRow,
+  supabase: ReturnType<typeof makeSupabase>,
+): Promise<string> {
   const requestId = String(job.id);
   let element: string;
   switch (job.kind) {
@@ -129,9 +142,34 @@ function renderJobRequest(job: JobRow): string {
     case 'bill_add':
       element = buildBillAddRq({ ...(job.payload as BillAddRqInput), requestId });
       break;
-    case 'bill_pmt_add':
-      element = buildBillPaymentCheckAddRq({ ...(job.payload as BillPaymentCheckAddRqInput), requestId });
+    case 'bill_pmt_add': {
+      const payload = job.payload as BillPaymentCheckAddRqInput & {
+        applications?: { billTxnId: string | null; paymentAmount: number; invoiceId?: number }[];
+      };
+      const apps = payload.applications ?? [];
+      const needsLookup = apps.filter(a => !a.billTxnId && a.invoiceId != null).map(a => a.invoiceId!);
+      if (needsLookup.length > 0) {
+        const { data: invRows, error } = await supabase
+          .from('invoices')
+          .select('id, qb_bill_txn_id')
+          .in('id', needsLookup);
+        if (error) throw new Error(`bill_pmt_add render: invoice lookup failed: ${error.message}`);
+        const txnByInv = new Map<number, string | null>();
+        for (const r of (invRows ?? [])) txnByInv.set(r.id as number, r.qb_bill_txn_id as string | null);
+        const resolvedApps = apps.map(a => {
+          if (a.billTxnId) return a;
+          const resolved = a.invoiceId != null ? txnByInv.get(a.invoiceId) : null;
+          if (!resolved) {
+            throw new Error(`bill_pmt_add render: no qb_bill_txn_id for invoice ${a.invoiceId}. bill_add dependency may have failed — check depends_on job's status.`);
+          }
+          return { ...a, billTxnId: resolved };
+        });
+        element = buildBillPaymentCheckAddRq({ ...payload, applications: resolvedApps, requestId });
+      } else {
+        element = buildBillPaymentCheckAddRq({ ...payload, requestId });
+      }
       break;
+    }
     case 'account_query':
       element = buildAccountQueryRq({ ...(job.payload as AccountQueryRqInput), requestId });
       break;
@@ -545,7 +583,7 @@ async function handleSendRequestXML(params: Record<string, string>): Promise<str
   }
   let requestXml: string;
   try {
-    requestXml = renderJobRequest(job);
+    requestXml = await renderJobRequest(job, supabase);
   } catch (e) {
     await supabase.from('qb_sync_jobs').update({
       status: 'error',
