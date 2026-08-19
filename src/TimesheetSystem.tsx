@@ -4530,18 +4530,78 @@ const TimesheetSystem = () => {
         setConveraError('No payment rows found in this file. Positive-amount rows in the expense/AP account (with "Inv# XXX" memos) are what we look for.');
         return;
       }
-      // Resolve invoiceRefs → invoice ids using current invoices state.
-      // Match is case-insensitive; also compares against invoice_number with all runs of
-      // consecutive dashes collapsed (handles "Inv# INV---000043" → "INV-000043" variants).
+      // Layered invoice matcher (mirrors the parseIntuitEmails pattern that worked
+      // for the paste-emails flow — company-name + amount is more forgiving than
+      // exact invoice-number matching, which fails for short refs like "05" or
+      // multi-invoice memos like "Inv# 03, 04" that don't match our internal formats).
+      const AMT_EPS = 0.02;
       const norm = (s: string) => s.toLowerCase().trim().replace(/-+/g, '-');
       const invByNum = new Map<string, number>();
       for (const inv of invoices) {
         if (inv.invoiceNumber) invByNum.set(norm(inv.invoiceNumber), inv.id);
       }
       for (const r of rows) {
-        r.matchedInvoiceIds = r.invoiceRefs
-          .map(ref => invByNum.get(norm(ref)))
-          .filter((id): id is number => id != null);
+        // Layer 1: exact invoice_number match on each memo ref. If ALL refs resolve,
+        // trust them and stop — most precise signal we have.
+        const l1: number[] = [];
+        for (const ref of r.invoiceRefs) {
+          const hit = invByNum.get(norm(ref));
+          if (hit != null && !l1.includes(hit)) l1.push(hit);
+        }
+        if (r.invoiceRefs.length > 0 && l1.length === r.invoiceRefs.length) {
+          r.matchedInvoiceIds = l1;
+          continue;
+        }
+
+        // Layer 2: normalised company name (event.name ↔ invoice.paymentProfile.companyName
+        // or invoice.userName) intersected with amount match. Handles Rumiya's "Inv# 05"
+        // → INV 5 case, and Ravi's non-standard refs.
+        // Also strip whitespace for the contains check — "hover cloud" (Intuit's
+        // spelling) vs "hovercloud" (our DB) should match even though normaliseCompany
+        // preserves the internal space.
+        const stripWs = (s: string) => s.replace(/\s+/g, '');
+        const eventCompany = normaliseCompany(r.name);
+        const eventCompanyC = stripWs(eventCompany);
+        if (!eventCompanyC) { r.matchedInvoiceIds = l1; continue; }
+        const vendorInvoices = invoices.filter(inv => {
+          const invComp = stripWs(normaliseCompany(inv.paymentProfile?.companyName || inv.userName));
+          if (!invComp) return false;
+          return invComp.includes(eventCompanyC) || eventCompanyC.includes(invComp);
+        });
+        if (vendorInvoices.length === 0) { r.matchedInvoiceIds = l1; continue; }
+
+        // Single-invoice event: one vendor invoice whose totalAmount matches.
+        if (r.invoiceRefs.length <= 1) {
+          const amtHit = vendorInvoices.find(inv => Math.abs(inv.totalAmount - r.amount) < AMT_EPS);
+          r.matchedInvoiceIds = amtHit ? [amtHit.id] : l1;
+          continue;
+        }
+
+        // Multi-invoice event (e.g. "Inv# 03, 04" $15,950): find a subset of vendor
+        // invoices whose amounts sum to r.amount. Brute force, stop on first find,
+        // subset size = number of refs in the memo, candidates capped at 20 to keep
+        // combinatorial cost bounded.
+        const cands = vendorInvoices.slice(0, 20);
+        const targetCents = Math.round(r.amount * 100);
+        const size = r.invoiceRefs.length;
+        let found: number[] | null = null;
+        function rec(start: number, chosen: number[], sumCents: number) {
+          if (found) return;
+          if (chosen.length === size) {
+            if (Math.abs(sumCents - targetCents) <= 2) found = chosen.slice();
+            return;
+          }
+          for (let i = start; i < cands.length; i++) {
+            const next = sumCents + Math.round(cands[i].totalAmount * 100);
+            if (next > targetCents + 5) continue;
+            chosen.push(cands[i].id);
+            rec(i + 1, chosen, next);
+            chosen.pop();
+            if (found) return;
+          }
+        }
+        rec(0, [], 0);
+        r.matchedInvoiceIds = found ?? l1;
       }
       setIntuitXlsxPreview(rows);
     } catch (e) {
