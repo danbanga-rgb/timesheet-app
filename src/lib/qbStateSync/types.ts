@@ -32,6 +32,22 @@ export interface QbOpenBillRow {
   queriedAt: string;   // ISO timestamp
 }
 
+export interface QbBillPaymentRow {
+  vendorListId: string;
+  vendorName: string | null;
+  txnId: string;
+  refNumber: string | null;
+  txnDate: string | null;
+  amount: number;
+  bankListId: string | null;
+  bankFullName: string | null;
+  memo: string | null;
+  /** Bills this payment settled. Present only when the source bill_pmt_query
+   *  set IncludeLineItems=true. Empty otherwise. */
+  appliedToBills: Array<{ billTxnId: string; amount: number; refNumber?: string }>;
+  queriedAt: string;
+}
+
 /**
  * Freshness metadata computed from a set of mirror rows. Used by UI to
  * decide whether to show "fresh" / "stale" and by callers to gate sync.

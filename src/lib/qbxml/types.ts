@@ -41,6 +41,31 @@ export interface BillQueryRqInput {
   maxReturned?: number;
 }
 
+/** Result of parseBillPaymentCheckQueryRs — one entry per matched payment.
+ *  All fields optional except txnId + refNumber (only known-required). Callers
+ *  that need e.g. appliedToBills should request IncludeLineItems=true in the
+ *  BillPaymentCheckQueryRq payload; otherwise QB returns none. */
+export interface BillPaymentCheckQueryResult {
+  txnId: string;
+  editSequence: string;
+  refNumber?: string;
+  txnDate?: string;
+  amount?: number;
+  memo?: string;
+  timeModified?: string;
+  payeeEntityListId?: string;
+  payeeEntityFullName?: string;
+  bankAccountListId?: string;
+  bankAccountFullName?: string;
+  /** AppliedToTxnRet[] blocks — each records one bill this payment settled.
+   *  Present only if the query requested IncludeLineItems=true. Empty otherwise. */
+  appliedToBills: Array<{
+    billTxnId: string;
+    amount: number;
+    refNumber?: string;
+  }>;
+}
+
 /** Result of parseBillQueryRs — one entry per matched bill. */
 export interface BillQueryResult {
   refNumber: string;
@@ -356,6 +381,12 @@ export interface ParsedBillAddRs {
 export interface ParsedBillPaymentCheckAddRs {
   status: QbxmlResponseStatus;
   result: BillPaymentCheckAddResult | null;
+}
+
+/** Return shape of parseBillPaymentCheckQueryRs. Zero results = valid (no matches). */
+export interface ParsedBillPaymentCheckQueryRs {
+  status: QbxmlResponseStatus;
+  results: BillPaymentCheckQueryResult[];
 }
 
 /** Return shape of parseCheckAddRs. `result` is null on any non-success status. */
