@@ -514,6 +514,8 @@ interface QbVendorMapping {
   defaultExpenseAccountListId: string | null;
 }
 
+type QbResolvedAction = 'already_done' | 'pay_existing_bill' | 'create_bill_then_pay' | 'check' | 'held';
+
 interface QbIngestEvent {
   id: number;
   ingestedAt: string;
@@ -534,6 +536,12 @@ interface QbIngestEvent {
   lastError: string | null;
   rawData: Record<string, unknown> | null;
   notes: string | null;
+  // Slice G4a — reconciler output. NULL until Slice G4c orchestrator runs.
+  resolvedAction: QbResolvedAction | null;
+  resolvedBillTxnId: string | null;
+  resolvedPaymentTxnId: string | null;
+  resolvedReason: string | null;
+  reconciledAt: string | null;
 }
 
 function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
@@ -557,6 +565,11 @@ function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
     lastError: (r.last_error as string) ?? null,
     rawData: (r.raw_data as Record<string, unknown>) ?? null,
     notes: (r.notes as string) ?? null,
+    resolvedAction: (r.resolved_action as QbResolvedAction) ?? null,
+    resolvedBillTxnId: (r.resolved_bill_txn_id as string) ?? null,
+    resolvedPaymentTxnId: (r.resolved_payment_txn_id as string) ?? null,
+    resolvedReason: (r.resolved_reason as string) ?? null,
+    reconciledAt: (r.reconciled_at as string) ?? null,
   };
 }
 
