@@ -2559,22 +2559,29 @@ const TimesheetSystem = () => {
         allVendorNames.map(n => listIdByName.get(n)).filter((x): x is string => !!x),
         freshness,
       );
-      const staleNames = staleListIds
-        .map(id => vendorNamesByListId.get(id))
-        .filter((n): n is string => !!n);
+      const staleVendors = staleListIds
+        .map(id => ({ listId: id, name: vendorNamesByListId.get(id) ?? '' }))
+        .filter(v => v.name !== '');
       // If nothing is stale, we're up-to-date — no-op with a helpful message.
-      if (staleNames.length === 0) {
+      if (staleVendors.length === 0) {
         alert(`All ${allVendorNames.length} vendors have fresh snapshots (< 1h). Nothing to enqueue.`);
         return;
       }
 
-      const result = await enqueueBillQueryForVendors(supabase, staleNames, { auditTag: 'slice-g1-manual-sync' });
+      // Slice G3: delta cursor per vendor. First call for a vendor pulls all
+      // history; subsequent calls pull only bills since MAX(txn_date) - 1d.
+      const result = await enqueueBillQueryForVendors(supabase, staleVendors, {
+        deltaFrom: 'auto',
+        auditTag: 'slice-g1-manual-sync',
+      });
       await loadQbBillQueryPending();  // update pending counter immediately
+      const deltaCount = Object.values(result.deltaCursorsUsed).filter(c => c !== 'none').length;
       alert(
         `Enqueued ${result.jobIds.length} bill_query job${result.jobIds.length === 1 ? '' : 's'} `
-        + `across ${staleNames.length} vendor${staleNames.length === 1 ? '' : 's'}`
+        + `across ${staleVendors.length} vendor${staleVendors.length === 1 ? '' : 's'} `
+        + `(${deltaCount} delta / ${staleVendors.length - deltaCount} full-history)`
         + (result.skippedInFlight.length > 0 ? `; skipped ${result.skippedInFlight.length} already in flight` : '')
-        + `. QBWC will drain over the next ~${Math.max(15, Math.ceil(staleNames.length * 15 / 8))} min at 15-min poll cadence. `
+        + `. QBWC will drain over the next ~${Math.max(15, Math.ceil(staleVendors.length * 15 / 8))} min at 15-min poll cadence. `
         + `This UI will update automatically as they complete.`,
       );
     } catch (e) {
