@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"/Users/dbanga/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal/Personal Prep Resume/V2\" 2>/dev/null | head -20)",
+      "Read(//Users/dbanga/Documents/Personal/Personal Prep Resume/V2/**)",
+      "Bash(pip3 install *)",
+      "Bash(node scripts/monthly-invoice-analysis.js*)",
+      "Bash(source scripts/poller/.env*)",
+      "Bash(grep * scripts/poller/.env*)",
+      "Read(/Users/dbanga/timesheet-app/scripts/**)",
+      "Bash(curl -s * mimlatvdwxqtgxrgcins.supabase.co*)",
+      "Read(//Volumes/**)",
+      "Read(//Volumes/TimeMachinePartition//**)",
+      "Bash(sudo ls \"/Volumes/TimeMachinePartition/\")",
+      "Bash(tmutil listmachines *)",
+      "Bash(tmutil machinedirectory *)",
+      "Bash(tmutil destinationinfo *)",
+      "Bash(tmutil listbackups *)",
+      "Bash(sudo ls /Volumes/TimeMachinePartition/)",
+      "Bash(sudo find /Volumes/TimeMachinePartition -maxdepth 3 -type d)",
+      "Bash(diskutil list *)",
+      "Bash(diskutil eject *)",
+      "Bash(vercel ls *)",
+      "Bash(vercel inspect *)",
+      "Bash(pdftotext *)",
+      "Bash(pdfinfo *)",
+      "Bash(source /Users/dbanga/timesheet-app/scripts/poller/.env*)",
+      "WebFetch(domain:support.google.com)",
+      "Bash(source .env*)"
+    ],
+    "additionalDirectories": [
+      "/Users/dbanga/Downloads"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/dbanga/timesheet-app/.claude/scripts/perms-scan.py"
+          }
+        ]
+      }
+    ]
+  }
+}
