@@ -220,6 +220,7 @@ import {
   type MirrorPayment,
   type ReconcilableEvent,
 } from './lib/intuit/reconcile';
+import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from './lib/intuit/config';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -520,7 +521,7 @@ interface QbVendorMapping {
   defaultExpenseAccountListId: string | null;
 }
 
-type QbResolvedAction = 'already_done' | 'pay_existing_bill' | 'create_bill_then_pay' | 'check' | 'held';
+type QbResolvedAction = 'already_done' | 'pay_existing_bill' | 'create_bill_then_pay' | 'check' | 'held' | 'pre_our_system';
 
 interface QbIngestEvent {
   id: number;
@@ -2512,7 +2513,15 @@ const TimesheetSystem = () => {
       paymentsByVendor.set(p.vendorListId, arr);
     }
 
-    const results = reconcileBatch(events, { billsByVendor, paymentsByVendor });
+    // Intuit-source events use the Intuit cutoff; other sources (Convera —
+    // future retrofit) will pass their own cutoff. For now pass Intuit's
+    // — safe because our only current source IS intuit_xlsx, and reconciler
+    // uses cutoff only as a per-event compare (skips it if not applicable).
+    const results = reconcileBatch(events, {
+      billsByVendor,
+      paymentsByVendor,
+      preOurSystemCutoff: INTUIT_PRE_OUR_SYSTEM_CUTOFF,
+    });
     const nowIso = new Date().toISOString();
     let reconciled = 0;
     // We track events whose action becomes 'already_done' so we can also flip
