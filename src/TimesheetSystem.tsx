@@ -1176,6 +1176,8 @@ const TimesheetSystem = () => {
   // Slice G1 — qbStateSync mirror of QB open bills
   const [qbOpenBills, setQbOpenBills] = useState<QbOpenBillRow[]>([]);
   const [qbSyncingBills, setQbSyncingBills] = useState(false);
+  // Slice G1 — QBWC heartbeat: most recent qb_wc_sessions.last_seen_at
+  const [qbWcLastSeen, setQbWcLastSeen] = useState<string | null>(null);
   // Slice D — vendor mapping widget state
   const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
@@ -2461,6 +2463,19 @@ const TimesheetSystem = () => {
       console.warn('loadQbOpenBills failed', e);
     }
   };
+  // Slice G1 — MAX(qb_wc_sessions.last_seen_at) as QBWC heartbeat.
+  const loadQbWcLastSeen = async () => {
+    try {
+      const { data } = await supabase
+        .from('qb_wc_sessions')
+        .select('last_seen_at')
+        .order('last_seen_at', { ascending: false })
+        .limit(1);
+      setQbWcLastSeen((data && data[0]?.last_seen_at) || null);
+    } catch (e) {
+      console.warn('loadQbWcLastSeen failed', e);
+    }
+  };
   // Slice G1 — Sync button handler. Enqueues iterator-mode bill_query for
   // every vendor that has actionable events (kind bill_pmt or bill_add_and_pmt
   // and not posted/ignored) and hasn't been synced within the last hour.
@@ -2501,7 +2516,13 @@ const TimesheetSystem = () => {
         + `. QBWC will drain on next poll (~15 min). Come back and click Refresh to see snapshot update.`,
       );
     } catch (e) {
-      alert('Sync failed: ' + (e instanceof Error ? e.message : String(e)));
+      // Supabase errors come as { message, details, hint, code } — String(e)
+      // renders these as "[object Object]" (session-2026-08-19 post-mortem #4).
+      const err = e as { message?: string; details?: string; hint?: string; code?: string };
+      const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
+        .filter((s): s is string => !!s);
+      const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
+      alert('Sync failed: ' + msg);
     } finally {
       setQbSyncingBills(false);
     }
@@ -2515,6 +2536,7 @@ const TimesheetSystem = () => {
       await loadQbVendorMappings();
       await loadQbVendorsAndAccounts();
       await loadQbOpenBills();
+      await loadQbWcLastSeen();
       // Auto-recompute matches for pending events using current invoices.
       // Guarded — skips silently if invoices state is empty (see the guard in
       // recomputeMatchesForPending). The invoices.length dependency below
@@ -9915,27 +9937,54 @@ const TimesheetSystem = () => {
                         Push to QB
                       </button>
                     </div>
-                    {/* Slice G1 — QB state freshness badge */}
+                    {/* Slice G1 — QB state freshness + QBWC heartbeat */}
                     {(() => {
                       const freshness = snapshotAge(qbOpenBills);
-                      const label = freshness.newestQueriedAt
+                      const snapshotLabel = freshness.newestQueriedAt
                         ? `QB state · ${humanizeAge(freshness.newestQueriedAt)} · ${freshness.rowCount} bills`
                         : 'QB state · not synced yet';
-                      const isStale = !freshness.newestQueriedAt
+                      const snapshotStale = !freshness.newestQueriedAt
                         || (Date.now() - Date.parse(freshness.newestQueriedAt)) > 3600 * 1000;
+
+                      // QBWC heartbeat. Poll cadence is 15 min; consider alive if
+                      // last contact < 20 min, delayed 20–30 min, down > 30 min.
+                      const qbwcAgeMs = qbWcLastSeen ? Date.now() - Date.parse(qbWcLastSeen) : Infinity;
+                      const qbwcAlive = qbwcAgeMs < 20 * 60_000;
+                      const qbwcDown = qbwcAgeMs > 30 * 60_000;
+                      const nextPollMs = qbWcLastSeen ? Date.parse(qbWcLastSeen) + 15 * 60_000 - Date.now() : 0;
+                      const nextPollLabel = nextPollMs > 0
+                        ? `next poll in ~${Math.max(1, Math.round(nextPollMs / 60_000))}m`
+                        : `overdue ~${Math.abs(Math.round(nextPollMs / 60_000))}m`;
+                      const qbwcLabel = !qbWcLastSeen
+                        ? 'QBWC · never seen'
+                        : qbwcDown
+                          ? `⚠ QBWC not running (last seen ${humanizeAge(qbWcLastSeen)})`
+                          : qbwcAlive
+                            ? `QBWC alive · ${nextPollLabel}`
+                            : `QBWC delayed · last seen ${humanizeAge(qbWcLastSeen)}`;
+                      const qbwcColor = qbwcDown ? 'text-red-700' : (qbwcAlive ? 'text-green-700' : 'text-amber-700');
+
                       return (
-                        <div className="flex items-center gap-2 text-xs">
-                          <span className={isStale ? 'text-amber-700' : 'text-gray-500'}>
-                            {isStale && '⚠ '}{label}
-                          </span>
-                          <button
-                            onClick={runSyncQbBills}
-                            disabled={qbSyncingBills}
-                            className="text-indigo-600 hover:underline disabled:opacity-50"
-                            title="Enqueue bill_query jobs for actionable vendors. QBWC drains on next poll (~15 min)."
-                          >
-                            {qbSyncingBills ? 'Enqueuing…' : 'Sync QB state'}
-                          </button>
+                        <div className="flex flex-col items-end gap-0.5 text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className={snapshotStale ? 'text-amber-700' : 'text-gray-500'}>
+                              {snapshotStale && '⚠ '}{snapshotLabel}
+                            </span>
+                            <button
+                              onClick={runSyncQbBills}
+                              disabled={qbSyncingBills}
+                              className="text-indigo-600 hover:underline disabled:opacity-50"
+                              title="Enqueue bill_query jobs for actionable vendors. QBWC drains on next poll (~15 min)."
+                            >
+                              {qbSyncingBills ? 'Enqueuing…' : 'Sync QB state'}
+                            </button>
+                          </div>
+                          <div className={qbwcColor}>
+                            {qbwcLabel}
+                            {qbwcDown && (
+                              <span className="ml-1 text-gray-500">— start QBWC on accountant's laptop</span>
+                            )}
+                          </div>
                         </div>
                       );
                     })()}
