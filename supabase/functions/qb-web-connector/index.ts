@@ -286,38 +286,41 @@ async function persistJobResponse(
       console.log(`[bill_query iterator job=${job.id} vendor="${payload.entityVendorName}"] results=${parsed.results.length} linked=${linked} skipped_unmapped_vendor=${skippedUnmappedVendor} skipped_unknown_invoice=${skippedUnknownInvoice}`);
     }
 
-    // qbStateSync mirror — upsert every BillRet into qb_open_bills_snapshot for
-    // Slice G1 reconciliation. Runs alongside the invoice-linkage above (which
-    // stays for Convera backward compat). Skips rows missing the required
-    // snapshot fields (older QB responses may not include OpenAmount/IsPaid,
-    // in which case they can't be reconciled reliably — safer to omit than lie).
-    const snapshotRows = parsed.results
+    // Slice G1.1: unified qb_mirror (entity_kind='bill'). Runs alongside the
+    // invoice-linkage above (Convera-critical, preserved). Skips rows missing
+    // OpenAmount/IsPaid — older QB responses may omit them and we shouldn't
+    // record a false "settled/unsettled" state.
+    const mirrorRows = parsed.results
       .filter(r => r.vendorListId && r.vendorFullName && r.amount != null && r.openAmount != null && r.isPaid != null)
       .map(r => ({
+        entity_kind: 'bill' as const,
+        entity_ref:  r.txnId,
         vendor_list_id: r.vendorListId!,
-        vendor_name: r.vendorFullName!,
-        ref_number: r.refNumber,
-        txn_id: r.txnId,
-        txn_date: r.txnDate ?? null,
-        due_date: r.dueDate ?? null,
-        amount: r.amount!,
-        open_amount: r.openAmount!,
-        is_paid: r.isPaid!,
+        ref_number:  r.refNumber,
+        amount:      r.amount!,
+        is_settled:  r.isPaid!,
+        data: {
+          vendor_name:   r.vendorFullName!,
+          open_amount:   r.openAmount!,
+          txn_date:      r.txnDate ?? null,
+          due_date:      r.dueDate ?? null,
+          time_modified: r.timeModified ?? null,
+        },
         queried_at: new Date().toISOString(),
       }));
-    if (snapshotRows.length > 0) {
+    if (mirrorRows.length > 0) {
       const { error: snapErr } = await supabase
-        .from('qb_open_bills_snapshot')
-        .upsert(snapshotRows, { onConflict: 'vendor_list_id,ref_number,txn_id' });
+        .from('qb_mirror')
+        .upsert(mirrorRows, { onConflict: 'entity_kind,entity_ref' });
       if (snapErr) {
-        // Do NOT fail the job on snapshot upsert failure — the invoice-linkage
+        // Do NOT fail the job on mirror upsert failure — the invoice-linkage
         // (Convera-critical) already succeeded above. Log for investigation.
-        console.warn(`[bill_query job=${job.id}] snapshot upsert failed:`, snapErr.message);
+        console.warn(`[bill_query job=${job.id}] qb_mirror upsert failed:`, snapErr.message);
       } else {
-        console.log(`[bill_query job=${job.id}] snapshot upserted ${snapshotRows.length} rows`);
+        console.log(`[bill_query job=${job.id}] qb_mirror upserted ${mirrorRows.length} rows (kind=bill)`);
       }
     } else if (parsed.results.length > 0) {
-      console.log(`[bill_query job=${job.id}] snapshot skipped — no BillRets had complete open-amount/is-paid fields`);
+      console.log(`[bill_query job=${job.id}] qb_mirror skipped — no BillRets had complete open-amount/is-paid fields`);
     }
 
     return { ok: true, errorMsg: null };
@@ -365,23 +368,26 @@ async function persistJobResponse(
     if (!isQueryStatusOk(parsed.status, parsed.accounts.length)) {
       return { ok: false, errorMsg: `AccountQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Upsert each account into qb_accounts. Primary key = list_id (stable across
-    // renames — QB assigns it on create and never changes it). This is the
-    // authoritative snapshot of the accountant's chart of accounts.
+    // Slice G1.1: upsert into unified qb_mirror (entity_kind='account'). Legacy
+    // qb_accounts VIEW still queryable by all consumers (frontend loader, etc).
     if (parsed.accounts.length > 0) {
       const rows = parsed.accounts.map(a => ({
-        list_id:          a.listId,
-        name:             a.name,
-        full_name:        a.fullName,
-        account_type:     a.accountType,
-        parent_full_name: a.parentFullName,
-        is_active:        a.isActive,
-        synced_at:        new Date().toISOString(),
+        entity_kind: 'account' as const,
+        entity_ref:  a.listId,
+        is_active:   a.isActive,
+        data: {
+          full_name:        a.fullName,
+          account_type:     a.accountType,
+          name:             a.name,             // preserved for future consumers
+          parent_full_name: a.parentFullName,   // preserved for future consumers
+        },
+        queried_at: new Date().toISOString(),
       }));
-      const { error } = await supabase.from('qb_accounts').upsert(rows, { onConflict: 'list_id' });
+      const { error } = await supabase.from('qb_mirror').upsert(rows, { onConflict: 'entity_kind,entity_ref' });
       if (error) {
-        return { ok: false, errorMsg: `AccountQuery upsert failed: ${error.message}` };
+        return { ok: false, errorMsg: `AccountQuery qb_mirror upsert failed: ${error.message}` };
       }
+      console.log(`[account_query job=${job.id}] qb_mirror upserted ${rows.length} rows (kind=account)`);
     }
     return { ok: true, errorMsg: null };
   }
@@ -391,23 +397,25 @@ async function persistJobResponse(
     if (!isQueryStatusOk(parsed.status, parsed.vendors.length)) {
       return { ok: false, errorMsg: `VendorQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Upsert each vendor into qb_vendors. Primary key = list_id (stable across
-    // renames — QB assigns it on create and never changes it). Authoritative
-    // snapshot of the accountant's vendor list; consumed by pre-batch verification
-    // (payment_profiles.qb_vendor_name must match a row here before enqueueing
-    // bill_pmt_add / bill_add).
+    // Slice G1.1: upsert into unified qb_mirror (entity_kind='vendor'). Legacy
+    // qb_vendors VIEW still queryable — used by Convera qb-batch-dryrun.cjs,
+    // frontend Slice D mapping widget, and edge fn cross-refs.
     if (parsed.vendors.length > 0) {
       const rows = parsed.vendors.map(v => ({
-        list_id:      v.listId,
-        name:         v.name,
-        company_name: v.companyName,
-        is_active:    v.isActive,
-        synced_at:    new Date().toISOString(),
+        entity_kind: 'vendor' as const,
+        entity_ref:  v.listId,
+        is_active:   v.isActive,
+        data: {
+          name:         v.name,
+          ...(v.companyName ? { company_name: v.companyName } : {}),
+        },
+        queried_at: new Date().toISOString(),
       }));
-      const { error } = await supabase.from('qb_vendors').upsert(rows, { onConflict: 'list_id' });
+      const { error } = await supabase.from('qb_mirror').upsert(rows, { onConflict: 'entity_kind,entity_ref' });
       if (error) {
-        return { ok: false, errorMsg: `VendorQuery upsert failed: ${error.message}` };
+        return { ok: false, errorMsg: `VendorQuery qb_mirror upsert failed: ${error.message}` };
       }
+      console.log(`[vendor_query job=${job.id}] qb_mirror upserted ${rows.length} rows (kind=vendor)`);
     }
     return { ok: true, errorMsg: null };
   }
