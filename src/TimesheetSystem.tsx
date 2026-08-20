@@ -210,6 +210,10 @@ import {
   type ClassifiableInvoice,
   type ClassifiableMapping,
 } from './lib/classifyQbIngestEvent';
+import { enqueueBillQueryForVendors } from './lib/qbStateSync/enqueue';
+import { getAllOpenBills } from './lib/qbStateSync/read';
+import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
+import type { QbOpenBillRow } from './lib/qbStateSync/types';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -1169,6 +1173,9 @@ const TimesheetSystem = () => {
   });
   // Slice F — push preview modal
   const [showQbPushPreview, setShowQbPushPreview] = useState(false);
+  // Slice G1 — qbStateSync mirror of QB open bills
+  const [qbOpenBills, setQbOpenBills] = useState<QbOpenBillRow[]>([]);
+  const [qbSyncingBills, setQbSyncingBills] = useState(false);
   // Slice D — vendor mapping widget state
   const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
@@ -2445,6 +2452,61 @@ const TimesheetSystem = () => {
       })));
     }
   };
+  // Slice G1 — load qb_open_bills_snapshot into React state for freshness UI.
+  const loadQbOpenBills = async () => {
+    try {
+      const rows = await getAllOpenBills(supabase);
+      setQbOpenBills(rows);
+    } catch (e) {
+      console.warn('loadQbOpenBills failed', e);
+    }
+  };
+  // Slice G1 — Sync button handler. Enqueues iterator-mode bill_query for
+  // every vendor that has actionable events (kind bill_pmt or bill_add_and_pmt
+  // and not posted/ignored) and hasn't been synced within the last hour.
+  const runSyncQbBills = async () => {
+    setQbSyncingBills(true);
+    try {
+      const actionableEvents = qbIngestEvents.filter(e =>
+        (e.targetQbTxnKind === 'bill_pmt' || e.targetQbTxnKind === 'bill_add_and_pmt')
+        && e.status !== 'posted' && e.status !== 'ignored',
+      );
+      // Resolve vendor NAMES from qbVendorsList (need the string, not just listId).
+      const vendorNamesByListId = new Map(qbVendorsList.map(v => [v.listId, v.name]));
+      const uniqueVendorNames = Array.from(new Set(
+        actionableEvents
+          .map(e => e.counterpartyQbVendorListId ? vendorNamesByListId.get(e.counterpartyQbVendorListId) : null)
+          .filter((n): n is string => !!n),
+      ));
+      if (uniqueVendorNames.length === 0) {
+        alert('No vendors need syncing — either no actionable events or none have a mapped QB vendor yet.');
+        return;
+      }
+      // Fresh snapshot to compute stale vendor list.
+      await loadQbOpenBills();
+      const freshness = snapshotAge(qbOpenBills);
+      const staleVendorListIds = vendorsNeedingSync(
+        actionableEvents.map(e => e.counterpartyQbVendorListId).filter((x): x is string => !!x),
+        freshness,
+      );
+      const staleNames = staleVendorListIds
+        .map(id => vendorNamesByListId.get(id))
+        .filter((n): n is string => !!n);
+      // Send only stale ones; if user wants everything, they can click again after debounce.
+      const namesToSync = staleNames.length > 0 ? staleNames : uniqueVendorNames;
+      const result = await enqueueBillQueryForVendors(supabase, namesToSync, { auditTag: 'slice-g1-manual-sync' });
+      alert(
+        `Enqueued ${result.jobIds.length} bill_query job${result.jobIds.length === 1 ? '' : 's'}`
+        + (result.skippedInFlight.length > 0 ? `; skipped ${result.skippedInFlight.length} already in flight` : '')
+        + `. QBWC will drain on next poll (~15 min). Come back and click Refresh to see snapshot update.`,
+      );
+    } catch (e) {
+      alert('Sync failed: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setQbSyncingBills(false);
+    }
+  };
+
   useEffect(() => {
     if (accountantTab !== 'qb-automation') return;
     if (currentUser?.role !== 'accountant') return;
@@ -2452,6 +2514,7 @@ const TimesheetSystem = () => {
       await loadQbIngestEvents();
       await loadQbVendorMappings();
       await loadQbVendorsAndAccounts();
+      await loadQbOpenBills();
       // Auto-recompute matches for pending events using current invoices.
       // Guarded — skips silently if invoices state is empty (see the guard in
       // recomputeMatchesForPending). The invoices.length dependency below
@@ -9839,17 +9902,43 @@ const TimesheetSystem = () => {
                     <h2 className="text-2xl font-bold text-gray-800">QB Automation — Inbox</h2>
                     <p className="text-sm text-gray-500 mt-0.5">Financial events pending classification and push to QuickBooks. Import via Invoices → Import Payments.</p>
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={runRecomputeButton} disabled={recomputeBusy || qbIngestLoading} className="text-sm px-3 py-1.5 border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-50 disabled:opacity-50" title="Re-run the invoice matcher for all pending events. Use after creating/importing invoices, or after a matcher upgrade ships.">{recomputeBusy ? 'Recomputing…' : 'Recompute matches'}</button>
-                    <button onClick={loadQbIngestEvents} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
-                    <button
-                      onClick={() => setShowQbPushPreview(true)}
-                      disabled={qbIngestLoading || qbIngestEvents.length === 0}
-                      className="text-sm px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 font-medium"
-                      title="Preview what will be pushed to QuickBooks."
-                    >
-                      Push to QB
-                    </button>
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="flex gap-2">
+                      <button onClick={runRecomputeButton} disabled={recomputeBusy || qbIngestLoading} className="text-sm px-3 py-1.5 border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-50 disabled:opacity-50" title="Re-run the invoice matcher for all pending events. Use after creating/importing invoices, or after a matcher upgrade ships.">{recomputeBusy ? 'Recomputing…' : 'Recompute matches'}</button>
+                      <button onClick={() => { loadQbIngestEvents(); loadQbOpenBills(); }} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
+                      <button
+                        onClick={() => setShowQbPushPreview(true)}
+                        disabled={qbIngestLoading || qbIngestEvents.length === 0}
+                        className="text-sm px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 font-medium"
+                        title="Preview what will be pushed to QuickBooks."
+                      >
+                        Push to QB
+                      </button>
+                    </div>
+                    {/* Slice G1 — QB state freshness badge */}
+                    {(() => {
+                      const freshness = snapshotAge(qbOpenBills);
+                      const label = freshness.newestQueriedAt
+                        ? `QB state · ${humanizeAge(freshness.newestQueriedAt)} · ${freshness.rowCount} bills`
+                        : 'QB state · not synced yet';
+                      const isStale = !freshness.newestQueriedAt
+                        || (Date.now() - Date.parse(freshness.newestQueriedAt)) > 3600 * 1000;
+                      return (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className={isStale ? 'text-amber-700' : 'text-gray-500'}>
+                            {isStale && '⚠ '}{label}
+                          </span>
+                          <button
+                            onClick={runSyncQbBills}
+                            disabled={qbSyncingBills}
+                            className="text-indigo-600 hover:underline disabled:opacity-50"
+                            title="Enqueue bill_query jobs for actionable vendors. QBWC drains on next poll (~15 min)."
+                          >
+                            {qbSyncingBills ? 'Enqueuing…' : 'Sync QB state'}
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
 

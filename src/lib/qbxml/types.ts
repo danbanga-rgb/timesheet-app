@@ -50,6 +50,24 @@ export interface BillQueryResult {
    *  grouped bills, where refNumber alone doesn't identify the target invoices —
    *  every invoice for that vendor in that period_end month shares the same bill. */
   vendorFullName?: string;
+  /** VendorRef.ListID — QB's stable vendor ID. Needed for qb_open_bills_snapshot
+   *  PK (which keys on vendor_list_id, not name, since names can be edited). */
+  vendorListId?: string;
+  /** Bill date from QB (TxnDate). YYYY-MM-DD. Optional — some responses omit. */
+  txnDate?: string;
+  /** Bill due date. YYYY-MM-DD. Optional. */
+  dueDate?: string;
+  /** Total bill amount (QB's <AmountDue> — despite the name this is the ORIGINAL
+   *  amount at BillAdd time, not what's currently owed). */
+  amount?: number;
+  /** Currently outstanding balance (QB's <OpenAmount>). 0 = fully paid. This is
+   *  the field to check for reconciliation ("did QB already pay this?"). */
+  openAmount?: number;
+  /** QB's <IsPaid> boolean. Equivalent to openAmount === 0 but the DB carries
+   *  the explicit flag for tolerance if QB ever emits inconsistent values. */
+  isPaid?: boolean;
+  /** QB's <TimeModified> — needed later for delta-read cursors. */
+  timeModified?: string;
 }
 
 /** BillAddRq: create a Vendor Bill in QB.
