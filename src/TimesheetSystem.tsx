@@ -2721,8 +2721,8 @@ const TimesheetSystem = () => {
         + `across ${staleVendors.length} vendor${staleVendors.length === 1 ? '' : 's'} `
         + `(${deltaCount} delta / ${staleVendors.length - deltaCount} full-history)`
         + (result.skippedInFlight.length > 0 ? `; skipped ${result.skippedInFlight.length} already in flight` : '')
-        + `. QBWC will drain over the next ~${Math.max(15, Math.ceil(staleVendors.length * 15 / 8))} min at 15-min poll cadence. `
-        + `This UI will update automatically as they complete.`,
+        + `. QBWC drains the full queue in one session; wait up to 15 min for the next poll, then ~${Math.max(1, Math.ceil(result.jobIds.length * 1 / 60))} min of drain time. `
+        + `This UI updates automatically as they complete.`,
       );
     } catch (e) {
       // Supabase errors come as { message, details, hint, code } — String(e)
