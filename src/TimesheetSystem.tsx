@@ -211,9 +211,15 @@ import {
   type ClassifiableMapping,
 } from './lib/classifyQbIngestEvent';
 import { enqueueBillQueryForVendors } from './lib/qbStateSync/enqueue';
-import { getAllOpenBills } from './lib/qbStateSync/read';
+import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
 import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
 import type { QbOpenBillRow } from './lib/qbStateSync/types';
+import {
+  reconcileBatch,
+  type MirrorBill,
+  type MirrorPayment,
+  type ReconcilableEvent,
+} from './lib/intuit/reconcile';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -2422,12 +2428,123 @@ const TimesheetSystem = () => {
     return { classified, seeded };
   };
 
+  // Slice G4c — reconciliation pass. For every event that's been classified
+  // (has vendor + kind), consult qb_mirror to decide the concrete resolved_action:
+  //   already_done | pay_existing_bill | create_bill_then_pay | check | held
+  //
+  // Fetches mirror fresh (avoids closure trap per [[feedback-state-vs-fresh-fetch]]).
+  // Idempotent — only PATCHes events whose resolved_action actually changes.
+  const applyReconciliationPass = async (): Promise<{ reconciled: number; skipReason?: string }> => {
+    // Load fresh mirror bills + payments across all vendors we care about.
+    const [bills, payments] = await Promise.all([
+      getAllOpenBills(supabase),
+      getAllPayments(supabase),
+    ]);
+
+    // Fetch events that need reconciliation: have vendor + kind, and are pending or ready.
+    // We reconcile ready ones too because mirror state changes (new payment arrives)
+    // can flip ready → already_done.
+    const { data: rows } = await supabase
+      .from('qb_ingest_events')
+      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason')
+      .in('status', ['pending', 'ready'])
+      .not('target_qb_txn_kind', 'is', null);
+    const events: ReconcilableEvent[] = (rows ?? []).map((r: Record<string, unknown>) => ({
+      id: r.id as number,
+      counterpartyRaw: (r.counterparty_raw as string) ?? '',
+      memo: (r.memo as string | null) ?? null,
+      amount: Number(r.amount ?? 0),
+      txnDate: (r.txn_date as string) ?? '',
+      counterpartyQbVendorListId: (r.counterparty_qb_vendor_list_id as string | null) ?? null,
+      targetQbTxnKind: (r.target_qb_txn_kind as ReconcilableEvent['targetQbTxnKind']) ?? null,
+      matchedInvoiceIds: Array.isArray(r.matched_invoice_ids) ? (r.matched_invoice_ids as number[]) : [],
+      status: (r.status as ReconcilableEvent['status']) ?? 'pending',
+    }));
+    if (events.length === 0) return { reconciled: 0 };
+
+    // Group mirror rows by vendor for O(1) lookup in reconciler.
+    const billsByVendor = new Map<string, MirrorBill[]>();
+    for (const b of bills) {
+      const arr = billsByVendor.get(b.vendorListId) ?? [];
+      arr.push({
+        txnId: b.txnId,
+        vendorListId: b.vendorListId,
+        refNumber: b.refNumber,
+        amount: b.amount,
+        isPaid: b.isPaid,
+        txnDate: b.txnDate,
+      });
+      billsByVendor.set(b.vendorListId, arr);
+    }
+    const paymentsByVendor = new Map<string, MirrorPayment[]>();
+    for (const p of payments) {
+      const arr = paymentsByVendor.get(p.vendorListId) ?? [];
+      arr.push({
+        txnId: p.txnId,
+        vendorListId: p.vendorListId,
+        amount: p.amount,
+        txnDate: p.txnDate,
+        appliedToBills: p.appliedToBills.map(a => ({ billTxnId: a.billTxnId, amount: a.amount })),
+      });
+      paymentsByVendor.set(p.vendorListId, arr);
+    }
+
+    const results = reconcileBatch(events, { billsByVendor, paymentsByVendor });
+    const nowIso = new Date().toISOString();
+    let reconciled = 0;
+    // We track events whose action becomes 'already_done' so we can also flip
+    // their status to 'posted' with posted_source note. Others just update
+    // resolved_* fields and keep status.
+    for (const { event, result } of results) {
+      const currentRow = (rows ?? []).find((r: Record<string, unknown>) => r.id === event.id) as Record<string, unknown> | undefined;
+      const prevAction = (currentRow?.resolved_action as string | null) ?? null;
+      const prevBillTxnId = (currentRow?.resolved_bill_txn_id as string | null) ?? null;
+      const prevPaymentTxnId = (currentRow?.resolved_payment_txn_id as string | null) ?? null;
+      const prevReason = (currentRow?.resolved_reason as string | null) ?? null;
+
+      const nextBillTxnId = result.billTxnId ?? null;
+      const nextPaymentTxnId = result.paymentTxnId ?? null;
+      const nextReason = result.reason ?? null;
+
+      // Skip PATCH if nothing changed
+      if (
+        prevAction === result.action
+        && prevBillTxnId === nextBillTxnId
+        && prevPaymentTxnId === nextPaymentTxnId
+        && prevReason === nextReason
+      ) continue;
+
+      const patch: Record<string, unknown> = {
+        resolved_action: result.action,
+        resolved_bill_txn_id: nextBillTxnId,
+        resolved_payment_txn_id: nextPaymentTxnId,
+        resolved_reason: nextReason,
+        reconciled_at: nowIso,
+      };
+      // already_done means QB already settled this event — auto-close.
+      if (result.action === 'already_done' && event.status !== 'posted') {
+        patch.status = 'posted';
+        patch.status_updated_at = nowIso;
+        patch.posted_qb_refs = {
+          bill_txn_id: nextBillTxnId,
+          payment_txn_id: nextPaymentTxnId,
+          posted_source: 'qb_probe',
+        };
+      }
+      const { error } = await supabase.from('qb_ingest_events').update(patch).eq('id', event.id);
+      if (!error) reconciled++;
+      else console.warn('reconciliation PATCH failed for event', event.id, error);
+    }
+    return { reconciled };
+  };
+
   const [recomputeBusy, setRecomputeBusy] = useState(false);
   const runRecomputeButton = async () => {
     setRecomputeBusy(true);
     try {
       const result = await recomputeMatchesForPending();
       const cls = await applyClassificationPass();
+      const rec = await applyReconciliationPass();
       await loadQbVendorMappings();
       await loadQbIngestEvents();
       if (result.skipped === 'invoices-not-loaded') {
@@ -2436,7 +2553,10 @@ const TimesheetSystem = () => {
         const clsSummary = cls.skipReason
           ? ` · classification skipped (${cls.skipReason})`
           : ` · auto-classified ${cls.classified}${cls.seeded > 0 ? `, seeded ${cls.seeded} mapping${cls.seeded === 1 ? '' : 's'}` : ''}`;
-        alert(`Recomputed matches: scanned ${result.scanned} pending event${result.scanned === 1 ? '' : 's'}, updated ${result.updated}${clsSummary}.`);
+        const recSummary = rec.skipReason
+          ? ` · reconciliation skipped (${rec.skipReason})`
+          : ` · reconciled ${rec.reconciled}`;
+        alert(`Recomputed matches: scanned ${result.scanned} pending event${result.scanned === 1 ? '' : 's'}, updated ${result.updated}${clsSummary}${recSummary}.`);
       }
     } finally { setRecomputeBusy(false); }
   };
@@ -2505,10 +2625,17 @@ const TimesheetSystem = () => {
       const prev = qbBillQueryPending;
       const next = (data ?? []).length;
       setQbBillQueryPending(next);
-      // Transition from >0 → 0 = QBWC just finished draining; refresh snapshot.
+      // Transition from >0 → 0 = QBWC just finished draining; refresh snapshot,
+      // heartbeat, and re-reconcile since mirror is now fresher.
       if (prev > 0 && next === 0) {
         await loadQbOpenBills();
         await loadQbWcLastSeen();
+        try {
+          const rec = await applyReconciliationPass();
+          if (rec.reconciled > 0) await loadQbIngestEvents();
+        } catch (e) {
+          console.warn('post-drain reconciliation failed', e);
+        }
       }
     } catch (e) {
       console.warn('loadQbBillQueryPending failed', e);
@@ -2627,10 +2754,10 @@ const TimesheetSystem = () => {
       try {
         const { updated } = await recomputeMatchesForPending();
         // Then auto-classify using mappings + profile chain. Slice F.5.
-        // Silently skips if any prereq state is empty — the effect re-fires
-        // when invoices arrive, catching us up.
         const cls = await applyClassificationPass();
-        if (updated > 0 || cls.classified > 0) await loadQbIngestEvents();
+        // Then reconcile against qb_mirror. Slice G4c.
+        const rec = await applyReconciliationPass();
+        if (updated > 0 || cls.classified > 0 || rec.reconciled > 0) await loadQbIngestEvents();
         if (cls.seeded > 0) await loadQbVendorMappings();
       } catch (e) {
         console.warn('QB Automation: auto-recompute failed', e);
