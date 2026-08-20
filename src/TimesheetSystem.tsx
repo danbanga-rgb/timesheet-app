@@ -203,6 +203,13 @@ import {
   type MatchableEvent,
   type MatcherInvoice,
 } from './lib/matchQbIngestEvents';
+import {
+  classifyBatch,
+  resolveBankAccount,
+  type ClassifiableEvent,
+  type ClassifiableInvoice,
+  type ClassifiableMapping,
+} from './lib/classifyQbIngestEvent';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -2305,16 +2312,88 @@ const TimesheetSystem = () => {
     }
     return { scanned: events.length, updated };
   };
+  // Slice F.5 — auto-classification pass. Applies two passes to all pending events:
+  //   1. Explicit qb_vendor_mappings row → apply.
+  //   2. Profile-chain (event → matched invoice → profile.qbVendorName → qb_vendors) → apply + seed mapping.
+  // Idempotent — only PATCHes events whose classification actually changes.
+  // Requires qbVendorMappings + qbVendorsList + qbAccountsList + invoices to be loaded;
+  // returns skipped='data-not-loaded' if any prerequisite is empty.
+  const applyClassificationPass = async (): Promise<{ classified: number; seeded: number; skipReason?: string }> => {
+    if (invoices.length === 0) return { classified: 0, seeded: 0, skipReason: 'invoices-not-loaded' };
+    if (qbVendorsList.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-vendors-not-loaded' };
+    if (qbAccountsList.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-accounts-not-loaded' };
+
+    const { data: pendingRows } = await supabase
+      .from('qb_ingest_events')
+      .select('id, source, counterparty_raw, matched_invoice_ids, status, counterparty_qb_vendor_list_id, target_qb_txn_kind, qb_bank_account_list_id, qb_expense_account_list_id')
+      .eq('status', 'pending');
+    const events: ClassifiableEvent[] = (pendingRows ?? []).map((r: Record<string, unknown>) => ({
+      id: r.id as number,
+      source: (r.source as string) ?? '',
+      counterpartyRaw: (r.counterparty_raw as string) ?? '',
+      matchedInvoiceIds: Array.isArray(r.matched_invoice_ids) ? (r.matched_invoice_ids as number[]) : [],
+      status: 'pending',
+      counterpartyQbVendorListId: (r.counterparty_qb_vendor_list_id as string | null) ?? null,
+      targetQbTxnKind: (r.target_qb_txn_kind as ClassifiableEvent['targetQbTxnKind']) ?? null,
+      qbBankAccountListId: (r.qb_bank_account_list_id as string | null) ?? null,
+      qbExpenseAccountListId: (r.qb_expense_account_list_id as string | null) ?? null,
+    }));
+    if (events.length === 0) return { classified: 0, seeded: 0 };
+
+    const invoicesById = new Map<number, ClassifiableInvoice>(
+      invoices.map(i => [i.id, { id: i.id, paymentProfileQbVendorName: i.paymentProfile?.qbVendorName ?? null }]),
+    );
+    const vendorsByLowerName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
+    const bankAccount = resolveBankAccount(qbAccountsList);
+    const mappings: ClassifiableMapping[] = qbVendorMappings.map(m => ({
+      source: m.source,
+      counterpartyPattern: m.counterpartyPattern,
+      qbVendorListId: m.qbVendorListId,
+      defaultTargetKind: m.defaultTargetKind,
+      defaultBankAccountListId: m.defaultBankAccountListId,
+      defaultExpenseAccountListId: m.defaultExpenseAccountListId,
+    }));
+
+    const { results, seedMappings } = classifyBatch(events, {
+      mappings, invoicesById, vendorsByLowerName, bankAccount,
+    });
+
+    let classified = 0;
+    for (const { event, result } of results) {
+      if (Object.keys(result.patch).length === 0) continue;
+      const { error } = await supabase.from('qb_ingest_events').update(result.patch).eq('id', event.id);
+      if (!error) classified++;
+      else console.warn('classification PATCH failed for event', event.id, error);
+    }
+
+    let seeded = 0;
+    if (seedMappings.length > 0) {
+      const rows = seedMappings.filter((s): s is NonNullable<typeof s> => !!s).map(s => ({
+        ...s, updated_at: new Date().toISOString(),
+      }));
+      const { error } = await supabase.from('qb_vendor_mappings').upsert(rows, { onConflict: 'source,counterparty_pattern' });
+      if (!error) seeded = rows.length;
+      else console.warn('seed mappings upsert failed', error);
+    }
+
+    return { classified, seeded };
+  };
+
   const [recomputeBusy, setRecomputeBusy] = useState(false);
   const runRecomputeButton = async () => {
     setRecomputeBusy(true);
     try {
       const result = await recomputeMatchesForPending();
+      const cls = await applyClassificationPass();
+      await loadQbVendorMappings();
       await loadQbIngestEvents();
       if (result.skipped === 'invoices-not-loaded') {
         alert('Cannot recompute yet — invoices are still loading. Wait a moment and try again.');
       } else {
-        alert(`Recomputed matches: scanned ${result.scanned} pending event${result.scanned === 1 ? '' : 's'}, updated ${result.updated}.`);
+        const clsSummary = cls.skipReason
+          ? ` · classification skipped (${cls.skipReason})`
+          : ` · auto-classified ${cls.classified}${cls.seeded > 0 ? `, seeded ${cls.seeded} mapping${cls.seeded === 1 ? '' : 's'}` : ''}`;
+        alert(`Recomputed matches: scanned ${result.scanned} pending event${result.scanned === 1 ? '' : 's'}, updated ${result.updated}${clsSummary}.`);
       }
     } finally { setRecomputeBusy(false); }
   };
@@ -2351,15 +2430,20 @@ const TimesheetSystem = () => {
     if (currentUser?.role !== 'accountant') return;
     (async () => {
       await loadQbIngestEvents();
-      loadQbVendorMappings();
-      loadQbVendorsAndAccounts();
+      await loadQbVendorMappings();
+      await loadQbVendorsAndAccounts();
       // Auto-recompute matches for pending events using current invoices.
       // Guarded — skips silently if invoices state is empty (see the guard in
       // recomputeMatchesForPending). The invoices.length dependency below
       // ensures we re-run once invoices actually load.
       try {
         const { updated } = await recomputeMatchesForPending();
-        if (updated > 0) await loadQbIngestEvents();
+        // Then auto-classify using mappings + profile chain. Slice F.5.
+        // Silently skips if any prereq state is empty — the effect re-fires
+        // when invoices arrive, catching us up.
+        const cls = await applyClassificationPass();
+        if (updated > 0 || cls.classified > 0) await loadQbIngestEvents();
+        if (cls.seeded > 0) await loadQbVendorMappings();
       } catch (e) {
         console.warn('QB Automation: auto-recompute failed', e);
       }
@@ -4642,6 +4726,16 @@ const TimesheetSystem = () => {
       if (error) throw error;
       const inserted = data?.length ?? 0;
       const skipped = intuitXlsxPreview.length - inserted;
+      // Slice F.5 — run auto-classification pass over the freshly-inserted
+      // pending events (also picks up any prior pending events, which is fine).
+      // Silent skip if prereq state is missing; accountant can hit Recompute later.
+      try {
+        await loadQbVendorMappings();
+        await loadQbVendorsAndAccounts();
+        await applyClassificationPass();
+      } catch (e) {
+        console.warn('Post-ingest classification failed', e);
+      }
       setIntuitXlsxResult({ inserted, skipped });
       setIntuitXlsxPreview(null);
       setIntuitXlsxFile(null);
