@@ -2316,18 +2316,31 @@ const TimesheetSystem = () => {
   //   1. Explicit qb_vendor_mappings row → apply.
   //   2. Profile-chain (event → matched invoice → profile.qbVendorName → qb_vendors) → apply + seed mapping.
   // Idempotent — only PATCHes events whose classification actually changes.
-  // Requires qbVendorMappings + qbVendorsList + qbAccountsList + invoices to be loaded;
-  // returns skipped='data-not-loaded' if any prerequisite is empty.
+  //
+  // Fetches vendors/accounts/mappings FRESH from Supabase rather than reading React
+  // state, so callers don't hit the "setState just fired, closure still stale" trap
+  // when this runs immediately after a load. Invoices come from React state (already
+  // populated app-wide by the time any accountant hits this tab).
   const applyClassificationPass = async (): Promise<{ classified: number; seeded: number; skipReason?: string }> => {
     if (invoices.length === 0) return { classified: 0, seeded: 0, skipReason: 'invoices-not-loaded' };
-    if (qbVendorsList.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-vendors-not-loaded' };
-    if (qbAccountsList.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-accounts-not-loaded' };
 
-    const { data: pendingRows } = await supabase
-      .from('qb_ingest_events')
-      .select('id, source, counterparty_raw, matched_invoice_ids, status, counterparty_qb_vendor_list_id, target_qb_txn_kind, qb_bank_account_list_id, qb_expense_account_list_id')
-      .eq('status', 'pending');
-    const events: ClassifiableEvent[] = (pendingRows ?? []).map((r: Record<string, unknown>) => ({
+    const [pendingRes, vendorsRes, accountsRes, mappingsRes] = await Promise.all([
+      supabase
+        .from('qb_ingest_events')
+        .select('id, source, counterparty_raw, matched_invoice_ids, status, counterparty_qb_vendor_list_id, target_qb_txn_kind, qb_bank_account_list_id, qb_expense_account_list_id')
+        .eq('status', 'pending'),
+      supabase.from('qb_vendors').select('list_id, name'),
+      supabase.from('qb_accounts').select('list_id, full_name, account_type'),
+      supabase.from('qb_vendor_mappings').select('*'),
+    ]);
+
+    const vendorRows = (vendorsRes.data ?? []) as Array<{ list_id: string; name: string }>;
+    const accountRows = (accountsRes.data ?? []) as Array<{ list_id: string; full_name: string; account_type: string }>;
+    const mappingRows = (mappingsRes.data ?? []) as Array<Record<string, unknown>>;
+    if (vendorRows.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-vendors-empty (check RLS + qb_vendors sync)' };
+    if (accountRows.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-accounts-empty (check RLS + qb_accounts sync)' };
+
+    const events: ClassifiableEvent[] = (pendingRes.data ?? []).map((r: Record<string, unknown>) => ({
       id: r.id as number,
       source: (r.source as string) ?? '',
       counterpartyRaw: (r.counterparty_raw as string) ?? '',
@@ -2343,15 +2356,15 @@ const TimesheetSystem = () => {
     const invoicesById = new Map<number, ClassifiableInvoice>(
       invoices.map(i => [i.id, { id: i.id, paymentProfileQbVendorName: i.paymentProfile?.qbVendorName ?? null }]),
     );
-    const vendorsByLowerName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
-    const bankAccount = resolveBankAccount(qbAccountsList);
-    const mappings: ClassifiableMapping[] = qbVendorMappings.map(m => ({
-      source: m.source,
-      counterpartyPattern: m.counterpartyPattern,
-      qbVendorListId: m.qbVendorListId,
-      defaultTargetKind: m.defaultTargetKind,
-      defaultBankAccountListId: m.defaultBankAccountListId,
-      defaultExpenseAccountListId: m.defaultExpenseAccountListId,
+    const vendorsByLowerName = new Map(vendorRows.map(v => [v.name.toLowerCase().trim(), { listId: v.list_id, name: v.name }]));
+    const bankAccount = resolveBankAccount(accountRows.map(a => ({ listId: a.list_id, fullName: a.full_name })));
+    const mappings: ClassifiableMapping[] = mappingRows.map(r => ({
+      source: (r.source as string) ?? '',
+      counterpartyPattern: (r.counterparty_pattern as string) ?? '',
+      qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
+      defaultTargetKind: (r.default_target_kind as ClassifiableMapping['defaultTargetKind']) ?? null,
+      defaultBankAccountListId: (r.default_bank_account_list_id as string | null) ?? null,
+      defaultExpenseAccountListId: (r.default_expense_account_list_id as string | null) ?? null,
     }));
 
     const { results, seedMappings } = classifyBatch(events, {
