@@ -203,6 +203,7 @@ import {
   type MatchableEvent,
   type MatcherInvoice,
 } from './lib/matchQbIngestEvents';
+import QbPushPreviewModal from './components/QbPushPreviewModal';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -1159,6 +1160,8 @@ const TimesheetSystem = () => {
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
   });
+  // Slice F — push preview modal
+  const [showQbPushPreview, setShowQbPushPreview] = useState(false);
   // Slice D — vendor mapping widget state
   const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
@@ -9725,6 +9728,14 @@ const TimesheetSystem = () => {
                   <div className="flex gap-2">
                     <button onClick={runRecomputeButton} disabled={recomputeBusy || qbIngestLoading} className="text-sm px-3 py-1.5 border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-50 disabled:opacity-50" title="Re-run the invoice matcher for all pending events. Use after creating/importing invoices, or after a matcher upgrade ships.">{recomputeBusy ? 'Recomputing…' : 'Recompute matches'}</button>
                     <button onClick={loadQbIngestEvents} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
+                    <button
+                      onClick={() => setShowQbPushPreview(true)}
+                      disabled={qbIngestLoading || qbIngestEvents.length === 0}
+                      className="text-sm px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 font-medium"
+                      title="Preview what will be pushed to QuickBooks."
+                    >
+                      Push to QB
+                    </button>
                   </div>
                 </div>
 
@@ -9749,6 +9760,24 @@ const TimesheetSystem = () => {
                     <p className="text-sm">Inbox is empty. Import Intuit payments via <strong>Invoices → Import Payments → Intuit XLSX</strong>.</p>
                   </div>
                 )}
+
+                <QbPushPreviewModal
+                  open={showQbPushPreview}
+                  onClose={() => setShowQbPushPreview(false)}
+                  events={qbIngestEvents}
+                  qbVendors={qbVendorsList}
+                  qbAccounts={qbAccountsList}
+                  invoices={invoices}
+                  onConfirm={(readyIds) => {
+                    setShowQbPushPreview(false);
+                    console.log('[Slice F] Push confirmed for event ids:', readyIds);
+                    alert(`Preview only — Slice G will wire enqueue.\n\nWould push ${readyIds.length} event${readyIds.length === 1 ? '' : 's'} to QuickBooks. Nothing has been sent to QB.`);
+                  }}
+                  onFixMapping={(counterparty, source) => {
+                    setQbInboxExpanded(prev => ({ ...prev, pending: true }));
+                    openMapWidget(counterparty, source);
+                  }}
+                />
 
                 {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => (
                   <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
