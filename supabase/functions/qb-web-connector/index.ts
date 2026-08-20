@@ -35,6 +35,7 @@ import {
   parseAccountQueryRs,
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
+  parseBillPaymentCheckQueryRs,
   parseBillQueryRs,
   parseCheckAddRs,
   parseVendorQueryRs,
@@ -511,9 +512,45 @@ async function persistJobResponse(
   }
 
   if (job.kind === 'bill_pmt_query') {
-    // Exploratory kind. Response XML is already stored in qb_sync_jobs.qbxml_response
-    // (the outer WC pipeline handles that). Nothing to persist structurally —
-    // caller reads the raw response to eyeball patterns.
+    // Slice G2: parse BillPaymentCheckQueryRs, upsert each payment into qb_mirror
+    // (entity_kind='bill_payment'). Skips rows missing required identity fields.
+    // AppliedToTxnRet (which bills a payment settled) is only present if the
+    // request set IncludeLineItems=true; captured in data.applied_to_bills for
+    // the reconciler.
+    const parsed = parseBillPaymentCheckQueryRs(first);
+    if (!isQueryStatusOk(parsed.status, parsed.results.length)) {
+      return { ok: false, errorMsg: `BillPaymentCheckQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
+    }
+    if (parsed.results.length === 0) return { ok: true, errorMsg: null };
+    const mirrorRows = parsed.results
+      .filter(r => r.payeeEntityListId && r.amount != null)
+      .map(r => ({
+        entity_kind: 'bill_payment' as const,
+        entity_ref:  r.txnId,
+        vendor_list_id: r.payeeEntityListId!,
+        ref_number:  r.refNumber ?? null,
+        amount:      r.amount!,
+        is_settled:  null,  // not meaningful for payments (bills carry that flag)
+        data: {
+          vendor_name: r.payeeEntityFullName ?? null,
+          txn_date: r.txnDate ?? null,
+          bank_list_id: r.bankAccountListId ?? null,
+          bank_full_name: r.bankAccountFullName ?? null,
+          memo: r.memo ?? null,
+          time_modified: r.timeModified ?? null,
+          applied_to_bills: r.appliedToBills,  // may be empty when IncludeLineItems=false
+        },
+        queried_at: new Date().toISOString(),
+      }));
+    if (mirrorRows.length > 0) {
+      const { error } = await supabase.from('qb_mirror').upsert(mirrorRows, { onConflict: 'entity_kind,entity_ref' });
+      if (error) {
+        return { ok: false, errorMsg: `BillPaymentCheckQuery qb_mirror upsert failed: ${error.message}` };
+      }
+      console.log(`[bill_pmt_query job=${job.id}] qb_mirror upserted ${mirrorRows.length} rows (kind=bill_payment)`);
+    } else if (parsed.results.length > 0) {
+      console.log(`[bill_pmt_query job=${job.id}] qb_mirror skipped — no BillPaymentCheckRets had required identity fields`);
+    }
     return { ok: true, errorMsg: null };
   }
 

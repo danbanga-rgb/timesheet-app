@@ -7,7 +7,7 @@
 // and qb_vendors is 1165+ rows in prod (see [[feedback-no-hardcoded-cutoff]]).
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { QbAccountRow, QbOpenBillRow, QbVendorRow } from './types';
+import type { QbAccountRow, QbBillPaymentRow, QbOpenBillRow, QbVendorRow } from './types';
 
 type SB = SupabaseClient;
 
@@ -76,6 +76,49 @@ export async function getAllOpenBills(supabase: SB): Promise<QbOpenBillRow[]> {
     .range(0, MAX);
   if (error) throw error;
   return (data ?? []).map(mapBillRow);
+}
+
+/** Fetch bill_payment snapshot rows for a specific vendor. */
+export async function getVendorPayments(supabase: SB, vendorListId: string): Promise<QbBillPaymentRow[]> {
+  const { data, error } = await supabase
+    .from('qb_mirror')
+    .select('*')
+    .eq('entity_kind', 'bill_payment')
+    .eq('vendor_list_id', vendorListId)
+    .range(0, MAX);
+  if (error) throw error;
+  return (data ?? [])
+    .map(mapPaymentRow)
+    .sort((a, b) => (b.txnDate ?? '').localeCompare(a.txnDate ?? ''));
+}
+
+/** Fetch all bill_payment snapshot rows. */
+export async function getAllPayments(supabase: SB): Promise<QbBillPaymentRow[]> {
+  const { data, error } = await supabase
+    .from('qb_mirror')
+    .select('*')
+    .eq('entity_kind', 'bill_payment')
+    .range(0, MAX);
+  if (error) throw error;
+  return (data ?? []).map(mapPaymentRow);
+}
+
+function mapPaymentRow(r: Record<string, unknown>): QbBillPaymentRow {
+  const d = (r.data as Record<string, unknown> | null) ?? {};
+  const applied = Array.isArray(d.applied_to_bills) ? d.applied_to_bills as QbBillPaymentRow['appliedToBills'] : [];
+  return {
+    vendorListId: (r.vendor_list_id as string) ?? '',
+    vendorName: (d.vendor_name as string | null) ?? null,
+    txnId: (r.entity_ref as string) ?? '',
+    refNumber: (r.ref_number as string | null) ?? null,
+    txnDate: (d.txn_date as string | null) ?? null,
+    amount: Number(r.amount ?? 0),
+    bankListId: (d.bank_list_id as string | null) ?? null,
+    bankFullName: (d.bank_full_name as string | null) ?? null,
+    memo: (d.memo as string | null) ?? null,
+    appliedToBills: applied,
+    queriedAt: (r.queried_at as string) ?? '',
+  };
 }
 
 function mapBillRow(r: Record<string, unknown>): QbOpenBillRow {
