@@ -198,19 +198,30 @@ export function reconcileEvent(
     return { action: 'held', reason: 'vendor not synced (no QB state for this vendor)' };
   }
 
-  // Score all bills; pick best unclaimed
+  // Score all bills; pick best unclaimed. For terminal-state actions
+  // (already_done, pay_existing_bill) we REQUIRE a refNumber match — amount-only
+  // matches are too weak and produced silently wrong assignments when mirror
+  // was partially seeded (bug surfaced 2026-08-20). Amount-only matches fall
+  // through to create_bill_then_pay, which is the safe fallback.
   const scored = bills
     .filter(b => !claimedBillTxnIds.has(b.txnId))
-    .map(b => ({ bill: b, score: scoreBillMatch(eventRefs, event.amount, event.txnDate, b) }))
+    .map(b => ({
+      bill: b,
+      score: scoreBillMatch(eventRefs, event.amount, event.txnDate, b),
+      refHit: eventRefs.includes(normalizeRef(b.refNumber)),
+    }))
     .filter(x => x.score !== null)
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
-  if (scored.length === 0) {
-    // No bill match at all → we'll need to create one
+  // Restrict "already_done" / "pay_existing_bill" to bills where the event
+  // memo's ref actually matches. Otherwise we'd loose-match by amount and
+  // claim the wrong bill.
+  const refMatch = scored.find(s => s.refHit);
+  if (!refMatch) {
     return { action: 'create_bill_then_pay' };
   }
 
-  const best = scored[0].bill;
+  const best = refMatch.bill;
   const settlement = findSettlingPayment(best, payments);
 
   if (settlement.alreadySettled) {

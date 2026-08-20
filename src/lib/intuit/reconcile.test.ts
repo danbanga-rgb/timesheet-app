@@ -203,6 +203,19 @@ describe('reconcileEvent', () => {
     expect(r.action).toBe('create_bill_then_pay');
   });
 
+  it("2026-08-20: amount-only match (no ref match) does NOT produce already_done — falls to create_bill_then_pay", () => {
+    // Regression: Event 84 (Inv# 05, $8400) previously loose-matched to
+    // 402BC (Inv# 06, $8400) via amount-only. Now such matches are refused.
+    const b = bill({ refNumber: 'INV 06', amount: 8400, isPaid: true });
+    const r = reconcileEvent(
+      event({ memo: 'Inv# 05', amount: 8400 }),  // ref='05' != bill's '06'
+      ctxWith([b], [payment({ appliedToBills: [{ billTxnId: 'B1', amount: 8400 }] })]),
+      new Set(),
+    );
+    expect(r.action).toBe('create_bill_then_pay');   // NOT already_done
+    expect(r.billTxnId).toBeUndefined();
+  });
+
   it("skips a bill already claimed by another event in same batch", () => {
     const b = bill({ txnId: 'B-shared', refNumber: 'INV 12', amount: 9625 });
     const claimed = new Set(['B-shared']);

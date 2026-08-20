@@ -2459,13 +2459,18 @@ const TimesheetSystem = () => {
       getAllPayments(supabase),
     ]);
 
-    // Fetch events that need reconciliation: have vendor + kind, and are pending or ready.
-    // We reconcile ready ones too because mirror state changes (new payment arrives)
-    // can flip ready → already_done.
+    // Fetch events that need reconciliation. Include:
+    //   - status IN (pending, ready) — normal reconcile path
+    //   - status='posted' WITH posted_qb_refs.posted_source='qb_probe' —
+    //     events we auto-closed based on mirror state; re-reconcile so that
+    //     a wrong auto-close (e.g. amount-only match on partial-seed mirror)
+    //     self-heals when mirror becomes complete.
+    // Human-pushed events (posted_source='push') stay OUT of scope — they're
+    // final. Ignored/failed also stay out.
     const { data: rows } = await supabase
       .from('qb_ingest_events')
-      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason')
-      .in('status', ['pending', 'ready'])
+      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs')
+      .or('status.in.(pending,ready),and(status.eq.posted,posted_qb_refs->>posted_source.eq.qb_probe)')
       .not('target_qb_txn_kind', 'is', null);
     const events: ReconcilableEvent[] = (rows ?? []).map((r: Record<string, unknown>) => ({
       id: r.id as number,
@@ -2539,7 +2544,12 @@ const TimesheetSystem = () => {
         resolved_reason: nextReason,
         reconciled_at: nowIso,
       };
-      // already_done means QB already settled this event — auto-close.
+      // Status transitions driven by reconciliation:
+      //   pending/ready + already_done → posted (auto-close via qb_probe)
+      //   posted(qb_probe) + NOT already_done → back to pending (self-heal
+      //     when a prior partial-mirror mis-match is corrected)
+      const wasQbProbePosted = event.status === 'posted'
+        && ((currentRow?.posted_qb_refs as Record<string, unknown> | null)?.posted_source === 'qb_probe');
       if (result.action === 'already_done' && event.status !== 'posted') {
         patch.status = 'posted';
         patch.status_updated_at = nowIso;
@@ -2548,6 +2558,12 @@ const TimesheetSystem = () => {
           payment_txn_id: nextPaymentTxnId,
           posted_source: 'qb_probe',
         };
+      } else if (result.action !== 'already_done' && wasQbProbePosted) {
+        // Auto-close was wrong — revert to pending so the accountant sees
+        // the corrected action (pay_existing_bill, create_bill_then_pay, held, ...).
+        patch.status = 'pending';
+        patch.status_updated_at = nowIso;
+        patch.posted_qb_refs = null;
       }
       const { error } = await supabase.from('qb_ingest_events').update(patch).eq('id', event.id);
       if (!error) reconciled++;
