@@ -1178,6 +1178,10 @@ const TimesheetSystem = () => {
   const [qbSyncingBills, setQbSyncingBills] = useState(false);
   // Slice G1 — QBWC heartbeat: most recent qb_wc_sessions.last_seen_at
   const [qbWcLastSeen, setQbWcLastSeen] = useState<string | null>(null);
+  // Slice G1 — count of in-flight bill_query jobs (pending or in_flight status).
+  // Polled every 30s while the QB Automation tab is open + > 0 pending. Falls
+  // to 0 when QBWC finishes draining; UI auto-refreshes snapshot at that point.
+  const [qbBillQueryPending, setQbBillQueryPending] = useState(0);
   // Slice D — vendor mapping widget state
   const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
@@ -2476,44 +2480,102 @@ const TimesheetSystem = () => {
       console.warn('loadQbWcLastSeen failed', e);
     }
   };
-  // Slice G1 — Sync button handler. Enqueues iterator-mode bill_query for
-  // every vendor that has actionable events (kind bill_pmt or bill_add_and_pmt
-  // and not posted/ignored) and hasn't been synced within the last hour.
+  // Slice G1 — count in-flight bill_query jobs. Used to disable the Sync button
+  // and show live progress. Called by the polling effect below.
+  const loadQbBillQueryPending = async () => {
+    try {
+      const { data } = await supabase
+        .from('qb_sync_jobs')
+        .select('id')
+        .eq('kind', 'bill_query')
+        .in('status', ['pending', 'in_flight']);
+      const prev = qbBillQueryPending;
+      const next = (data ?? []).length;
+      setQbBillQueryPending(next);
+      // Transition from >0 → 0 = QBWC just finished draining; refresh snapshot.
+      if (prev > 0 && next === 0) {
+        await loadQbOpenBills();
+        await loadQbWcLastSeen();
+      }
+    } catch (e) {
+      console.warn('loadQbBillQueryPending failed', e);
+    }
+  };
+  // Slice G1 — Sync button handler. Broad seed strategy per Dan's ask:
+  // enqueue iterator-mode bill_query for EVERY QB vendor we care about, not
+  // just event-classified ones. "Care about" =
+  //   (a) any qb_vendor_name set on any payment_profiles row, AND
+  //   (b) any event-resolvable vendor (via mapping or profile chain).
+  // Then filter out vendors that already have a fresh snapshot (< 1h) or an
+  // in-flight bill_query job (dedup lives in enqueueBillQuery).
   const runSyncQbBills = async () => {
     setQbSyncingBills(true);
     try {
-      const actionableEvents = qbIngestEvents.filter(e =>
-        (e.targetQbTxnKind === 'bill_pmt' || e.targetQbTxnKind === 'bill_add_and_pmt')
-        && e.status !== 'posted' && e.status !== 'ignored',
-      );
-      // Resolve vendor NAMES from qbVendorsList (need the string, not just listId).
+      const vendorsByLowerName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
       const vendorNamesByListId = new Map(qbVendorsList.map(v => [v.listId, v.name]));
-      const uniqueVendorNames = Array.from(new Set(
-        actionableEvents
-          .map(e => e.counterpartyQbVendorListId ? vendorNamesByListId.get(e.counterpartyQbVendorListId) : null)
-          .filter((n): n is string => !!n),
-      ));
-      if (uniqueVendorNames.length === 0) {
-        alert('No vendors need syncing — either no actionable events or none have a mapped QB vendor yet.');
+
+      // Set (a): mapped-in-profiles vendors. These are the ~40 contractors
+      // whose qbVendorName we've curated. Resolve to canonical qb_vendors.name
+      // for exact QBWC lookup.
+      const profileVendorNames = new Set<string>();
+      for (const pp of paymentProfiles) {
+        const name = pp.qbVendorName?.trim();
+        if (!name) continue;
+        const canonical = vendorsByLowerName.get(name.toLowerCase())?.name ?? name;
+        profileVendorNames.add(canonical);
+      }
+
+      // Set (b): event-resolvable vendors. Classified events carry a listId
+      // directly; unclassified events with matched_invoice_ids resolve via
+      // invoice → paymentProfile.qbVendorName.
+      const invById = new Map(invoices.map(i => [i.id, i]));
+      const eventVendorNames = new Set<string>();
+      for (const e of qbIngestEvents) {
+        if (e.counterpartyQbVendorListId) {
+          const name = vendorNamesByListId.get(e.counterpartyQbVendorListId);
+          if (name) eventVendorNames.add(name);
+          continue;
+        }
+        // profile-chain resolution
+        if (e.matchedInvoiceIds.length === 0) continue;
+        const inv = invById.get(e.matchedInvoiceIds[0]);
+        const qvn = inv?.paymentProfile?.qbVendorName?.trim();
+        if (!qvn) continue;
+        const canonical = vendorsByLowerName.get(qvn.toLowerCase())?.name;
+        if (canonical) eventVendorNames.add(canonical);
+      }
+
+      const allVendorNames = Array.from(new Set([...profileVendorNames, ...eventVendorNames])).sort();
+      if (allVendorNames.length === 0) {
+        alert('No vendors need syncing — no payment profiles have qb_vendor_name set and no events resolve to a QB vendor.');
         return;
       }
-      // Fresh snapshot to compute stale vendor list.
+
+      // Filter by freshness — skip vendors synced within TTL. Fresh snapshot first.
       await loadQbOpenBills();
       const freshness = snapshotAge(qbOpenBills);
-      const staleVendorListIds = vendorsNeedingSync(
-        actionableEvents.map(e => e.counterpartyQbVendorListId).filter((x): x is string => !!x),
+      const listIdByName = new Map(qbVendorsList.map(v => [v.name, v.listId]));
+      const staleListIds = vendorsNeedingSync(
+        allVendorNames.map(n => listIdByName.get(n)).filter((x): x is string => !!x),
         freshness,
       );
-      const staleNames = staleVendorListIds
+      const staleNames = staleListIds
         .map(id => vendorNamesByListId.get(id))
         .filter((n): n is string => !!n);
-      // Send only stale ones; if user wants everything, they can click again after debounce.
-      const namesToSync = staleNames.length > 0 ? staleNames : uniqueVendorNames;
-      const result = await enqueueBillQueryForVendors(supabase, namesToSync, { auditTag: 'slice-g1-manual-sync' });
+      // If nothing is stale, we're up-to-date — no-op with a helpful message.
+      if (staleNames.length === 0) {
+        alert(`All ${allVendorNames.length} vendors have fresh snapshots (< 1h). Nothing to enqueue.`);
+        return;
+      }
+
+      const result = await enqueueBillQueryForVendors(supabase, staleNames, { auditTag: 'slice-g1-manual-sync' });
+      await loadQbBillQueryPending();  // update pending counter immediately
       alert(
-        `Enqueued ${result.jobIds.length} bill_query job${result.jobIds.length === 1 ? '' : 's'}`
+        `Enqueued ${result.jobIds.length} bill_query job${result.jobIds.length === 1 ? '' : 's'} `
+        + `across ${staleNames.length} vendor${staleNames.length === 1 ? '' : 's'}`
         + (result.skippedInFlight.length > 0 ? `; skipped ${result.skippedInFlight.length} already in flight` : '')
-        + `. QBWC will drain on next poll (~15 min). Come back and click Refresh to see snapshot update.`,
+        + `. QBWC will drain over the next ~${Math.max(15, Math.ceil(staleNames.length * 15 / 8))} min at 15-min poll cadence. `
+        + `This UI will update automatically as they complete.`,
       );
     } catch (e) {
       // Supabase errors come as { message, details, hint, code } — String(e)
@@ -2537,6 +2599,7 @@ const TimesheetSystem = () => {
       await loadQbVendorsAndAccounts();
       await loadQbOpenBills();
       await loadQbWcLastSeen();
+      await loadQbBillQueryPending();
       // Auto-recompute matches for pending events using current invoices.
       // Guarded — skips silently if invoices state is empty (see the guard in
       // recomputeMatchesForPending). The invoices.length dependency below
@@ -2558,6 +2621,18 @@ const TimesheetSystem = () => {
     // matches actually change) so re-firing on later invoice changes is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountantTab, currentUser?.role, invoices.length]);
+
+  // Slice G1 — poll qb_sync_jobs while on the QB Automation tab AND there are
+  // pending bill_query jobs. 30s cadence — QBWC drains every 15 min so this
+  // just tracks whether the queue is empty (=> ready to refresh snapshot).
+  useEffect(() => {
+    if (accountantTab !== 'qb-automation') return;
+    if (currentUser?.role !== 'accountant') return;
+    if (qbBillQueryPending === 0) return;   // nothing pending → no need to poll
+    const iv = setInterval(() => { loadQbBillQueryPending(); }, 30_000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountantTab, currentUser?.role, qbBillQueryPending]);
 
   // Slice D — save a vendor mapping and apply it to all pending events with the same counterparty.
   const openMapWidget = (counterparty: string, source: string) => {
@@ -9964,6 +10039,13 @@ const TimesheetSystem = () => {
                             : `QBWC delayed · last seen ${humanizeAge(qbWcLastSeen)}`;
                       const qbwcColor = qbwcDown ? 'text-red-700' : (qbwcAlive ? 'text-green-700' : 'text-amber-700');
 
+                      const syncPending = qbBillQueryPending > 0;
+                      const syncDisabled = qbSyncingBills || syncPending;
+                      const syncLabel = qbSyncingBills
+                        ? 'Enqueuing…'
+                        : syncPending
+                          ? `Syncing… ${qbBillQueryPending} pending`
+                          : 'Sync QB state';
                       return (
                         <div className="flex flex-col items-end gap-0.5 text-xs">
                           <div className="flex items-center gap-2">
@@ -9972,11 +10054,15 @@ const TimesheetSystem = () => {
                             </span>
                             <button
                               onClick={runSyncQbBills}
-                              disabled={qbSyncingBills}
-                              className="text-indigo-600 hover:underline disabled:opacity-50"
-                              title="Enqueue bill_query jobs for actionable vendors. QBWC drains on next poll (~15 min)."
+                              disabled={syncDisabled}
+                              className={syncDisabled
+                                ? 'text-gray-400 cursor-not-allowed'
+                                : 'text-indigo-600 hover:underline'}
+                              title={syncPending
+                                ? `${qbBillQueryPending} bill_query job${qbBillQueryPending === 1 ? '' : 's'} still draining via QBWC. Wait for them to complete before enqueueing more.`
+                                : 'Enqueue bill_query jobs for all mapped vendors that need refresh. QBWC drains on next poll (~15 min).'}
                             >
-                              {qbSyncingBills ? 'Enqueuing…' : 'Sync QB state'}
+                              {syncLabel}
                             </button>
                           </div>
                           <div className={qbwcColor}>
