@@ -25,7 +25,8 @@ export type QbResolvedAction =
   | 'pay_existing_bill'
   | 'create_bill_then_pay'
   | 'check'
-  | 'held';
+  | 'held'
+  | 'pre_our_system';   // Slice G4d: predates cutoff; QB handled manually, we skip
 
 export type QbIngestKind = 'bill_pmt' | 'bill_add_and_pmt' | 'check' | 'ignore';
 
@@ -63,6 +64,10 @@ export interface MirrorPayment {
 export interface ReconcileContext {
   billsByVendor: Map<string, MirrorBill[]>;
   paymentsByVendor: Map<string, MirrorPayment[]>;
+  /** ISO date. Events with txn_date < cutoff → action='pre_our_system' and skip.
+   *  Undefined = no cutoff applied. Per-source config lives outside this pure
+   *  module (see src/lib/intuit/config.ts for the Intuit value). */
+  preOurSystemCutoff?: string;
 }
 
 // ─── Output ───────────────────────────────────────────────────────────────────
@@ -170,6 +175,14 @@ export function reconcileEvent(
   ctx: ReconcileContext,
   claimedBillTxnIds: Set<string>,   // bills already reserved by another event in this batch
 ): ReconciliationResult {
+  // Pre-our-system cutoff (Slice G4d) — mirrors [[matcher-ignore]] pattern.
+  // Skip terminal-outcome reconciliation for events QB already handled before
+  // we came online. Runs BEFORE vendor/kind guardrails because the cutoff
+  // decision doesn't depend on whether we've classified the counterparty.
+  if (ctx.preOurSystemCutoff && event.txnDate < ctx.preOurSystemCutoff) {
+    return { action: 'pre_our_system', reason: `txn_date < ${ctx.preOurSystemCutoff}` };
+  }
+
   // Guardrails: unresolved kind/vendor → held
   if (!event.counterpartyQbVendorListId) {
     return { action: 'held', reason: 'no QB vendor mapped' };

@@ -23,7 +23,8 @@ export type QbResolvedAction =
   | 'pay_existing_bill'
   | 'create_bill_then_pay'
   | 'check'
-  | 'held';
+  | 'held'
+  | 'pre_our_system';
 
 export interface PreviewEvent {
   id: number;
@@ -63,7 +64,9 @@ interface Props {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ACTION_LABEL: Record<Exclude<QbResolvedAction, 'held'>, string> = {
+// Only the actions rendered as expandable Ready-group headers need labels here.
+// held + pre_our_system have their own dedicated sections below.
+const ACTION_LABEL: Record<Exclude<QbResolvedAction, 'held' | 'pre_our_system'>, string> = {
   already_done: 'Already done in QB (auto-closed)',
   pay_existing_bill: 'Pay existing Bill',
   create_bill_then_pay: 'Create Bill + Pay Bill',
@@ -122,10 +125,11 @@ interface Partition {
   heldBack: PreviewEvent[];             // resolvedAction='held' OR null (and status='pending')
   ignored: PreviewEvent[];              // status='ignored' OR resolvedAction='held' with targetQbTxnKind='ignore'
   postedByPush: PreviewEvent[];         // status='posted' with posted_source!='qb_probe' (previously pushed by us)
+  preOurSystem: PreviewEvent[];         // resolvedAction='pre_our_system' — QB handled manually before we came online
 }
 
 function partition(events: PreviewEvent[]): Partition {
-  const p: Partition = { autoClosed: [], ready: [], heldBack: [], ignored: [], postedByPush: [] };
+  const p: Partition = { autoClosed: [], ready: [], heldBack: [], ignored: [], postedByPush: [], preOurSystem: [] };
   for (const e of events) {
     const postedSource = (e.postedQbRefs as Record<string, unknown> | null)?.posted_source as string | undefined;
     if (e.status === 'posted') {
@@ -133,6 +137,7 @@ function partition(events: PreviewEvent[]): Partition {
       else p.postedByPush.push(e);
       continue;
     }
+    if (e.resolvedAction === 'pre_our_system') { p.preOurSystem.push(e); continue; }
     if (e.status === 'ignored' || e.targetQbTxnKind === 'ignore') { p.ignored.push(e); continue; }
     if (e.resolvedAction === 'already_done') { p.autoClosed.push(e); continue; }
     if (isReady(e)) { p.ready.push(e); continue; }
@@ -169,7 +174,7 @@ export default function QbPushPreviewModal({
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     heldBack: true, pay_existing_bill: false, create_bill_then_pay: false, check: false,
-    autoClosed: false, ignored: false, postedByPush: false,
+    autoClosed: false, ignored: false, postedByPush: false, preOurSystem: false,
   });
   const toggle = (k: string) => setExpanded(prev => ({ ...prev, [k]: !prev[k] }));
 
@@ -179,8 +184,9 @@ export default function QbPushPreviewModal({
 
   if (!open) return null;
 
-  const readyGroups: Array<{ action: Exclude<QbResolvedAction, 'held' | 'already_done'>; events: PreviewEvent[] }> = (
-    ['pay_existing_bill', 'create_bill_then_pay', 'check'] as Array<Exclude<QbResolvedAction, 'held' | 'already_done'>>
+  type PushableAction = Exclude<QbResolvedAction, 'held' | 'already_done' | 'pre_our_system'>;
+  const readyGroups: Array<{ action: PushableAction; events: PreviewEvent[] }> = (
+    ['pay_existing_bill', 'create_bill_then_pay', 'check'] as PushableAction[]
   ).map(a => ({ action: a, events: parts.ready.filter(e => e.resolvedAction === a) }))
    .filter(g => g.events.length > 0);
 
@@ -273,7 +279,7 @@ export default function QbPushPreviewModal({
           )}
 
           {/* Empty state */}
-          {readyGroups.length === 0 && parts.heldBack.length === 0 && parts.ignored.length === 0 && parts.autoClosed.length === 0 && parts.postedByPush.length === 0 && (
+          {readyGroups.length === 0 && parts.heldBack.length === 0 && parts.ignored.length === 0 && parts.autoClosed.length === 0 && parts.postedByPush.length === 0 && parts.preOurSystem.length === 0 && (
             <div className="p-6 text-center text-sm text-gray-500 border border-dashed border-gray-300 rounded-lg">
               Nothing to push right now.
             </div>
@@ -395,6 +401,36 @@ export default function QbPushPreviewModal({
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Pre-our-system — QB handled manually before we existed */}
+          {parts.preOurSystem.length > 0 && (
+            <div className="border border-gray-200 rounded-lg overflow-hidden bg-gray-50/50">
+              <button onClick={() => toggle('preOurSystem')} className="w-full flex items-center justify-between px-4 py-2 hover:bg-gray-100 text-left text-sm">
+                <div className="text-gray-600">
+                  <span className="font-medium">Pre-our-system (handled directly in QB):</span>{' '}
+                  <span className="text-xs">
+                    {parts.preOurSystem.length} event{parts.preOurSystem.length === 1 ? '' : 's'} · {money(parts.preOurSystem.reduce((n, e) => n + e.amount, 0))}
+                  </span>
+                </div>
+                <span className="text-xs text-gray-400">{expanded.preOurSystem ? '▼' : '▶'}</span>
+              </button>
+              {expanded.preOurSystem && (
+                <div className="px-4 py-2">
+                  <p className="text-xs text-gray-500 italic mb-1">
+                    These predate our confidence window — accountant already reconciled them manually in QB. Never pushed.
+                  </p>
+                  <ul className="text-xs text-gray-600 space-y-0.5">
+                    {parts.preOurSystem.map(e => (
+                      <li key={e.id} className="flex justify-between">
+                        <span>{e.txnDate} · {e.counterpartyRaw} · <span className="text-gray-400">{e.memo}</span></span>
+                        <span className="font-mono">{money(e.amount)}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>

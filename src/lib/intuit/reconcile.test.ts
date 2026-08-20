@@ -277,6 +277,72 @@ describe('reconcileBatch — claim reservation', () => {
   });
 });
 
+// ─── Pre-our-system cutoff (Slice G4d) ──────────────────────────────────────
+
+describe('preOurSystemCutoff', () => {
+  const ctxCutoff = (bills: MirrorBill[], cutoff: string): ReconcileContext => ({
+    billsByVendor: new Map([[VENDOR, bills]]),
+    paymentsByVendor: new Map(),
+    preOurSystemCutoff: cutoff,
+  });
+
+  it("action='pre_our_system' when event.txnDate < cutoff", () => {
+    const r = reconcileEvent(
+      event({ txnDate: '2026-02-02' }),
+      ctxCutoff([bill()], '2026-06-01'),
+      new Set(),
+    );
+    expect(r.action).toBe('pre_our_system');
+    expect(r.reason).toContain('2026-06-01');
+    expect(r.billTxnId).toBeUndefined();
+  });
+
+  it("cutoff does NOT trigger when event.txnDate >= cutoff (normal reconcile path)", () => {
+    const b = bill({ isPaid: false });
+    const r = reconcileEvent(
+      event({ txnDate: '2026-06-15' }),  // after cutoff
+      ctxCutoff([b], '2026-06-01'),
+      new Set(),
+    );
+    expect(r.action).toBe('pay_existing_bill');
+  });
+
+  it("no cutoff (undefined) skips the pre_our_system branch", () => {
+    const r = reconcileEvent(
+      event({ txnDate: '2026-02-02' }),
+      ctxWith([bill({ isPaid: false })]),
+      new Set(),
+    );
+    expect(r.action).toBe('pay_existing_bill');   // no cutoff = normal path
+  });
+
+  it("cutoff runs BEFORE vendor/kind guardrails (even unmapped events skip)", () => {
+    const r = reconcileEvent(
+      event({ txnDate: '2026-02-02', counterpartyQbVendorListId: null }),
+      ctxCutoff([], '2026-06-01'),
+      new Set(),
+    );
+    expect(r.action).toBe('pre_our_system');   // NOT 'held' for unmapped vendor
+  });
+
+  it('batch: mixed pre-cutoff and post-cutoff events', () => {
+    const b = bill({ txnId: 'BILL-12', refNumber: 'INV 12', amount: 9625, isPaid: false });
+    const events = [
+      event({ id: 1, txnDate: '2026-02-01', memo: 'Inv# 5' }),  // pre-cutoff
+      event({ id: 2, txnDate: '2026-07-01', memo: 'Inv# 12' }),  // post-cutoff, matches
+      event({ id: 3, txnDate: '2026-08-01', memo: 'Inv# 999' }),  // post-cutoff, no match
+    ];
+    const results = reconcileBatch(events, {
+      billsByVendor: new Map([[VENDOR, [b]]]),
+      paymentsByVendor: new Map(),
+      preOurSystemCutoff: '2026-06-01',
+    });
+    expect(results.find(r => r.event.id === 1)!.result.action).toBe('pre_our_system');
+    expect(results.find(r => r.event.id === 2)!.result.action).toBe('pay_existing_bill');
+    expect(results.find(r => r.event.id === 3)!.result.action).toBe('create_bill_then_pay');
+  });
+});
+
 // ─── Vendor-scoped correctness ───────────────────────────────────────────────
 
 describe('vendor scoping', () => {
