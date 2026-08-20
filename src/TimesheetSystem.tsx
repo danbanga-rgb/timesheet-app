@@ -2389,8 +2389,26 @@ const TimesheetSystem = () => {
     }));
     if (events.length === 0) return { classified: 0, seeded: 0 };
 
+    // Invoice.paymentProfile is a JSONB SNAPSHOT taken at invoice creation.
+    // If qbVendorName was set on the profile AFTER the invoice was created,
+    // the snapshot won't have it. Fall back to the LIVE payment_profiles row
+    // via userId lookup. Fixed 2026-08-20 after Slice G5 seed exposed this
+    // (Mek/Sivakumar/Ravi profiles had qbVendorName set live but invoices
+    // #60/#188/etc had NULL in the snapshot → classifier couldn't classify).
+    const liveVendorNameByUserId = new Map<string, string>();
+    for (const pp of paymentProfiles) {
+      const name = pp.qbVendorName?.trim();
+      if (!name) continue;
+      // Prefer default profile; else first-set-wins
+      if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) {
+        liveVendorNameByUserId.set(pp.userId, name);
+      }
+    }
     const invoicesById = new Map<number, ClassifiableInvoice>(
-      invoices.map(i => [i.id, { id: i.id, paymentProfileQbVendorName: i.paymentProfile?.qbVendorName ?? null }]),
+      invoices.map(i => [i.id, {
+        id: i.id,
+        paymentProfileQbVendorName: i.paymentProfile?.qbVendorName ?? liveVendorNameByUserId.get(i.userId) ?? null,
+      }]),
     );
     const vendorsByLowerName = new Map(vendorRows.map(v => [v.name.toLowerCase().trim(), { listId: v.list_id, name: v.name }]));
     const bankAccount = resolveBankAccount(accountRows.map(a => ({ listId: a.list_id, fullName: a.full_name })));
