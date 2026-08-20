@@ -2324,14 +2324,18 @@ const TimesheetSystem = () => {
   const applyClassificationPass = async (): Promise<{ classified: number; seeded: number; skipReason?: string }> => {
     if (invoices.length === 0) return { classified: 0, seeded: 0, skipReason: 'invoices-not-loaded' };
 
+    // .range(0, 4999) — PostgREST default cap is 1000. qb_vendors has 1165+ rows;
+    // without an explicit range Yara/late-alphabetical vendors get silently dropped
+    // and their events stay held-back forever. Same rule as [[feedback-no-hardcoded-cutoff]].
     const [pendingRes, vendorsRes, accountsRes, mappingsRes] = await Promise.all([
       supabase
         .from('qb_ingest_events')
         .select('id, source, counterparty_raw, matched_invoice_ids, status, counterparty_qb_vendor_list_id, target_qb_txn_kind, qb_bank_account_list_id, qb_expense_account_list_id')
-        .eq('status', 'pending'),
-      supabase.from('qb_vendors').select('list_id, name'),
-      supabase.from('qb_accounts').select('list_id, full_name, account_type'),
-      supabase.from('qb_vendor_mappings').select('*'),
+        .eq('status', 'pending')
+        .range(0, 4999),
+      supabase.from('qb_vendors').select('list_id, name').range(0, 4999),
+      supabase.from('qb_accounts').select('list_id, full_name, account_type').range(0, 4999),
+      supabase.from('qb_vendor_mappings').select('*').range(0, 4999),
     ]);
 
     const vendorRows = (vendorsRes.data ?? []) as Array<{ list_id: string; name: string }>;
@@ -2425,14 +2429,17 @@ const TimesheetSystem = () => {
   };
   const loadQbVendorsAndAccounts = async () => {
     // Lists rarely change during a session — only fetch if empty.
+    // .range(0, 4999) — qb_vendors is 1165+ rows and PostgREST default cap is
+    // 1000, silently dropping the alphabetical tail (e.g. Yara). See
+    // [[feedback-no-hardcoded-cutoff]].
     if (qbVendorsList.length === 0) {
-      const { data } = await supabase.from('qb_vendors').select('list_id, name, is_active').order('name');
+      const { data } = await supabase.from('qb_vendors').select('list_id, name, is_active').order('name').range(0, 4999);
       setQbVendorsList((data ?? []).map((r: Record<string, unknown>) => ({
         listId: (r.list_id as string) ?? '', name: (r.name as string) ?? '', isActive: Boolean(r.is_active),
       })));
     }
     if (qbAccountsList.length === 0) {
-      const { data } = await supabase.from('qb_accounts').select('list_id, full_name, account_type, is_active').order('full_name');
+      const { data } = await supabase.from('qb_accounts').select('list_id, full_name, account_type, is_active').order('full_name').range(0, 4999);
       setQbAccountsList((data ?? []).map((r: Record<string, unknown>) => ({
         listId: (r.list_id as string) ?? '', fullName: (r.full_name as string) ?? '', accountType: (r.account_type as string) ?? '', isActive: Boolean(r.is_active),
       })));

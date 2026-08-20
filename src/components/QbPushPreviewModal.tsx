@@ -122,13 +122,15 @@ function partition(events: PreviewEvent[]) {
 
 // Sub-group ignored/held events by (source, counterparty_raw) — same shape
 // Slice C uses in the pending group at TimesheetSystem.tsx:9773.
-function groupByCounterparty<T>(items: T[], keyOf: (t: T) => { source: string; counterparty: string }) {
+// keyOf returns identity + amount so we can accumulate totals per group.
+function groupByCounterparty<T>(items: T[], keyOf: (t: T) => { source: string; counterparty: string; amount: number }) {
   const m = new Map<string, { source: string; counterparty: string; items: T[]; total: number }>();
   for (const t of items) {
-    const { source, counterparty } = keyOf(t);
+    const { source, counterparty, amount } = keyOf(t);
     const k = `${source}||${counterparty}`;
     const cur = m.get(k) ?? { source, counterparty, items: [], total: 0 };
     cur.items.push(t);
+    cur.total += amount;
     m.set(k, cur);
   }
   return [...m.values()].sort((a, b) => a.counterparty.localeCompare(b.counterparty));
@@ -238,7 +240,7 @@ export default function QbPushPreviewModal({
                   </p>
                   <ul className="space-y-1.5">
                     {groupByCounterparty(heldBack, x => ({
-                      source: x.event.source, counterparty: x.event.counterpartyRaw,
+                      source: x.event.source, counterparty: x.event.counterpartyRaw, amount: x.event.amount,
                     })).map(grp => {
                       const uniqueReasons = Array.from(new Set(
                         grp.items.flatMap(x => x.reasons),
@@ -368,7 +370,7 @@ export default function QbPushPreviewModal({
                   <span className="text-xs">
                     {(() => {
                       const grp = groupByCounterparty(ignored, e => ({
-                        source: e.source, counterparty: e.counterpartyRaw,
+                        source: e.source, counterparty: e.counterpartyRaw, amount: e.amount,
                       }));
                       return grp
                         .map(g => `${g.counterparty} × ${g.items.length}`)
