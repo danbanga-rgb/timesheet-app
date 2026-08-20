@@ -285,6 +285,41 @@ async function persistJobResponse(
     if (isIteratorMode) {
       console.log(`[bill_query iterator job=${job.id} vendor="${payload.entityVendorName}"] results=${parsed.results.length} linked=${linked} skipped_unmapped_vendor=${skippedUnmappedVendor} skipped_unknown_invoice=${skippedUnknownInvoice}`);
     }
+
+    // qbStateSync mirror — upsert every BillRet into qb_open_bills_snapshot for
+    // Slice G1 reconciliation. Runs alongside the invoice-linkage above (which
+    // stays for Convera backward compat). Skips rows missing the required
+    // snapshot fields (older QB responses may not include OpenAmount/IsPaid,
+    // in which case they can't be reconciled reliably — safer to omit than lie).
+    const snapshotRows = parsed.results
+      .filter(r => r.vendorListId && r.vendorFullName && r.amount != null && r.openAmount != null && r.isPaid != null)
+      .map(r => ({
+        vendor_list_id: r.vendorListId!,
+        vendor_name: r.vendorFullName!,
+        ref_number: r.refNumber,
+        txn_id: r.txnId,
+        txn_date: r.txnDate ?? null,
+        due_date: r.dueDate ?? null,
+        amount: r.amount!,
+        open_amount: r.openAmount!,
+        is_paid: r.isPaid!,
+        queried_at: new Date().toISOString(),
+      }));
+    if (snapshotRows.length > 0) {
+      const { error: snapErr } = await supabase
+        .from('qb_open_bills_snapshot')
+        .upsert(snapshotRows, { onConflict: 'vendor_list_id,ref_number,txn_id' });
+      if (snapErr) {
+        // Do NOT fail the job on snapshot upsert failure — the invoice-linkage
+        // (Convera-critical) already succeeded above. Log for investigation.
+        console.warn(`[bill_query job=${job.id}] snapshot upsert failed:`, snapErr.message);
+      } else {
+        console.log(`[bill_query job=${job.id}] snapshot upserted ${snapshotRows.length} rows`);
+      }
+    } else if (parsed.results.length > 0) {
+      console.log(`[bill_query job=${job.id}] snapshot skipped — no BillRets had complete open-amount/is-paid fields`);
+    }
+
     return { ok: true, errorMsg: null };
   }
 

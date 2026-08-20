@@ -136,7 +136,39 @@ describe('parseBillQueryRs', () => {
       txnId: '12006-1196864828',
       editSequence: '1234567890',
       refNumber: 'INV 178329594109',
+      txnDate: '2026-05-31',
+      timeModified: '2026-05-31T12:00:00-08:00',
+      amount: 1050,
+      isPaid: false,
     });
+  });
+
+  it('extracts openAmount and isPaid=true for a fully-paid bill', () => {
+    const env = wrap([
+      '  <BillRet>',
+      '    <TxnID>41726-1786742647</TxnID>',
+      '    <TimeCreated>2026-08-14T14:24:07-08:00</TimeCreated>',
+      '    <TimeModified>2026-08-17T12:24:08-08:00</TimeModified>',
+      '    <EditSequence>1786742647</EditSequence>',
+      '    <VendorRef><ListID>V1</ListID><FullName>Native Team Ltd. - Marta Susek</FullName></VendorRef>',
+      '    <TxnDate>2026-06-30</TxnDate>',
+      '    <DueDate>2026-07-30</DueDate>',
+      '    <AmountDue>2400.00</AmountDue>',
+      '    <RefNumber>INV 226/1/1</RefNumber>',
+      '    <IsPaid>true</IsPaid>',
+      '    <OpenAmount>0.00</OpenAmount>',
+      '  </BillRet>',
+    ].join('\n'));
+    const parsed = parseBillQueryRs(env);
+    expect(parsed.results).toHaveLength(1);
+    const r = parsed.results[0];
+    expect(r.amount).toBe(2400);
+    expect(r.openAmount).toBe(0);
+    expect(r.isPaid).toBe(true);
+    expect(r.dueDate).toBe('2026-07-30');
+    expect(r.timeModified).toBe('2026-08-17T12:24:08-08:00');
+    expect(r.vendorFullName).toBe('Native Team Ltd. - Marta Susek');
+    expect(r.vendorListId).toBe('V1');
   });
 
   it('extracts multiple BillRet blocks in document order', () => {

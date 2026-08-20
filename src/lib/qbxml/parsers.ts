@@ -322,16 +322,36 @@ export function parseBillQueryRs(xml: string): ParsedBillQueryRs {
     const txnId = getLeafText(cleaned, 'TxnID');
     const editSequence = getLeafText(cleaned, 'EditSequence');
     const refNumber = getLeafText(cleaned, 'RefNumber');
-    // Pull VendorRef.FullName from the ORIGINAL block (VendorRef is stripped in `cleaned`
-    // to avoid FullName collisions; we need it back for MULTI-YYYY-MM persist logic).
+    // Pull VendorRef.FullName + ListID from the ORIGINAL block (VendorRef is stripped
+    // in `cleaned` to avoid FullName collisions; we need it back for MULTI-YYYY-MM
+    // persist logic and for qb_open_bills_snapshot's vendor_list_id PK.
     const vendorRefBlock = getAllBlocks(block, 'VendorRef')[0];
     const vendorFullName = vendorRefBlock ? getLeafText(vendorRefBlock, 'FullName') : null;
+    const vendorListId = vendorRefBlock ? getLeafText(vendorRefBlock, 'ListID') : null;
+    // Fields needed for the qb_open_bills_snapshot mirror (Slice G1). Optional
+    // on the type so consumers not depending on them (Convera flow) keep working.
+    const txnDate = getLeafText(cleaned, 'TxnDate');
+    const dueDate = getLeafText(cleaned, 'DueDate');
+    const timeModified = getLeafText(cleaned, 'TimeModified');
+    const amountStr = getLeafText(cleaned, 'AmountDue');
+    const openAmountStr = getLeafText(cleaned, 'OpenAmount');
+    const isPaidStr = getLeafText(cleaned, 'IsPaid');
+    const amount = amountStr != null ? Number(amountStr) : undefined;
+    const openAmount = openAmountStr != null ? Number(openAmountStr) : undefined;
+    const isPaid = isPaidStr === 'true' ? true : (isPaidStr === 'false' ? false : undefined);
     if (txnId != null && editSequence != null && refNumber != null) {
       results.push({
         txnId,
         editSequence,
         refNumber,
         ...(vendorFullName != null ? { vendorFullName } : {}),
+        ...(vendorListId != null ? { vendorListId } : {}),
+        ...(txnDate != null ? { txnDate } : {}),
+        ...(dueDate != null ? { dueDate } : {}),
+        ...(timeModified != null ? { timeModified } : {}),
+        ...(amount != null && !Number.isNaN(amount) ? { amount } : {}),
+        ...(openAmount != null && !Number.isNaN(openAmount) ? { openAmount } : {}),
+        ...(isPaid != null ? { isPaid } : {}),
       });
     }
   }
