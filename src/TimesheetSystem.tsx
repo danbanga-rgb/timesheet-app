@@ -10180,7 +10180,20 @@ const TimesheetSystem = () => {
             // total pending QB work per contractor, not just Intuit payment events.
             // Matches invoice.paymentProfile.qbVendorName → vendor listId → any
             // bill in qbOpenBills with normalizeRef(refNumber) === normalizeRef(invoice_number).
+            //
+            // The invoice.paymentProfile is a JSONB snapshot at invoice creation, so
+            // qbVendorName can be stale if the accountant added it to the profile after
+            // the invoice was created. Fall back to the live payment_profiles row per
+            // userId — same pattern as applyClassificationPass (fix 4e1c7da).
             const vendorByName = new Map(qbVendorsList.map(v => [v.name, v]));
+            const liveVendorNameByUserId = new Map<string, string>();
+            for (const pp of paymentProfiles) {
+              const name = pp.qbVendorName?.trim();
+              if (!name) continue;
+              if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) {
+                liveVendorNameByUserId.set(pp.userId, name);
+              }
+            }
             type MissingBill = {
               invoice: Invoice;
               paymentPath: string;
@@ -10191,7 +10204,9 @@ const TimesheetSystem = () => {
               .filter(inv => inv.status === 'approved')
               .filter(inv => (inv.periodEnd || '') >= INTUIT_PRE_OUR_SYSTEM_CUTOFF)
               .map((inv): MissingBill | null => {
-                const qbVendorName = inv.paymentProfile?.qbVendorName ?? null;
+                const snapshotName = inv.paymentProfile?.qbVendorName?.trim() || null;
+                const liveName = liveVendorNameByUserId.get(inv.userId) || null;
+                const qbVendorName = snapshotName ?? liveName;
                 const vendor = qbVendorName ? vendorByName.get(qbVendorName) : undefined;
                 const vendorListId = vendor?.listId ?? null;
                 const invRef = normalizeRef(inv.invoiceNumber);
