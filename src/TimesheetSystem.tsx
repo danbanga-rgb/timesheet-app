@@ -10168,13 +10168,17 @@ const TimesheetSystem = () => {
             // Read-only Inbox — Slice C of QB Automation Layer.
             // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
             // that arrives with Slice F (preview modal) and Slice G (real enqueue).
-            const invById = new Map(invoices.map(i => [i.id, i]));
             const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual' }[s] || s);
+            // Reconciler bill lookup by TxnID for the "Resolved" column (replaces the
+            // legacy matched_invoice_ids display, which over-matched by amount alone).
+            const billByTxnId = new Map(qbOpenBills.map(b => [b.txnId, b]));
+            const isPreOur = (e: QbIngestEvent) => e.resolvedAction === 'pre_our_system';
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
               { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
-              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored') },
-              { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored') },
-              { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored') },
+              { key: 'pre_our_system',   title: 'Pre-our-system (handled in QB)', hint: `Predate our confidence window (< ${INTUIT_PRE_OUR_SYSTEM_CUTOFF} for Intuit). Accountant reconciled these manually in QB; never pushed.`, events: qbIngestEvents.filter(isPreOur) },
+              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: 'Deliberately never pushed. Advance-payment cases (US Signature) or retired vendors (CLOUDYGON).',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
               { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: qbIngestEvents.filter(e => e.status === 'posted') },
             ];
@@ -10451,13 +10455,30 @@ const TimesheetSystem = () => {
                                   <th className="px-3 py-1.5 text-left">Counterparty</th>
                                   <th className="px-3 py-1.5 text-right">Amount</th>
                                   <th className="px-3 py-1.5 text-left">Memo</th>
-                                  <th className="px-3 py-1.5 text-left">Matched invoices</th>
+                                  <th className="px-3 py-1.5 text-left" title="Reconciler decision — authoritative for push. Old amount-only matcher output removed 2026-08-21.">Resolved</th>
                                   <th className="px-3 py-1.5 text-left">Status</th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {g.events.map(e => {
-                                  const invLinks = e.matchedInvoiceIds.map(id => invById.get(id)).filter(Boolean);
+                                  const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
+                                  const badge = (bg: string, fg: string, text: string, title?: string) => (
+                                    <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
+                                  );
+                                  let resolvedCell: React.ReactNode = <span className="text-gray-400">—</span>;
+                                  if (e.resolvedAction === 'pre_our_system') {
+                                    resolvedCell = badge('bg-gray-100', 'text-gray-500', 'pre-cutoff · in QB', e.resolvedReason ?? undefined);
+                                  } else if (e.resolvedAction === 'already_done') {
+                                    resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid', e.resolvedBillTxnId ?? undefined);
+                                  } else if (e.resolvedAction === 'pay_existing_bill') {
+                                    resolvedCell = badge('bg-yellow-100', 'text-yellow-700', resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill', e.resolvedBillTxnId ?? undefined);
+                                  } else if (e.resolvedAction === 'create_bill_then_pay') {
+                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will create bill + pay');
+                                  } else if (e.resolvedAction === 'check') {
+                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will write check');
+                                  } else if (e.resolvedAction === 'held') {
+                                    resolvedCell = badge('bg-red-100', 'text-red-700', 'held', e.resolvedReason ?? undefined);
+                                  }
                                   return (
                                     <tr key={e.id} className="border-t border-gray-100 hover:bg-indigo-50/40">
                                       <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
@@ -10465,11 +10486,7 @@ const TimesheetSystem = () => {
                                       <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
                                       <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
                                       <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
-                                      <td className="px-3 py-1.5">
-                                        {invLinks.length === 0
-                                          ? <span className="text-gray-400">—</span>
-                                          : invLinks.map(i => <span key={i!.id} className="inline-block mr-1 px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[10px] font-mono">{i!.invoiceNumber}</span>)}
-                                      </td>
+                                      <td className="px-3 py-1.5">{resolvedCell}</td>
                                       <td className="px-3 py-1.5"><span className="text-gray-500">{e.status}</span></td>
                                     </tr>
                                   );
