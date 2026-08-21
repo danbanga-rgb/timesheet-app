@@ -194,24 +194,167 @@ function intentToJob(intent: WriteIntent): { kind: JobKind; payload: Record<stri
 
 // ─── Enqueue path ───────────────────────────────────────────────────────────
 
+// ─── Idempotency (INVARIANTS #18 + #19) ────────────────────────────────────
+//
+// Every intent carries a source_ref back to the domain row that spawned it:
+//   pay_bill (Convera)  → convera_transactions.id via sourceConveraTxnId
+//   pay_bill (Intuit)   → qb_ingest_events.id     via sourceIngestEventId
+//   create_bill         → invoices.id[]           via sourceInvoiceIds
+//   check_expense       → qb_ingest_events.id     via sourceIngestEventId
+//
+// Two dedup layers:
+//   ALREADY DONE    — the QB write has already succeeded (domain row records it)
+//   ALREADY IN-FLIGHT — a qb_sync_jobs row for this source_ref is pending or
+//                       in_flight (draining right now)
+//
+// Either one → skippedDuplicate (not rejected — not an error, just a no-op).
+// This is the same class of protection that stopped the 2026-08-14 silent-no-op
+// bug (missing source_ref) and closes the "spam-click Push" race.
+
+interface IdempotencyKey {
+  index: number;
+  intent: WriteIntent;
+  kind: JobKind;
+  payload: Record<string, unknown>;
+}
+
+async function findDuplicates(supabase: SB, candidates: IdempotencyKey[]): Promise<Map<number, string>> {
+  const dupReason = new Map<number, string>();
+  if (candidates.length === 0) return dupReason;
+
+  // ─── Collect the source_refs we care about, per kind ───
+  const converaTxnIds = new Set<number>();     // Convera pay_bill
+  const ingestEventIdsPay = new Set<number>(); // Intuit pay_bill
+  const ingestEventIdsCheck = new Set<number>(); // check_expense
+  const invoiceIds = new Set<number>();        // create_bill
+
+  for (const c of candidates) {
+    if (c.intent.kind === 'pay_bill' && c.intent.sourceConveraTxnId != null) converaTxnIds.add(c.intent.sourceConveraTxnId);
+    if (c.intent.kind === 'pay_bill' && c.intent.sourceIngestEventId != null) ingestEventIdsPay.add(c.intent.sourceIngestEventId);
+    if (c.intent.kind === 'check_expense') ingestEventIdsCheck.add(c.intent.sourceIngestEventId);
+    if (c.intent.kind === 'create_bill') c.intent.sourceInvoiceIds.forEach(id => invoiceIds.add(id));
+  }
+
+  // ─── Layer 1: ALREADY-DONE domain checks ───
+  //
+  // Convera pay_bill: link table entry already exists for (convera_transaction, qb_vendor)
+  if (converaTxnIds.size > 0) {
+    const { data } = await supabase
+      .from('convera_transaction_billpmts')
+      .select('convera_transaction_id, qb_vendor_name')
+      .in('convera_transaction_id', Array.from(converaTxnIds));
+    const paidPairs = new Set<string>();
+    for (const r of (data ?? []) as Array<{ convera_transaction_id: number; qb_vendor_name: string }>) {
+      paidPairs.add(`${r.convera_transaction_id}::${r.qb_vendor_name}`);
+    }
+    for (const c of candidates) {
+      if (c.intent.kind !== 'pay_bill' || c.intent.sourceConveraTxnId == null) continue;
+      const key = `${c.intent.sourceConveraTxnId}::${c.intent.payeeVendorName}`;
+      if (paidPairs.has(key)) {
+        dupReason.set(c.index, `already-done: convera_transaction_billpmts has (${c.intent.sourceConveraTxnId}, "${c.intent.payeeVendorName}")`);
+      }
+    }
+  }
+
+  // Intuit pay_bill + check_expense: qb_ingest_events.status='posted' means the QB push already succeeded
+  const postedIngestIds = new Set([...ingestEventIdsPay, ...ingestEventIdsCheck]);
+  if (postedIngestIds.size > 0) {
+    const { data } = await supabase
+      .from('qb_ingest_events')
+      .select('id, status')
+      .in('id', Array.from(postedIngestIds))
+      .eq('status', 'posted');
+    const postedSet = new Set(((data ?? []) as Array<{ id: number }>).map(r => r.id));
+    for (const c of candidates) {
+      if (dupReason.has(c.index)) continue;
+      const eventId = c.intent.kind === 'pay_bill' ? c.intent.sourceIngestEventId
+                    : c.intent.kind === 'check_expense' ? c.intent.sourceIngestEventId
+                    : null;
+      if (eventId != null && postedSet.has(eventId)) {
+        dupReason.set(c.index, `already-done: qb_ingest_events id=${eventId} status='posted'`);
+      }
+    }
+  }
+
+  // create_bill: invoices.qb_bill_txn_id already set means Bill exists in QB
+  if (invoiceIds.size > 0) {
+    const { data } = await supabase
+      .from('invoices')
+      .select('id, qb_bill_txn_id')
+      .in('id', Array.from(invoiceIds))
+      .not('qb_bill_txn_id', 'is', null);
+    const withBillIds = new Set(((data ?? []) as Array<{ id: number }>).map(r => r.id));
+    for (const c of candidates) {
+      if (dupReason.has(c.index)) continue;
+      if (c.intent.kind !== 'create_bill') continue;
+      const overlap = c.intent.sourceInvoiceIds.filter(id => withBillIds.has(id));
+      if (overlap.length > 0) {
+        dupReason.set(c.index, `already-done: invoices ${overlap.join(', ')} already have qb_bill_txn_id set`);
+      }
+    }
+  }
+
+  // ─── Layer 2: ALREADY-IN-FLIGHT qb_sync_jobs check ───
+  //
+  // Query one bulk batch of pending/in_flight jobs of any relevant kind, then
+  // match in JS against payload source_refs. Cheaper than N-per-intent JSONB
+  // filters and works uniformly across PostgREST versions.
+  const kindsInvolved = new Set(candidates.map(c => c.kind));
+  const { data: inflight } = await supabase
+    .from('qb_sync_jobs')
+    .select('id, kind, payload, status')
+    .in('kind', Array.from(kindsInvolved))
+    .in('status', ['pending', 'in_flight']);
+  const inflightRows = (inflight ?? []) as Array<{ id: number; kind: string; payload: Record<string, unknown> | null }>;
+
+  for (const c of candidates) {
+    if (dupReason.has(c.index)) continue;
+    const match = inflightRows.find(row => {
+      if (row.kind !== c.kind) return false;
+      const p = row.payload ?? {};
+      if (c.intent.kind === 'pay_bill' && c.intent.sourceConveraTxnId != null) {
+        return p.sourceConveraTxnId === c.intent.sourceConveraTxnId
+            && p.payeeVendorName === c.intent.payeeVendorName;
+      }
+      if (c.intent.kind === 'pay_bill' && c.intent.sourceIngestEventId != null) {
+        return p.sourceIngestEventId === c.intent.sourceIngestEventId;
+      }
+      if (c.intent.kind === 'check_expense') {
+        return p.sourceIngestEventId === c.intent.sourceIngestEventId;
+      }
+      if (c.intent.kind === 'create_bill') {
+        const rowInvoiceIds = Array.isArray(p.sourceInvoiceIds) ? (p.sourceInvoiceIds as number[]) : [];
+        return c.intent.sourceInvoiceIds.some(id => rowInvoiceIds.includes(id));
+      }
+      return false;
+    });
+    if (match) {
+      dupReason.set(c.index, `in-flight: qb_sync_jobs id=${match.id} (${match.kind}) is already pending/in_flight for this source_ref`);
+    }
+  }
+
+  return dupReason;
+}
+
 /** Enqueue a batch of intents. For each intent:
  *  1. validateIntent (all shape rules)
  *  2. build payload for the target job kind
  *  3. validatePayload (against qbxml/job-payloads contract — INVARIANTS #14)
- *  4. INSERT into qb_sync_jobs (status='pending')
+ *  4. findDuplicates (INVARIANTS #18 already-done + #19 already-in-flight)
+ *  5. INSERT surviving into qb_sync_jobs (status='pending')
  *
  *  Intents fail INDEPENDENTLY. A validation failure on intent[i] does not
- *  block intent[i+1] from enqueueing. Returns per-intent result — caller
- *  reports the summary. */
+ *  block intent[i+1] from enqueueing. Duplicates are skipped, not rejected. */
 export async function executeIntents(
   supabase: SB,
   intents: WriteIntent[],
 ): Promise<ExecuteResult> {
   const rejected: ExecuteResult['rejected'] = [];
+  const skippedDuplicate: ExecuteResult['skippedDuplicate'] = [];
   const jobIds: ExecuteResult['jobIds'] = intents.map(() => null);
 
-  // Build + validate each. Collect the ones that pass all checks + will be inserted.
-  const toInsert: Array<{ index: number; row: { kind: JobKind; payload: Record<string, unknown>; status: 'pending' } }> = [];
+  // ─── Steps 1-3: validate shape + payload, collect passing intents ───
+  const candidates: IdempotencyKey[] = [];
   for (let i = 0; i < intents.length; i++) {
     const intent = intents[i];
     const v = validateIntent(intent);
@@ -230,21 +373,30 @@ export async function executeIntents(
       });
       continue;
     }
-    toInsert.push({ index: i, row: { kind, payload, status: 'pending' } });
+    candidates.push({ index: i, intent, kind, payload });
   }
+
+  // ─── Step 4: idempotency ───
+  const duplicates = await findDuplicates(supabase, candidates);
+  const toInsert = candidates.filter(c => {
+    if (duplicates.has(c.index)) {
+      skippedDuplicate.push({ index: c.index, intent: c.intent, reason: duplicates.get(c.index)! });
+      return false;
+    }
+    return true;
+  });
 
   if (toInsert.length === 0) {
-    return { jobIds, rejected, skippedDuplicate: [] };
+    return { jobIds, rejected, skippedDuplicate };
   }
 
-  // Single batch insert. INSERT INTO qb_sync_jobs (kind, payload, status) returning id.
-  const rows = toInsert.map(t => t.row);
+  // ─── Step 5: batch insert ───
+  const rows = toInsert.map(t => ({ kind: t.kind, payload: t.payload, status: 'pending' as const }));
   const { data, error } = await supabase
     .from('qb_sync_jobs')
     .insert(rows)
     .select('id');
   if (error) {
-    // Whole batch fails — mark them all as rejected with DB error. Callers can retry.
     for (const t of toInsert) {
       rejected.push({
         index: t.index,
@@ -253,14 +405,12 @@ export async function executeIntents(
         invariant: 'DB error (not an invariant violation) — retryable',
       });
     }
-    return { jobIds, rejected, skippedDuplicate: [] };
+    return { jobIds, rejected, skippedDuplicate };
   }
 
-  // Map returned IDs back to their original intent index. Rely on order preservation
-  // (PostgREST returns rows in insert order).
   (data ?? []).forEach((row: { id: number }, idx: number) => {
     const t = toInsert[idx];
     if (t) jobIds[t.index] = row.id;
   });
-  return { jobIds, rejected, skippedDuplicate: [] };
+  return { jobIds, rejected, skippedDuplicate };
 }
