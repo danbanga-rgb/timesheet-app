@@ -39,11 +39,13 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, PayloadRequirement> = {
   // reading from payload is simpler and always correct).
   bill_add: ['vendorName', 'refNumber'],
   // bill_pmt_add persist uses a source-ref back to the row that spawned the payment.
-  // Convera path: sourceConveraTxnId (2026-08-14 incident: enqueue omitted this, persist
-  // silently no-op'd). Intuit path (Slice G7+): sourceIngestEventId. Exactly one required.
+  // Convera path: sourceConveraTxnId + refNumber (OTR wire code). 2026-08-14 incident:
+  // enqueue omitted the source ref, persist silently no-op'd.
+  // Intuit path (Slice G7+): sourceIngestEventId, blank RefNumber per accountant's
+  // historic convention (verified 2026-08-17 against QB — see [[intuit-push-context]]).
   bill_pmt_add: {
-    required: ['refNumber', 'payeeVendorName', 'applications'],
-    oneOf: [['sourceConveraTxnId'], ['sourceIngestEventId']],
+    required: ['payeeVendorName', 'applications'],
+    oneOf: [['refNumber', 'sourceConveraTxnId'], ['sourceIngestEventId']],
   },
   // check_add (Slice E of QB Automation Layer): direct expense check.
   // persist uses sourceIngestEventId to update the ONE qb_ingest_events row that

@@ -8,7 +8,10 @@
 //   Check (check)                — push check_add (Lucien-style direct expense)
 //   Held back (held | null)      — reconciler couldn't resolve; requires action
 //
-// Confirm handler is still a no-op — Slice G7 wires the qbWrite path.
+// G7a (2026-08-21): per-row checkboxes on pay_existing_bill rows, default OFF.
+// create_bill_then_pay + check rows show disabled checkboxes with a "coming in
+// G7.5" tooltip — the intent is to visually communicate the full picture while
+// keeping the first live-push scope small. Push button = "Push N selected to QB".
 // ============================================================
 
 import { useMemo, useState } from 'react';
@@ -166,17 +169,29 @@ export default function QbPushPreviewModal({
   open, onClose, events, qbVendors, qbAccounts, invoices, onConfirm, onFixMapping,
 }: Props) {
   const [snapshot, setSnapshot] = useState<PreviewEvent[] | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   const activeEvents = snapshot ?? events;
-  if (open && snapshot === null) setSnapshot(events);
-  if (!open && snapshot !== null) setSnapshot(null);
+  if (open && snapshot === null) { setSnapshot(events); setSelected(new Set()); }
+  if (!open && snapshot !== null) { setSnapshot(null); setSelected(new Set()); }
 
   const parts = useMemo(() => partition(activeEvents), [activeEvents]);
 
+  // G7a: only pay_existing_bill is pushable through the executor today.
+  // The other actions render as disabled with a "coming in G7.5" tooltip.
+  const PUSHABLE_ACTIONS: QbResolvedAction[] = ['pay_existing_bill'];
+  const isPushable = (e: PreviewEvent) => e.resolvedAction != null && PUSHABLE_ACTIONS.includes(e.resolvedAction);
+
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
-    heldBack: true, pay_existing_bill: false, create_bill_then_pay: false, check: false,
+    heldBack: true, pay_existing_bill: true, create_bill_then_pay: false, check: false,
     autoClosed: false, ignored: false, postedByPush: false, preOurSystem: false,
   });
   const toggle = (k: string) => setExpanded(prev => ({ ...prev, [k]: !prev[k] }));
+
+  const toggleSelected = (id: number) => setSelected(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   const vendorById = useMemo(() => new Map(qbVendors.map(v => [v.listId, v])), [qbVendors]);
   const accountById = useMemo(() => new Map(qbAccounts.map(a => [a.listId, a])), [qbAccounts]);
@@ -196,9 +211,22 @@ export default function QbPushPreviewModal({
   const heldTotal = parts.heldBack.reduce((n, e) => n + e.amount, 0);
   const autoClosedTotal = parts.autoClosed.reduce((n, e) => n + e.amount, 0);
 
+  const pushableEvents = parts.ready.filter(isPushable);
+  const selectedTotal = pushableEvents.filter(e => selected.has(e.id)).reduce((n, e) => n + e.amount, 0);
+  const selectPushableAll = () => setSelected(new Set(pushableEvents.map(e => e.id)));
+  const clearSelected = () => setSelected(new Set());
+  const allPushableSelected = pushableEvents.length > 0 && pushableEvents.every(e => selected.has(e.id));
+
   const handleConfirm = () => {
-    if (readyCount === 0) return;
-    onConfirm(parts.ready.map(e => e.id));
+    if (selected.size === 0) return;
+    // Soft second-confirm on any live push while we're still gaining trust.
+    const ok = window.confirm(
+      `First live-push safety check.\n\n` +
+      `You're about to push ${selected.size} pay_existing_bill event${selected.size === 1 ? '' : 's'} to QuickBooks (${money(selectedTotal)}).\n\n` +
+      `Continue?`,
+    );
+    if (!ok) return;
+    onConfirm(Array.from(selected));
   };
 
   return (
@@ -218,6 +246,21 @@ export default function QbPushPreviewModal({
                 <>{' · '}<span className="text-green-700"><CheckCircle className="w-3 h-3 inline mr-0.5" />{parts.autoClosed.length} already done ({money(autoClosedTotal)})</span></>
               )}
             </p>
+            {pushableEvents.length > 0 && (
+              <p className="text-xs text-gray-500 mt-1 flex items-center gap-2">
+                <span>
+                  G7a: only <em>pay_existing_bill</em> is wired to QB. Others show for context.
+                </span>
+                <button
+                  onClick={allPushableSelected ? clearSelected : selectPushableAll}
+                  className="text-indigo-700 hover:text-indigo-900 hover:underline"
+                >
+                  {allPushableSelected
+                    ? `Clear (${selected.size})`
+                    : `Select all ${pushableEvents.length} pay_existing_bill`}
+                </button>
+              </p>
+            )}
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600" aria-label="Close">
             <X className="w-5 h-5" />
@@ -292,15 +335,25 @@ export default function QbPushPreviewModal({
             const bankId = g.events.find(e => e.qbBankAccountListId)?.qbBankAccountListId;
             const bank = bankId ? accountById.get(bankId) : null;
             const isExpanded = expanded[g.action];
+            const groupPushable = PUSHABLE_ACTIONS.includes(g.action);
+            const groupSelectedCount = groupPushable ? g.events.filter(e => selected.has(e.id)).length : 0;
             return (
-              <div key={g.action} className="border border-gray-200 rounded-lg overflow-hidden">
-                <button onClick={() => toggle(g.action)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left">
+              <div key={g.action} className={`border rounded-lg overflow-hidden ${groupPushable ? 'border-indigo-200' : 'border-gray-200'}`}>
+                <button onClick={() => toggle(g.action)} className={`w-full flex items-center justify-between px-4 py-3 text-left ${groupPushable ? 'bg-indigo-50/40 hover:bg-indigo-50/70' : 'bg-gray-50 hover:bg-gray-100'}`}>
                   <div>
                     <span className="font-semibold text-gray-800">{ACTION_LABEL[g.action]}</span>
+                    {!groupPushable && (
+                      <span className="ml-2 text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded">
+                        coming in G7.5
+                      </span>
+                    )}
                     <span className="ml-2 text-sm text-gray-500">
                       × {g.events.length} = {money(total)}
                       {bank && <> · <span className="font-mono text-xs">{bank.fullName}</span></>}
                       {jobs !== g.events.length && <> · {jobs} qbXML jobs</>}
+                      {groupPushable && (
+                        <> · <span className="font-medium text-indigo-700">{groupSelectedCount} selected</span></>
+                      )}
                     </span>
                   </div>
                   <span className="text-xs text-gray-400">{isExpanded ? '▼' : '▶'}</span>
@@ -309,6 +362,24 @@ export default function QbPushPreviewModal({
                   <table className="w-full text-xs">
                     <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
                       <tr>
+                        <th className="px-3 py-1.5 text-left w-8">
+                          {groupPushable && (
+                            <input
+                              type="checkbox"
+                              checked={allPushableSelected && groupSelectedCount === g.events.length}
+                              onChange={() => {
+                                const allInGroupSelected = g.events.every(e => selected.has(e.id));
+                                setSelected(prev => {
+                                  const next = new Set(prev);
+                                  if (allInGroupSelected) g.events.forEach(e => next.delete(e.id));
+                                  else g.events.forEach(e => next.add(e.id));
+                                  return next;
+                                });
+                              }}
+                              aria-label={`Select all ${g.action} rows`}
+                            />
+                          )}
+                        </th>
                         <th className="px-3 py-1.5 text-left">Date</th>
                         <th className="px-3 py-1.5 text-left">Counterparty</th>
                         <th className="px-3 py-1.5 text-left">QB vendor</th>
@@ -322,7 +393,19 @@ export default function QbPushPreviewModal({
                         const expense = e.qbExpenseAccountListId ? accountById.get(e.qbExpenseAccountListId) : null;
                         const invs = e.matchedInvoiceIds.map(id => invoiceById.get(id)).filter(Boolean);
                         return (
-                          <tr key={e.id} className="border-t border-gray-100">
+                          <tr key={e.id} className={`border-t border-gray-100 ${groupPushable && selected.has(e.id) ? 'bg-indigo-50/50' : ''}`}>
+                            <td className="px-3 py-1.5">
+                              {groupPushable ? (
+                                <input
+                                  type="checkbox"
+                                  checked={selected.has(e.id)}
+                                  onChange={() => toggleSelected(e.id)}
+                                  aria-label={`Select event ${e.id}`}
+                                />
+                              ) : (
+                                <input type="checkbox" disabled title="Coming in G7.5 — pay_existing_bill only for now" />
+                              )}
+                            </td>
                             <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
                             <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
                             <td className="px-3 py-1.5">
@@ -494,16 +577,25 @@ export default function QbPushPreviewModal({
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-gray-200 flex items-center justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">Cancel</button>
-          <button
-            onClick={handleConfirm}
-            disabled={readyCount === 0}
-            className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm flex items-center gap-2"
-          >
-            <Send className="w-4 h-4" />
-            {readyCount === 0 ? 'Nothing to push' : `Push ${readyCount} to QB`}
-          </button>
+        <div className="p-4 border-t border-gray-200 flex items-center justify-between gap-2">
+          <div className="text-xs text-gray-500">
+            {selected.size > 0
+              ? <>Selected: <strong className="text-gray-700">{selected.size}</strong> event{selected.size === 1 ? '' : 's'} · <span className="font-mono">{money(selectedTotal)}</span></>
+              : pushableEvents.length > 0
+                ? 'Select rows above to push'
+                : ''}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">Cancel</button>
+            <button
+              onClick={handleConfirm}
+              disabled={selected.size === 0}
+              className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm flex items-center gap-2"
+            >
+              <Send className="w-4 h-4" />
+              {selected.size === 0 ? 'Nothing selected' : `Push ${selected.size} selected to QB`}
+            </button>
+          </div>
         </div>
       </div>
     </div>

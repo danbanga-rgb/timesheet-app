@@ -223,6 +223,7 @@ import {
 } from './lib/intuit/reconcile';
 import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from './lib/intuit/config';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
+import { pushIntuitPayBill } from './lib/qbWrite/consumers/intuitPush';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -10359,10 +10360,27 @@ const TimesheetSystem = () => {
                   qbVendors={qbVendorsList}
                   qbAccounts={qbAccountsList}
                   invoices={invoices}
-                  onConfirm={(readyIds) => {
+                  onConfirm={async (selectedIds) => {
                     setShowQbPushPreview(false);
-                    console.log('[Slice F] Push confirmed for event ids:', readyIds);
-                    alert(`Preview only — Slice G will wire enqueue.\n\nWould push ${readyIds.length} event${readyIds.length === 1 ? '' : 's'} to QuickBooks. Nothing has been sent to QB.`);
+                    try {
+                      const r = await pushIntuitPayBill(supabase, selectedIds);
+                      const enqueued = r.jobIds.filter((id): id is number => id != null).length;
+                      const parts: string[] = [];
+                      parts.push(`${enqueued} pay_bill job${enqueued === 1 ? '' : 's'} enqueued.`);
+                      if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
+                      if (r.skippedDuplicate.length > 0) parts.push(`${r.skippedDuplicate.length} skipped (already done or in-flight).`);
+                      if (r.rejected.length > 0) parts.push(`${r.rejected.length} rejected by invariants.`);
+                      const detail = [
+                        ...r.skippedIneligible.map(s => `• event ${s.eventId}: ${s.reason}`),
+                        ...r.skippedDuplicate.map(s => `• ${s.reason}`),
+                        ...r.rejected.map(rj => `• ${rj.invariant}: ${rj.reason}`),
+                      ].slice(0, 12).join('\n');
+                      alert(`Pushed to QuickBooks queue.\n\n${parts.join(' ')}${detail ? '\n\n' + detail : ''}`);
+                      void loadQbIngestEvents();
+                    } catch (e) {
+                      console.error('[G7a] pushIntuitPayBill failed', e);
+                      alert(`Push failed: ${(e as Error).message}`);
+                    }
                   }}
                   onFixMapping={(counterparty, source) => {
                     setQbInboxExpanded(prev => ({ ...prev, pending: true }));
