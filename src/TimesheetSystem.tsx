@@ -223,6 +223,7 @@ import {
 } from './lib/intuit/reconcile';
 import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from './lib/intuit/config';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
+import QbPushStatusPane, { type PushRecord } from './components/QbPushStatusPane';
 import { pushIntuitPayBill } from './lib/qbWrite/consumers/intuitPush';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -1195,6 +1196,7 @@ const TimesheetSystem = () => {
   });
   // Slice F — push preview modal
   const [showQbPushPreview, setShowQbPushPreview] = useState(false);
+  const [qbPushRecords, setQbPushRecords] = useState<PushRecord[]>([]);
   // Slice G1 — qbStateSync mirror of QB open bills
   const [qbOpenBills, setQbOpenBills] = useState<QbOpenBillRow[]>([]);
   const [qbSyncingBills, setQbSyncingBills] = useState(false);
@@ -10331,6 +10333,12 @@ const TimesheetSystem = () => {
                   </div>
                 </div>
 
+                <QbPushStatusPane
+                  supabase={supabase}
+                  records={qbPushRecords}
+                  onDismiss={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
+                />
+
                 <div className="grid grid-cols-3 gap-3 mb-6">
                   <div className="p-3 border border-gray-200 rounded-lg bg-white">
                     <div className="text-xs text-gray-500">Total events</div>
@@ -10365,6 +10373,41 @@ const TimesheetSystem = () => {
                     try {
                       const r = await pushIntuitPayBill(supabase, selectedIds);
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
+
+                      // Build push records for the live status pane. Only successful
+                      // pay enqueues get an entry — rejected/skipped are surfaced via alert.
+                      const eventById = new Map(qbIngestEvents.map(e => [e.id, e]));
+                      const vendorByListId = new Map(qbVendorsList.map(v => [v.listId, v]));
+                      const newRecords: PushRecord[] = [];
+                      // The order of r.jobIds matches the order intents were built which
+                      // matches the order of eligible events. But since we don't know the
+                      // exact eligible ordering here, use selectedIds filtered against the
+                      // returned jobIds by index. Simpler: iterate selected in order and
+                      // pair each successful jobId with the first-remaining selected event
+                      // that didn't end up ineligible/rejected/duplicate.
+                      const inelig = new Set(r.skippedIneligible.map(s => s.eventId));
+                      const rejEventIds = new Set(r.rejected.map(rj => (rj.intent.kind === 'pay_bill' ? rj.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const dupEventIds = new Set(r.skippedDuplicate.map(s => (s.intent.kind === 'pay_bill' ? s.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const eligibleInOrder = selectedIds.filter(id => !inelig.has(id) && !rejEventIds.has(id) && !dupEventIds.has(id));
+                      r.jobIds.forEach((jobId, i) => {
+                        if (jobId == null) return;
+                        const eventId = eligibleInOrder[i];
+                        if (eventId == null) return;
+                        const event = eventById.get(eventId);
+                        if (!event) return;
+                        const vendor = event.counterpartyQbVendorListId ? vendorByListId.get(event.counterpartyQbVendorListId) : null;
+                        newRecords.push({
+                          eventId,
+                          payJobId: jobId,
+                          verifyJobId: r.verifyJobIdByPayJobId[jobId] ?? null,
+                          billTxnId: event.resolvedBillTxnId ?? '',
+                          expectedAmount: event.amount,
+                          expectedVendor: vendor?.name ?? event.counterpartyRaw,
+                          pushedAt: new Date().toISOString(),
+                        });
+                      });
+                      setQbPushRecords(prev => [...prev, ...newRecords]);
+
                       const parts: string[] = [];
                       parts.push(`${enqueued} pay_bill job${enqueued === 1 ? '' : 's'} enqueued.`);
                       if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
