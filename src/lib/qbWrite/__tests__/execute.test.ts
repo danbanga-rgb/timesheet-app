@@ -63,11 +63,22 @@ type MockTable = Array<Record<string, unknown>>;
 function makeMockSupabase(opts: {
   nextId?: number;
   insertError?: { message: string };
-  tables?: Partial<Record<'convera_transaction_billpmts' | 'qb_ingest_events' | 'invoices' | 'qb_sync_jobs', MockTable>>;
+  tables?: Partial<Record<'convera_transaction_billpmts' | 'qb_ingest_events' | 'invoices' | 'qb_sync_jobs' | 'qb_mirror', MockTable>>;
 } = {}) {
   let nextId = opts.nextId ?? 1000;
   const inserts: Array<{ table: string; rows: InsertedRow[] }> = [];
-  const tables = opts.tables ?? {};
+  // Default qb_mirror seed — covers basePayBill's billTxnId so tests that don't
+  // exercise #11 pass by default. Tests that want to trigger a vendor mismatch
+  // override `tables.qb_mirror` explicitly.
+  const defaultTables = {
+    qb_mirror: [
+      { entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-BIMO-AMAR',
+        data: { vendor_full_name: 'Bimosoft - Amar Pljevljak' } },
+      { entity_kind: 'bill', entity_ref: '41282-1784756812', vendor_list_id: 'V-FLAW',
+        data: { vendor_full_name: 'Flawless APPS LLC' } },
+    ],
+  };
+  const tables: NonNullable<typeof opts.tables> = { ...defaultTables, ...(opts.tables ?? {}) };
 
   const client = {
     from(tableName: string) {
@@ -200,9 +211,73 @@ describe('INVARIANTS #1–10 (qbXML builder-layer)', () => {
 // ─── Domain / persistence invariants (INVARIANTS #11–19) ───────────────────
 
 describe('INVARIANTS #11–19 (domain / persistence)', () => {
-  it.todo('#11 vendor-scoped TxnID resolution — application billTxnId must belong to payeeVendorName in qb_mirror');
+  describe('#11 vendor-scoped TxnID (billTxnId belongs to payeeVendorName in qb_mirror)', () => {
+    it('rejects pay_bill when billTxnId belongs to a DIFFERENT vendor in qb_mirror', async () => {
+      // Simulates the 2026-08-13 batch-15 bug — reconciler picked a bill by
+      // refNumber alone, TxnID resolved to WRONG vendor. Executor catches it.
+      const { client } = makeMockSupabase({
+        tables: {
+          qb_mirror: [{
+            entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-OTHER',
+            data: { vendor_full_name: 'Someone Else LLC' },
+          }],
+        },
+      });
+      const r = await executeIntents(client, [basePayBill]);
+      expect(r.rejected).toHaveLength(1);
+      expect(r.rejected[0].invariant).toMatch(/#11/);
+      expect(r.rejected[0].reason).toMatch(/Someone Else LLC/);
+      expect(r.rejected[0].reason).toMatch(/Batch-15/);
+    });
+    it('rejects pay_bill when billTxnId is not in qb_mirror at all', async () => {
+      const { client } = makeMockSupabase({ tables: { qb_mirror: [] } });
+      const r = await executeIntents(client, [basePayBill]);
+      expect(r.rejected[0].reason).toMatch(/not found in qb_mirror/);
+    });
+    it('accepts pay_bill when every billTxnId matches payeeVendorName in qb_mirror', async () => {
+      const { client } = makeMockSupabase();  // default mirror has the fixture bill
+      const r = await executeIntents(client, [basePayBill]);
+      expect(r.rejected).toEqual([]);
+      expect(r.jobIds[0]).not.toBeNull();
+    });
+    it('rejects when only ONE of N applications has a wrong-vendor TxnID (umbrella check)', async () => {
+      const twoApps: PayBillIntent = {
+        ...basePayBill,
+        applications: [
+          { billTxnId: '12006-1196864828', paymentAmount: 3000 },  // correct vendor (in default mirror)
+          { billTxnId: 'WRONG-VENDOR-BILL', paymentAmount: 3336 },  // wrong vendor
+        ],
+      };
+      const { client } = makeMockSupabase({
+        tables: {
+          qb_mirror: [
+            { entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-BIMO-AMAR',
+              data: { vendor_full_name: 'Bimosoft - Amar Pljevljak' } },
+            { entity_kind: 'bill', entity_ref: 'WRONG-VENDOR-BILL', vendor_list_id: 'V-OTHER',
+              data: { vendor_full_name: 'Someone Else' } },
+          ],
+        },
+      });
+      const r = await executeIntents(client, [twoApps]);
+      expect(r.rejected[0].invariant).toMatch(/#11/);
+    });
+    it('skips vendor check for create_bill / check_expense (they do not carry billTxnIds)', async () => {
+      const { client } = makeMockSupabase({ tables: { qb_mirror: [] } });
+      const r = await executeIntents(client, [baseCreateBill, baseCheckExpense]);
+      expect(r.rejected).toEqual([]);
+      expect(r.jobIds.every(id => id !== null)).toBe(true);
+    });
+  });
   it.todo('#12 reconciler refHit requirement — executor does NOT create pay_bill intents for amount-only matches (contract with reconciler)');
-  it.todo('#13 normalizeRef stacked INV — refNumber comparison against qb_mirror uses normalizeRef');
+  describe('#13 normalizeRef stacked INV', () => {
+    it('N/A to executor — enforced by reconciler upstream (bills are looked up by refNumber there)', () => {
+      // Executor accepts TxnID directly. The refNumber-normalization safety net
+      // lives in src/lib/intuit/reconcile.ts (normalizeRef) — see stacked-INV
+      // regression tests in reconcile.test.ts. Documented here so a reader
+      // knows where the enforcement actually lives.
+      expect(true).toBe(true);
+    });
+  });
   describe('#14 payload contract via validatePayload + shape rules', () => {
     it('rejects pay_bill with NEITHER source ref (would silent-no-op on persist)', () => {
       const bad: PayBillIntent = { ...basePayBill };
@@ -238,7 +313,44 @@ describe('INVARIANTS #11–19 (domain / persistence)', () => {
       expect(validateIntent(bad)!.invariant).toMatch(/#14/);
     });
   });
-  it.todo('#15 umbrella-safe pay_bill persistence — Convera pay_bill payload includes sourceConveraTxnId so link table gets populated');
+  describe('#15 umbrella-safe pay_bill persistence', () => {
+    it('Convera pay_bill payload carries sourceConveraTxnId so link table upsert works', async () => {
+      const { client, inserts } = makeMockSupabase();
+      await executeIntents(client, [basePayBill]);
+      const jobRow = inserts.find(i => i.table === 'qb_sync_jobs')!.rows[0];
+      expect(jobRow.kind).toBe('bill_pmt_add');
+      expect(jobRow.payload.sourceConveraTxnId).toBe(934);
+      expect(jobRow.payload.payeeVendorName).toBe('Bimosoft - Amar Pljevljak');
+      // Persist step uses (sourceConveraTxnId, payeeVendorName) as the
+      // convera_transaction_billpmts UNIQUE key — both required for umbrella-safe write.
+    });
+    it('two vendors on same wire enqueue as TWO independent pay_bill jobs', async () => {
+      const { client, inserts } = makeMockSupabase({
+        tables: {
+          qb_mirror: [
+            { entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-A',
+              data: { vendor_full_name: 'Bimosoft - Amar Pljevljak' } },
+            { entity_kind: 'bill', entity_ref: '12006-1196864829', vendor_list_id: 'V-B',
+              data: { vendor_full_name: 'Bimosoft - Edin Jasarspahic' } },
+          ],
+        },
+      });
+      const amar: PayBillIntent = { ...basePayBill };
+      const edin: PayBillIntent = {
+        ...basePayBill,
+        payeeVendorName: 'Bimosoft - Edin Jasarspahic',
+        applications: [{ billTxnId: '12006-1196864829', paymentAmount: 3040 }],
+      };
+      await executeIntents(client, [amar, edin]);
+      const jobs = inserts.find(i => i.table === 'qb_sync_jobs')!.rows;
+      expect(jobs).toHaveLength(2);
+      expect(jobs.map(j => j.payload.payeeVendorName).sort())
+        .toEqual(['Bimosoft - Amar Pljevljak', 'Bimosoft - Edin Jasarspahic']);
+      // Both carry the same sourceConveraTxnId (wire 934). Link table dedup
+      // works because UNIQUE key is (convera_transaction_id, qb_vendor_name).
+      expect(jobs.every(j => j.payload.sourceConveraTxnId === 934)).toBe(true);
+    });
+  });
   it.todo('#16 sub-block stripping — N/A to executor (parser concern), affirmed by parsers test');
   it.todo('#17 sessionProgress — N/A to executor (WC concern)');
   describe('#18 idempotency: already-done skip', () => {
