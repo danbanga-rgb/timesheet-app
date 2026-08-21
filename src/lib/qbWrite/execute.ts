@@ -8,7 +8,14 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { assertAscii } from '../qbxml/envelope';
-import type { ExecuteResult, WriteIntent } from './types';
+import { validatePayload, type JobKind } from '../qbxml/job-payloads';
+import type {
+  CheckExpenseIntent,
+  CreateBillIntent,
+  ExecuteResult,
+  PayBillIntent,
+  WriteIntent,
+} from './types';
 
 type SB = SupabaseClient;
 
@@ -20,8 +27,8 @@ export interface ValidateFailure {
   invariant: string;
 }
 
-/** Wrap assertAscii to return { reason } instead of throwing.
- *  Field values pass through unchanged; caller supplies field name for error text. */
+// ─── Input-shape validation (no DB required) ────────────────────────────────
+
 function checkAscii(fieldName: string, value: string | null | undefined): string | null {
   if (value == null) return null;
   try {
@@ -37,8 +44,6 @@ function checkAscii(fieldName: string, value: string | null | undefined): string
  *  Stops at first failure — caller sees one reason per rejected intent. */
 export function validateIntent(intent: WriteIntent): ValidateFailure | null {
   // ─── INVARIANTS #1 — ASCII-only on every user-facing string field ───
-  // Vendor / account names, memo, refNumber all pass to qbXML → Xerces →
-  // Windows-1252. Non-ASCII produces UTFDataFormatException from QB.
   const asciiFields: Array<[string, string | null | undefined]> = [];
   if (intent.kind === 'pay_bill') {
     asciiFields.push(
@@ -91,24 +96,171 @@ export function validateIntent(intent: WriteIntent): ValidateFailure | null {
     };
   }
 
-  // Additional invariants land in subsequent commits, each un-skipping its it.todo test.
+  // ─── Source-ref exclusivity for pay_bill (feeds INVARIANTS #14 + #15) ───
+  // Convera path uses sourceConveraTxnId; Intuit path uses sourceIngestEventId.
+  // Exactly one must be present so persist step knows which domain row to update.
+  if (intent.kind === 'pay_bill') {
+    const hasConvera = intent.sourceConveraTxnId != null;
+    const hasIntuit = intent.sourceIngestEventId != null;
+    if (hasConvera && hasIntuit) {
+      return {
+        reason: 'pay_bill: exactly ONE of sourceConveraTxnId / sourceIngestEventId must be set — both were supplied',
+        invariant: 'INVARIANTS #14 — payload contract (one-of source ref)',
+      };
+    }
+    if (!hasConvera && !hasIntuit) {
+      return {
+        reason: 'pay_bill: exactly ONE of sourceConveraTxnId / sourceIngestEventId must be set — neither was supplied',
+        invariant: 'INVARIANTS #14 — payload contract (one-of source ref)',
+      };
+    }
+  }
+
+  // ─── create_bill: lines[] must be non-empty ───
+  if (intent.kind === 'create_bill' && intent.lines.length === 0) {
+    return {
+      reason: 'create_bill: lines[] must contain at least one expense line',
+      invariant: 'INVARIANTS #14 — payload contract',
+    };
+  }
+  // ─── check_expense: lines[] must be non-empty ───
+  if (intent.kind === 'check_expense' && intent.lines.length === 0) {
+    return {
+      reason: 'check_expense: lines[] must contain at least one expense line',
+      invariant: 'INVARIANTS #14 — payload contract',
+    };
+  }
+  // ─── pay_bill: applications[] must be non-empty ───
+  if (intent.kind === 'pay_bill' && intent.applications.length === 0) {
+    return {
+      reason: 'pay_bill: applications[] must contain at least one bill to pay',
+      invariant: 'INVARIANTS #14 — payload contract',
+    };
+  }
+
   return null;
 }
 
-/** Enqueue a batch of intents. Validates each; skips duplicates; inserts
- *  the rest into qb_sync_jobs. Returns per-intent status.
+// ─── Payload builders — intent → qb_sync_jobs.payload ───────────────────────
+
+function buildPayBillPayload(intent: PayBillIntent): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    payeeVendorName: intent.payeeVendorName,
+    bankAccountName: intent.bankAccountName,
+    txnDate: intent.txnDate,
+    refNumber: intent.refNumber,
+    memo: intent.memo,
+    applications: intent.applications,
+    __audit_tag: intent.auditTag,
+  };
+  if (intent.sourceConveraTxnId != null) payload.sourceConveraTxnId = intent.sourceConveraTxnId;
+  if (intent.sourceIngestEventId != null) payload.sourceIngestEventId = intent.sourceIngestEventId;
+  return payload;
+}
+
+function buildCreateBillPayload(intent: CreateBillIntent): Record<string, unknown> {
+  return {
+    vendorName: intent.vendorName,
+    apAccountName: intent.apAccountName,
+    defaultExpenseAccountName: intent.defaultExpenseAccountName,
+    txnDate: intent.txnDate,
+    dueDate: intent.dueDate,
+    refNumber: intent.refNumber,
+    memo: intent.memo,
+    lines: intent.lines,
+    sourceInvoiceIds: intent.sourceInvoiceIds,
+    __audit_tag: intent.auditTag,
+  };
+}
+
+function buildCheckExpensePayload(intent: CheckExpenseIntent): Record<string, unknown> {
+  return {
+    payeeVendorName: intent.payeeVendorName,
+    bankAccountName: intent.bankAccountName,
+    txnDate: intent.txnDate,
+    refNumber: intent.refNumber,
+    memo: intent.memo,
+    lines: intent.lines,
+    sourceIngestEventId: intent.sourceIngestEventId,
+    __audit_tag: intent.auditTag,
+  };
+}
+
+function intentToJob(intent: WriteIntent): { kind: JobKind; payload: Record<string, unknown> } {
+  if (intent.kind === 'pay_bill') return { kind: 'bill_pmt_add', payload: buildPayBillPayload(intent) };
+  if (intent.kind === 'create_bill') return { kind: 'bill_add', payload: buildCreateBillPayload(intent) };
+  return { kind: 'check_add', payload: buildCheckExpensePayload(intent) };
+}
+
+// ─── Enqueue path ───────────────────────────────────────────────────────────
+
+/** Enqueue a batch of intents. For each intent:
+ *  1. validateIntent (all shape rules)
+ *  2. build payload for the target job kind
+ *  3. validatePayload (against qbxml/job-payloads contract — INVARIANTS #14)
+ *  4. INSERT into qb_sync_jobs (status='pending')
  *
- *  SCAFFOLD — enqueue path lands in a later commit. Validation is live. */
-export async function executeIntents(_supabase: SB, intents: WriteIntent[]): Promise<ExecuteResult> {
+ *  Intents fail INDEPENDENTLY. A validation failure on intent[i] does not
+ *  block intent[i+1] from enqueueing. Returns per-intent result — caller
+ *  reports the summary. */
+export async function executeIntents(
+  supabase: SB,
+  intents: WriteIntent[],
+): Promise<ExecuteResult> {
   const rejected: ExecuteResult['rejected'] = [];
   const jobIds: ExecuteResult['jobIds'] = intents.map(() => null);
-  intents.forEach((intent, index) => {
+
+  // Build + validate each. Collect the ones that pass all checks + will be inserted.
+  const toInsert: Array<{ index: number; row: { kind: JobKind; payload: Record<string, unknown>; status: 'pending' } }> = [];
+  for (let i = 0; i < intents.length; i++) {
+    const intent = intents[i];
     const v = validateIntent(intent);
-    if (v) rejected.push({ index, intent, ...v });
+    if (v) {
+      rejected.push({ index: i, intent, ...v });
+      continue;
+    }
+    const { kind, payload } = intentToJob(intent);
+    const pv = validatePayload(kind, payload);
+    if (!pv.ok) {
+      rejected.push({
+        index: i,
+        intent,
+        reason: pv.oneOfFailure ?? `missing payload keys: ${pv.missing.join(', ')}`,
+        invariant: 'INVARIANTS #14 — payload contract (validatePayload)',
+      });
+      continue;
+    }
+    toInsert.push({ index: i, row: { kind, payload, status: 'pending' } });
+  }
+
+  if (toInsert.length === 0) {
+    return { jobIds, rejected, skippedDuplicate: [] };
+  }
+
+  // Single batch insert. INSERT INTO qb_sync_jobs (kind, payload, status) returning id.
+  const rows = toInsert.map(t => t.row);
+  const { data, error } = await supabase
+    .from('qb_sync_jobs')
+    .insert(rows)
+    .select('id');
+  if (error) {
+    // Whole batch fails — mark them all as rejected with DB error. Callers can retry.
+    for (const t of toInsert) {
+      rejected.push({
+        index: t.index,
+        intent: intents[t.index],
+        reason: `qb_sync_jobs insert failed: ${error.message}`,
+        invariant: 'DB error (not an invariant violation) — retryable',
+      });
+    }
+    return { jobIds, rejected, skippedDuplicate: [] };
+  }
+
+  // Map returned IDs back to their original intent index. Rely on order preservation
+  // (PostgREST returns rows in insert order).
+  (data ?? []).forEach((row: { id: number }, idx: number) => {
+    const t = toInsert[idx];
+    if (t) jobIds[t.index] = row.id;
   });
-  return {
-    jobIds,
-    rejected,
-    skippedDuplicate: [],
-  };
+  return { jobIds, rejected, skippedDuplicate: [] };
 }
