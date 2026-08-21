@@ -33,8 +33,8 @@ const baseCreateBill: CreateBillIntent = {
   txnDate: '2026-07-31',
   dueDate: '2026-09-15',
   refNumber: 'INV 12',
-  memo: 'July 2026 — 77h @ $125 — Rumiya — INV 12',
-  lines: [{ amount: 9625, memo: 'Jul 2026 — 77h @ $125 — Rumiya — INV 12' }],
+  memo: 'July 2026 - 77h @ $125 - Rumiya - INV 12',
+  lines: [{ amount: 9625, memo: 'Jul 2026 - 77h @ $125 - Rumiya - INV 12' }],
   sourceInvoiceIds: [229],
 };
 
@@ -66,11 +66,62 @@ describe('scaffold', () => {
 // ─── Builder-layer invariants (INVARIANTS #1–10) ────────────────────────────
 
 describe('INVARIANTS #1–10 (qbXML builder-layer)', () => {
-  it.todo('#1  ASCII-only — non-ASCII in payeeVendorName / memo / refNumber rejects');
+  describe('#1 ASCII-only', () => {
+    it('rejects non-ASCII in payeeVendorName (Croatian diacritic)', () => {
+      const bad = { ...basePayBill, payeeVendorName: 'Bimosoft - Naretena Arnaüt' };
+      const r = validateIntent(bad);
+      expect(r).not.toBeNull();
+      expect(r!.invariant).toMatch(/INVARIANTS #1/);
+      expect(r!.reason).toMatch(/non-ASCII/);
+    });
+    it('rejects non-ASCII in memo (em-dash)', () => {
+      const bad = { ...baseCreateBill, memo: 'July 2026 — 77h' };  // em-dash U+2014
+      expect(validateIntent(bad)!.invariant).toMatch(/#1/);
+    });
+    it('rejects non-ASCII in refNumber', () => {
+      const bad = { ...baseCreateBill, refNumber: 'INV—12' };
+      expect(validateIntent(bad)!.invariant).toMatch(/#1/);
+    });
+    it('rejects non-ASCII in line memo', () => {
+      const bad = { ...baseCreateBill, lines: [{ ...baseCreateBill.lines[0], memo: 'Jul — 77h' }] };
+      expect(validateIntent(bad)!.invariant).toMatch(/#1/);
+    });
+    it('rejects non-ASCII in expenseAccountName (check_expense)', () => {
+      const bad = { ...baseCheckExpense, lines: [{ ...baseCheckExpense.lines[0], expenseAccountName: 'Payroll:Süplement' }] };
+      expect(validateIntent(bad)!.invariant).toMatch(/#1/);
+    });
+    it('passes clean ASCII on all three intent kinds', () => {
+      expect(validateIntent(basePayBill)).toBeNull();
+      expect(validateIntent(baseCreateBill)).toBeNull();
+      expect(validateIntent(baseCheckExpense)).toBeNull();
+    });
+  });
   it.todo('#2  element ordering strict per SDK 13 XSD — enforced by underlying builders (integration)');
   it.todo('#3  amounts formatted via fmtAmount (2dp) in the emitted qbXML');
   it.todo('#4  empty inputs — omitted memo does NOT emit <Memo></Memo>');
-  it.todo('#5  BillPmtCheck RefNumber max 11 chars — 12+ rejects, 11 accepted, boundary tested');
+  describe('#5 pay_bill RefNumber max 11 chars', () => {
+    it('rejects 12-char refNumber', () => {
+      const bad = { ...basePayBill, refNumber: 'OTR660756801' };  // 12 chars
+      const r = validateIntent(bad);
+      expect(r).not.toBeNull();
+      expect(r!.invariant).toMatch(/#5/);
+      expect(r!.reason).toMatch(/12 chars/);
+    });
+    it('accepts exactly 11-char refNumber (boundary)', () => {
+      const boundary = { ...basePayBill, refNumber: 'OTR66075680' };  // 11 chars
+      expect(validateIntent(boundary)).toBeNull();
+    });
+    it('accepts undefined refNumber (optional)', () => {
+      const noRef: PayBillIntent = { ...basePayBill };
+      delete noRef.refNumber;
+      expect(validateIntent(noRef)).toBeNull();
+    });
+    it('does NOT apply the 11-char cap to create_bill (Bill refNumber has higher limit)', () => {
+      const longBillRef = { ...baseCreateBill, refNumber: 'INVOICE Synergie 05/01-31/2026' };  // 30 chars
+      // ASCII check passes (all ASCII); refNumber-length rule is pay_bill-only
+      expect(validateIntent(longBillRef)).toBeNull();
+    });
+  });
   it.todo('#6  DiscountAmount requires DiscountAccountRef — set without account rejects');
   it.todo('#7  XML escape order — &, then <, >, \", \'');
   it.todo('#8  BillQueryRq uses repeated <RefNumber> (verified in enqueue path if we ever call it)');
