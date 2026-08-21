@@ -426,48 +426,79 @@ async function persistJobResponse(
     if (!parsed.result) {
       return { ok: false, errorMsg: `BillPaymentCheckAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Umbrella-safe persist. A single Convera wire can span multiple vendors
+    const payload = job.payload as {
+      sourceConveraTxnId?: number;
+      sourceIngestEventId?: number;
+      payeeVendorName?: string;
+      applications?: { paymentAmount?: number }[];
+    };
+    // Convera path — umbrella-safe: a single Convera wire can span multiple vendors
     // (BIMOSOFT, Native Teams, Teal) → multiple bill_pmt_add jobs share the same
     // sourceConveraTxnId but produce distinct QB payment TxnIDs. Prior code wrote
     // each to convera_transactions.qb_billpmt_txn_id (last-wins, silently lost the
     // other N-1). We now insert per-(wire, vendor) into convera_transaction_billpmts
     // and keep the old column populated as a "at least one recorded" cache.
-    const payload = job.payload as {
-      sourceConveraTxnId?: number;
-      payeeVendorName?: string;
-      applications?: { paymentAmount?: number }[];
-    };
-    if (payload.sourceConveraTxnId == null) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing sourceConveraTxnId. QB payment created (TxnID=${parsed.result.txnId}) but not linked to any convera_transaction row.` };
+    if (payload.sourceConveraTxnId != null) {
+      if (!payload.payeeVendorName) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing payeeVendorName. QB payment created (TxnID=${parsed.result.txnId}) for wire ${payload.sourceConveraTxnId} but vendor unknown — link table row cannot be built.` };
+      }
+      const paymentAmount = (payload.applications ?? []).reduce((s, a) => s + (Number(a.paymentAmount) || 0), 0);
+      const { error: linkErr } = await supabase
+        .from('convera_transaction_billpmts')
+        .upsert({
+          convera_transaction_id: payload.sourceConveraTxnId,
+          qb_vendor_name:         payload.payeeVendorName,
+          qb_billpmt_txn_id:      parsed.result.txnId,
+          payment_amount:         paymentAmount,
+        }, { onConflict: 'convera_transaction_id,qb_vendor_name' });
+      if (linkErr) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist DB error inserting link row for wire=${payload.sourceConveraTxnId} vendor="${payload.payeeVendorName}": ${linkErr.message}` };
+      }
+      // Legacy single-value cache. Deliberately last-write-wins — we don't check for
+      // an existing value; the link table is authoritative for per-vendor lookups.
+      // This column is a "was ever paid" bit for legacy consumers (matcher_ignore
+      // filter, older UI badges). Drop candidate for a future migration.
+      const { error: cacheErr } = await supabase
+        .from('convera_transactions')
+        .update({ qb_billpmt_txn_id: parsed.result.txnId })
+        .eq('id', payload.sourceConveraTxnId);
+      if (cacheErr) {
+        console.warn(`BillPaymentCheckAdd: link row saved but legacy cache update failed for wire=${payload.sourceConveraTxnId}: ${cacheErr.message}`);
+      }
+      return { ok: true, errorMsg: null };
     }
-    if (!payload.payeeVendorName) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing payeeVendorName. QB payment created (TxnID=${parsed.result.txnId}) for wire ${payload.sourceConveraTxnId} but vendor unknown — link table row cannot be built.` };
+    // Intuit path (G7a, 2026-08-21) — persist writes the returned TxnID back
+    // to qb_ingest_events.posted_qb_refs.bill_pmt + flips status to 'posted' +
+    // appends this job id. Mirrors the check_add persist pattern below.
+    // INVARIANTS #18: without status='posted', a re-Push would create a duplicate.
+    if (payload.sourceIngestEventId != null) {
+      const { data: existing, error: readErr } = await supabase
+        .from('qb_ingest_events')
+        .select('posted_qb_refs, qb_sync_job_ids')
+        .eq('id', payload.sourceIngestEventId)
+        .maybeSingle();
+      if (readErr) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist (Intuit) DB read error for event ${payload.sourceIngestEventId}: ${readErr.message}. QB payment created (TxnID=${parsed.result.txnId}) but event row not updated — re-push would duplicate.` };
+      }
+      const existingRefs = (existing as { posted_qb_refs?: Record<string, unknown> } | null)?.posted_qb_refs ?? {};
+      const existingJobIds = (existing as { qb_sync_job_ids?: number[] } | null)?.qb_sync_job_ids ?? [];
+      const nextRefs = { ...existingRefs, bill_pmt: parsed.result.txnId, posted_source: 'push' };
+      const nextJobIds = existingJobIds.includes(job.id) ? existingJobIds : [...existingJobIds, job.id];
+      const { error: updErr } = await supabase
+        .from('qb_ingest_events')
+        .update({
+          status: 'posted',
+          status_updated_at: new Date().toISOString(),
+          posted_qb_refs: nextRefs,
+          qb_sync_job_ids: nextJobIds,
+        })
+        .eq('id', payload.sourceIngestEventId);
+      if (updErr) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist (Intuit) DB update error for event ${payload.sourceIngestEventId}: ${updErr.message}. QB payment created (TxnID=${parsed.result.txnId}) but event row not marked posted — re-push would duplicate.` };
+      }
+      return { ok: true, errorMsg: null };
     }
-    const paymentAmount = (payload.applications ?? []).reduce((s, a) => s + (Number(a.paymentAmount) || 0), 0);
-    const { error: linkErr } = await supabase
-      .from('convera_transaction_billpmts')
-      .upsert({
-        convera_transaction_id: payload.sourceConveraTxnId,
-        qb_vendor_name:         payload.payeeVendorName,
-        qb_billpmt_txn_id:      parsed.result.txnId,
-        payment_amount:         paymentAmount,
-      }, { onConflict: 'convera_transaction_id,qb_vendor_name' });
-    if (linkErr) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist DB error inserting link row for wire=${payload.sourceConveraTxnId} vendor="${payload.payeeVendorName}": ${linkErr.message}` };
-    }
-    // Legacy single-value cache. Deliberately last-write-wins — we don't check for
-    // an existing value; the link table is authoritative for per-vendor lookups.
-    // This column is a "was ever paid" bit for legacy consumers (matcher_ignore
-    // filter, older UI badges). Drop candidate for a future migration.
-    const { error: cacheErr } = await supabase
-      .from('convera_transactions')
-      .update({ qb_billpmt_txn_id: parsed.result.txnId })
-      .eq('id', payload.sourceConveraTxnId);
-    if (cacheErr) {
-      // Non-fatal — link table is the source of truth. Log but don't fail.
-      console.warn(`BillPaymentCheckAdd: link row saved but legacy cache update failed for wire=${payload.sourceConveraTxnId}: ${cacheErr.message}`);
-    }
-    return { ok: true, errorMsg: null };
+    return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload has neither sourceConveraTxnId nor sourceIngestEventId. QB payment created (TxnID=${parsed.result.txnId}) but no domain row linked.` };
   }
 
   if (job.kind === 'check_add') {

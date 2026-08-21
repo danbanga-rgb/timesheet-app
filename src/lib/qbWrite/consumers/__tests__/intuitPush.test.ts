@@ -17,6 +17,7 @@ type Row = Record<string, unknown>;
 // `qb_accounts` selects. See execute.ts for the exact chain patterns exercised.
 function makeMockSupabase(tables: Record<string, Row[]>) {
   const inserts: Array<{ table: string; rows: Row[] }> = [];
+  let nextId = 9000;
   const client = {
     from(tableName: string) {
       const rows = (tables[tableName] ?? []) as Row[];
@@ -26,7 +27,7 @@ function makeMockSupabase(tables: Record<string, Row[]>) {
           inserts.push({ table: tableName, rows: newRows });
           return {
             select() {
-              const data = newRows.map((_, i) => ({ id: 9000 + i }));
+              const data = newRows.map(() => ({ id: nextId++ }));
               return Promise.resolve({ data, error: null });
             },
           };
@@ -69,9 +70,12 @@ const readyEvent = {
 
 const vendors = [{ list_id: 'V-HOVER', name: 'Hovercloud Technologies' }];
 const accounts = [{ list_id: 'A-8220', full_name: 'BANK/CASH:8220 - Key Point Checking' }];
+// Default mirror: bill matches event amount exactly + unsettled. Individual tests
+// override to exercise amount-mismatch / already-settled / missing paths.
 const qbMirror = [
   { entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
-    data: { vendor_full_name: 'Hovercloud Technologies' } },
+    amount: 5000, is_settled: false,
+    data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 5000 } },
 ];
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -80,11 +84,11 @@ describe('pushIntuitPayBill', () => {
   it('no-op on empty input', async () => {
     const { client, inserts } = makeMockSupabase({});
     const r = await pushIntuitPayBill(client, []);
-    expect(r).toEqual({ jobIds: [], rejected: [], skippedDuplicate: [], skippedIneligible: [] });
+    expect(r).toEqual({ jobIds: [], rejected: [], skippedDuplicate: [], skippedIneligible: [], verifyJobIdByPayJobId: {} });
     expect(inserts).toHaveLength(0);
   });
 
-  it('enqueues one pay_bill for a ready pay_existing_bill event', async () => {
+  it('enqueues one pay_bill for a ready pay_existing_bill event + a verify bill_query with depends_on', async () => {
     const { client, inserts } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: qbMirror,
     });
@@ -93,10 +97,12 @@ describe('pushIntuitPayBill', () => {
     expect(r.skippedDuplicate).toEqual([]);
     expect(r.skippedIneligible).toEqual([]);
     expect(r.jobIds).toEqual([9000]);
-    const job = inserts.find(i => i.table === 'qb_sync_jobs')!;
-    expect(job).toBeTruthy();
-    expect(job.rows[0].kind).toBe('bill_pmt_add');
-    const payload = job.rows[0].payload as Record<string, unknown>;
+    // Two inserts into qb_sync_jobs: the pay_bill then the follow-up bill_query.
+    const jobInserts = inserts.filter(i => i.table === 'qb_sync_jobs');
+    expect(jobInserts).toHaveLength(2);
+    const payJob = jobInserts[0].rows[0] as Record<string, unknown>;
+    expect(payJob.kind).toBe('bill_pmt_add');
+    const payload = payJob.payload as Record<string, unknown>;
     expect(payload.payeeVendorName).toBe('Hovercloud Technologies');
     expect(payload.bankAccountName).toBe('BANK/CASH:8220 - Key Point Checking');
     expect(payload.sourceIngestEventId).toBe(42);
@@ -104,6 +110,14 @@ describe('pushIntuitPayBill', () => {
     expect(payload.memo).toBe('ingest:42');                  // traceability into QB
     expect(payload.__audit_tag).toBe('test-tag');
     expect(payload.applications).toEqual([{ billTxnId: 'HOVER-BILL-TXN', paymentAmount: 5000 }]);
+    // INVARIANTS #36 — verify chain
+    const verifyJob = jobInserts[1].rows[0] as Record<string, unknown>;
+    expect(verifyJob.kind).toBe('bill_query');
+    expect(verifyJob.depends_on).toEqual([9000]);            // waits for pay to complete
+    const verifyPayload = verifyJob.payload as Record<string, unknown>;
+    expect(verifyPayload.txnIds).toEqual(['HOVER-BILL-TXN']);
+    expect(verifyPayload.__verify_for_event_id).toBe(42);
+    expect(r.verifyJobIdByPayJobId).toEqual({ 9000: 9001 });  // pay=9000, verify=9001 (shared counter)
   });
 
   it('skips events with resolved_action != pay_existing_bill', async () => {
@@ -185,14 +199,71 @@ describe('pushIntuitPayBill', () => {
   it('partitions mixed batch — enqueues eligible, skips ineligible in one call', async () => {
     const wrongAction = { ...readyEvent, id: 100, resolved_action: 'check' };
     const ready = { ...readyEvent, id: 101 };
+    // Second mirror row for the second event (same TxnID but the read is per-event
+    // via .in on entity_ref, so a single row keyed by the shared bill txn is fine).
     const { client, inserts } = makeMockSupabase({
       qb_ingest_events: [wrongAction, ready], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: qbMirror,
     });
     const r = await pushIntuitPayBill(client, [100, 101]);
     expect(r.jobIds).toEqual([9000]);
     expect(r.skippedIneligible.map(s => s.eventId)).toEqual([100]);
-    const job = inserts.find(i => i.table === 'qb_sync_jobs')!;
-    expect((job.rows[0].payload as Record<string, unknown>).sourceIngestEventId).toBe(101);
+    const payJob = inserts.filter(i => i.table === 'qb_sync_jobs')[0];
+    expect((payJob.rows[0].payload as Record<string, unknown>).sourceIngestEventId).toBe(101);
+  });
+
+  // ─── Amount-equality gate (INVARIANTS #36 co-safety) ─────────────────────
+
+  it('refuses to push if event.amount != qb_mirror open_amount (partial-payment block)', async () => {
+    const mirrorMismatch = [{
+      entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
+      amount: 5000, is_settled: false,
+      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 4000 },  // partial
+    }];
+    const { client, inserts } = makeMockSupabase({
+      qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirrorMismatch,
+    });
+    const r = await pushIntuitPayBill(client, [42]);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible).toHaveLength(1);
+    expect(r.skippedIneligible[0].reason).toMatch(/amount-mismatch/);
+    expect(r.skippedIneligible[0].reason).toContain('5000.00');
+    expect(r.skippedIneligible[0].reason).toContain('4000.00');
+    expect(inserts.filter(i => i.table === 'qb_sync_jobs')).toHaveLength(0);
+  });
+
+  it('refuses to push if qb_mirror bill is already settled (IsPaid=true)', async () => {
+    const mirrorSettled = [{
+      entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
+      amount: 5000, is_settled: true,
+      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 0 },
+    }];
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirrorSettled,
+    });
+    const r = await pushIntuitPayBill(client, [42]);
+    expect(r.skippedIneligible[0].reason).toMatch(/already settled/);
+  });
+
+  it('refuses to push if qb_mirror has no row for the resolved bill (stale mirror)', async () => {
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: [],
+    });
+    const r = await pushIntuitPayBill(client, [42]);
+    expect(r.skippedIneligible[0].reason).toMatch(/qb_mirror bill missing/);
+  });
+
+  it('tolerates 2dp float noise in amount comparison', async () => {
+    const nearlyEqualMirror = [{
+      entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
+      amount: 5000, is_settled: false,
+      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 5000.001 },  // sub-penny noise
+    }];
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: nearlyEqualMirror,
+    });
+    const r = await pushIntuitPayBill(client, [42]);
+    expect(r.jobIds).toEqual([9000]);
+    expect(r.skippedIneligible).toEqual([]);
   });
 
   it('executor idempotency — already-posted event → skippedDuplicate (not skippedIneligible)', async () => {
@@ -220,9 +291,11 @@ describe('pushIntuitPayBill', () => {
 
   it('vendor mismatch surfaces from executor #11 — payeeVendorName ≠ bill.vendor', async () => {
     // qb_mirror bill belongs to a DIFFERENT vendor than the event's classifier output.
+    // Amount + is_settled must be present so we get past the consumer's amount-equality gate.
     const mismatchMirror = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-OTHER',
-      data: { vendor_full_name: 'Some Other Vendor' },
+      amount: 5000, is_settled: false,
+      data: { vendor_full_name: 'Some Other Vendor', open_amount: 5000 },
     }];
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mismatchMirror,
