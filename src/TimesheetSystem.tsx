@@ -215,6 +215,7 @@ import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
 import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
 import type { QbOpenBillRow } from './lib/qbStateSync/types';
 import {
+  normalizeRef,
   reconcileBatch,
   type MirrorBill,
   type MirrorPayment,
@@ -10173,6 +10174,49 @@ const TimesheetSystem = () => {
             // legacy matched_invoice_ids display, which over-matched by amount alone).
             const billByTxnId = new Map(qbOpenBills.map(b => [b.txnId, b]));
             const isPreOur = (e: QbIngestEvent) => e.resolvedAction === 'pre_our_system';
+
+            // "Missing QB bills" audit — approved invoices in our system that have
+            // no matching Bill in qb_mirror. Read-only visibility so Dan can see the
+            // total pending QB work per contractor, not just Intuit payment events.
+            // Matches invoice.paymentProfile.qbVendorName → vendor listId → any
+            // bill in qbOpenBills with normalizeRef(refNumber) === normalizeRef(invoice_number).
+            const vendorByName = new Map(qbVendorsList.map(v => [v.name, v]));
+            type MissingBill = {
+              invoice: Invoice;
+              paymentPath: string;
+              qbVendorName: string | null;
+              vendorMapped: boolean;
+            };
+            const missingBills: MissingBill[] = invoices
+              .filter(inv => inv.status === 'approved')
+              .filter(inv => (inv.periodEnd || '') >= INTUIT_PRE_OUR_SYSTEM_CUTOFF)
+              .map((inv): MissingBill | null => {
+                const qbVendorName = inv.paymentProfile?.qbVendorName ?? null;
+                const vendor = qbVendorName ? vendorByName.get(qbVendorName) : undefined;
+                const vendorListId = vendor?.listId ?? null;
+                const invRef = normalizeRef(inv.invoiceNumber);
+                const hasBill = vendorListId != null && invRef !== '' && qbOpenBills.some(b =>
+                  b.vendorListId === vendorListId && normalizeRef(b.refNumber) === invRef
+                );
+                if (hasBill) return null;
+                return {
+                  invoice: inv,
+                  paymentPath: paymentMethod(inv) || 'Unassigned',
+                  qbVendorName,
+                  vendorMapped: vendorListId != null,
+                };
+              })
+              .filter((x): x is MissingBill => x !== null)
+              // Sort Intuit first (fewer rows, more critical — bill gets created at
+              // next payment push, no batch script involved), then by period, contractor.
+              .sort((a, b) => {
+                const pathOrder = (p: string) => p === 'Intuit' ? 0 : p === 'Convera' ? 1 : 2;
+                const p = pathOrder(a.paymentPath) - pathOrder(b.paymentPath);
+                if (p !== 0) return p;
+                const d = (a.invoice.periodEnd || '').localeCompare(b.invoice.periodEnd || '');
+                if (d !== 0) return d;
+                return (a.invoice.userName || '').localeCompare(b.invoice.userName || '');
+              });
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
               { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
               { key: 'pre_our_system',   title: 'Pre-our-system (handled in QB)', hint: `Predate our confidence window (< ${INTUIT_PRE_OUR_SYSTEM_CUTOFF} for Intuit). Accountant reconciled these manually in QB; never pushed.`, events: qbIngestEvents.filter(isPreOur) },
@@ -10310,6 +10354,82 @@ const TimesheetSystem = () => {
                     openMapWidget(counterparty, source);
                   }}
                 />
+
+                {/* Missing QB bills — approved invoices lacking a QB Bill. Purely
+                    audit / visibility. No writes. Read-only cross-check between
+                    invoices and qb_mirror. */}
+                {(() => {
+                  const totalAmt = missingBills.reduce((s, m) => s + m.invoice.totalAmount, 0);
+                  return (
+                    <div className="mb-4 border border-amber-200 rounded-lg overflow-hidden bg-amber-50/40">
+                      <button
+                        onClick={() => toggle('missing_bills')}
+                        className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40 text-left"
+                      >
+                        <div>
+                          <span className="font-semibold text-amber-900">Missing QB bills — approved invoices without a Bill in QB</span>
+                          <span className="ml-2 text-sm text-amber-800">· {missingBills.length} invoice{missingBills.length === 1 ? '' : 's'}</span>
+                          {missingBills.length > 0 && (
+                            <span className="ml-2 text-sm text-amber-800">· ${totalAmt.toFixed(2)}</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</span>
+                      </button>
+                      {qbInboxExpanded['missing_bills'] && (
+                        <div>
+                          {missingBills.length === 0 ? (
+                            <p className="p-4 text-sm text-gray-500 italic">All approved invoices (period_end ≥ {INTUIT_PRE_OUR_SYSTEM_CUTOFF}) have a matching Bill in QB.</p>
+                          ) : (
+                            <>
+                              <p className="px-4 pt-3 text-xs text-gray-600 italic">
+                                Approved invoices in our system with no matching Bill in <code>qb_mirror</code>.
+                                Intuit path: bill gets created on next payment push. Convera path: bill gets created by the batch script.
+                              </p>
+                              <table className="w-full text-xs">
+                                <thead className="bg-white text-gray-500 border-t border-b border-amber-200">
+                                  <tr>
+                                    <th className="px-3 py-1.5 text-left">Period end</th>
+                                    <th className="px-3 py-1.5 text-left">Contractor</th>
+                                    <th className="px-3 py-1.5 text-left">Invoice #</th>
+                                    <th className="px-3 py-1.5 text-right">Amount</th>
+                                    <th className="px-3 py-1.5 text-left">Path</th>
+                                    <th className="px-3 py-1.5 text-left">QB vendor</th>
+                                    <th className="px-3 py-1.5 text-left">Next action</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {missingBills.map(m => {
+                                    const pathClass = m.paymentPath === 'Intuit' ? 'bg-green-50 text-green-700'
+                                                    : m.paymentPath === 'Convera' ? 'bg-purple-50 text-purple-700'
+                                                    : 'bg-gray-100 text-gray-500';
+                                    const nextAction = !m.vendorMapped
+                                      ? <span className="text-red-600">map QB vendor first</span>
+                                      : m.paymentPath === 'Intuit'
+                                        ? <span className="text-gray-600">bill created at next Intuit payment</span>
+                                        : m.paymentPath === 'Convera'
+                                          ? <span className="text-gray-600">bill created by Convera batch</span>
+                                          : <span className="text-red-600">assign payment method</span>;
+                                    return (
+                                      <tr key={m.invoice.id} className="border-t border-amber-100 hover:bg-amber-100/30">
+                                        <td className="px-3 py-1.5 font-mono">{m.invoice.periodEnd}</td>
+                                        <td className="px-3 py-1.5">{m.invoice.userName}</td>
+                                        <td className="px-3 py-1.5 font-mono">{m.invoice.invoiceNumber}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono">${m.invoice.totalAmount.toFixed(2)}</td>
+                                        <td className="px-3 py-1.5"><span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${pathClass}`}>{m.paymentPath}</span></td>
+                                        <td className="px-3 py-1.5 text-gray-600">{m.qbVendorName || <span className="text-red-500">— unmapped —</span>}</td>
+                                        <td className="px-3 py-1.5">{nextAction}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => (
                   <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
