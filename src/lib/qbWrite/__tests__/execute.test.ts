@@ -51,28 +51,64 @@ const baseCheckExpense: CheckExpenseIntent = {
 
 // ─── Scaffold sanity — passes today ─────────────────────────────────────────
 
-// Minimal supabase mock — captures inserts, returns predictable ids.
-// Chain shape: supabase.from(table).insert(rows).select('id') → { data, error }.
+// Supabase mock that serves both idempotency queries + inserts.
+// Chain shapes supported:
+//   supabase.from(t).insert(rows).select('id')                          → { data, error }
+//   supabase.from(t).select(cols).in(col, values)                       → { data, error }
+//   supabase.from(t).select(cols).in(col, values).eq(col, value)        → { data, error }
+//   supabase.from(t).select(cols).in(col, values).not(col, 'is', null)  → { data, error }
+//   supabase.from(t).select(cols).in(col, values).in(col2, values2)     → { data, error }
 type InsertedRow = { kind: string; payload: Record<string, unknown>; status: string };
-function makeMockSupabase(opts: { nextId?: number; error?: { message: string } } = {}) {
+type MockTable = Array<Record<string, unknown>>;
+function makeMockSupabase(opts: {
+  nextId?: number;
+  insertError?: { message: string };
+  tables?: Partial<Record<'convera_transaction_billpmts' | 'qb_ingest_events' | 'invoices' | 'qb_sync_jobs', MockTable>>;
+} = {}) {
   let nextId = opts.nextId ?? 1000;
   const inserts: Array<{ table: string; rows: InsertedRow[] }> = [];
+  const tables = opts.tables ?? {};
+
   const client = {
-    from(table: string) {
-      let stagedRows: InsertedRow[] = [];
-      return {
-        insert(rows: InsertedRow[]) {
-          stagedRows = rows;
-          inserts.push({ table, rows });
+    from(tableName: string) {
+      const rows = (tables[tableName as keyof typeof tables] ?? []) as MockTable;
+      let stagedInsert: InsertedRow[] = [];
+      const query = {
+        _rows: [...rows],
+        insert(newRows: InsertedRow[]) {
+          stagedInsert = newRows;
+          inserts.push({ table: tableName, rows: newRows });
           return {
             select(_cols: string) {
-              if (opts.error) return Promise.resolve({ data: null, error: opts.error });
-              const data = stagedRows.map(() => ({ id: nextId++ }));
+              if (opts.insertError) return Promise.resolve({ data: null, error: opts.insertError });
+              const data = stagedInsert.map(() => ({ id: nextId++ }));
               return Promise.resolve({ data, error: null });
             },
           };
         },
+        select(_cols: string) {
+          return this;
+        },
+        in(col: string, values: unknown[]) {
+          this._rows = this._rows.filter(r => values.includes(r[col]));
+          return this;
+        },
+        eq(col: string, value: unknown) {
+          this._rows = this._rows.filter(r => r[col] === value);
+          return this;
+        },
+        not(col: string, op: string, value: unknown) {
+          if (op === 'is' && value === null) {
+            this._rows = this._rows.filter(r => r[col] != null);
+          }
+          return this;
+        },
+        then(resolve: (v: { data: MockTable; error: null }) => unknown) {
+          // Terminal await — resolve with current filtered rows
+          return resolve({ data: this._rows, error: null });
+        },
       };
+      return query;
     },
   };
   return { client: client as unknown as Parameters<typeof executeIntents>[0], inserts };
@@ -205,8 +241,101 @@ describe('INVARIANTS #11–19 (domain / persistence)', () => {
   it.todo('#15 umbrella-safe pay_bill persistence — Convera pay_bill payload includes sourceConveraTxnId so link table gets populated');
   it.todo('#16 sub-block stripping — N/A to executor (parser concern), affirmed by parsers test');
   it.todo('#17 sessionProgress — N/A to executor (WC concern)');
-  it.todo('#18 idempotency: status=posted skips re-post — duplicate intents for same source ref get skippedDuplicate');
-  it.todo('#19 (source, source_ref) UNIQUE — executor does not create duplicates for the same sourceInvoiceId / sourceConveraTxnId / sourceIngestEventId');
+  describe('#18 idempotency: already-done skip', () => {
+    it('skips Convera pay_bill when convera_transaction_billpmts has (wire, vendor) entry', async () => {
+      const { client } = makeMockSupabase({
+        tables: {
+          convera_transaction_billpmts: [{ convera_transaction_id: 934, qb_vendor_name: 'Bimosoft - Amar Pljevljak' }],
+        },
+      });
+      const r = await executeIntents(client, [basePayBill]);
+      expect(r.jobIds).toEqual([null]);
+      expect(r.rejected).toEqual([]);
+      expect(r.skippedDuplicate).toHaveLength(1);
+      expect(r.skippedDuplicate[0].reason).toMatch(/convera_transaction_billpmts/);
+    });
+    it('skips Intuit pay_bill when qb_ingest_events.status=posted for the event', async () => {
+      const intuitPay: PayBillIntent = { ...basePayBill };
+      delete intuitPay.sourceConveraTxnId;
+      intuitPay.sourceIngestEventId = 89;
+      const { client } = makeMockSupabase({
+        tables: { qb_ingest_events: [{ id: 89, status: 'posted' }] },
+      });
+      const r = await executeIntents(client, [intuitPay]);
+      expect(r.skippedDuplicate[0].reason).toMatch(/status='posted'/);
+      expect(r.jobIds).toEqual([null]);
+    });
+    it('skips create_bill when any sourceInvoiceId already has qb_bill_txn_id in invoices', async () => {
+      const { client } = makeMockSupabase({
+        tables: { invoices: [{ id: 229, qb_bill_txn_id: '41000-1234567' }] },
+      });
+      const r = await executeIntents(client, [baseCreateBill]);
+      expect(r.skippedDuplicate).toHaveLength(1);
+      expect(r.skippedDuplicate[0].reason).toMatch(/229/);
+      expect(r.skippedDuplicate[0].reason).toMatch(/qb_bill_txn_id/);
+    });
+    it('skips check_expense when qb_ingest_events.status=posted', async () => {
+      const { client } = makeMockSupabase({
+        tables: { qb_ingest_events: [{ id: 76, status: 'posted' }] },
+      });
+      const r = await executeIntents(client, [baseCheckExpense]);
+      expect(r.skippedDuplicate).toHaveLength(1);
+    });
+  });
+  describe('#19 in-flight qb_sync_jobs dedup', () => {
+    it('skips when a pending bill_pmt_add for same (sourceConveraTxnId, payeeVendorName) exists', async () => {
+      const { client } = makeMockSupabase({
+        tables: {
+          qb_sync_jobs: [{
+            id: 42, kind: 'bill_pmt_add', status: 'pending',
+            payload: { sourceConveraTxnId: 934, payeeVendorName: 'Bimosoft - Amar Pljevljak' },
+          }],
+        },
+      });
+      const r = await executeIntents(client, [basePayBill]);
+      expect(r.skippedDuplicate[0].reason).toMatch(/in-flight.*id=42/);
+    });
+    it('skips create_bill when a pending bill_add covers overlapping sourceInvoiceIds', async () => {
+      const { client } = makeMockSupabase({
+        tables: {
+          qb_sync_jobs: [{
+            id: 88, kind: 'bill_add', status: 'in_flight',
+            payload: { sourceInvoiceIds: [229, 230] },  // overlaps with baseCreateBill.sourceInvoiceIds=[229]
+          }],
+        },
+      });
+      const r = await executeIntents(client, [baseCreateBill]);
+      expect(r.skippedDuplicate[0].reason).toMatch(/in-flight.*id=88/);
+    });
+    it('does NOT skip when in-flight job is for DIFFERENT source_ref', async () => {
+      const { client } = makeMockSupabase({
+        tables: {
+          qb_sync_jobs: [{
+            id: 99, kind: 'bill_pmt_add', status: 'pending',
+            payload: { sourceConveraTxnId: 999, payeeVendorName: 'Someone Else' },
+          }],
+        },
+      });
+      const r = await executeIntents(client, [basePayBill]);
+      expect(r.skippedDuplicate).toHaveLength(0);
+      expect(r.jobIds[0]).not.toBeNull();
+    });
+    it('does NOT skip when in-flight job is for DIFFERENT vendor same wire (umbrella case)', async () => {
+      // Umbrella wire pays 2 vendors — first is in-flight, second should still enqueue.
+      const { client } = makeMockSupabase({
+        tables: {
+          qb_sync_jobs: [{
+            id: 77, kind: 'bill_pmt_add', status: 'pending',
+            payload: { sourceConveraTxnId: 934, payeeVendorName: 'Bimosoft - Edin Jasarspahic' },
+          }],
+        },
+      });
+      const secondVendor: PayBillIntent = { ...basePayBill, payeeVendorName: 'Bimosoft - Amar Pljevljak' };
+      const r = await executeIntents(client, [secondVendor]);
+      expect(r.skippedDuplicate).toHaveLength(0);
+      expect(r.jobIds[0]).not.toBeNull();
+    });
+  });
 });
 
 // ─── Data invariants (INVARIANTS #20–24) ───────────────────────────────────
