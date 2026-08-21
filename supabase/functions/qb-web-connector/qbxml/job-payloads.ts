@@ -20,8 +20,17 @@
 
 export type JobKind = 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'check_add' | 'account_query' | 'vendor_query' | 'bill_pmt_query';
 
+/** Either every listed key must be present, OR at least one of the `oneOf` groups
+ *  must have all its members present (and `required` is still enforced).
+ *  Legacy shape: bare `readonly string[]` == { required: [...], oneOf: [] }. */
+export type PayloadRequirement = readonly string[] | {
+  required?: readonly string[];
+  /** Array of key-groups. AT LEAST ONE group must have every member defined. */
+  oneOf?: ReadonlyArray<readonly string[]>;
+};
+
 /** Keys the edge fn's persist step MUST see in the payload for each kind. */
-export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
+export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, PayloadRequirement> = {
   // bill_query supports three mutually-exclusive modes (txnIds, refNumbers, iterator).
   // buildBillQueryRq validates the mode contract and throws if payload is under-specified.
   // Persist reads results from the response XML, not the payload — no single required key.
@@ -29,10 +38,13 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
   // bill_add persist uses vendorName from the payload (response echoes it back but
   // reading from payload is simpler and always correct).
   bill_add: ['vendorName', 'refNumber'],
-  // bill_pmt_add persist uses sourceConveraTxnId to update the ONE row that spawned
-  // the payment. Without it, we can't attribute the payment back. Was the 2026-08-14
-  // bug — enqueue omitted this field entirely and persist silently no-op'd.
-  bill_pmt_add: ['sourceConveraTxnId', 'refNumber', 'payeeVendorName', 'applications'],
+  // bill_pmt_add persist uses a source-ref back to the row that spawned the payment.
+  // Convera path: sourceConveraTxnId (2026-08-14 incident: enqueue omitted this, persist
+  // silently no-op'd). Intuit path (Slice G7+): sourceIngestEventId. Exactly one required.
+  bill_pmt_add: {
+    required: ['refNumber', 'payeeVendorName', 'applications'],
+    oneOf: [['sourceConveraTxnId'], ['sourceIngestEventId']],
+  },
   // check_add (Slice E of QB Automation Layer): direct expense check.
   // persist uses sourceIngestEventId to update the ONE qb_ingest_events row that
   // spawned the check, setting posted_qb_refs.check = TxnID and status = 'posted'.
@@ -50,19 +62,53 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, readonly string[]> = {
 export interface ValidatePayloadResult {
   ok: boolean;
   missing: string[];
+  /** Populated when a oneOf group check failed. Explains which groups were tried. */
+  oneOfFailure?: string;
 }
 
-/** Check that the payload has every required key for its kind, with a defined value. */
+/** Check that the payload has every required key for its kind, with a defined value.
+ *  Supports both bare-array (legacy) and { required, oneOf } shape. */
 export function validatePayload(kind: JobKind, payload: unknown): ValidatePayloadResult {
-  const required = PAYLOAD_REQUIRED_KEYS[kind];
-  if (!required || required.length === 0) return { ok: true, missing: [] };
-  if (payload == null || typeof payload !== 'object') {
-    return { ok: false, missing: [...required] };
+  const spec = PAYLOAD_REQUIRED_KEYS[kind];
+  let required: readonly string[];
+  let oneOfGroups: ReadonlyArray<readonly string[]>;
+  if (Array.isArray(spec)) {
+    required = spec;
+    oneOfGroups = [];
+  } else {
+    // TS can't narrow the union to the object branch after Array.isArray on a
+    // union that includes a readonly array — cast explicitly.
+    const objSpec = spec as { required?: readonly string[]; oneOf?: ReadonlyArray<readonly string[]> };
+    required = objSpec.required ?? [];
+    oneOfGroups = objSpec.oneOf ?? [];
   }
-  const record = payload as Record<string, unknown>;
+  if (required.length === 0 && oneOfGroups.length === 0) return { ok: true, missing: [] };
+
+  const record = (payload && typeof payload === 'object')
+    ? (payload as Record<string, unknown>)
+    : null;
+
   const missing: string[] = [];
+  if (record == null) {
+    missing.push(...required);
+    return { ok: false, missing };
+  }
   for (const key of required) {
     if (record[key] === undefined || record[key] === null) missing.push(key);
   }
-  return { ok: missing.length === 0, missing };
+  if (missing.length > 0) return { ok: false, missing };
+
+  if (oneOfGroups.length === 0) return { ok: true, missing: [] };
+
+  const groupOk = oneOfGroups.some(group =>
+    group.every(key => record[key] !== undefined && record[key] !== null),
+  );
+  if (groupOk) return { ok: true, missing: [] };
+
+  const desc = oneOfGroups.map(g => `[${g.join(',')}]`).join(' OR ');
+  return {
+    ok: false,
+    missing: [],
+    oneOfFailure: `payload for '${kind}' must satisfy one of: ${desc}`,
+  };
 }
