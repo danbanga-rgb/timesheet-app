@@ -218,6 +218,58 @@ interface IdempotencyKey {
   payload: Record<string, unknown>;
 }
 
+// ─── Vendor-scoped TxnID check (INVARIANTS #11) ────────────────────────────
+//
+// For every pay_bill intent, cross-check that each applications[].billTxnId
+// belongs to payeeVendorName in qb_mirror. Prevents the batch-15 class of
+// bug (2026-08-13) where 3 payments got wrong-vendor TxnIDs because the
+// reconciler picked a bill by refNumber alone across vendors.
+//
+// Returns a map (intent index → rejection reason). Only pay_bill kinds
+// participate; other kinds skip cleanly.
+async function findVendorMismatches(supabase: SB, candidates: IdempotencyKey[]): Promise<Map<number, string>> {
+  const mismatches = new Map<number, string>();
+
+  const payBillCandidates = candidates.filter(c => c.intent.kind === 'pay_bill');
+  if (payBillCandidates.length === 0) return mismatches;
+
+  const allTxnIds = new Set<string>();
+  for (const c of payBillCandidates) {
+    if (c.intent.kind !== 'pay_bill') continue;
+    for (const app of c.intent.applications) allTxnIds.add(app.billTxnId);
+  }
+  if (allTxnIds.size === 0) return mismatches;
+
+  const { data } = await supabase
+    .from('qb_mirror')
+    .select('entity_ref, vendor_list_id, data')
+    .eq('entity_kind', 'bill')
+    .in('entity_ref', Array.from(allTxnIds));
+
+  // Bill lookup by TxnID → vendor name (from mirror row's data.vendor_full_name)
+  const billVendor = new Map<string, string>();
+  for (const row of (data ?? []) as Array<{ entity_ref: string; data: Record<string, unknown> | null }>) {
+    const vname = ((row.data ?? {}) as Record<string, unknown>).vendor_full_name;
+    if (typeof vname === 'string') billVendor.set(row.entity_ref, vname);
+  }
+
+  for (const c of payBillCandidates) {
+    if (c.intent.kind !== 'pay_bill') continue;
+    for (const app of c.intent.applications) {
+      const actualVendor = billVendor.get(app.billTxnId);
+      if (actualVendor == null) {
+        mismatches.set(c.index, `vendor-mismatch: bill TxnID '${app.billTxnId}' not found in qb_mirror (sync qb_mirror first)`);
+        break;
+      }
+      if (actualVendor !== c.intent.payeeVendorName) {
+        mismatches.set(c.index, `vendor-mismatch: bill TxnID '${app.billTxnId}' belongs to vendor '${actualVendor}' in qb_mirror, but pay_bill.payeeVendorName is '${c.intent.payeeVendorName}'. Batch-15-class regression — check reconciler.`);
+        break;
+      }
+    }
+  }
+  return mismatches;
+}
+
 async function findDuplicates(supabase: SB, candidates: IdempotencyKey[]): Promise<Map<number, string>> {
   const dupReason = new Map<number, string>();
   if (candidates.length === 0) return dupReason;
@@ -376,9 +428,26 @@ export async function executeIntents(
     candidates.push({ index: i, intent, kind, payload });
   }
 
+  // ─── Step 3.5: vendor-scoped TxnID check (INVARIANTS #11) ───
+  // Runs BEFORE idempotency so a wrong-vendor mismatch is surfaced as a
+  // real rejection, not silently swallowed as "duplicate."
+  const vendorMismatches = await findVendorMismatches(supabase, candidates);
+  const postVendorCheck = candidates.filter(c => {
+    if (vendorMismatches.has(c.index)) {
+      rejected.push({
+        index: c.index,
+        intent: c.intent,
+        reason: vendorMismatches.get(c.index)!,
+        invariant: 'INVARIANTS #11 — vendor-scoped TxnID (billTxnId must belong to payeeVendorName in qb_mirror)',
+      });
+      return false;
+    }
+    return true;
+  });
+
   // ─── Step 4: idempotency ───
-  const duplicates = await findDuplicates(supabase, candidates);
-  const toInsert = candidates.filter(c => {
+  const duplicates = await findDuplicates(supabase, postVendorCheck);
+  const toInsert = postVendorCheck.filter(c => {
     if (duplicates.has(c.index)) {
       skippedDuplicate.push({ index: c.index, intent: c.intent, reason: duplicates.get(c.index)! });
       return false;
