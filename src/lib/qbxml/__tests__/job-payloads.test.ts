@@ -12,10 +12,11 @@ describe('PAYLOAD_REQUIRED_KEYS', () => {
     expect(PAYLOAD_REQUIRED_KEYS.bill_query).toEqual([]);
     expect(PAYLOAD_REQUIRED_KEYS.bill_add).toEqual(['vendorName', 'refNumber']);
     // bill_pmt_add uses { required, oneOf } shape as of 2026-08-21 to support both
-    // Convera path (sourceConveraTxnId) and Intuit path (sourceIngestEventId).
+    // Convera path (sourceConveraTxnId + refNumber wire code) and Intuit path
+    // (sourceIngestEventId, blank RefNumber per historic convention).
     expect(PAYLOAD_REQUIRED_KEYS.bill_pmt_add).toEqual({
-      required: ['refNumber', 'payeeVendorName', 'applications'],
-      oneOf: [['sourceConveraTxnId'], ['sourceIngestEventId']],
+      required: ['payeeVendorName', 'applications'],
+      oneOf: [['refNumber', 'sourceConveraTxnId'], ['sourceIngestEventId']],
     });
     expect(PAYLOAD_REQUIRED_KEYS.account_query).toEqual([]);
     expect(PAYLOAD_REQUIRED_KEYS.vendor_query).toEqual([]);
@@ -78,8 +79,11 @@ describe('validatePayload', () => {
     };
     const result = validatePayload('bill_pmt_add', renamedPayload);
     expect(result.ok).toBe(false);
-    // required missing (payeeVendorName + applications + refNumber)
-    expect(result.missing.sort()).toEqual(['applications', 'payeeVendorName', 'refNumber']);
+    // required missing (payeeVendorName + applications). refNumber is no longer
+    // in `required` — it's in the Convera arm of `oneOf` — so its absence is
+    // signaled through oneOfFailure, not `missing`. validatePayload short-circuits
+    // on `missing`; oneOfFailure only surfaces once `required` is satisfied.
+    expect(result.missing.sort()).toEqual(['applications', 'payeeVendorName']);
   });
 
   it('rejects null/undefined payloads for kinds with required keys', () => {
