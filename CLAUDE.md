@@ -138,7 +138,7 @@ Reminders are fired by a **Supabase pg_cron job** (not GitHub Actions). The `sen
 - To pause: `SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'send-reminders'`
 - To resume: `SELECT cron.schedule('send-reminders', '0 * * * *', $$SELECT net.http_post(...)$$)`
 - Use the Supabase Management API with PAT to run these queries: `POST /v1/projects/{ref}/database/query`
-- Edge function logs are queryable via `GET /v1/projects/{ref}/analytics/endpoints/logs.all` with PAT
+- Edge function logs are queryable via `GET /v1/projects/{ref}/analytics/endpoints/logs` with PAT. `iso_timestamp_start` + `iso_timestamp_end` are required. Union table only — use `FROM logs WHERE source = 'edge_logs'`. Only common fields exposed (id, timestamp, source, event_message, log_attributes); `metadata` is unavailable and `log_attributes` isn't SQL-queryable — match on `event_message` (edge_logs format: `METHOD | STATUS | URL | UA`). (Legacy `logs.all` removed 2026-09-23.)
 
 ### GitHub Actions
 - `poll-timesheets.yml` — runs the email poller hourly (`cron: '30 * * * *'`)

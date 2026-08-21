@@ -259,13 +259,19 @@ async function checkEdge5xx(supabasePat: string, projectRef: string): Promise<Sl
   }
 
   const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const sql = `SELECT count(*) as cnt FROM edge_logs WHERE timestamp >= '${sixHoursAgo.toISOString()}' AND metadata->>'status' >= '500'`;
+  const nowIso = new Date().toISOString();
+  const startIso = sixHoursAgo.toISOString();
+  // logs.all → logs (2026-09-23 cutover). Union table exposes id/timestamp/source/event_message/log_attributes
+  // but not metadata; log_attributes isn't SQL-queryable, so match the 5xx signal in event_message directly.
+  // edge_logs event_message shape: "METHOD | STATUS | URL | UA".
+  const sql = `SELECT count(*) as cnt FROM logs WHERE source = 'edge_logs' AND event_message LIKE '% | 5__ | %'`;
+  const url = new URL(`https://api.supabase.com/v1/projects/${projectRef}/analytics/endpoints/logs`);
+  url.searchParams.set('sql', sql);
+  url.searchParams.set('iso_timestamp_start', startIso);
+  url.searchParams.set('iso_timestamp_end', nowIso);
 
   try {
-    const res = await fetch(
-      `https://api.supabase.com/v1/projects/${projectRef}/analytics/endpoints/logs.all?sql=${encodeURIComponent(sql)}`,
-      { headers: { 'Authorization': `Bearer ${supabasePat}` } }
-    );
+    const res = await fetch(url.toString(), { headers: { 'Authorization': `Bearer ${supabasePat}` } });
 
     if (!res.ok) {
       return { ...base, ok: true, current: 'query error', details: `Analytics API returned ${res.status}` };
