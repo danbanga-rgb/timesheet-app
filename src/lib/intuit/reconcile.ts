@@ -82,26 +82,33 @@ export interface ReconciliationResult {
 // ─── refNumber normalization ─────────────────────────────────────────────────
 
 /**
- * Canonicalize a refNumber for cross-source matching. QB stores "INV 12"
- * whereas Intuit memo says "Inv# 12"; contractors use "Inv#12", "INV#12", etc.
- * Rule: uppercase, strip leading "INV#"/"INV "/"INV"/"#", keep alnum + separators.
+ * Canonicalize a refNumber for cross-source matching. QB stores "INV 12" or
+ * "INV-000046"; Intuit memo says "Inv# 12" or "In# INV 000046"; contractors
+ * use "Inv#12", "INV#12", etc.
+ * Rule: uppercase, strip stacked leading "INV" runs plus any of #/space/hyphen
+ * between them, then any leading "#". Handles the doubled-prefix case where a
+ * QB bill ref is literally "INV-000046" (strip "INV" once → "-000046" would
+ * fail to match memo "INV 000046" → "000046"; the stacked strip fixes this).
  */
 export function normalizeRef(raw: string | null): string {
   if (!raw) return '';
   let s = raw.toUpperCase().trim();
-  s = s.replace(/^INV\s*#?\s*/, '').replace(/^#\s*/, '');
+  // Repeated group so "INV# INV-000046" strips both INV runs → "000046".
+  s = s.replace(/^(INV[\s#\-]*)+/, '').replace(/^#\s*/, '');
   return s.trim();
 }
 
 /**
  * Extract all invoice refs from an event memo. Handles "Inv# 12", "Inv# 03, 04",
- * "INV#12 INV#13", etc. Returns normalized forms.
+ * "INV#12 INV#13", "Inv# INV-000046" (Hover-style stacked prefix), etc.
+ * Returns normalized forms.
  */
 export function extractRefsFromMemo(memo: string | null): string[] {
   if (!memo) return [];
   const out = new Set<string>();
-  // Match "Inv# X" or "INV X" or "INV#X" style occurrences
-  const rex = /INV\s*#?\s*([A-Z0-9][A-Z0-9\-/.]*)/gi;
+  // [\s#\-]* allows the INV prefix to be followed by any of space/hash/hyphen
+  // before the capture group, so patterns like "INV-000046" (no space) match.
+  const rex = /INV[\s#\-]*([A-Z0-9][A-Z0-9\-/.]*)/gi;
   let m: RegExpExecArray | null;
   while ((m = rex.exec(memo)) !== null) {
     const ref = normalizeRef(m[0]);
