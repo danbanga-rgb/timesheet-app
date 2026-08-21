@@ -69,6 +69,18 @@ describe('normalizeRef', () => {
     expect(normalizeRef('INV 226/1/1')).toBe('226/1/1');
     expect(normalizeRef('Inv# 03/26')).toBe('03/26');
   });
+  it('strips stacked INV prefixes (Hover-style: "Inv# INV-000046" ↔ "INV 000046")', () => {
+    // Real prod cases 2026-08-21: Hover bills stored in QB as "Inv# INV-000046"
+    // while Intuit memo says "In# INV 000046". Both must collapse to "000046".
+    expect(normalizeRef('Inv# INV-000046')).toBe('000046');
+    expect(normalizeRef('INV 000046')).toBe('000046');
+    expect(normalizeRef('INV-000047')).toBe('000047');
+    expect(normalizeRef('Inv# INV--000045')).toBe('000045'); // double-hyphen typo in QB
+    expect(normalizeRef('Inv# INV---000043')).toBe('000043'); // triple-hyphen typo
+    // PT-XXXX must survive intact (letters after INV are the identifier)
+    expect(normalizeRef('INV PT-10631')).toBe('PT-10631');
+    expect(normalizeRef('Inv# PT-10631')).toBe('PT-10631');
+  });
   it('null/empty → empty string', () => {
     expect(normalizeRef(null)).toBe('');
     expect(normalizeRef('')).toBe('');
@@ -90,6 +102,12 @@ describe('extractRefsFromMemo', () => {
   it('handles memo with no refs', () => {
     expect(extractRefsFromMemo('some other text')).toEqual([]);
     expect(extractRefsFromMemo(null)).toEqual([]);
+  });
+  it('handles hyphen-only separator between INV and number (Hover-style)', () => {
+    // "Inv# INV-000047" — no whitespace between INV and hyphen. Old regex missed this.
+    expect(extractRefsFromMemo('Inv# INV-000047')).toEqual(['000047']);
+    expect(extractRefsFromMemo('In# INV 000046')).toEqual(['000046']);
+    expect(extractRefsFromMemo('INV-000048')).toEqual(['000048']);
   });
 });
 

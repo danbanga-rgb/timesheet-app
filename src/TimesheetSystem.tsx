@@ -10487,7 +10487,11 @@ const TimesheetSystem = () => {
                                       <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
                                       <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
                                       <td className="px-3 py-1.5">{resolvedCell}</td>
-                                      <td className="px-3 py-1.5"><span className="text-gray-500">{e.status}</span></td>
+                                      <td className="px-3 py-1.5">
+                                        {e.resolvedAction === 'pre_our_system'
+                                          ? <span className="text-gray-500 italic">will not push</span>
+                                          : <span className="text-gray-500">{e.status}</span>}
+                                      </td>
                                     </tr>
                                   );
                                 })}
