@@ -12,6 +12,9 @@
 //   8. zero_hour_timesheet  — SILENCED
 //   9. auto_yes_zero_hour   — auto-YES submission resulted in 0h           cap: 4h
 //                              (CRITICAL — sanity gate should prevent this)
+//  10. qb_silent_drop       — bill_pmt_add + verify done but qb_mirror     cap: 1/day
+//                              disagrees; or any job stuck in_flight >30m
+//                              (INVARIANTS #36; G8 landed 2026-08-21)
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -291,6 +294,93 @@ async function checkEdge5xx(supabasePat: string, projectRef: string): Promise<Sl
   }
 }
 
+// ─── G8: QB silent-drop verifier (INVARIANTS #36) ───────────────────────────
+//
+// After a bill_pmt_add job succeeds, the consumer chains a bill_query with
+// depends_on so qb_mirror re-reads the paid bill's IsPaid state. This SLO
+// asserts that once BOTH jobs are done for >30 min, the mirror row actually
+// shows the bill settled — otherwise the payment "landed" in QB per the
+// qbXML response but reality diverged (or the persist step misbehaved).
+//
+// Also flags any qb_sync_jobs stuck in_flight > 30 min — QBWC crashed
+// mid-drain and the row will never move without manual intervention.
+//
+// 24h lookback window; alerts once per day.
+
+async function checkQbSilentDrop(supabase: ReturnType<typeof createClient>): Promise<SloResult> {
+  const base: Omit<SloResult, 'ok' | 'current' | 'details'> = {
+    key: 'qb_silent_drop',
+    threshold: '0 silent drops or stuck jobs in 24h',
+    capMinutes: 24 * 60,
+    actionSuggestion: 'Check QB Automation tab → status pane for the affected event(s). Look up the BillPmt in QB Desktop; if it exists but qb_mirror disagrees, enqueue a bill_query to refresh mirror. If it does not exist in QB, void the qb_ingest_events row (see void SQL in the status pane).',
+    minConsecutiveBreaches: 1,
+  };
+
+  const thirtyMinAgoIso = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const twentyFourHrsAgoIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  // Signal 2: stuck in_flight (QBWC crash mid-drain). started_at = when QBWC
+  // picked it up; if it's still in_flight >30 min after pickup, WC hung.
+  const { data: stuck } = await supabase
+    .from('qb_sync_jobs')
+    .select('id, kind, started_at')
+    .eq('status', 'in_flight')
+    .lt('started_at', thirtyMinAgoIso);
+  const stuckRows = (stuck ?? []) as Array<{ id: number; kind: string; started_at: string }>;
+
+  // Signal 1: bill_pmt_add done + verify bill_query done, but mirror shows unsettled
+  const { data: payJobs } = await supabase
+    .from('qb_sync_jobs')
+    .select('id, payload, completed_at')
+    .eq('kind', 'bill_pmt_add')
+    .eq('status', 'done')
+    .lt('completed_at', thirtyMinAgoIso)
+    .gt('completed_at', twentyFourHrsAgoIso);
+  const payRows = (payJobs ?? []) as Array<{ id: number; payload: Record<string, unknown> | null; completed_at: string }>;
+
+  const drops: Array<{ payJobId: number; billTxnId: string; reason: string }> = [];
+  for (const pj of payRows) {
+    const apps = (pj.payload?.applications as Array<{ billTxnId?: string }> | undefined) ?? [];
+    const billTxnIds = apps.map(a => a.billTxnId).filter((v): v is string => typeof v === 'string');
+    if (billTxnIds.length === 0) continue;
+
+    // Follow-up bill_query enqueued with depends_on = [payJobId]
+    const { data: verifies } = await supabase
+      .from('qb_sync_jobs')
+      .select('id, status')
+      .eq('kind', 'bill_query')
+      .contains('depends_on', [pj.id]);
+    const doneVerify = ((verifies ?? []) as Array<{ status: string }>).find(v => v.status === 'done');
+    if (!doneVerify) continue;  // verify hasn't drained yet — not enough info to call it a drop
+
+    const { data: mirror } = await supabase
+      .from('qb_mirror')
+      .select('entity_ref, is_settled')
+      .eq('entity_kind', 'bill')
+      .in('entity_ref', billTxnIds);
+    const mirrorByTxn = new Map(((mirror ?? []) as Array<{ entity_ref: string; is_settled: boolean | null }>).map(m => [m.entity_ref, m]));
+    for (const txnId of billTxnIds) {
+      const m = mirrorByTxn.get(txnId);
+      if (!m) drops.push({ payJobId: pj.id, billTxnId: txnId, reason: 'qb_mirror row missing' });
+      else if (m.is_settled !== true) drops.push({ payJobId: pj.id, billTxnId: txnId, reason: 'qb_mirror.is_settled != true' });
+    }
+  }
+
+  const total = drops.length + stuckRows.length;
+  const preview = [
+    ...drops.slice(0, 3).map(d => `silent-drop: pay job ${d.payJobId} bill ${d.billTxnId.slice(0, 12)}… ${d.reason}`),
+    ...stuckRows.slice(0, 3).map(s => `stuck: ${s.kind} job ${s.id} in_flight since ${s.started_at}`),
+  ].join(' | ');
+  return {
+    ...base,
+    ok: total === 0,
+    current: total === 0 ? '0 silent drops / 0 stuck' : `${drops.length} silent-drop(s), ${stuckRows.length} stuck`,
+    details: total === 0
+      ? 'All done bill_pmt_add jobs with completed verify chains show mirror settled; no jobs stuck in flight >30 min'
+      : `${preview}${total > 6 ? ` (+${total - 6} more)` : ''}`,
+  };
+}
+
 // ─── Alerting state & Brevo ────────────────────────────────────────────────
 
 // Returns current state and whether cap allows alerting
@@ -398,6 +488,7 @@ serve(async (req) => {
     checkZeroHourTimesheet(supabase),
     checkAutoYesZeroHour(supabase),
     checkEdge5xx(SUPABASE_PAT, PROJECT_REF),
+    checkQbSilentDrop(supabase),
   ]);
 
   const report: Array<{ slo: string; ok: boolean; current: string; alerted?: boolean; skipped?: string }> = [];
