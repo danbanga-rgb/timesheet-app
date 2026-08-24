@@ -212,13 +212,23 @@ export async function pushIntuitPayBill(
       continue;
     }
     const eventAmount = Number(e.amount);
-    const openAmount = mirror.data?.open_amount != null ? Number(mirror.data.open_amount) : Number(mirror.amount ?? 0);
+    // QB Desktop quirk (verified 2026-08-24 across 6 open bills, 3 vendors):
+    // <OpenAmount> in BillRet returns the VENDOR's aggregate AP balance across
+    // all unsettled bills, NOT the per-bill open amount. Both Hover bills
+    // ($12,600 + $13,200) returned OpenAmount=$25,800; same pattern on Flawless
+    // and Procal. Not usable for per-bill parity.
+    //
+    // Use <AmountDue> (mirror.amount) as the per-bill worth. Combined with
+    // is_settled=false (checked above), this is a sound "full bill is still
+    // owed" signal. Partial-payment support (subtracting LinkedTxn
+    // AppliedToTxnRet amounts) is future work — no such case in the backlog.
+    const billAmount = Number(mirror.amount ?? 0);
     // Compare to 2dp — accountant amounts are always penny-precise; float noise
     // is a code smell here anyway.
-    if (Math.abs(eventAmount - openAmount) > 0.005) {
+    if (Math.abs(eventAmount - billAmount) > 0.005) {
       skippedIneligible.push({
         eventId: e.id,
-        reason: `amount-mismatch: event.amount=${eventAmount.toFixed(2)} but qb_mirror bill TxnID=${e.resolved_bill_txn_id} open_amount=${openAmount.toFixed(2)}. Partial payments not allowed on first live push; refuse until parity or explicit override.`,
+        reason: `amount-mismatch: event.amount=${eventAmount.toFixed(2)} but qb_mirror bill TxnID=${e.resolved_bill_txn_id} AmountDue=${billAmount.toFixed(2)}. Refuse until parity or explicit override.`,
       });
       continue;
     }

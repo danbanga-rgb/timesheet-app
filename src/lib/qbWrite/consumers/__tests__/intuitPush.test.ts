@@ -292,11 +292,15 @@ describe('pushIntuitPayBill', () => {
 
   // ─── Amount-equality gate (INVARIANTS #36 co-safety) ─────────────────────
 
-  it('refuses to push if event.amount != qb_mirror open_amount (partial-payment block)', async () => {
+  it('refuses to push if event.amount != qb_mirror AmountDue (bill worth different from event)', async () => {
+    // Mirror.amount = <AmountDue> = per-bill true worth. If event says $5000
+    // but the bill is $4000, that's a mismatch — likely reconciler paired
+    // the wrong bill. Refuse. (open_amount NOT trusted — QB Desktop returns
+    // vendor-aggregate open balance there, not per-bill.)
     const mirrorMismatch = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
-      amount: 5000, is_settled: false,
-      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 4000 },  // partial
+      amount: 4000, is_settled: false,
+      data: { vendor_full_name: 'Hovercloud Technologies' },
     }];
     const { client, inserts } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirrorMismatch,
@@ -308,6 +312,24 @@ describe('pushIntuitPayBill', () => {
     expect(r.skippedIneligible[0].reason).toContain('5000.00');
     expect(r.skippedIneligible[0].reason).toContain('4000.00');
     expect(inserts.filter(i => i.table === 'qb_sync_jobs')).toHaveLength(0);
+  });
+
+  it('ignores qb_mirror open_amount (unreliable — QB Desktop returns vendor-aggregate)', async () => {
+    // Regression 2026-08-24: QB Desktop's <OpenAmount> in BillRet returns the
+    // VENDOR's total open balance, not the per-bill open. Our gate must not
+    // use it. Here, event.amount=5000 matches mirror.amount=5000 (AmountDue),
+    // but data.open_amount=25000 (aggregate). Push should succeed.
+    const mirrorQuirk = [{
+      entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
+      amount: 5000, is_settled: false,
+      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 25000 },
+    }];
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirrorQuirk,
+    });
+    const r = await pushIntuitPayBill(client, [42]);
+    expect(r.jobIds).toEqual([9000]);
+    expect(r.skippedIneligible).toEqual([]);
   });
 
   it('refuses to push if qb_mirror bill is already settled (IsPaid=true)', async () => {
@@ -334,8 +356,8 @@ describe('pushIntuitPayBill', () => {
   it('tolerates 2dp float noise in amount comparison', async () => {
     const nearlyEqualMirror = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
-      amount: 5000, is_settled: false,
-      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 5000.001 },  // sub-penny noise
+      amount: 5000.001, is_settled: false,   // sub-penny noise in AmountDue
+      data: { vendor_full_name: 'Hovercloud Technologies' },
     }];
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: nearlyEqualMirror,
