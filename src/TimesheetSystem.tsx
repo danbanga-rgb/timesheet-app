@@ -10484,11 +10484,11 @@ const TimesheetSystem = () => {
                       // create_bill_then_pay → intuitCreateBill. Run both in parallel;
                       // merge results for the alert + status pane.
                       const selectedEvents = selectedIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
-                      const payIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
-                      const createIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
+                      const payEventIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
+                      const createEventIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
                       const [payRes, createRes] = await Promise.all([
-                        payIds.length > 0 ? pushIntuitPayBill(supabase, payIds) : Promise.resolve(null),
-                        createIds.length > 0 ? pushIntuitCreateBill(supabase, createIds) : Promise.resolve(null),
+                        payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
+                        createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
                       ]);
                       const r = {
                         jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? [])],
@@ -10498,25 +10498,25 @@ const TimesheetSystem = () => {
                         verifyJobIdByPayJobId: payRes?.verifyJobIdByPayJobId ?? {},
                       };
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
+                      const payJobIds = payRes?.jobIds ?? [];
+                      const createJobIds = createRes?.jobIds ?? [];
+                      void createJobIds;
 
                       // Build push records for the live status pane. Only successful
-                      // pay enqueues get an entry — rejected/skipped are surfaced via alert.
+                      // pay_bill jobs get an entry — status pane's pay+verify state
+                      // machine doesn't model bill_add. bill_add drain success is
+                      // observable via the event's resolved_bill_txn_id flipping
+                      // + subsequent recompute; alert covers the immediate feedback.
                       const eventById = new Map(qbIngestEvents.map(e => [e.id, e]));
                       const vendorByListId = new Map(qbVendorsList.map(v => [v.listId, v]));
                       const newRecords: PushRecord[] = [];
-                      // The order of r.jobIds matches the order intents were built which
-                      // matches the order of eligible events. But since we don't know the
-                      // exact eligible ordering here, use selectedIds filtered against the
-                      // returned jobIds by index. Simpler: iterate selected in order and
-                      // pair each successful jobId with the first-remaining selected event
-                      // that didn't end up ineligible/rejected/duplicate.
                       const inelig = new Set(r.skippedIneligible.map(s => s.eventId));
-                      const rejEventIds = new Set(r.rejected.map(rj => (rj.intent.kind === 'pay_bill' ? rj.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
-                      const dupEventIds = new Set(r.skippedDuplicate.map(s => (s.intent.kind === 'pay_bill' ? s.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
-                      const eligibleInOrder = selectedIds.filter(id => !inelig.has(id) && !rejEventIds.has(id) && !dupEventIds.has(id));
-                      r.jobIds.forEach((jobId, i) => {
+                      const rejPayEventIds = new Set((payRes?.rejected ?? []).map(rj => (rj.intent.kind === 'pay_bill' ? rj.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const dupPayEventIds = new Set((payRes?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'pay_bill' ? s.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const eligiblePayInOrder = payEventIds.filter(id => !inelig.has(id) && !rejPayEventIds.has(id) && !dupPayEventIds.has(id));
+                      payJobIds.forEach((jobId, i) => {
                         if (jobId == null) return;
-                        const eventId = eligibleInOrder[i];
+                        const eventId = eligiblePayInOrder[i];
                         if (eventId == null) return;
                         const event = eventById.get(eventId);
                         if (!event) return;
@@ -10533,8 +10533,13 @@ const TimesheetSystem = () => {
                       });
                       setQbPushRecords(prev => [...prev, ...newRecords]);
 
+                      const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
+                      const createEnqueued = createJobIds.filter((id): id is number => id != null).length;
                       const parts: string[] = [];
-                      parts.push(`${enqueued} pay_bill job${enqueued === 1 ? '' : 's'} enqueued.`);
+                      if (payEnqueued > 0) parts.push(`${payEnqueued} pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
+                      if (createEnqueued > 0) parts.push(`${createEnqueued} bill_add job${createEnqueued === 1 ? '' : 's'} enqueued (G7b — wait for drain, then Recompute + push payment step).`);
+                      if (parts.length === 0) parts.push(`0 jobs enqueued.`);
+                      void enqueued;
                       if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
                       if (r.skippedDuplicate.length > 0) parts.push(`${r.skippedDuplicate.length} skipped (already done or in-flight).`);
                       if (r.rejected.length > 0) parts.push(`${r.rejected.length} rejected by invariants.`);
