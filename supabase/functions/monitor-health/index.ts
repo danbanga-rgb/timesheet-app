@@ -264,7 +264,10 @@ async function checkEdge5xx(supabasePat: string, projectRef: string): Promise<Sl
   // logs.all → logs (2026-09-23 cutover). Union table exposes id/timestamp/source/event_message/log_attributes
   // but not metadata; log_attributes isn't SQL-queryable, so match the 5xx signal in event_message directly.
   // edge_logs event_message shape: "METHOD | STATUS | URL | UA".
-  const sql = `SELECT count(*) as cnt FROM logs WHERE source = 'edge_logs' AND event_message LIKE '% | 5__ | %'`;
+  // The 'edge_logs' source covers ALL project edge traffic (Realtime, Storage, PostgREST, Functions), so we
+  // filter on URL path to isolate actual edge Functions. Without this, transient Realtime websocket 502/503s
+  // (upstream Supabase infra) trip the SLO — nothing we can act on.
+  const sql = `SELECT count(*) as cnt FROM logs WHERE source = 'edge_logs' AND event_message LIKE '% | 5__ | %' AND event_message LIKE '%/functions/v1/%'`;
   const url = new URL(`https://api.supabase.com/v1/projects/${projectRef}/analytics/endpoints/logs`);
   url.searchParams.set('sql', sql);
   url.searchParams.set('iso_timestamp_start', startIso);
