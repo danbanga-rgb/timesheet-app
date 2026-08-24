@@ -57,6 +57,8 @@ interface IngestEventRow {
   resolved_action: string | null;
   resolved_bill_txn_id: string | null;
   status: string;
+  matched_invoice_ids: number[] | null;
+  match_provenance: string | null;
 }
 
 interface VendorRow { list_id: string; name: string }
@@ -87,7 +89,7 @@ export async function pushIntuitPayBill(
 
   const { data: eventData } = await supabase
     .from('qb_ingest_events')
-    .select('id, txn_date, amount, counterparty_qb_vendor_list_id, qb_bank_account_list_id, resolved_action, resolved_bill_txn_id, status')
+    .select('id, txn_date, amount, counterparty_qb_vendor_list_id, qb_bank_account_list_id, resolved_action, resolved_bill_txn_id, status, matched_invoice_ids, match_provenance')
     .in('id', eventIds);
   const events = (eventData ?? []) as IngestEventRow[];
 
@@ -121,13 +123,58 @@ export async function pushIntuitPayBill(
       skippedIneligible.push({ eventId: e.id, reason: 'qb_bank_account_list_id missing — set bank account before push' });
       continue;
     }
+    // Provenance gate (pay_existing_bill class): require exact-txn or exact-ref
+    // so we know our matched invoice is the right one. Fuzzy / empty stays
+    // out until the accountant human-verifies in the UI (future: override flag).
+    const provenance = e.match_provenance;
+    if (provenance !== 'exact-txn' && provenance !== 'exact-ref') {
+      skippedIneligible.push({
+        eventId: e.id,
+        reason: `match_provenance='${provenance ?? 'null'}' — pay_existing_bill requires exact-txn or exact-ref (invoice link too weak; verify in UI first)`,
+      });
+      continue;
+    }
+    const matchedIds = e.matched_invoice_ids ?? [];
+    if (matchedIds.length === 0) {
+      skippedIneligible.push({
+        eventId: e.id,
+        reason: 'matched_invoice_ids is empty — no invoice to reconcile against',
+      });
+      continue;
+    }
     eligible.push(e);
   }
 
   if (eligible.length === 0) return emptyReturn();
 
+  // Dupe guard: if two eligible events map to the same primary invoice
+  // (matched_invoice_ids[0]), both are ambiguous — refuse both. exact-txn
+  // provenance makes this collision statistically impossible (bill TxnID is
+  // unique per QB bill) but keep the guard for exact-ref which relies on
+  // memo naming and could plausibly collide.
+  const primaryInvoiceCount = new Map<number, number>();
+  for (const e of eligible) {
+    const primary = (e.matched_invoice_ids ?? [])[0];
+    if (primary != null) primaryInvoiceCount.set(primary, (primaryInvoiceCount.get(primary) ?? 0) + 1);
+  }
+  const collided = new Set<number>();
+  for (const [invId, n] of primaryInvoiceCount) if (n > 1) collided.add(invId);
+  const eligibleAfterDupe: IngestEventRow[] = [];
+  for (const e of eligible) {
+    const primary = (e.matched_invoice_ids ?? [])[0];
+    if (primary != null && collided.has(primary)) {
+      skippedIneligible.push({
+        eventId: e.id,
+        reason: `duplicate invoice-mapping: invoice.id=${primary} claimed by multiple ready events — human review before push`,
+      });
+      continue;
+    }
+    eligibleAfterDupe.push(e);
+  }
+  if (eligibleAfterDupe.length === 0) return emptyReturn();
+
   // Amount-equality gate — fetch mirror rows for the resolved bills.
-  const billTxnIds = Array.from(new Set(eligible.map(e => e.resolved_bill_txn_id!)));
+  const billTxnIds = Array.from(new Set(eligibleAfterDupe.map(e => e.resolved_bill_txn_id!)));
   const { data: mirrorData } = await supabase
     .from('qb_mirror')
     .select('entity_ref, amount, is_settled, data')
@@ -135,8 +182,8 @@ export async function pushIntuitPayBill(
     .in('entity_ref', billTxnIds);
   const mirrorByTxnId = new Map(((mirrorData ?? []) as MirrorBillRow[]).map(m => [m.entity_ref, m]));
 
-  const vendorIds = Array.from(new Set(eligible.map(e => e.counterparty_qb_vendor_list_id!)));
-  const bankIds = Array.from(new Set(eligible.map(e => e.qb_bank_account_list_id!)));
+  const vendorIds = Array.from(new Set(eligibleAfterDupe.map(e => e.counterparty_qb_vendor_list_id!)));
+  const bankIds = Array.from(new Set(eligibleAfterDupe.map(e => e.qb_bank_account_list_id!)));
   const { data: vendorData } = await supabase.from('qb_vendors').select('list_id, name').in('list_id', vendorIds);
   const { data: bankData } = await supabase.from('qb_accounts').select('list_id, full_name').in('list_id', bankIds);
   const vendorName = new Map(((vendorData ?? []) as VendorRow[]).map(r => [r.list_id, r.name]));
@@ -144,7 +191,7 @@ export async function pushIntuitPayBill(
 
   const intents: PayBillIntent[] = [];
   const eventIdByIntentIndex: number[] = [];  // for mapping executor jobIds back to events
-  for (const e of eligible) {
+  for (const e of eligibleAfterDupe) {
     const payee = vendorName.get(e.counterparty_qb_vendor_list_id!);
     const bank = bankName.get(e.qb_bank_account_list_id!);
     if (!payee) {

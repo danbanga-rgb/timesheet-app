@@ -66,6 +66,8 @@ const readyEvent = {
   resolved_action: 'pay_existing_bill',
   resolved_bill_txn_id: 'HOVER-BILL-TXN',
   status: 'ready',
+  matched_invoice_ids: [901],
+  match_provenance: 'exact-txn',
 };
 
 const vendors = [{ list_id: 'V-HOVER', name: 'Hovercloud Technologies' }];
@@ -209,6 +211,83 @@ describe('pushIntuitPayBill', () => {
     expect(r.skippedIneligible.map(s => s.eventId)).toEqual([100]);
     const payJob = inserts.filter(i => i.table === 'qb_sync_jobs')[0];
     expect((payJob.rows[0].payload as Record<string, unknown>).sourceIngestEventId).toBe(101);
+  });
+
+  // ─── Provenance gate (invoice-linking trust level) ───────────────────────
+
+  it('refuses to push events with match_provenance=fuzzy (weak invoice link)', async () => {
+    const fuzzy = { ...readyEvent, id: 200, match_provenance: 'fuzzy' };
+    const { client, inserts } = makeMockSupabase({
+      qb_ingest_events: [fuzzy], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: qbMirror,
+    });
+    const r = await pushIntuitPayBill(client, [200]);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible).toHaveLength(1);
+    expect(r.skippedIneligible[0].reason).toMatch(/match_provenance='fuzzy'/);
+    expect(inserts.filter(i => i.table === 'qb_sync_jobs')).toHaveLength(0);
+  });
+
+  it('refuses to push events with match_provenance=empty', async () => {
+    const empty = { ...readyEvent, id: 201, match_provenance: 'empty', matched_invoice_ids: [] };
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [empty], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: qbMirror,
+    });
+    const r = await pushIntuitPayBill(client, [201]);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible[0].reason).toMatch(/match_provenance='empty'/);
+  });
+
+  it('refuses to push events with match_provenance=null (reconciler never ran)', async () => {
+    const noProv = { ...readyEvent, id: 202, match_provenance: null };
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [noProv], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: qbMirror,
+    });
+    const r = await pushIntuitPayBill(client, [202]);
+    expect(r.skippedIneligible[0].reason).toMatch(/match_provenance='null'/);
+  });
+
+  it('accepts events with match_provenance=exact-ref (memo names the invoice)', async () => {
+    const ref = { ...readyEvent, id: 203, match_provenance: 'exact-ref' };
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [ref], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: qbMirror,
+    });
+    const r = await pushIntuitPayBill(client, [203]);
+    expect(r.jobIds).toEqual([9000]);
+    expect(r.skippedIneligible).toEqual([]);
+  });
+
+  it('refuses to push exact-txn event whose matched_invoice_ids is somehow empty', async () => {
+    // Defense-in-depth: shouldn't happen (exact-txn implies matched=[authoritativeId])
+    // but the gate blocks anyway to prevent orphan pushes.
+    const emptyMatched = { ...readyEvent, id: 204, matched_invoice_ids: [] };
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [emptyMatched], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: qbMirror,
+    });
+    const r = await pushIntuitPayBill(client, [204]);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible[0].reason).toMatch(/matched_invoice_ids is empty/);
+  });
+
+  // ─── Dupe guard (invoice mapped to multiple events) ───────────────────────
+
+  it('refuses BOTH events when they map to the same primary invoice', async () => {
+    const a = { ...readyEvent, id: 300, matched_invoice_ids: [777] };
+    const b = { ...readyEvent, id: 301, matched_invoice_ids: [777], resolved_bill_txn_id: 'HOVER-BILL-TXN-2' };
+    const mirror2 = [
+      ...qbMirror,
+      { entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN-2', vendor_list_id: 'V-HOVER',
+        amount: 5000, is_settled: false,
+        data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 5000 } },
+    ];
+    const { client, inserts } = makeMockSupabase({
+      qb_ingest_events: [a, b], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirror2,
+    });
+    const r = await pushIntuitPayBill(client, [300, 301]);
+    expect(r.jobIds).toEqual([]);
+    const reasons = r.skippedIneligible.map(s => s.reason);
+    expect(reasons.every(r => /duplicate invoice-mapping/.test(r))).toBe(true);
+    expect(r.skippedIneligible.map(s => s.eventId).sort()).toEqual([300, 301]);
+    expect(inserts.filter(i => i.table === 'qb_sync_jobs')).toHaveLength(0);
   });
 
   // ─── Amount-equality gate (INVARIANTS #36 co-safety) ─────────────────────

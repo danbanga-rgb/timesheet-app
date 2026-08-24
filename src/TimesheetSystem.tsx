@@ -558,6 +558,7 @@ interface QbIngestEvent {
   resolvedPaymentTxnId: string | null;
   resolvedReason: string | null;
   reconciledAt: string | null;
+  matchProvenance: MatchProvenance | null;
 }
 
 function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
@@ -586,6 +587,7 @@ function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
     resolvedPaymentTxnId: (r.resolved_payment_txn_id as string) ?? null,
     resolvedReason: (r.resolved_reason as string) ?? null,
     reconciledAt: (r.reconciled_at as string) ?? null,
+    matchProvenance: (r.match_provenance as MatchProvenance) ?? null,
   };
 }
 

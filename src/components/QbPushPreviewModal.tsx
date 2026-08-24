@@ -28,6 +28,7 @@ export type QbResolvedAction =
   | 'check'
   | 'held'
   | 'pre_our_system';
+export type MatchProvenance = 'exact-txn' | 'exact-ref' | 'fuzzy' | 'empty';
 
 export interface PreviewEvent {
   id: number;
@@ -48,6 +49,7 @@ export interface PreviewEvent {
   resolvedPaymentTxnId: string | null;
   resolvedReason: string | null;
   postedQbRefs: Record<string, unknown> | null;   // { posted_source: 'qb_probe' | 'push' | ... }
+  matchProvenance: MatchProvenance | null;        // 2026-08-24 — invoice-link strength gate
 }
 
 export interface PreviewVendor { listId: string; name: string; }
@@ -180,6 +182,12 @@ export default function QbPushPreviewModal({
   // The other actions render as disabled with a "coming in G7.5" tooltip.
   const PUSHABLE_ACTIONS: QbResolvedAction[] = ['pay_existing_bill'];
   const isPushable = (e: PreviewEvent) => e.resolvedAction != null && PUSHABLE_ACTIONS.includes(e.resolvedAction);
+  // 2026-08-24 provenance gate — mirrors intuitPush.ts consumer.
+  // Only exact-txn / exact-ref events are eligible to select. Weaker provenance
+  // means the invoice link is not trustworthy enough to auto-push; the human
+  // must resolve the ambiguity (backlog: add per-row "verified" override).
+  const isProvenanceStrong = (e: PreviewEvent) => e.matchProvenance === 'exact-txn' || e.matchProvenance === 'exact-ref';
+  const isSelectable = (e: PreviewEvent) => isPushable(e) && isProvenanceStrong(e);
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     heldBack: true, pay_existing_bill: true, create_bill_then_pay: false, check: false,
@@ -212,10 +220,11 @@ export default function QbPushPreviewModal({
   const autoClosedTotal = parts.autoClosed.reduce((n, e) => n + e.amount, 0);
 
   const pushableEvents = parts.ready.filter(isPushable);
-  const selectedTotal = pushableEvents.filter(e => selected.has(e.id)).reduce((n, e) => n + e.amount, 0);
-  const selectPushableAll = () => setSelected(new Set(pushableEvents.map(e => e.id)));
+  const selectableEvents = pushableEvents.filter(isSelectable);
+  const selectedTotal = selectableEvents.filter(e => selected.has(e.id)).reduce((n, e) => n + e.amount, 0);
+  const selectPushableAll = () => setSelected(new Set(selectableEvents.map(e => e.id)));
   const clearSelected = () => setSelected(new Set());
-  const allPushableSelected = pushableEvents.length > 0 && pushableEvents.every(e => selected.has(e.id));
+  const allPushableSelected = selectableEvents.length > 0 && selectableEvents.every(e => selected.has(e.id));
 
   const handleConfirm = () => {
     if (selected.size === 0) return;
@@ -247,18 +256,25 @@ export default function QbPushPreviewModal({
               )}
             </p>
             {pushableEvents.length > 0 && (
-              <p className="text-xs text-gray-500 mt-1 flex items-center gap-2">
+              <p className="text-xs text-gray-500 mt-1 flex items-center gap-2 flex-wrap">
                 <span>
                   G7a: only <em>pay_existing_bill</em> is wired to QB. Others show for context.
                 </span>
-                <button
-                  onClick={allPushableSelected ? clearSelected : selectPushableAll}
-                  className="text-indigo-700 hover:text-indigo-900 hover:underline"
-                >
-                  {allPushableSelected
-                    ? `Clear (${selected.size})`
-                    : `Select all ${pushableEvents.length} pay_existing_bill`}
-                </button>
+                {selectableEvents.length < pushableEvents.length && (
+                  <span className="text-amber-700">
+                    · {pushableEvents.length - selectableEvents.length} row{pushableEvents.length - selectableEvents.length === 1 ? '' : 's'} disabled (weak invoice link)
+                  </span>
+                )}
+                {selectableEvents.length > 0 && (
+                  <button
+                    onClick={allPushableSelected ? clearSelected : selectPushableAll}
+                    className="text-indigo-700 hover:text-indigo-900 hover:underline"
+                  >
+                    {allPushableSelected
+                      ? `Clear (${selected.size})`
+                      : `Select all ${selectableEvents.length} eligible`}
+                  </button>
+                )}
               </p>
             )}
           </div>
@@ -392,15 +408,23 @@ export default function QbPushPreviewModal({
                         const vendor = e.counterpartyQbVendorListId ? vendorById.get(e.counterpartyQbVendorListId) : null;
                         const expense = e.qbExpenseAccountListId ? accountById.get(e.qbExpenseAccountListId) : null;
                         const invs = e.matchedInvoiceIds.map(id => invoiceById.get(id)).filter(Boolean);
+                        const provStrong = e.matchProvenance === 'exact-txn' || e.matchProvenance === 'exact-ref';
+                        const canSelect = groupPushable && provStrong;
                         return (
-                          <tr key={e.id} className={`border-t border-gray-100 ${groupPushable && selected.has(e.id) ? 'bg-indigo-50/50' : ''}`}>
+                          <tr key={e.id} className={`border-t border-gray-100 ${groupPushable && selected.has(e.id) ? 'bg-indigo-50/50' : ''} ${groupPushable && !provStrong ? 'opacity-60' : ''}`}>
                             <td className="px-3 py-1.5">
-                              {groupPushable ? (
+                              {canSelect ? (
                                 <input
                                   type="checkbox"
                                   checked={selected.has(e.id)}
                                   onChange={() => toggleSelected(e.id)}
                                   aria-label={`Select event ${e.id}`}
+                                />
+                              ) : groupPushable ? (
+                                <input
+                                  type="checkbox"
+                                  disabled
+                                  title={`match_provenance='${e.matchProvenance ?? 'null'}' — invoice link too weak to auto-push; verify manually`}
                                 />
                               ) : (
                                 <input type="checkbox" disabled title="Coming in G7.5 — pay_existing_bill only for now" />
@@ -429,6 +453,35 @@ export default function QbPushPreviewModal({
                                     ))}</span>
                                   )}
                                 </>
+                              )}
+                              {/* Invoice link chip + provenance badge — visible for all pushable actions */}
+                              {groupPushable && invs.length > 0 && (
+                                <span className="ml-2 inline-flex items-center gap-1">
+                                  {invs.map(i => (
+                                    <span key={i!.id} className="inline-block px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-mono" title={`Our invoice → will be marked paid`}>
+                                      {i!.invoiceNumber}
+                                    </span>
+                                  ))}
+                                  <span
+                                    className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                                      e.matchProvenance === 'exact-txn' ? 'bg-emerald-100 text-emerald-800' :
+                                      e.matchProvenance === 'exact-ref' ? 'bg-teal-100 text-teal-800' :
+                                      e.matchProvenance === 'fuzzy'     ? 'bg-amber-100 text-amber-800' :
+                                                                          'bg-gray-100 text-gray-600'
+                                    }`}
+                                    title={
+                                      e.matchProvenance === 'exact-txn' ? 'exact-txn: invoice qb_bill_txn_id matches — deterministic link' :
+                                      e.matchProvenance === 'exact-ref' ? 'exact-ref: memo names this invoice by number' :
+                                      e.matchProvenance === 'fuzzy'     ? 'fuzzy: matched by vendor+amount only — verify before pushing' :
+                                                                          'no invoice link'
+                                    }
+                                  >
+                                    {e.matchProvenance === 'exact-txn' ? '🔒 exact-txn' :
+                                     e.matchProvenance === 'exact-ref' ? '✓ exact-ref' :
+                                     e.matchProvenance === 'fuzzy'     ? '~ fuzzy' :
+                                                                          '— empty'}
+                                  </span>
+                                </span>
                               )}
                               {g.action === 'check' && expense && (
                                 <span className="font-mono text-[11px] text-gray-600">{expense.fullName}</span>
