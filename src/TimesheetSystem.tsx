@@ -2378,7 +2378,12 @@ const TimesheetSystem = () => {
         .select('id, source, counterparty_raw, matched_invoice_ids, status, counterparty_qb_vendor_list_id, target_qb_txn_kind, qb_bank_account_list_id, qb_expense_account_list_id')
         .eq('status', 'pending')
         .range(0, 4999),
-      supabase.from('qb_vendors').select('list_id, name').range(0, 4999),
+      // .eq('is_active', true) + .range(0, 4999) — PostgREST server-side max-rows
+      // cap is 1000 on this project, so .range alone is not enough for qb_vendors
+      // (1165+ rows total, 997 inactive). Filter inactive server-side to bring
+      // the row count under the cap. Silent truncation dropped alphabetical tail
+      // (Y* vendors like Yara, T* like TechAntz) before 2026-08-24.
+      supabase.from('qb_vendors').select('list_id, name').eq('is_active', true).range(0, 4999),
       supabase.from('qb_accounts').select('list_id, full_name, account_type').range(0, 4999),
       supabase.from('qb_vendor_mappings').select('*').range(0, 4999),
     ]);
@@ -2720,7 +2725,9 @@ const TimesheetSystem = () => {
     // 1000, silently dropping the alphabetical tail (e.g. Yara). See
     // [[feedback-no-hardcoded-cutoff]].
     if (qbVendorsList.length === 0) {
-      const { data } = await supabase.from('qb_vendors').select('list_id, name, is_active').order('name').range(0, 4999);
+      // .eq('is_active', true) + .range — see comment in applyClassificationPass.
+      // PostgREST project-level max-rows=1000 silently truncates otherwise.
+      const { data } = await supabase.from('qb_vendors').select('list_id, name, is_active').eq('is_active', true).order('name').range(0, 4999);
       setQbVendorsList((data ?? []).map((r: Record<string, unknown>) => ({
         listId: (r.list_id as string) ?? '', name: (r.name as string) ?? '', isActive: Boolean(r.is_active),
       })));
