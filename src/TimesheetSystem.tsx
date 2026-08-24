@@ -217,10 +217,16 @@ import type { QbOpenBillRow } from './lib/qbStateSync/types';
 import {
   normalizeRef,
   reconcileBatch,
+  extractRefsFromMemo,
   type MirrorBill,
   type MirrorPayment,
   type ReconcilableEvent,
 } from './lib/intuit/reconcile';
+import {
+  computeMatchProvenance,
+  memoNamesMatchedInvoice,
+  type MatchProvenance,
+} from './lib/matchProvenance';
 import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from './lib/intuit/config';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
 import QbPushStatusPane, { type PushRecord } from './components/QbPushStatusPane';
@@ -2458,12 +2464,32 @@ const TimesheetSystem = () => {
   // Fetches mirror fresh (avoids closure trap per [[feedback-state-vs-fresh-fetch]]).
   // Idempotent — only PATCHes events whose resolved_action actually changes.
   const applyReconciliationPass = async (): Promise<{ reconciled: number; skipReason?: string }> => {
-    // Load fresh mirror bills + payments across all vendors we care about.
-    const [bills, payments] = await Promise.all([
+    // Load fresh mirror bills + payments across all vendors we care about,
+    // plus the invoice→bill link table for provenance classification.
+    // .range(0, 4999) — PostgREST default cap is 1000; some invoice tables
+    // exceed that. Mirrors the pattern in applyClassificationPass.
+    const [bills, payments, invoiceLinkRes] = await Promise.all([
       getAllOpenBills(supabase),
       getAllPayments(supabase),
+      supabase
+        .from('invoices')
+        .select('id, invoice_number, qb_bill_txn_id, matcher_ignore')
+        .not('qb_bill_txn_id', 'is', null)
+        .range(0, 4999),
     ]);
 
+    // Build maps for provenance classification (see src/lib/matchProvenance.ts):
+    //   invoiceIdByBillTxnId — for the exact-txn deterministic override
+    //   invoicesById         — for memoNamesMatchedInvoice() lookup by matched id
+    const invoiceIdByBillTxnId = new Map<string, number>();
+    const invoicesById = new Map<number, { invoiceNumber: string | null; qbBillTxnId: string | null }>();
+    for (const inv of (invoiceLinkRes.data ?? []) as Array<{
+      id: number; invoice_number: string | null; qb_bill_txn_id: string | null; matcher_ignore: boolean | null;
+    }>) {
+      if (inv.matcher_ignore === true) continue;
+      if (inv.qb_bill_txn_id) invoiceIdByBillTxnId.set(inv.qb_bill_txn_id, inv.id);
+      invoicesById.set(inv.id, { invoiceNumber: inv.invoice_number, qbBillTxnId: inv.qb_bill_txn_id });
+    }
     // Fetch events that need reconciliation. Include:
     //   - status IN (pending, ready) — normal reconcile path
     //   - status='posted' WITH posted_qb_refs.posted_source='qb_probe' —
@@ -2474,9 +2500,27 @@ const TimesheetSystem = () => {
     // final. Ignored/failed also stay out.
     const { data: rows } = await supabase
       .from('qb_ingest_events')
-      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs')
+      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs, match_provenance')
       .or('status.in.(pending,ready),and(status.eq.posted,posted_qb_refs->>posted_source.eq.qb_probe)')
       .not('target_qb_txn_kind', 'is', null);
+
+    // Backfill invoicesById with any matched invoices we don't already have
+    // (matched_invoice_ids can reference invoices whose qb_bill_txn_id is
+    // still null — those weren't picked up by the qb_bill_txn_id NOT NULL
+    // filter above but are needed for the memo-name provenance check).
+    const missingIds = new Set<number>();
+    for (const r of (rows ?? []) as Array<{ matched_invoice_ids: number[] | null }>) {
+      for (const id of r.matched_invoice_ids ?? []) if (!invoicesById.has(id)) missingIds.add(id);
+    }
+    if (missingIds.size > 0) {
+      const { data: extra } = await supabase
+        .from('invoices')
+        .select('id, invoice_number, qb_bill_txn_id')
+        .in('id', Array.from(missingIds));
+      for (const inv of (extra ?? []) as Array<{ id: number; invoice_number: string | null; qb_bill_txn_id: string | null }>) {
+        invoicesById.set(inv.id, { invoiceNumber: inv.invoice_number, qbBillTxnId: inv.qb_bill_txn_id });
+      }
+    }
     const events: ReconcilableEvent[] = (rows ?? []).map((r: Record<string, unknown>) => ({
       id: r.id as number,
       counterpartyRaw: (r.counterparty_raw as string) ?? '',
@@ -2537,10 +2581,40 @@ const TimesheetSystem = () => {
       const prevBillTxnId = (currentRow?.resolved_bill_txn_id as string | null) ?? null;
       const prevPaymentTxnId = (currentRow?.resolved_payment_txn_id as string | null) ?? null;
       const prevReason = (currentRow?.resolved_reason as string | null) ?? null;
+      const prevMatchedIds = Array.isArray(currentRow?.matched_invoice_ids)
+        ? [...(currentRow!.matched_invoice_ids as number[])].sort((a, b) => a - b)
+        : [];
+      const prevProvenance = (currentRow?.match_provenance as MatchProvenance | null) ?? null;
 
       const nextBillTxnId = result.billTxnId ?? null;
       const nextPaymentTxnId = result.paymentTxnId ?? null;
       const nextReason = result.reason ?? null;
+
+      // ─── Provenance classification ────────────────────────────────────────
+      // Compute match_provenance from (event.resolved_bill_txn_id, matched
+      // invoices, memo refs) using the smarter normalizeRef normalization.
+      // On exact-txn, force matched_invoice_ids = [authoritativeInvoiceId]
+      // — this is where wrong fuzzy matches get corrected.
+      const matchedInvoiceRecords = event.matchedInvoiceIds
+        .map(id => invoicesById.get(id))
+        .filter((v): v is { invoiceNumber: string | null; qbBillTxnId: string | null } => v != null);
+      const memoRefs = extractRefsFromMemo(event.memo);
+      const provResult = computeMatchProvenance({
+        eventResolvedBillTxnId: nextBillTxnId,
+        matchedInvoiceIds: event.matchedInvoiceIds,
+        memoNamesMatchedInvoice: memoNamesMatchedInvoice(memoRefs, matchedInvoiceRecords),
+        targetQbTxnKind: event.targetQbTxnKind,
+        invoiceIdByBillTxnId,
+      });
+      const nextMatchedIds: number[] = provResult.provenance === 'exact-txn' && provResult.authoritativeInvoiceId != null
+        ? [provResult.authoritativeInvoiceId]
+        : [...event.matchedInvoiceIds];
+      const nextMatchedIdsSorted = [...nextMatchedIds].sort((a, b) => a - b);
+      const nextProvenance = provResult.provenance;
+
+      const matchedIdsChanged = prevMatchedIds.length !== nextMatchedIdsSorted.length
+        || prevMatchedIds.some((v, i) => v !== nextMatchedIdsSorted[i]);
+      const provenanceChanged = prevProvenance !== nextProvenance;
 
       // Skip PATCH if nothing changed
       if (
@@ -2548,6 +2622,8 @@ const TimesheetSystem = () => {
         && prevBillTxnId === nextBillTxnId
         && prevPaymentTxnId === nextPaymentTxnId
         && prevReason === nextReason
+        && !matchedIdsChanged
+        && !provenanceChanged
       ) continue;
 
       const patch: Record<string, unknown> = {
@@ -2556,14 +2632,20 @@ const TimesheetSystem = () => {
         resolved_payment_txn_id: nextPaymentTxnId,
         resolved_reason: nextReason,
         reconciled_at: nowIso,
+        match_provenance: nextProvenance,
       };
+      if (matchedIdsChanged) patch.matched_invoice_ids = nextMatchedIds;
+
       // Status transitions driven by reconciliation:
-      //   pending/ready + already_done → posted (auto-close via qb_probe)
-      //   posted(qb_probe) + NOT already_done → back to pending (self-heal
-      //     when a prior partial-mirror mis-match is corrected)
+      //   pending/ready + already_done + exact-txn provenance → posted
+      //     (auto-close only when the invoice link is deterministic; fuzzy
+      //     matches must be human-verified even for auto-close)
+      //   posted(qb_probe) + (NOT already_done OR provenance dropped from
+      //     exact-txn) → back to pending (self-heal)
       const wasQbProbePosted = event.status === 'posted'
         && ((currentRow?.posted_qb_refs as Record<string, unknown> | null)?.posted_source === 'qb_probe');
-      if (result.action === 'already_done' && event.status !== 'posted') {
+      const autoCloseEligible = result.action === 'already_done' && nextProvenance === 'exact-txn';
+      if (autoCloseEligible && event.status !== 'posted') {
         patch.status = 'posted';
         patch.status_updated_at = nowIso;
         patch.posted_qb_refs = {
@@ -2571,9 +2653,9 @@ const TimesheetSystem = () => {
           payment_txn_id: nextPaymentTxnId,
           posted_source: 'qb_probe',
         };
-      } else if (result.action !== 'already_done' && wasQbProbePosted) {
-        // Auto-close was wrong — revert to pending so the accountant sees
-        // the corrected action (pay_existing_bill, create_bill_then_pay, held, ...).
+      } else if (!autoCloseEligible && wasQbProbePosted) {
+        // Auto-close was wrong (action changed OR provenance no longer
+        // exact-txn) — revert to pending so the accountant sees the case.
         patch.status = 'pending';
         patch.status_updated_at = nowIso;
         patch.posted_qb_refs = null;
