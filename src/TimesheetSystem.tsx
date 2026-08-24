@@ -10532,6 +10532,33 @@ const TimesheetSystem = () => {
                           pushedAt: new Date().toISOString(),
                         });
                       });
+                      // Phase 3 one-click chain: also track the chained pay+verify
+                      // jobs from intuitCreateBill so the status pane surfaces the
+                      // whole flow (bill_add is upstream but the pay job is what
+                      // shows the money-moved state — same UX shape).
+                      const chainedPay = createRes?.chainedPayJobIdByBillAddJobId ?? {};
+                      const chainedVerify = createRes?.chainedVerifyJobIdByPayJobId ?? {};
+                      const inelig2 = new Set(r.skippedIneligible.map(s => s.eventId));
+                      const eligibleCreateInOrder = createEventIds.filter(id => !inelig2.has(id));
+                      createJobIds.forEach((billAddJobId, i) => {
+                        if (billAddJobId == null) return;
+                        const eventId = eligibleCreateInOrder[i];
+                        if (eventId == null) return;
+                        const event = eventById.get(eventId);
+                        if (!event) return;
+                        const chainedPayId = chainedPay[billAddJobId];
+                        if (chainedPayId == null) return;
+                        const vendor = event.counterpartyQbVendorListId ? vendorByListId.get(event.counterpartyQbVendorListId) : null;
+                        newRecords.push({
+                          eventId,
+                          payJobId: chainedPayId,
+                          verifyJobId: chainedVerify[chainedPayId] ?? null,
+                          billTxnId: '',   // hydrated on parent bill_add drain
+                          expectedAmount: event.amount,
+                          expectedVendor: vendor?.name ?? event.counterpartyRaw,
+                          pushedAt: new Date().toISOString(),
+                        });
+                      });
                       setQbPushRecords(prev => [...prev, ...newRecords]);
 
                       const payEnqueued = payJobIds.filter((id): id is number => id != null).length;

@@ -346,6 +346,31 @@ async function persistJobResponse(
     if (!vendorName) {
       return { ok: false, errorMsg: `BillAdd payload missing vendorName; cannot safely persist TxnID for refNumber=${parsed.result.refNumber}` };
     }
+    // Phase 3 one-click chain: hydrate any pending child jobs (bill_pmt_add
+    // or bill_query) that were enqueued with __hydrate_bill_txn_id_from_dep
+    // pointing at THIS job. Their payloads have placeholder billTxnId=null
+    // (or txnIds=[null]) that we now fill in with the freshly-created TxnID.
+    // Runs whether the parent bill_add was orphan or invoice-linked; the
+    // chained pay/verify machinery is orthogonal to the invoice-persist path.
+    const { data: dependents } = await supabase
+      .from('qb_sync_jobs')
+      .select('id, kind, payload')
+      .eq('status', 'pending')
+      .contains('depends_on', [job.id]);
+    for (const dep of ((dependents ?? []) as Array<{ id: number; kind: string; payload: Record<string, unknown> }>)) {
+      const dpay = dep.payload as { __hydrate_bill_txn_id_from_dep?: number; applications?: Array<Record<string, unknown>>; txnIds?: Array<string | null> };
+      if (dpay.__hydrate_bill_txn_id_from_dep !== job.id) continue;
+      const nextPayload = { ...dep.payload } as Record<string, unknown>;
+      if (dep.kind === 'bill_pmt_add' && Array.isArray(dpay.applications)) {
+        nextPayload.applications = dpay.applications.map((a, i) =>
+          i === 0 ? { ...a, billTxnId: parsed.result!.txnId } : a,
+        );
+      } else if (dep.kind === 'bill_query' && Array.isArray(dpay.txnIds)) {
+        nextPayload.txnIds = [parsed.result!.txnId];
+      }
+      await supabase.from('qb_sync_jobs').update({ payload: nextPayload }).eq('id', dep.id);
+    }
+
     // Orphan-create path (G7b): bill_add was triggered by a qb_ingest_event
     // with no matching invoice in our system. Persist the new bill TxnID onto
     // the event row so the follow-up pay step and reconciler can find it.

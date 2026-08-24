@@ -38,6 +38,12 @@ import type { CreateBillIntent, ExecuteResult } from '../types';
 
 export interface IntuitCreateBillResult extends ExecuteResult {
   skippedIneligible: Array<{ eventId: number; reason: string }>;
+  /** Phase 3 one-click chain: for each successful bill_add job, the paired
+   *  bill_pmt_add job id (waiting on bill_add via depends_on with a hydrate
+   *  marker so the drain handler injects the new bill TxnID before dispatch). */
+  chainedPayJobIdByBillAddJobId: Record<number, number>;
+  /** Verify bill_query enqueued after each chained pay (mirror refresh). */
+  chainedVerifyJobIdByPayJobId: Record<number, number>;
 }
 
 interface IngestEventRow {
@@ -68,8 +74,11 @@ export async function pushIntuitCreateBill(
   const auditTag = opts.auditTag ?? `intuit-create-bill-${new Date().toISOString().slice(0, 10)}`;
   const source = opts.source ?? 'intuit_xlsx';
   const skippedIneligible: IntuitCreateBillResult['skippedIneligible'] = [];
+  const chainedPayJobIdByBillAddJobId: Record<number, number> = {};
+  const chainedVerifyJobIdByPayJobId: Record<number, number> = {};
   const emptyReturn = (): IntuitCreateBillResult => ({
     jobIds: [], rejected: [], skippedDuplicate: [], skippedIneligible,
+    chainedPayJobIdByBillAddJobId, chainedVerifyJobIdByPayJobId,
   });
 
   if (eventIds.length === 0) return emptyReturn();
@@ -156,5 +165,109 @@ export async function pushIntuitCreateBill(
   if (intents.length === 0) return emptyReturn();
 
   const result = await executeIntents(supabase, intents);
-  return { ...result, skippedIneligible };
+
+  // Phase 3 one-click chain: for each successful bill_add job, enqueue a
+  // dependent bill_pmt_add + verify bill_query. The bill_pmt_add payload
+  // carries a hydrate marker (__hydrate_bill_txn_id_from_dep) so the edge fn
+  // bill_add drain handler injects the freshly-created bill's TxnID into the
+  // applications[0].billTxnId slot before the child dispatches.
+  //
+  // We insert bill_pmt_add + verify DIRECTLY (skip executeIntents) so the
+  // in-flight duplicate check + INVARIANT #11 vendor-scoped-TxnID check don't
+  // fire on a nascent TxnID we haven't observed yet. Both invariants are
+  // satisfied by construction (we're paying our own newly-created bill for
+  // the mapped vendor). Documented risk-accepted.
+  //
+  // We need bank account per event too — fetch it now for the pay-payload.
+  const bankIds = Array.from(new Set(eligible.map(e => e.qb_bank_account_list_id!).filter(Boolean)));
+  const { data: bankData } = bankIds.length > 0
+    ? await supabase.from('qb_accounts').select('list_id, full_name').in('list_id', bankIds)
+    : { data: [] as AccountRow[] };
+  const bankName = new Map(((bankData ?? []) as AccountRow[]).map(r => [r.list_id, r.full_name]));
+
+  interface JobInsert {
+    kind: 'bill_pmt_add' | 'bill_query';
+    payload: Record<string, unknown>;
+    status: 'pending';
+    depends_on: number[];
+  }
+  const chainedRows: JobInsert[] = [];
+  const chainedMeta: Array<{ billAddJobId: number; eventId: number; intent: CreateBillIntent }> = [];
+  const verifyRows: JobInsert[] = [];
+  const verifyMeta: Array<{ eventId: number; expectBillTxnPlaceholder: true }> = [];
+
+  result.jobIds.forEach((billAddJobId, i) => {
+    if (billAddJobId == null) return;
+    const eventId = eventIdByIntentIndex[i];
+    const intent = intents[i];
+    const event = eligible.find(x => x.id === eventId);
+    if (!event) return;
+    const bank = event.qb_bank_account_list_id ? bankName.get(event.qb_bank_account_list_id) : null;
+    if (!bank) {
+      // Bill will still be created but pay leg can't chain without a bank.
+      // Surface so accountant knows to push the pay leg manually via 2-step.
+      skippedIneligible.push({
+        eventId, reason: `bank account missing for chained pay leg — bill_add still enqueued (job ${billAddJobId}), but pay must be done manually via Recompute + push`,
+      });
+      return;
+    }
+    chainedRows.push({
+      kind: 'bill_pmt_add',
+      payload: {
+        payeeVendorName: intent.vendorName,
+        bankAccountName: bank,
+        txnDate: intent.txnDate,
+        memo: intent.memo,
+        applications: [{ billTxnId: null, paymentAmount: Number(event.amount) }],   // hydrated on parent-drain
+        sourceIngestEventId: eventId,
+        __hydrate_bill_txn_id_from_dep: billAddJobId,
+        __audit_tag: auditTag,
+      },
+      status: 'pending',
+      depends_on: [billAddJobId],
+    });
+    chainedMeta.push({ billAddJobId, eventId, intent });
+  });
+
+  if (chainedRows.length > 0) {
+    const { data: insertedPay, error: payErr } = await supabase
+      .from('qb_sync_jobs')
+      .insert(chainedRows)
+      .select('id');
+    if (!payErr && insertedPay) {
+      (insertedPay as Array<{ id: number }>).forEach((row, idx) => {
+        const meta = chainedMeta[idx];
+        chainedPayJobIdByBillAddJobId[meta.billAddJobId] = row.id;
+        // Also chain a verify bill_query on each chained pay. The chained pay
+        // won't have its billTxnId until parent drains, so verify's txnIds is
+        // hydrated the same way (piggybacks on the pay's hydration).
+        verifyRows.push({
+          kind: 'bill_query',
+          payload: {
+            txnIds: [null],   // hydrated on parent bill_add drain
+            __hydrate_bill_txn_id_from_dep: meta.billAddJobId,
+            __audit_tag: `${auditTag}-verify`,
+            __verify_for_event_id: meta.eventId,
+          },
+          status: 'pending',
+          depends_on: [row.id],   // depends on the chained pay
+        });
+        verifyMeta.push({ eventId: meta.eventId, expectBillTxnPlaceholder: true });
+      });
+      if (verifyRows.length > 0) {
+        const { data: insertedVerify } = await supabase
+          .from('qb_sync_jobs')
+          .insert(verifyRows)
+          .select('id');
+        if (insertedVerify) {
+          (insertedVerify as Array<{ id: number }>).forEach((row, idx) => {
+            const payJobId = (insertedPay as Array<{ id: number }>)[idx]?.id;
+            if (payJobId != null) chainedVerifyJobIdByPayJobId[payJobId] = row.id;
+          });
+        }
+      }
+    }
+  }
+
+  return { ...result, skippedIneligible, chainedPayJobIdByBillAddJobId, chainedVerifyJobIdByPayJobId };
 }
