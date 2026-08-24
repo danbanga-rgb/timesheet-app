@@ -346,20 +346,20 @@ async function persistJobResponse(
     if (!vendorName) {
       return { ok: false, errorMsg: `BillAdd payload missing vendorName; cannot safely persist TxnID for refNumber=${parsed.result.refNumber}` };
     }
-    // Phase 3 one-click chain: hydrate any pending child jobs (bill_pmt_add
-    // or bill_query) that were enqueued with __hydrate_bill_txn_id_from_dep
-    // pointing at THIS job. Their payloads have placeholder billTxnId=null
-    // (or txnIds=[null]) that we now fill in with the freshly-created TxnID.
-    // Runs whether the parent bill_add was orphan or invoice-linked; the
-    // chained pay/verify machinery is orthogonal to the invoice-persist path.
+    // Phase 3 one-click chain: hydrate any pending child jobs whose payload
+    // has __hydrate_bill_txn_id_from_dep=this job.id. Their placeholder
+    // billTxnId=null (or txnIds=[null]) gets the freshly-created TxnID.
+    //
+    // NOTE: querying by payload marker, NOT depends_on. The verify bill_query
+    // depends_on the chained pay (not this bill_add), but still needs the
+    // bill TxnID hydrated for its txnIds field. Query the JSONB field directly.
     const { data: dependents } = await supabase
       .from('qb_sync_jobs')
       .select('id, kind, payload')
       .eq('status', 'pending')
-      .contains('depends_on', [job.id]);
+      .eq('payload->>__hydrate_bill_txn_id_from_dep', String(job.id));
     for (const dep of ((dependents ?? []) as Array<{ id: number; kind: string; payload: Record<string, unknown> }>)) {
-      const dpay = dep.payload as { __hydrate_bill_txn_id_from_dep?: number; applications?: Array<Record<string, unknown>>; txnIds?: Array<string | null> };
-      if (dpay.__hydrate_bill_txn_id_from_dep !== job.id) continue;
+      const dpay = dep.payload as { applications?: Array<Record<string, unknown>>; txnIds?: Array<string | null> };
       const nextPayload = { ...dep.payload } as Record<string, unknown>;
       if (dep.kind === 'bill_pmt_add' && Array.isArray(dpay.applications)) {
         nextPayload.applications = dpay.applications.map((a, i) =>
