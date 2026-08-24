@@ -28,7 +28,7 @@ export type QbResolvedAction =
   | 'check'
   | 'held'
   | 'pre_our_system';
-export type MatchProvenance = 'exact-txn' | 'exact-ref' | 'fuzzy' | 'empty';
+export type MatchProvenance = 'exact-txn' | 'exact-ref' | 'created-pay' | 'fuzzy' | 'empty';
 
 export interface PreviewEvent {
   id: number;
@@ -477,22 +477,25 @@ export default function QbPushPreviewModal({
                                   ))}
                                   <span
                                     className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono ${
-                                      e.matchProvenance === 'exact-txn' ? 'bg-emerald-100 text-emerald-800' :
-                                      e.matchProvenance === 'exact-ref' ? 'bg-teal-100 text-teal-800' :
-                                      e.matchProvenance === 'fuzzy'     ? 'bg-amber-100 text-amber-800' :
-                                                                          'bg-gray-100 text-gray-600'
+                                      e.matchProvenance === 'exact-txn'   ? 'bg-emerald-100 text-emerald-800' :
+                                      e.matchProvenance === 'exact-ref'   ? 'bg-teal-100 text-teal-800' :
+                                      e.matchProvenance === 'created-pay' ? 'bg-violet-100 text-violet-800' :
+                                      e.matchProvenance === 'fuzzy'       ? 'bg-amber-100 text-amber-800' :
+                                                                            'bg-gray-100 text-gray-600'
                                     }`}
                                     title={
-                                      e.matchProvenance === 'exact-txn' ? 'exact-txn: invoice qb_bill_txn_id matches — deterministic link' :
-                                      e.matchProvenance === 'exact-ref' ? 'exact-ref: memo names this invoice by number' :
-                                      e.matchProvenance === 'fuzzy'     ? 'fuzzy: matched by vendor+amount only — verify before pushing' :
-                                                                          'no invoice link'
+                                      e.matchProvenance === 'exact-txn'   ? 'exact-txn: invoice qb_bill_txn_id matches — deterministic link' :
+                                      e.matchProvenance === 'exact-ref'   ? 'exact-ref: memo names this invoice by number' :
+                                      e.matchProvenance === 'created-pay' ? 'created-pay: we created this bill (G7b orphan) and paid it — mapping-authorized, no invoice link expected' :
+                                      e.matchProvenance === 'fuzzy'       ? 'fuzzy: matched by vendor+amount only — verify before pushing' :
+                                                                            'no invoice link'
                                     }
                                   >
-                                    {e.matchProvenance === 'exact-txn' ? '🔒 exact-txn' :
-                                     e.matchProvenance === 'exact-ref' ? '✓ exact-ref' :
-                                     e.matchProvenance === 'fuzzy'     ? '~ fuzzy' :
-                                                                          '— empty'}
+                                    {e.matchProvenance === 'exact-txn'   ? '🔒 exact-txn' :
+                                     e.matchProvenance === 'exact-ref'   ? '✓ exact-ref' :
+                                     e.matchProvenance === 'created-pay' ? '🆕 created-pay' :
+                                     e.matchProvenance === 'fuzzy'       ? '~ fuzzy' :
+                                                                            '— empty'}
                                   </span>
                                 </span>
                               )}

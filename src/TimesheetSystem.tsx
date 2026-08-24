@@ -10813,22 +10813,26 @@ const TimesheetSystem = () => {
                                   const provRelevant = e.resolvedAction != null && e.resolvedAction !== 'pre_our_system' && e.resolvedAction !== 'check' && e.resolvedAction !== 'held';
                                   const provCell: React.ReactNode = provRelevant && e.matchProvenance
                                     ? badge(
-                                        e.matchProvenance === 'exact-txn' ? 'bg-emerald-100' :
-                                        e.matchProvenance === 'exact-ref' ? 'bg-teal-100' :
-                                        e.matchProvenance === 'fuzzy'     ? 'bg-amber-100' :
-                                                                            'bg-gray-100',
-                                        e.matchProvenance === 'exact-txn' ? 'text-emerald-800' :
-                                        e.matchProvenance === 'exact-ref' ? 'text-teal-800' :
-                                        e.matchProvenance === 'fuzzy'     ? 'text-amber-800' :
-                                                                            'text-gray-600',
-                                        e.matchProvenance === 'exact-txn' ? '🔒 exact-txn' :
-                                        e.matchProvenance === 'exact-ref' ? '✓ exact-ref' :
-                                        e.matchProvenance === 'fuzzy'     ? '~ fuzzy' :
-                                                                            '— empty',
-                                        e.matchProvenance === 'exact-txn' ? 'invoice.qb_bill_txn_id matches — deterministic 1:1 link' :
-                                        e.matchProvenance === 'exact-ref' ? 'memo names this invoice by number' :
-                                        e.matchProvenance === 'fuzzy'     ? 'matched by vendor+amount only — verify before pushing' :
-                                                                            'no invoice link',
+                                        e.matchProvenance === 'exact-txn'   ? 'bg-emerald-100' :
+                                        e.matchProvenance === 'exact-ref'   ? 'bg-teal-100' :
+                                        e.matchProvenance === 'created-pay' ? 'bg-violet-100' :
+                                        e.matchProvenance === 'fuzzy'       ? 'bg-amber-100' :
+                                                                              'bg-gray-100',
+                                        e.matchProvenance === 'exact-txn'   ? 'text-emerald-800' :
+                                        e.matchProvenance === 'exact-ref'   ? 'text-teal-800' :
+                                        e.matchProvenance === 'created-pay' ? 'text-violet-800' :
+                                        e.matchProvenance === 'fuzzy'       ? 'text-amber-800' :
+                                                                              'text-gray-600',
+                                        e.matchProvenance === 'exact-txn'   ? '🔒 exact-txn' :
+                                        e.matchProvenance === 'exact-ref'   ? '✓ exact-ref' :
+                                        e.matchProvenance === 'created-pay' ? '🆕 created-pay' :
+                                        e.matchProvenance === 'fuzzy'       ? '~ fuzzy' :
+                                                                              '— empty',
+                                        e.matchProvenance === 'exact-txn'   ? 'invoice.qb_bill_txn_id matches — deterministic 1:1 link' :
+                                        e.matchProvenance === 'exact-ref'   ? 'memo names this invoice by number' :
+                                        e.matchProvenance === 'created-pay' ? 'we created this bill (G7b orphan) and paid it — mapping-authorized, no invoice link expected' :
+                                        e.matchProvenance === 'fuzzy'       ? 'matched by vendor+amount only — verify before pushing' :
+                                                                              'no invoice link',
                                       )
                                     : <span className="text-gray-300">—</span>;
                                   return (

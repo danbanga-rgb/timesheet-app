@@ -5,19 +5,24 @@
 // four provenance buckets, and per-action gates in downstream code refuse to
 // act on weak-provenance links.
 //
-//   exact-txn  — event.resolved_bill_txn_id matches an invoice's qb_bill_txn_id.
-//                Deterministic 1:1 link. Overrides whatever the matcher produced.
-//   exact-ref  — the event memo names (by invoice number) at least one of the
-//                matched invoices. Semantic match with INV-prefix stripped so
-//                "Inv# 12" ↔ "INV 12" ↔ "12" all agree.
-//   fuzzy      — matched invoice(s) exist but memo doesn't name any of them
-//                (matcher chose by vendor+amount or subset-sum).
-//   empty      — no matched invoice, or event has no invoice concept
-//                (targetQbTxnKind='check' or 'ignore').
+//   exact-txn    — event.resolved_bill_txn_id matches an invoice's qb_bill_txn_id.
+//                  Deterministic 1:1 link. Overrides whatever the matcher produced.
+//   exact-ref    — the event memo names (by invoice number) at least one of the
+//                  matched invoices. Semantic match with INV-prefix stripped so
+//                  "Inv# 12" ↔ "INV 12" ↔ "12" all agree.
+//   created-pay  — G7b orphan flow: event has resolved_bill_txn_id (we created
+//                  the bill via bill_add) AND targetQbTxnKind='bill_add_and_pmt'
+//                  AND no invoice in our system claims this bill. Mapping IS
+//                  the authorization — distinct from 'empty' (which means
+//                  "no match, no path forward").
+//   fuzzy        — matched invoice(s) exist but memo doesn't name any of them
+//                  (matcher chose by vendor+amount or subset-sum).
+//   empty        — no matched invoice, or event has no invoice concept
+//                  (targetQbTxnKind='check' or 'ignore').
 
 import { normalizeRef } from './intuit/reconcile';
 
-export type MatchProvenance = 'exact-txn' | 'exact-ref' | 'fuzzy' | 'empty';
+export type MatchProvenance = 'exact-txn' | 'exact-ref' | 'created-pay' | 'fuzzy' | 'empty';
 
 export interface ProvenanceInput {
   /** From qb_ingest_events.resolved_bill_txn_id. Null when reconciler hasn't
@@ -50,6 +55,13 @@ export function computeMatchProvenance(input: ProvenanceInput): ProvenanceResult
     const invId = input.invoiceIdByBillTxnId.get(input.eventResolvedBillTxnId);
     if (invId != null) {
       return { provenance: 'exact-txn', authoritativeInvoiceId: invId };
+    }
+    // G7b orphan flow: event has a resolved bill (we created it via bill_add)
+    // but no invoice claims it, AND the mapping is create+pay. That's the
+    // authorization — mark 'created-pay' so it's visually distinct from
+    // matcher-failure 'empty' and downstream code can gate on it explicitly.
+    if (input.targetQbTxnKind === 'bill_add_and_pmt') {
+      return { provenance: 'created-pay' };
     }
   }
   if (input.targetQbTxnKind === 'check' || input.targetQbTxnKind === 'ignore') {

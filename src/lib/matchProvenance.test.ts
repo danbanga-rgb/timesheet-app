@@ -112,6 +112,32 @@ describe('computeMatchProvenance', () => {
     }));
     expect(r.provenance).toBe('empty');
   });
+
+  it('returns created-pay for G7b orphan: resolved bill + no invoice + bill_add_and_pmt kind', () => {
+    // TechAntz-style: we created the bill via bill_add. Event now has
+    // resolved_bill_txn_id (from drain handler) but no invoice claims it,
+    // and mapping = create+pay. Surfaces as created-pay, not empty.
+    const r = computeMatchProvenance(inputOf({
+      eventResolvedBillTxnId: '41873-1787609600',   // not in invoiceIdByBillTxnId
+      matchedInvoiceIds: [],
+      memoNamesMatchedInvoice: false,
+      targetQbTxnKind: 'bill_add_and_pmt',
+    }));
+    expect(r.provenance).toBe('created-pay');
+    expect(r.authoritativeInvoiceId).toBeUndefined();
+  });
+
+  it('does NOT return created-pay for bill_pmt kind — only bill_add_and_pmt orphan case', () => {
+    // pay_existing_bill with resolved bill but no invoice-side link stays
+    // empty (bill created outside our system).
+    const r = computeMatchProvenance(inputOf({
+      eventResolvedBillTxnId: '41873-1787609600',
+      matchedInvoiceIds: [],
+      memoNamesMatchedInvoice: false,
+      targetQbTxnKind: 'bill_pmt',
+    }));
+    expect(r.provenance).toBe('empty');
+  });
 });
 
 // ─── memoNamesMatchedInvoice ─────────────────────────────────────────────────
