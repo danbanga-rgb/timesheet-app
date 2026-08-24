@@ -376,9 +376,14 @@ async function persistJobResponse(
     // the event row so the follow-up pay step and reconciler can find it.
     // Also seed qb_mirror so reconciler treats the new bill as authoritative.
     if (payload.sourceIngestEventId != null && (!payload.sourceInvoiceIds || payload.sourceInvoiceIds.length === 0)) {
+      // Also set match_provenance='created-pay' — reconciler won't re-touch
+      // posted-via-push events, so we set the provenance here at the moment
+      // it becomes true (we just created the bill; no invoice-side link
+      // possible; mapping is the authorization). Matches what
+      // computeMatchProvenance would return if it ran on this event.
       const { error: evErr } = await supabase
         .from('qb_ingest_events')
-        .update({ resolved_bill_txn_id: parsed.result.txnId })
+        .update({ resolved_bill_txn_id: parsed.result.txnId, match_provenance: 'created-pay' })
         .eq('id', payload.sourceIngestEventId);
       if (evErr) {
         return { ok: false, errorMsg: `BillAdd orphan persist DB error for event=${payload.sourceIngestEventId} vendor="${vendorName}" refNumber="${parsed.result.refNumber}": ${evErr.message}` };
