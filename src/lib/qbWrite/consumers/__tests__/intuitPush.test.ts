@@ -77,7 +77,7 @@ const accounts = [{ list_id: 'A-8220', full_name: 'BANK/CASH:8220 - Key Point Ch
 const qbMirror = [
   { entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
     amount: 5000, is_settled: false,
-    data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 5000 } },
+    data: { vendor_name: 'Hovercloud Technologies', open_amount: 5000 } },
 ];
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -277,7 +277,7 @@ describe('pushIntuitPayBill', () => {
       ...qbMirror,
       { entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN-2', vendor_list_id: 'V-HOVER',
         amount: 5000, is_settled: false,
-        data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 5000 } },
+        data: { vendor_name: 'Hovercloud Technologies', open_amount: 5000 } },
     ];
     const { client, inserts } = makeMockSupabase({
       qb_ingest_events: [a, b], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirror2,
@@ -300,7 +300,7 @@ describe('pushIntuitPayBill', () => {
     const mirrorMismatch = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
       amount: 4000, is_settled: false,
-      data: { vendor_full_name: 'Hovercloud Technologies' },
+      data: { vendor_name: 'Hovercloud Technologies' },
     }];
     const { client, inserts } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirrorMismatch,
@@ -322,7 +322,7 @@ describe('pushIntuitPayBill', () => {
     const mirrorQuirk = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
       amount: 5000, is_settled: false,
-      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 25000 },
+      data: { vendor_name: 'Hovercloud Technologies', open_amount: 25000 },
     }];
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirrorQuirk,
@@ -336,7 +336,7 @@ describe('pushIntuitPayBill', () => {
     const mirrorSettled = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
       amount: 5000, is_settled: true,
-      data: { vendor_full_name: 'Hovercloud Technologies', open_amount: 0 },
+      data: { vendor_name: 'Hovercloud Technologies', open_amount: 0 },
     }];
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mirrorSettled,
@@ -357,7 +357,7 @@ describe('pushIntuitPayBill', () => {
     const nearlyEqualMirror = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-HOVER',
       amount: 5000.001, is_settled: false,   // sub-penny noise in AmountDue
-      data: { vendor_full_name: 'Hovercloud Technologies' },
+      data: { vendor_name: 'Hovercloud Technologies' },
     }];
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: nearlyEqualMirror,
@@ -396,7 +396,7 @@ describe('pushIntuitPayBill', () => {
     const mismatchMirror = [{
       entity_kind: 'bill', entity_ref: 'HOVER-BILL-TXN', vendor_list_id: 'V-OTHER',
       amount: 5000, is_settled: false,
-      data: { vendor_full_name: 'Some Other Vendor', open_amount: 5000 },
+      data: { vendor_name: 'Some Other Vendor', open_amount: 5000 },
     }];
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent], qb_vendors: vendors, qb_accounts: accounts, qb_mirror: mismatchMirror,

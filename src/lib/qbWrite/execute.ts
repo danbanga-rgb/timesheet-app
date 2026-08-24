@@ -246,10 +246,10 @@ async function findVendorMismatches(supabase: SB, candidates: IdempotencyKey[]):
     .eq('entity_kind', 'bill')
     .in('entity_ref', Array.from(allTxnIds));
 
-  // Bill lookup by TxnID → vendor name (from mirror row's data.vendor_full_name)
+  // Bill lookup by TxnID → vendor name (from mirror row's data.vendor_name)
   const billVendor = new Map<string, string>();
   for (const row of (data ?? []) as Array<{ entity_ref: string; data: Record<string, unknown> | null }>) {
-    const vname = ((row.data ?? {}) as Record<string, unknown>).vendor_full_name;
+    const vname = ((row.data ?? {}) as Record<string, unknown>).vendor_name;
     if (typeof vname === 'string') billVendor.set(row.entity_ref, vname);
   }
 

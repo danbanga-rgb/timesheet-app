@@ -73,9 +73,9 @@ function makeMockSupabase(opts: {
   const defaultTables = {
     qb_mirror: [
       { entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-BIMO-AMAR',
-        data: { vendor_full_name: 'Bimosoft - Amar Pljevljak' } },
+        data: { vendor_name: 'Bimosoft - Amar Pljevljak' } },
       { entity_kind: 'bill', entity_ref: '41282-1784756812', vendor_list_id: 'V-FLAW',
-        data: { vendor_full_name: 'Flawless APPS LLC' } },
+        data: { vendor_name: 'Flawless APPS LLC' } },
     ],
   };
   const tables: NonNullable<typeof opts.tables> = { ...defaultTables, ...(opts.tables ?? {}) };
@@ -236,7 +236,7 @@ describe('INVARIANTS #11–19 (domain / persistence)', () => {
         tables: {
           qb_mirror: [{
             entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-OTHER',
-            data: { vendor_full_name: 'Someone Else LLC' },
+            data: { vendor_name: 'Someone Else LLC' },
           }],
         },
       });
@@ -269,9 +269,9 @@ describe('INVARIANTS #11–19 (domain / persistence)', () => {
         tables: {
           qb_mirror: [
             { entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-BIMO-AMAR',
-              data: { vendor_full_name: 'Bimosoft - Amar Pljevljak' } },
+              data: { vendor_name: 'Bimosoft - Amar Pljevljak' } },
             { entity_kind: 'bill', entity_ref: 'WRONG-VENDOR-BILL', vendor_list_id: 'V-OTHER',
-              data: { vendor_full_name: 'Someone Else' } },
+              data: { vendor_name: 'Someone Else' } },
           ],
         },
       });
@@ -353,9 +353,9 @@ describe('INVARIANTS #11–19 (domain / persistence)', () => {
         tables: {
           qb_mirror: [
             { entity_kind: 'bill', entity_ref: '12006-1196864828', vendor_list_id: 'V-A',
-              data: { vendor_full_name: 'Bimosoft - Amar Pljevljak' } },
+              data: { vendor_name: 'Bimosoft - Amar Pljevljak' } },
             { entity_kind: 'bill', entity_ref: '12006-1196864829', vendor_list_id: 'V-B',
-              data: { vendor_full_name: 'Bimosoft - Edin Jasarspahic' } },
+              data: { vendor_name: 'Bimosoft - Edin Jasarspahic' } },
           ],
         },
       });

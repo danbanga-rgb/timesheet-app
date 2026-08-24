@@ -67,7 +67,7 @@ interface MirrorBillRow {
   entity_ref: string;
   amount: number | string | null;
   is_settled: boolean | null;
-  data: { open_amount?: number | string; vendor_full_name?: string } | null;
+  data: { open_amount?: number | string; vendor_name?: string } | null;
 }
 
 /** Push `pay_existing_bill` intents to QB for the given qb_ingest_events ids.
