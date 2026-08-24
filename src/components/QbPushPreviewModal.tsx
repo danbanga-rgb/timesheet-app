@@ -412,9 +412,18 @@ export default function QbPushPreviewModal({
                         const expense = e.qbExpenseAccountListId ? accountById.get(e.qbExpenseAccountListId) : null;
                         const invs = e.matchedInvoiceIds.map(id => invoiceById.get(id)).filter(Boolean);
                         const provStrong = e.matchProvenance === 'exact-txn' || e.matchProvenance === 'exact-ref';
-                        const canSelect = groupPushable && provStrong;
+                        // canSelect defers to the action-specific isSelectable so
+                        // create_bill_then_pay (mapping-authorized, no invoice link)
+                        // isn't disabled by the provStrong-only check that only
+                        // makes sense for pay_existing_bill.
+                        const canSelect = isSelectable(e);
+                        const disabledReason = !canSelect && groupPushable
+                          ? (e.resolvedAction === 'pay_existing_bill'
+                              ? `match_provenance='${e.matchProvenance ?? 'null'}' — invoice link too weak to auto-push; verify manually`
+                              : `event not eligible (missing vendor/expense mapping or already handled)`)
+                          : null;
                         return (
-                          <tr key={e.id} className={`border-t border-gray-100 ${groupPushable && selected.has(e.id) ? 'bg-indigo-50/50' : ''} ${groupPushable && !provStrong ? 'opacity-60' : ''}`}>
+                          <tr key={e.id} className={`border-t border-gray-100 ${groupPushable && selected.has(e.id) ? 'bg-indigo-50/50' : ''} ${groupPushable && !canSelect && e.resolvedAction === 'pay_existing_bill' && !provStrong ? 'opacity-60' : ''}`}>
                             <td className="px-3 py-1.5">
                               {canSelect ? (
                                 <input
@@ -427,7 +436,7 @@ export default function QbPushPreviewModal({
                                 <input
                                   type="checkbox"
                                   disabled
-                                  title={`match_provenance='${e.matchProvenance ?? 'null'}' — invoice link too weak to auto-push; verify manually`}
+                                  title={disabledReason ?? 'not selectable'}
                                 />
                               ) : (
                                 <input type="checkbox" disabled title="Coming in G7.5 — pay_existing_bill only for now" />
