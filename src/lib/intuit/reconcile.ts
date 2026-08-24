@@ -214,7 +214,14 @@ export function reconcileEvent(
   //
   // Detection heuristic: if we have ZERO bills AND ZERO payments for the vendor,
   // we're uncertain. Prefer 'held' with a nudge to sync.
+  //
+  // Exception: kind='bill_add_and_pmt' — accountant explicitly mapped this
+  // vendor to "create the bill + pay." Empty mirror = confidently a create case.
+  // Don't hold; resolve to create_bill_then_pay so G7b consumer can pick it up.
   if (bills.length === 0 && payments.length === 0) {
+    if (event.targetQbTxnKind === 'bill_add_and_pmt') {
+      return { action: 'create_bill_then_pay' };
+    }
     return { action: 'held', reason: 'vendor not synced (no QB state for this vendor)' };
   }
 

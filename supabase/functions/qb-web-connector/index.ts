@@ -332,12 +332,49 @@ async function persistJobResponse(
     if (!parsed.result) {
       return { ok: false, errorMsg: `BillAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Persist TxnID scoped by (vendor, refNumber) — vendorName is baked into the payload.
-    // Same cross-vendor-collision reasoning as bill_query above.
-    const vendorName = (job.payload as { vendorName?: string }).vendorName;
+    const payload = job.payload as { vendorName?: string; sourceIngestEventId?: number; sourceInvoiceIds?: number[] };
+    const vendorName = payload.vendorName;
     if (!vendorName) {
       return { ok: false, errorMsg: `BillAdd payload missing vendorName; cannot safely persist TxnID for refNumber=${parsed.result.refNumber}` };
     }
+    // Orphan-create path (G7b): bill_add was triggered by a qb_ingest_event
+    // with no matching invoice in our system. Persist the new bill TxnID onto
+    // the event row so the follow-up pay step and reconciler can find it.
+    // Also seed qb_mirror so reconciler treats the new bill as authoritative.
+    if (payload.sourceIngestEventId != null && (!payload.sourceInvoiceIds || payload.sourceInvoiceIds.length === 0)) {
+      const { error: evErr } = await supabase
+        .from('qb_ingest_events')
+        .update({ resolved_bill_txn_id: parsed.result.txnId })
+        .eq('id', payload.sourceIngestEventId);
+      if (evErr) {
+        return { ok: false, errorMsg: `BillAdd orphan persist DB error for event=${payload.sourceIngestEventId} vendor="${vendorName}" refNumber="${parsed.result.refNumber}": ${evErr.message}` };
+      }
+      // Seed mirror row so next reconciler pass sees the bill (avoids a round
+      // trip through bill_query). Full hydration happens on the next scheduled
+      // bill_query anyway. amount/is_settled from payload — bill is definitely
+      // unpaid at creation.
+      const totalAmount = ((payload as unknown) as { lines?: Array<{ amount: number }> }).lines
+        ?.reduce((n, l) => n + Number(l.amount ?? 0), 0) ?? 0;
+      const { data: vendorRow } = await supabase.from('qb_vendors').select('list_id').eq('name', vendorName).limit(1).maybeSingle();
+      if (vendorRow?.list_id) {
+        await supabase.from('qb_mirror').upsert({
+          entity_kind: 'bill',
+          entity_ref: parsed.result.txnId,
+          vendor_list_id: vendorRow.list_id,
+          ref_number: parsed.result.refNumber,
+          amount: totalAmount,
+          is_settled: false,
+          data: {
+            vendor_name: vendorName,
+            txn_date: (payload as unknown as { txnDate?: string }).txnDate ?? null,
+            due_date: (payload as unknown as { dueDate?: string }).dueDate ?? null,
+          },
+          queried_at: new Date().toISOString(),
+        }, { onConflict: 'entity_kind,entity_ref' });
+      }
+      return { ok: true, errorMsg: null };
+    }
+    // Invoice-linked path (original): persist onto invoices matching (vendor, refNumber).
     const { data: pps } = await supabase
       .from('payment_profiles')
       .select('user_id')

@@ -169,6 +169,7 @@ function buildCreateBillPayload(intent: CreateBillIntent): Record<string, unknow
     memo: intent.memo,
     lines: intent.lines,
     sourceInvoiceIds: intent.sourceInvoiceIds,
+    ...(intent.sourceIngestEventId != null ? { sourceIngestEventId: intent.sourceIngestEventId } : {}),
     __audit_tag: intent.auditTag,
   };
 }

@@ -72,8 +72,15 @@ export interface CreateBillIntent extends WriteIntentBase {
     expenseAccountName?: string;  // per-line override; falls back to default
   }>;
   /** Persistence back-ref: which invoices this bill covers. Length 1 for
-   *  per-invoice bills; N for MULTI-grouped bills. */
+   *  per-invoice bills; N for MULTI-grouped bills. Empty for orphan-create
+   *  (G7b TechAntz-style: no invoice in our system). */
   sourceInvoiceIds: number[];
+  /** Orphan-create persistence back-ref (G7b). Set when creating a Bill
+   *  triggered by a qb_ingest_event that has no matching invoice. Edge fn
+   *  drain handler writes the resulting bill TxnID onto the event row
+   *  (resolved_bill_txn_id) instead of onto invoices. Mutually exclusive
+   *  with a non-empty sourceInvoiceIds. */
+  sourceIngestEventId?: number;
 }
 
 /** Write a direct-expense Check (bypasses A/P entirely). Used for Lucien-style

@@ -231,6 +231,7 @@ import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from './lib/intuit/config';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
 import QbPushStatusPane, { type PushRecord } from './components/QbPushStatusPane';
 import { pushIntuitPayBill } from './lib/qbWrite/consumers/intuitPush';
+import { pushIntuitCreateBill } from './lib/qbWrite/consumers/intuitCreateBill';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -10479,7 +10480,23 @@ const TimesheetSystem = () => {
                   onConfirm={async (selectedIds) => {
                     setShowQbPushPreview(false);
                     try {
-                      const r = await pushIntuitPayBill(supabase, selectedIds);
+                      // Route by resolved_action: pay_existing_bill → intuitPush,
+                      // create_bill_then_pay → intuitCreateBill. Run both in parallel;
+                      // merge results for the alert + status pane.
+                      const selectedEvents = selectedIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
+                      const payIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
+                      const createIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
+                      const [payRes, createRes] = await Promise.all([
+                        payIds.length > 0 ? pushIntuitPayBill(supabase, payIds) : Promise.resolve(null),
+                        createIds.length > 0 ? pushIntuitCreateBill(supabase, createIds) : Promise.resolve(null),
+                      ]);
+                      const r = {
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? [])],
+                        skippedIneligible: [...(payRes?.skippedIneligible ?? []), ...(createRes?.skippedIneligible ?? [])],
+                        verifyJobIdByPayJobId: payRes?.verifyJobIdByPayJobId ?? {},
+                      };
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
 
                       // Build push records for the live status pane. Only successful

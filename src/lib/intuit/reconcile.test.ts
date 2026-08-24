@@ -183,11 +183,20 @@ describe('reconcileEvent', () => {
     expect(r.billTxnId).toBeUndefined();
   });
 
-  it("action='held' when vendor has no bills AND no payments in mirror (not synced)", () => {
-    const e = event();
+  it("action='held' when vendor has no bills AND no payments in mirror (not synced) — bill_pmt kind", () => {
+    const e = event();   // default kind bill_pmt
     const r = reconcileEvent(e, ctxWith([], []), new Set());
     expect(r.action).toBe('held');
     expect(r.reason).toContain('not synced');
+  });
+
+  it("action='create_bill_then_pay' for bill_add_and_pmt kind + empty mirror (G7b TechAntz case)", () => {
+    // Accountant explicitly mapped vendor to create+pay. Empty mirror is the
+    // confirmatory signal — no bill to pay, so we create one. Don't hold.
+    const e = event({ targetQbTxnKind: 'bill_add_and_pmt' });
+    const r = reconcileEvent(e, ctxWith([], []), new Set());
+    expect(r.action).toBe('create_bill_then_pay');
+    expect(r.reason).toBeUndefined();
   });
 
   it("action='pay_existing_bill' when bill matches + unpaid", () => {

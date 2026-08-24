@@ -178,16 +178,19 @@ export default function QbPushPreviewModal({
 
   const parts = useMemo(() => partition(activeEvents), [activeEvents]);
 
-  // G7a: only pay_existing_bill is pushable through the executor today.
-  // The other actions render as disabled with a "coming in G7.5" tooltip.
-  const PUSHABLE_ACTIONS: QbResolvedAction[] = ['pay_existing_bill'];
+  // G7a + G7b: pay_existing_bill (bill_pmt_add) and create_bill_then_pay
+  // (bill_add — G7b Phase 2) are pushable. check/G7.5 come later.
+  const PUSHABLE_ACTIONS: QbResolvedAction[] = ['pay_existing_bill', 'create_bill_then_pay'];
   const isPushable = (e: PreviewEvent) => e.resolvedAction != null && PUSHABLE_ACTIONS.includes(e.resolvedAction);
-  // 2026-08-24 provenance gate — mirrors intuitPush.ts consumer.
-  // Only exact-txn / exact-ref events are eligible to select. Weaker provenance
-  // means the invoice link is not trustworthy enough to auto-push; the human
-  // must resolve the ambiguity (backlog: add per-row "verified" override).
-  const isProvenanceStrong = (e: PreviewEvent) => e.matchProvenance === 'exact-txn' || e.matchProvenance === 'exact-ref';
-  const isSelectable = (e: PreviewEvent) => isPushable(e) && isProvenanceStrong(e);
+  // Provenance gate — pay_existing_bill requires strong invoice link; but
+  // create_bill_then_pay's orphan case (TechAntz) is INTENTIONALLY invoice-less
+  // (mapping authorizes create). Gate is action-specific.
+  const isSelectable = (e: PreviewEvent) => {
+    if (!isPushable(e)) return false;
+    if (e.resolvedAction === 'create_bill_then_pay') return true;   // mapping = authorization
+    // pay_existing_bill: require exact-txn or exact-ref invoice link
+    return e.matchProvenance === 'exact-txn' || e.matchProvenance === 'exact-ref';
+  };
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     heldBack: true, pay_existing_bill: true, create_bill_then_pay: false, check: false,
