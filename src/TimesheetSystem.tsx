@@ -2644,6 +2644,10 @@ const TimesheetSystem = () => {
       //     matches must be human-verified even for auto-close)
       //   posted(qb_probe) + (NOT already_done OR provenance dropped from
       //     exact-txn) → back to pending (self-heal)
+      //   ready + already_done + weak provenance → pending
+      //     (classifier promotes any classified event to ready, but an
+      //     already_done event with fuzzy invoice link shouldn't LOOK
+      //     ready-to-push in the Inbox — surface it for review)
       const wasQbProbePosted = event.status === 'posted'
         && ((currentRow?.posted_qb_refs as Record<string, unknown> | null)?.posted_source === 'qb_probe');
       const autoCloseEligible = result.action === 'already_done' && nextProvenance === 'exact-txn';
@@ -2661,6 +2665,12 @@ const TimesheetSystem = () => {
         patch.status = 'pending';
         patch.status_updated_at = nowIso;
         patch.posted_qb_refs = null;
+      } else if (result.action === 'already_done' && nextProvenance !== 'exact-txn' && event.status === 'ready') {
+        // Classifier promoted event to ready, but reconciler says "QB already
+        // has this + weak invoice link" — this isn't push-ready, revert to
+        // pending so it lands in the review bucket, not the pushable group.
+        patch.status = 'pending';
+        patch.status_updated_at = nowIso;
       }
       const { error } = await supabase.from('qb_ingest_events').update(patch).eq('id', event.id);
       if (!error) reconciled++;
@@ -10322,7 +10332,8 @@ const TimesheetSystem = () => {
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
               { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
               { key: 'pre_our_system',   title: 'Pre-our-system (handled in QB)', hint: `Predate our confidence window (< ${INTUIT_PRE_OUR_SYSTEM_CUTOFF} for Intuit). Accountant reconciled these manually in QB; never pushed.`, events: qbIngestEvents.filter(isPreOur) },
-              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e) && e.resolvedAction !== 'already_done') },
+              { key: 'already_done',     title: 'Already done in QB — needs verification', hint: 'QB already has bill+payment; matched invoice link is fuzzy (memo doesn\'t name it, or invoice.qb_bill_txn_id doesn\'t match). Review and mark as pre-our-system, orphan, or verify.', events: qbIngestEvents.filter(e => e.resolvedAction === 'already_done' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: 'Deliberately never pushed. Advance-payment cases (US Signature) or retired vendors (CLOUDYGON).',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
@@ -10736,6 +10747,7 @@ const TimesheetSystem = () => {
                                   <th className="px-3 py-1.5 text-right">Amount</th>
                                   <th className="px-3 py-1.5 text-left">Memo</th>
                                   <th className="px-3 py-1.5 text-left" title="Reconciler decision — authoritative for push. Old amount-only matcher output removed 2026-08-21.">Resolved</th>
+                                  <th className="px-3 py-1.5 text-left" title="Invoice-link strength. exact-txn is deterministic (invoice.qb_bill_txn_id matches). Only exact-txn / exact-ref events are pushable.">Provenance</th>
                                   <th className="px-3 py-1.5 text-left">Status</th>
                                 </tr>
                               </thead>
@@ -10759,6 +10771,30 @@ const TimesheetSystem = () => {
                                   } else if (e.resolvedAction === 'held') {
                                     resolvedCell = badge('bg-red-100', 'text-red-700', 'held', e.resolvedReason ?? undefined);
                                   }
+                                  // Provenance chip — shown for events with an invoice concept.
+                                  // Mirrors QbPushPreviewModal so accountant sees the invoice-link
+                                  // strength in the same view where they'd trigger a push.
+                                  const provRelevant = e.resolvedAction != null && e.resolvedAction !== 'pre_our_system' && e.resolvedAction !== 'check' && e.resolvedAction !== 'held';
+                                  const provCell: React.ReactNode = provRelevant && e.matchProvenance
+                                    ? badge(
+                                        e.matchProvenance === 'exact-txn' ? 'bg-emerald-100' :
+                                        e.matchProvenance === 'exact-ref' ? 'bg-teal-100' :
+                                        e.matchProvenance === 'fuzzy'     ? 'bg-amber-100' :
+                                                                            'bg-gray-100',
+                                        e.matchProvenance === 'exact-txn' ? 'text-emerald-800' :
+                                        e.matchProvenance === 'exact-ref' ? 'text-teal-800' :
+                                        e.matchProvenance === 'fuzzy'     ? 'text-amber-800' :
+                                                                            'text-gray-600',
+                                        e.matchProvenance === 'exact-txn' ? '🔒 exact-txn' :
+                                        e.matchProvenance === 'exact-ref' ? '✓ exact-ref' :
+                                        e.matchProvenance === 'fuzzy'     ? '~ fuzzy' :
+                                                                            '— empty',
+                                        e.matchProvenance === 'exact-txn' ? 'invoice.qb_bill_txn_id matches — deterministic 1:1 link' :
+                                        e.matchProvenance === 'exact-ref' ? 'memo names this invoice by number' :
+                                        e.matchProvenance === 'fuzzy'     ? 'matched by vendor+amount only — verify before pushing' :
+                                                                            'no invoice link',
+                                      )
+                                    : <span className="text-gray-300">—</span>;
                                   return (
                                     <tr key={e.id} className="border-t border-gray-100 hover:bg-indigo-50/40">
                                       <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
@@ -10767,6 +10803,7 @@ const TimesheetSystem = () => {
                                       <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
                                       <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
                                       <td className="px-3 py-1.5">{resolvedCell}</td>
+                                      <td className="px-3 py-1.5">{provCell}</td>
                                       <td className="px-3 py-1.5">
                                         {e.resolvedAction === 'pre_our_system'
                                           ? <span className="text-gray-500 italic">will not push</span>
