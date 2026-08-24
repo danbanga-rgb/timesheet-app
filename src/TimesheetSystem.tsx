@@ -2676,6 +2676,13 @@ const TimesheetSystem = () => {
         // pending so it lands in the review bucket, not the pushable group.
         patch.status = 'pending';
         patch.status_updated_at = nowIso;
+      } else if (result.action === 'pre_our_system' && event.status !== 'ignored' && event.status !== 'posted') {
+        // Terminal: predates our cutoff; QB handled these before we came online.
+        // Flip to ignored so they don't clutter the pushable Inbox or inflate
+        // the "Ready to push" counter. resolved_action='pre_our_system' preserved
+        // for audit; they land in the Ignore bucket.
+        patch.status = 'ignored';
+        patch.status_updated_at = nowIso;
       }
       const { error } = await supabase.from('qb_ingest_events').update(patch).eq('id', event.id);
       if (!error) reconciled++;
@@ -10338,12 +10345,11 @@ const TimesheetSystem = () => {
               });
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
               { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
-              { key: 'pre_our_system',   title: 'Pre-our-system (handled in QB)', hint: `Predate our confidence window (< ${INTUIT_PRE_OUR_SYSTEM_CUTOFF} for Intuit). Accountant reconciled these manually in QB; never pushed.`, events: qbIngestEvents.filter(isPreOur) },
               { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e) && e.resolvedAction !== 'already_done') },
               { key: 'already_done',     title: 'Already done in QB — needs verification', hint: 'QB already has bill+payment; matched invoice link is fuzzy (memo doesn\'t name it, or invoice.qb_bill_txn_id doesn\'t match). Review and mark as pre-our-system, orphan, or verify.', events: qbIngestEvents.filter(e => e.resolvedAction === 'already_done' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
-              { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: 'Deliberately never pushed. Advance-payment cases (US Signature) or retired vendors (CLOUDYGON).',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
+              { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: `Deliberately never pushed. Includes advance-payment cases (US Signature), retired vendors (CLOUDYGON), and pre-our-system events (predate ${INTUIT_PRE_OUR_SYSTEM_CUTOFF}).`, events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
               { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: qbIngestEvents.filter(e => e.status === 'posted') },
             ];
             const total = qbIngestEvents.length;
