@@ -235,6 +235,15 @@ async function persistJobResponse(
     //       bills we actually wanted to reconcile.)
     const payload = job.payload as BillQueryRqInput;
     const isIteratorMode = !payload.txnIds?.length && !payload.refNumbers?.length;
+    // Verify-chain jobs (bill_query enqueued as a post-push verify by intuitPush
+    // et al.) carry __verify_for_event_id. Their purpose is mirror refresh so
+    // the status pane can see is_settled flip — NOT invoice-linkage persist.
+    // For G7b orphan events (TechAntz) the invoice-side is empty by design;
+    // hard-failing on "no payment_profile matches" would break every verify
+    // for orphan-created bills. Skip invoice-linkage errors in verify mode;
+    // mirror upsert (below) is what matters.
+    const isVerifyJob = (job.payload as { __verify_for_event_id?: number }).__verify_for_event_id != null;
+    const tolerateInvoicePersistMiss = isIteratorMode || isVerifyJob;
     let linked = 0;
     let skippedUnmappedVendor = 0;
     let skippedUnknownInvoice = 0;
@@ -253,7 +262,7 @@ async function persistJobResponse(
         .eq('qb_vendor_name', r.vendorFullName);
       const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
       if (userIds.length === 0) {
-        if (isIteratorMode) { skippedUnmappedVendor++; continue; }
+        if (tolerateInvoicePersistMiss) { skippedUnmappedVendor++; continue; }
         return { ok: false, errorMsg: `BillQuery persist: no payment_profile.qb_vendor_name matches "${r.vendorFullName}" (refNumber=${r.refNumber})` };
       }
       const multi = /^MULTI-(\d{4})-(\d{2})$/.exec(r.refNumber);
@@ -274,7 +283,7 @@ async function persistJobResponse(
         return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${updErr.message}` };
       }
       if (!updated || updated.length === 0) {
-        if (isIteratorMode) { skippedUnknownInvoice++; continue; }
+        if (tolerateInvoicePersistMiss) { skippedUnknownInvoice++; continue; }
         return { ok: false, errorMsg: `BillQuery persist: 0 rows updated for vendor="${r.vendorFullName}" refNumber="${r.refNumber}". Invoice(s) may have been deleted/renumbered after enqueue.` };
       }
       linked += updated.length;
