@@ -199,6 +199,49 @@ describe('reconcileEvent', () => {
     expect(r.reason).toBeUndefined();
   });
 
+  it("respects resolvedBillTxnId as authoritative (G7b post-drain): pay_existing_bill when bill in mirror", () => {
+    // After a G7b orphan bill_add drains, the edge fn writes resolved_bill_txn_id
+    // on the event. On next reconcile, that TxnID is authoritative — don't
+    // re-classify as create_bill_then_pay (which would double-create the bill).
+    const b = bill({ txnId: 'BILL-CREATED-BY-US', refNumber: 'INTUIT-124', isPaid: false });
+    const e = event({
+      targetQbTxnKind: 'bill_add_and_pmt',
+      memo: 'Invoice Payment',   // no ref# — would normally fall to create_bill_then_pay
+      resolvedBillTxnId: 'BILL-CREATED-BY-US',
+    });
+    const r = reconcileEvent(e, ctxWith([b], []), new Set());
+    expect(r.action).toBe('pay_existing_bill');
+    expect(r.billTxnId).toBe('BILL-CREATED-BY-US');
+  });
+
+  it("respects resolvedBillTxnId as authoritative: held when bill not yet in mirror", () => {
+    // Bill was created (TxnID persisted) but bill_query hasn't refreshed mirror
+    // yet. Hold so we don't create a duplicate.
+    const e = event({
+      targetQbTxnKind: 'bill_add_and_pmt',
+      memo: 'Invoice Payment',
+      resolvedBillTxnId: 'BILL-CREATED-BY-US',
+    });
+    const r = reconcileEvent(e, ctxWith([], []), new Set());
+    expect(r.action).toBe('held');
+    expect(r.reason).toContain('not yet visible in mirror');
+    expect(r.billTxnId).toBe('BILL-CREATED-BY-US');  // preserved for next reconcile
+  });
+
+  it("respects resolvedBillTxnId as authoritative: already_done when bill in mirror + paid", () => {
+    const b = bill({ txnId: 'BILL-CREATED-BY-US', refNumber: 'INTUIT-124', isPaid: true });
+    const p = payment({ txnId: 'PAY-A', appliedToBills: [{ billTxnId: 'BILL-CREATED-BY-US', amount: 100 }] });
+    const e = event({
+      targetQbTxnKind: 'bill_add_and_pmt',
+      memo: 'Invoice Payment',
+      resolvedBillTxnId: 'BILL-CREATED-BY-US',
+    });
+    const r = reconcileEvent(e, ctxWith([b], [p]), new Set());
+    expect(r.action).toBe('already_done');
+    expect(r.billTxnId).toBe('BILL-CREATED-BY-US');
+    expect(r.paymentTxnId).toBe('PAY-A');
+  });
+
   it("action='pay_existing_bill' when bill matches + unpaid", () => {
     const b = bill({ isPaid: false });
     const r = reconcileEvent(event(), ctxWith([b]), new Set());

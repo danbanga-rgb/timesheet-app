@@ -42,6 +42,11 @@ export interface ReconcilableEvent {
   targetQbTxnKind: QbIngestKind | null;
   matchedInvoiceIds: number[];         // for advisory display; not used by matcher
   status: 'pending' | 'ready' | 'queued' | 'posted' | 'failed' | 'ignored';
+  /** Set by a prior step (e.g. bill_add drain handler for G7b orphan events).
+   *  When present, reconciler treats it as authoritative — skips memo-based
+   *  bill matching and looks up this TxnID directly in mirror. Prevents
+   *  create_bill_then_pay from firing again after we already created the bill. */
+  resolvedBillTxnId?: string | null;
 }
 
 export interface MirrorBill {
@@ -206,6 +211,34 @@ export function reconcileEvent(
   const bills = ctx.billsByVendor.get(event.counterpartyQbVendorListId) ?? [];
   const payments = ctx.paymentsByVendor.get(event.counterpartyQbVendorListId) ?? [];
   const eventRefs = extractRefsFromMemo(event.memo);
+
+  // Authoritative bill TxnID (G7b): if a prior step already persisted
+  // resolved_bill_txn_id (bill_add drain handler for orphan creates), trust
+  // that TxnID over memo-based matching. Without this, ref-less TechAntz-style
+  // events would re-classify as create_bill_then_pay forever, and we'd double
+  // create bills every time the reconciler runs.
+  if (event.resolvedBillTxnId) {
+    const claimed = bills.find(b => b.txnId === event.resolvedBillTxnId);
+    if (claimed) {
+      const settlement = findSettlingPayment(claimed, payments);
+      if (settlement.alreadySettled) {
+        return {
+          action: 'already_done',
+          billTxnId: claimed.txnId,
+          ...(settlement.paymentTxnId ? { paymentTxnId: settlement.paymentTxnId } : {}),
+        };
+      }
+      return { action: 'pay_existing_bill', billTxnId: claimed.txnId };
+    }
+    // Bill TxnID persisted but not in mirror yet — a bill_query is pending.
+    // Hold so we don't accidentally create a second bill by classifying as
+    // create_bill_then_pay again.
+    return {
+      action: 'held',
+      reason: `resolved_bill_txn_id=${event.resolvedBillTxnId} not yet visible in mirror — bill_query pending`,
+      billTxnId: event.resolvedBillTxnId,
+    };
+  }
 
   // If vendor is entirely missing from mirror, we don't yet know QB state → held.
   // (Reconciler assumes an empty bills[] means "confirmed vendor has no bills",

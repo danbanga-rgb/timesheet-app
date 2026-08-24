@@ -2539,6 +2539,7 @@ const TimesheetSystem = () => {
       targetQbTxnKind: (r.target_qb_txn_kind as ReconcilableEvent['targetQbTxnKind']) ?? null,
       matchedInvoiceIds: Array.isArray(r.matched_invoice_ids) ? (r.matched_invoice_ids as number[]) : [],
       status: (r.status as ReconcilableEvent['status']) ?? 'pending',
+      resolvedBillTxnId: (r.resolved_bill_txn_id as string | null) ?? null,
     }));
     if (events.length === 0) return { reconciled: 0 };
 
