@@ -188,7 +188,8 @@ export default function QbPushPreviewModal({
   const isSelectable = (e: PreviewEvent) => {
     if (!isPushable(e)) return false;
     if (e.resolvedAction === 'create_bill_then_pay') return true;   // mapping = authorization
-    // pay_existing_bill: require exact-txn or exact-ref invoice link
+    // pay_existing_bill: mapping-authorized (G7b post-create step) OR strong provenance
+    if (e.targetQbTxnKind === 'bill_add_and_pmt') return true;      // G7b orphan pay step
     return e.matchProvenance === 'exact-txn' || e.matchProvenance === 'exact-ref';
   };
 

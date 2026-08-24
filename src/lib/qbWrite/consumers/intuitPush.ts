@@ -59,6 +59,7 @@ interface IngestEventRow {
   status: string;
   matched_invoice_ids: number[] | null;
   match_provenance: string | null;
+  target_qb_txn_kind: string | null;
 }
 
 interface VendorRow { list_id: string; name: string }
@@ -89,7 +90,7 @@ export async function pushIntuitPayBill(
 
   const { data: eventData } = await supabase
     .from('qb_ingest_events')
-    .select('id, txn_date, amount, counterparty_qb_vendor_list_id, qb_bank_account_list_id, resolved_action, resolved_bill_txn_id, status, matched_invoice_ids, match_provenance')
+    .select('id, txn_date, amount, counterparty_qb_vendor_list_id, qb_bank_account_list_id, resolved_action, resolved_bill_txn_id, status, matched_invoice_ids, match_provenance, target_qb_txn_kind')
     .in('id', eventIds);
   const events = (eventData ?? []) as IngestEventRow[];
 
@@ -126,21 +127,29 @@ export async function pushIntuitPayBill(
     // Provenance gate (pay_existing_bill class): require exact-txn or exact-ref
     // so we know our matched invoice is the right one. Fuzzy / empty stays
     // out until the accountant human-verifies in the UI (future: override flag).
+    //
+    // Bypass: target_qb_txn_kind='bill_add_and_pmt' means the accountant mapped
+    // this vendor as create+pay. G7b orphan flow (TechAntz-style) creates the
+    // bill from event data, no invoice ever exists — so invoice-link provenance
+    // will always be 'empty' and gate would deadlock. Mapping IS the auth here.
     const provenance = e.match_provenance;
-    if (provenance !== 'exact-txn' && provenance !== 'exact-ref') {
-      skippedIneligible.push({
-        eventId: e.id,
-        reason: `match_provenance='${provenance ?? 'null'}' — pay_existing_bill requires exact-txn or exact-ref (invoice link too weak; verify in UI first)`,
-      });
-      continue;
-    }
-    const matchedIds = e.matched_invoice_ids ?? [];
-    if (matchedIds.length === 0) {
-      skippedIneligible.push({
-        eventId: e.id,
-        reason: 'matched_invoice_ids is empty — no invoice to reconcile against',
-      });
-      continue;
+    const mappingAuthorized = e.target_qb_txn_kind === 'bill_add_and_pmt';
+    if (!mappingAuthorized) {
+      if (provenance !== 'exact-txn' && provenance !== 'exact-ref') {
+        skippedIneligible.push({
+          eventId: e.id,
+          reason: `match_provenance='${provenance ?? 'null'}' — pay_existing_bill requires exact-txn or exact-ref (invoice link too weak; verify in UI first)`,
+        });
+        continue;
+      }
+      const matchedIds = e.matched_invoice_ids ?? [];
+      if (matchedIds.length === 0) {
+        skippedIneligible.push({
+          eventId: e.id,
+          reason: 'matched_invoice_ids is empty — no invoice to reconcile against',
+        });
+        continue;
+      }
     }
     eligible.push(e);
   }
