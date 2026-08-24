@@ -32,7 +32,7 @@ type JobStatus = 'pending' | 'in_flight' | 'done' | 'failed' | 'cancelled';
 
 interface JobRow { id: number; status: JobStatus; error_msg: string | null }
 interface MirrorRow { entity_ref: string; is_settled: boolean | null; data: { open_amount?: number } | null }
-interface EventRow { id: number; status: string; posted_qb_refs: Record<string, unknown> | null }
+interface EventRow { id: number; status: string; posted_qb_refs: Record<string, unknown> | null; resolved_bill_txn_id: string | null }
 
 interface LiveState {
   payStatus: JobStatus | 'unknown';
@@ -87,23 +87,45 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
     if (records.length === 0) return;
     const jobIds = records.flatMap(r => [r.payJobId, ...(r.verifyJobId != null ? [r.verifyJobId] : [])]);
     const eventIds = records.map(r => r.eventId);
-    const billTxnIds = Array.from(new Set(records.map(r => r.billTxnId)));
+    // For chained-create events (G7b Phase 3), rec.billTxnId is empty at push
+    // time — TxnID becomes known only after bill_add drains and gets persisted
+    // on qb_ingest_events.resolved_bill_txn_id. We do a first mirror pass for
+    // known-billTxnId records, then a second pass for chained records using
+    // the event's resolved_bill_txn_id.
+    const billTxnIds = Array.from(new Set(records.map(r => r.billTxnId).filter(Boolean)));
 
     const [jobsRes, eventsRes, mirrorRes] = await Promise.all([
       supabase.from('qb_sync_jobs').select('id, status, error_msg').in('id', jobIds),
-      supabase.from('qb_ingest_events').select('id, status, posted_qb_refs').in('id', eventIds),
+      supabase.from('qb_ingest_events').select('id, status, posted_qb_refs, resolved_bill_txn_id').in('id', eventIds),
       supabase.from('qb_mirror').select('entity_ref, is_settled, data').eq('entity_kind', 'bill').in('entity_ref', billTxnIds),
     ]);
     const jobById = new Map(((jobsRes.data ?? []) as JobRow[]).map(r => [r.id, r]));
     const eventById = new Map(((eventsRes.data ?? []) as EventRow[]).map(r => [r.id, r]));
     const mirrorByTxn = new Map(((mirrorRes.data ?? []) as MirrorRow[]).map(r => [r.entity_ref, r]));
 
+    // Second mirror pass: fetch mirror rows for chained-create events whose
+    // rec.billTxnId was empty at push time but now have resolved_bill_txn_id
+    // set on the event (post bill_add drain).
+    const backfillTxnIds = Array.from(new Set(
+      records
+        .filter(r => !r.billTxnId)
+        .map(r => (eventById.get(r.eventId)?.resolved_bill_txn_id ?? null))
+        .filter((v): v is string => !!v && !mirrorByTxn.has(v)),
+    ));
+    if (backfillTxnIds.length > 0) {
+      const { data: extraMirror } = await supabase
+        .from('qb_mirror').select('entity_ref, is_settled, data')
+        .eq('entity_kind', 'bill').in('entity_ref', backfillTxnIds);
+      for (const m of ((extraMirror ?? []) as MirrorRow[])) mirrorByTxn.set(m.entity_ref, m);
+    }
+
     const next = new Map<number, LiveState>();
     for (const rec of records) {
       const pay = jobById.get(rec.payJobId) ?? null;
       const verify = rec.verifyJobId != null ? (jobById.get(rec.verifyJobId) ?? null) : null;
       const event = eventById.get(rec.eventId) ?? null;
-      const mirror = mirrorByTxn.get(rec.billTxnId) ?? null;
+      const lookupKey = rec.billTxnId || event?.resolved_bill_txn_id || '';
+      const mirror = lookupKey ? (mirrorByTxn.get(lookupKey) ?? null) : null;
       next.set(rec.eventId, classify(pay, verify, event, mirror));
     }
     setLiveByEventId(next);
