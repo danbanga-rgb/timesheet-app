@@ -1224,7 +1224,10 @@ const TimesheetSystem = () => {
   const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
   const [qbVendorMappings, setQbVendorMappings] = useState<QbVendorMapping[]>([]);
-  const [mapVendorOpenFor, setMapVendorOpenFor] = useState<string | null>(null);  // counterparty currently being mapped
+  // Widget context — carries source + event count so the widget can render
+  // as a floating modal at the tab level (opened from Needs Classification
+  // OR from the All Mappings management panel below).
+  const [mapVendorOpenFor, setMapVendorOpenFor] = useState<{ counterparty: string; source: string; eventCount: number } | null>(null);
   const [mapForm, setMapForm] = useState<{ kind: QbIngestKind; vendorListId: string; bankListId: string; expenseListId: string; vendorSearch: string; payeeFullName: string; payeeListKind: QbPayeeListKind; }>({ kind: 'bill_pmt', vendorListId: '', bankListId: '', expenseListId: '', vendorSearch: '', payeeFullName: '', payeeListKind: 'OtherName' });
   const [mapSaving, setMapSaving] = useState(false);
   // Convera beneficiaries
@@ -3008,9 +3011,11 @@ const TimesheetSystem = () => {
   }, [accountantTab, currentUser?.role, qbBillQueryPending]);
 
   // Slice D — save a vendor mapping and apply it to all pending events with the same counterparty.
-  const openMapWidget = (counterparty: string, source: string) => {
+  const openMapWidget = (counterparty: string, source: string, eventCount: number = 0) => {
     // Prefill from existing mapping if one exists for this (source, counterparty).
     const existing = qbVendorMappings.find(m => m.source === source && m.counterpartyPattern === counterparty);
+    // eventCount defaults to 0 for edit-from-mappings-panel path (we don't know
+    // how many pending events exist; save-path applies to all matching rows anyway).
     setMapForm({
       kind: existing?.defaultTargetKind ?? 'bill_pmt',
       vendorListId: existing?.qbVendorListId ?? '',
@@ -3020,7 +3025,7 @@ const TimesheetSystem = () => {
       payeeFullName: existing?.payeeFullName ?? '',
       payeeListKind: existing?.payeeListKind ?? 'OtherName',
     });
-    setMapVendorOpenFor(counterparty);
+    setMapVendorOpenFor({ counterparty, source, eventCount });
   };
   const saveVendorMapping = async (counterparty: string, source: string) => {
     const kind = mapForm.kind;
@@ -10537,6 +10542,179 @@ const TimesheetSystem = () => {
                   onDismiss={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
                 />
 
+                {/* Mapping widget — floating modal. Opened from Needs Classification cards
+                    OR from the All Mappings panel below. Single source of truth for edit UI. */}
+                {mapVendorOpenFor && (() => {
+                  const bankAccounts = qbAccountsList.filter(a => a.accountType === 'Bank' && a.isActive);
+                  const expenseAccounts = qbAccountsList.filter(a => (a.accountType === 'Expense' || a.accountType === 'CostOfGoodsSold' || a.accountType === 'OtherExpense') && a.isActive);
+                  const vendorMatches = qbVendorsList
+                    .filter(v => v.isActive && (!mapForm.vendorSearch || v.name.toLowerCase().includes(mapForm.vendorSearch.toLowerCase())))
+                    .slice(0, 20);
+                  const chosenVendor = qbVendorsList.find(v => v.listId === mapForm.vendorListId);
+                  const ctx = mapVendorOpenFor;
+                  return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setMapVendorOpenFor(null)}>
+                      <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                        <div className="px-4 py-3 bg-indigo-50 border-b border-indigo-200 flex items-center justify-between">
+                          <div>
+                            <div className="font-semibold text-gray-800">Map counterparty → QB</div>
+                            <div className="text-xs text-gray-600 mt-0.5">
+                              <span className="font-mono">{ctx.counterparty}</span> · {sourceLabel(ctx.source)}
+                            </div>
+                          </div>
+                          <button onClick={() => setMapVendorOpenFor(null)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+                        </div>
+                        <div className="p-4 space-y-3">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Action</label>
+                            <div className="flex flex-wrap gap-2 text-xs">
+                              {(['bill_pmt','bill_add_and_pmt','check','ignore'] as QbIngestKind[]).map(k => (
+                                <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.kind === k ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                                  <input type="radio" className="hidden" checked={mapForm.kind === k} onChange={() => setMapForm(f => ({ ...f, kind: k }))} />
+                                  {({ bill_pmt: 'Pay Bill', bill_add_and_pmt: 'Create Bill + Pay', check: 'Check', ignore: 'Ignore' } as Record<string, string>)[k]}
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                          {mapForm.kind !== 'ignore' && (
+                            <>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">
+                                  QB vendor{mapForm.kind === 'check' ? ' (optional — leave blank if payee is OtherName/Employee)' : ''}
+                                </label>
+                                {chosenVendor ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded text-xs font-mono">{chosenVendor.name}</span>
+                                    <button onClick={() => setMapForm(f => ({ ...f, vendorListId: '', vendorSearch: '' }))} className="text-xs text-red-500 hover:underline">clear</button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <input type="text" placeholder="Search vendors…" value={mapForm.vendorSearch} onChange={e => setMapForm(f => ({ ...f, vendorSearch: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs mb-1" />
+                                    <div className="max-h-32 overflow-y-auto border border-gray-200 rounded text-xs divide-y divide-gray-100">
+                                      {vendorMatches.length === 0 && <div className="p-2 text-gray-400">no matches</div>}
+                                      {vendorMatches.map(v => (
+                                        <button key={v.listId} onClick={() => setMapForm(f => ({ ...f, vendorListId: v.listId, vendorSearch: '' }))} className="w-full text-left px-2 py-1 hover:bg-indigo-50">{v.name}</button>
+                                      ))}
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                              {mapForm.kind === 'check' && !mapForm.vendorListId && (
+                                <div className="p-2 bg-amber-50 border border-amber-200 rounded space-y-2">
+                                  <div className="text-xs text-amber-800 font-medium">Payee not in Vendors list</div>
+                                  <div className="text-xs text-amber-700">
+                                    For Write-Check payees like OtherName / Employee / Customer entities. qbXML resolves the name across all QB payee lists — enter the exact FullName as it appears in QB.
+                                  </div>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-1">Payee full name</label>
+                                    <input
+                                      type="text"
+                                      placeholder="e.g. Lucien Pinto"
+                                      value={mapForm.payeeFullName}
+                                      onChange={e => setMapForm(f => ({ ...f, payeeFullName: e.target.value }))}
+                                      className="w-full px-2 py-1 border border-amber-300 rounded text-xs bg-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-1">Which QB list?</label>
+                                    <div className="flex flex-wrap gap-2 text-xs">
+                                      {(['OtherName','Employee','Customer'] as QbPayeeListKind[]).map(k => (
+                                        <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.payeeListKind === k ? 'bg-amber-600 text-white border-amber-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                                          <input type="radio" className="hidden" checked={mapForm.payeeListKind === k} onChange={() => setMapForm(f => ({ ...f, payeeListKind: k }))} />
+                                          {k}
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Bank account</label>
+                                <select value={mapForm.bankListId} onChange={e => setMapForm(f => ({ ...f, bankListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
+                                  <option value="">— pick a bank —</option>
+                                  {bankAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
+                                </select>
+                              </div>
+                              {(mapForm.kind === 'check' || mapForm.kind === 'bill_add_and_pmt') && (
+                                <div>
+                                  <label className="block text-xs font-medium text-gray-600 mb-1">Expense account</label>
+                                  <select value={mapForm.expenseListId} onChange={e => setMapForm(f => ({ ...f, expenseListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
+                                    <option value="">— pick an expense account —</option>
+                                    {expenseAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
+                                  </select>
+                                </div>
+                              )}
+                            </>
+                          )}
+                          {mapForm.kind === 'ignore' && (
+                            <div className="p-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+                              Ignore means events for this counterparty will never be pushed to QB. Accountant handles them separately.
+                            </div>
+                          )}
+                          <div className="flex justify-end gap-2 pt-2 border-t border-gray-100">
+                            <button onClick={() => setMapVendorOpenFor(null)} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                            <button onClick={() => saveVendorMapping(ctx.counterparty, ctx.source)} disabled={mapSaving} className="text-xs px-3 py-1.5 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">
+                              {mapSaving ? 'Saving…' : (ctx.eventCount > 0 ? `Save & apply to ${ctx.eventCount}` : 'Save mapping')}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* All Vendor Mappings — management panel. Collapsible; edit reopens the widget above. */}
+                {qbVendorMappings.length > 0 && (
+                  <details className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                    <summary className="px-4 py-2 bg-gray-50 hover:bg-gray-100 cursor-pointer text-sm font-medium text-gray-700">
+                      All Vendor Mappings ({qbVendorMappings.length})
+                    </summary>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 border-b border-gray-200 text-gray-500">
+                          <tr>
+                            <th className="px-3 py-1.5 text-left">Counterparty</th>
+                            <th className="px-3 py-1.5 text-left">Source</th>
+                            <th className="px-3 py-1.5 text-left">Kind</th>
+                            <th className="px-3 py-1.5 text-left">QB payee</th>
+                            <th className="px-3 py-1.5 text-left">Bank</th>
+                            <th className="px-3 py-1.5 text-left">Expense</th>
+                            <th className="px-3 py-1.5 text-right w-16">Edit</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {[...qbVendorMappings]
+                            .sort((a, b) => a.counterpartyPattern.localeCompare(b.counterpartyPattern))
+                            .map(m => {
+                              const vendor = m.qbVendorListId ? qbVendorsList.find(v => v.listId === m.qbVendorListId) : null;
+                              const bank = m.defaultBankAccountListId ? qbAccountsList.find(a => a.listId === m.defaultBankAccountListId) : null;
+                              const expense = m.defaultExpenseAccountListId ? qbAccountsList.find(a => a.listId === m.defaultExpenseAccountListId) : null;
+                              const kindLabel = m.defaultTargetKind ? ({ bill_pmt: 'Pay Bill', bill_add_and_pmt: 'Create+Pay', check: 'Check', ignore: 'Ignore' } as Record<string, string>)[m.defaultTargetKind] ?? m.defaultTargetKind : '—';
+                              const payeeDisplay = vendor
+                                ? vendor.name
+                                : m.payeeFullName
+                                  ? `${m.payeeFullName}${m.payeeListKind ? ` (${m.payeeListKind})` : ''}`
+                                  : '—';
+                              return (
+                                <tr key={m.id} className="hover:bg-gray-50">
+                                  <td className="px-3 py-1.5 font-medium text-gray-800">{m.counterpartyPattern}</td>
+                                  <td className="px-3 py-1.5 text-gray-600">{sourceLabel(m.source)}</td>
+                                  <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-700 rounded text-[10px]">{kindLabel}</span></td>
+                                  <td className="px-3 py-1.5 font-mono text-[11px]">{payeeDisplay}</td>
+                                  <td className="px-3 py-1.5 text-gray-600 text-[11px]">{bank?.fullName ?? '—'}</td>
+                                  <td className="px-3 py-1.5 text-gray-600 text-[11px]">{expense?.fullName ?? '—'}</td>
+                                  <td className="px-3 py-1.5 text-right">
+                                    <button onClick={() => openMapWidget(m.counterpartyPattern, m.source, 0)} className="text-xs px-2 py-0.5 border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-50">Edit</button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+
                 <div className="grid grid-cols-3 gap-3 mb-6">
                   <div className="p-3 border border-gray-200 rounded-lg bg-white">
                     <div className="text-xs text-gray-500">Total events</div>
@@ -10821,13 +10999,6 @@ const TimesheetSystem = () => {
                                 }
                                 const list = [...groupsByCp.values()].sort((a, b) => a.counterparty.localeCompare(b.counterparty));
                                 return list.map(grp => {
-                                  const widgetOpen = mapVendorOpenFor === grp.counterparty;
-                                  const bankAccounts = qbAccountsList.filter(a => a.accountType === 'Bank' && a.isActive);
-                                  const expenseAccounts = qbAccountsList.filter(a => (a.accountType === 'Expense' || a.accountType === 'CostOfGoodsSold' || a.accountType === 'OtherExpense') && a.isActive);
-                                  const vendorMatches = qbVendorsList
-                                    .filter(v => v.isActive && (!mapForm.vendorSearch || v.name.toLowerCase().includes(mapForm.vendorSearch.toLowerCase())))
-                                    .slice(0, 20);
-                                  const chosenVendor = qbVendorsList.find(v => v.listId === mapForm.vendorListId);
                                   return (
                                     <div key={grp.counterparty} className="border border-gray-200 rounded-lg overflow-hidden bg-white">
                                       <div className="flex items-center justify-between px-3 py-2 bg-amber-50 border-b border-amber-100">
@@ -10835,104 +11006,8 @@ const TimesheetSystem = () => {
                                           <span className="font-medium text-gray-800">{grp.counterparty}</span>
                                           <span className="ml-2 text-xs text-gray-500">{sourceLabel(grp.source)} · {grp.events.length} event{grp.events.length === 1 ? '' : 's'} · ${grp.total.toFixed(2)}</span>
                                         </div>
-                                        {!widgetOpen && (
-                                          <button onClick={() => openMapWidget(grp.counterparty, grp.source)} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">Map vendor</button>
-                                        )}
+                                        <button onClick={() => openMapWidget(grp.counterparty, grp.source, grp.events.length)} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">Map vendor</button>
                                       </div>
-                                      {widgetOpen && (
-                                        <div className="p-3 space-y-3 bg-white border-b border-gray-200">
-                                          <div>
-                                            <label className="block text-xs font-medium text-gray-600 mb-1">Action</label>
-                                            <div className="flex flex-wrap gap-2 text-xs">
-                                              {(['bill_pmt','bill_add_and_pmt','check','ignore'] as QbIngestKind[]).map(k => (
-                                                <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.kind === k ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
-                                                  <input type="radio" className="hidden" checked={mapForm.kind === k} onChange={() => setMapForm(f => ({ ...f, kind: k }))} />
-                                                  {({ bill_pmt: 'Pay Bill', bill_add_and_pmt: 'Create Bill + Pay', check: 'Check', ignore: 'Ignore' } as Record<string, string>)[k]}
-                                                </label>
-                                              ))}
-                                            </div>
-                                          </div>
-                                          {mapForm.kind !== 'ignore' && (
-                                            <>
-                                              <div>
-                                                <label className="block text-xs font-medium text-gray-600 mb-1">
-                                                  QB vendor{mapForm.kind === 'check' ? ' (optional — leave blank if payee is OtherName/Employee)' : ''}
-                                                </label>
-                                                {chosenVendor ? (
-                                                  <div className="flex items-center gap-2">
-                                                    <span className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded text-xs font-mono">{chosenVendor.name}</span>
-                                                    <button onClick={() => setMapForm(f => ({ ...f, vendorListId: '', vendorSearch: '' }))} className="text-xs text-red-500 hover:underline">clear</button>
-                                                  </div>
-                                                ) : (
-                                                  <>
-                                                    <input type="text" placeholder="Search vendors…" value={mapForm.vendorSearch} onChange={e => setMapForm(f => ({ ...f, vendorSearch: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs mb-1" />
-                                                    <div className="max-h-32 overflow-y-auto border border-gray-200 rounded text-xs divide-y divide-gray-100">
-                                                      {vendorMatches.length === 0 && <div className="p-2 text-gray-400">no matches</div>}
-                                                      {vendorMatches.map(v => (
-                                                        <button key={v.listId} onClick={() => setMapForm(f => ({ ...f, vendorListId: v.listId, vendorSearch: '' }))} className="w-full text-left px-2 py-1 hover:bg-indigo-50">{v.name}</button>
-                                                      ))}
-                                                    </div>
-                                                  </>
-                                                )}
-                                              </div>
-                                              {mapForm.kind === 'check' && !mapForm.vendorListId && (
-                                                <div className="p-2 bg-amber-50 border border-amber-200 rounded space-y-2">
-                                                  <div className="text-xs text-amber-800 font-medium">Payee not in Vendors list</div>
-                                                  <div className="text-xs text-amber-700">
-                                                    For Write-Check payees like OtherName / Employee / Customer entities. qbXML resolves the name across all QB payee lists — enter the exact FullName as it appears in QB.
-                                                  </div>
-                                                  <div>
-                                                    <label className="block text-xs font-medium text-gray-600 mb-1">Payee full name</label>
-                                                    <input
-                                                      type="text"
-                                                      placeholder="e.g. Lucien C Pinto"
-                                                      value={mapForm.payeeFullName}
-                                                      onChange={e => setMapForm(f => ({ ...f, payeeFullName: e.target.value }))}
-                                                      className="w-full px-2 py-1 border border-amber-300 rounded text-xs bg-white"
-                                                    />
-                                                  </div>
-                                                  <div>
-                                                    <label className="block text-xs font-medium text-gray-600 mb-1">Which QB list?</label>
-                                                    <div className="flex flex-wrap gap-2 text-xs">
-                                                      {(['OtherName','Employee','Customer'] as QbPayeeListKind[]).map(k => (
-                                                        <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.payeeListKind === k ? 'bg-amber-600 text-white border-amber-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
-                                                          <input type="radio" className="hidden" checked={mapForm.payeeListKind === k} onChange={() => setMapForm(f => ({ ...f, payeeListKind: k }))} />
-                                                          {k}
-                                                        </label>
-                                                      ))}
-                                                    </div>
-                                                  </div>
-                                                </div>
-                                              )}
-                                              <div>
-                                                <label className="block text-xs font-medium text-gray-600 mb-1">Bank account</label>
-                                                <select value={mapForm.bankListId} onChange={e => setMapForm(f => ({ ...f, bankListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
-                                                  <option value="">— pick a bank —</option>
-                                                  {bankAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
-                                                </select>
-                                              </div>
-                                              {(mapForm.kind === 'check' || mapForm.kind === 'bill_add_and_pmt') && (
-                                                <div>
-                                                  <label className="block text-xs font-medium text-gray-600 mb-1">Expense account</label>
-                                                  <select value={mapForm.expenseListId} onChange={e => setMapForm(f => ({ ...f, expenseListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
-                                                    <option value="">— pick an expense account —</option>
-                                                    {expenseAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
-                                                  </select>
-                                                </div>
-                                              )}
-                                            </>
-                                          )}
-                                          {mapForm.kind === 'ignore' && (
-                                            <div className="p-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
-                                              Ignore means these events (all {grp.events.length} for {grp.counterparty}) will never be pushed to QB. Accountant handles them separately.
-                                            </div>
-                                          )}
-                                          <div className="flex justify-end gap-2 pt-1">
-                                            <button onClick={() => setMapVendorOpenFor(null)} className="text-xs px-3 py-1 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
-                                            <button onClick={() => saveVendorMapping(grp.counterparty, grp.source)} disabled={mapSaving} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">{mapSaving ? 'Saving…' : `Save & apply to ${grp.events.length}`}</button>
-                                          </div>
-                                        </div>
-                                      )}
                                       <details className="text-xs">
                                         <summary className="px-3 py-1.5 cursor-pointer text-gray-500 hover:bg-gray-50">Show {grp.events.length} event{grp.events.length === 1 ? '' : 's'}</summary>
                                         <table className="w-full">
