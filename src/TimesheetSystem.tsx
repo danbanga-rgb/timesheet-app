@@ -10552,6 +10552,7 @@ const TimesheetSystem = () => {
                   qbVendors={qbVendorsList}
                   qbAccounts={qbAccountsList}
                   invoices={invoices}
+                  qbMappings={qbVendorMappings.map(m => ({ source: m.source, counterpartyPattern: m.counterpartyPattern, payeeFullName: m.payeeFullName }))}
                   onConfirm={async (selectedIds) => {
                     setShowQbPushPreview(false);
                     try {

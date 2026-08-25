@@ -57,6 +57,11 @@ export interface PreviewEvent {
 export interface PreviewVendor { listId: string; name: string; }
 export interface PreviewAccount { listId: string; fullName: string; }
 export interface PreviewInvoice { id: number; invoiceNumber: string; }
+export interface PreviewMapping {
+  source: string;
+  counterpartyPattern: string;
+  payeeFullName: string | null;
+}
 
 interface Props {
   open: boolean;
@@ -69,6 +74,9 @@ interface Props {
   qbVendors: PreviewVendor[];
   qbAccounts: PreviewAccount[];
   invoices: PreviewInvoice[];
+  /** Mappings for resolving check-payee names (payee_full_name for
+   *  OtherName/Employee/Customer payees not in qb_vendors). */
+  qbMappings?: PreviewMapping[];
   onConfirm: (readyEventIds: number[]) => void;
   onFixMapping?: (counterparty: string, source: string) => void;
 }
@@ -174,7 +182,7 @@ function groupByCounterparty<T>(items: T[], keyOf: (t: T) => { source: string; c
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function QbPushPreviewModal({
-  open, onClose, events, inflightEventIds, qbVendors, qbAccounts, invoices, onConfirm, onFixMapping,
+  open, onClose, events, inflightEventIds, qbVendors, qbAccounts, invoices, qbMappings, onConfirm, onFixMapping,
 }: Props) {
   const [snapshot, setSnapshot] = useState<PreviewEvent[] | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -228,6 +236,13 @@ export default function QbPushPreviewModal({
   const vendorById = useMemo(() => new Map(qbVendors.map(v => [v.listId, v])), [qbVendors]);
   const accountById = useMemo(() => new Map(qbAccounts.map(a => [a.listId, a])), [qbAccounts]);
   const invoiceById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
+  const payeeNameByCounterparty = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const map of (qbMappings ?? [])) {
+      if (map.payeeFullName) m.set(`${map.source} ${map.counterpartyPattern}`, map.payeeFullName);
+    }
+    return m;
+  }, [qbMappings]);
 
   if (!open) return null;
 
@@ -472,7 +487,12 @@ export default function QbPushPreviewModal({
                               {vendor
                                 ? <span className="font-mono text-[11px] px-1.5 py-0.5 bg-indigo-50 text-indigo-800 rounded">{vendor.name}</span>
                                 : e.resolvedAction === 'check'
-                                  ? <span className="font-mono text-[11px] px-1.5 py-0.5 bg-amber-50 text-amber-800 rounded" title="Payee resolved from qb_vendor_mappings.payee_full_name (OtherName/Employee/Customer)">{e.counterpartyRaw}</span>
+                                  ? (() => {
+                                      const payeeName = payeeNameByCounterparty.get(`${e.source} ${e.counterpartyRaw}`);
+                                      return payeeName
+                                        ? <span className="font-mono text-[11px] px-1.5 py-0.5 bg-amber-50 text-amber-800 rounded" title="Resolved payee from qb_vendor_mappings.payee_full_name (OtherName/Employee/Customer). This is the exact name that will be sent in the CheckAdd PayeeEntityRef.">{payeeName}</span>
+                                        : <span className="text-red-500" title="No payee_full_name on mapping — push will fail">— no payee on mapping —</span>;
+                                    })()
                                   : <span className="text-red-500">— unmapped —</span>}
                             </td>
                             <td className="px-3 py-1.5 text-right font-mono">{money(e.amount)}</td>
