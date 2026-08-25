@@ -54,7 +54,7 @@ function fmtAmount(n: number): string {
 export function buildBillQueryRq(input: BillQueryRqInput): string {
   const hasTxnIds = (input.txnIds?.length ?? 0) > 0;
   const hasRefs = (input.refNumbers?.length ?? 0) > 0;
-  const hasIterator = !!input.entityVendorName || !!input.fromTxnDate || !!input.toTxnDate;
+  const hasIterator = !!input.entityVendorName || !!input.fromTxnDate || !!input.toTxnDate || !!input.fromModifiedDate || !!input.toModifiedDate;
   const modeCount = (hasTxnIds ? 1 : 0) + (hasRefs ? 1 : 0) + (hasIterator ? 1 : 0);
   if (modeCount === 0) {
     throw new Error('buildBillQueryRq: supply txnIds OR refNumbers OR entityVendorName/date-range (iterator mode)');
