@@ -86,8 +86,22 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
     }
   } else {
     // Iterator mode per qbXML 13.0 XSD (BillQueryRq). Element ordering:
-    //   FILTERS (TxnDateRangeFilter → EntityFilter → PaidStatus → CurrencyFilter)
+    //   FILTERS (ModifiedDateRangeFilter → TxnDateRangeFilter → EntityFilter
+    //            → PaidStatus → CurrencyFilter)
     //   → MaxReturned? → IncludeLineItems? → OwnerID*
+    // ModifiedDateRangeFilter comes BEFORE TxnDateRangeFilter per XSD.
+    if (input.fromModifiedDate || input.toModifiedDate) {
+      parts.push('  <ModifiedDateRangeFilter>');
+      if (input.fromModifiedDate) {
+        assertAscii('fromModifiedDate', input.fromModifiedDate);
+        parts.push(`    <FromModifiedDate>${xmlEscape(input.fromModifiedDate)}</FromModifiedDate>`);
+      }
+      if (input.toModifiedDate) {
+        assertAscii('toModifiedDate', input.toModifiedDate);
+        parts.push(`    <ToModifiedDate>${xmlEscape(input.toModifiedDate)}</ToModifiedDate>`);
+      }
+      parts.push('  </ModifiedDateRangeFilter>');
+    }
     if (input.fromTxnDate || input.toTxnDate) {
       parts.push('  <TxnDateRangeFilter>');
       if (input.fromTxnDate) {

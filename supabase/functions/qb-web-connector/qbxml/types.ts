@@ -34,6 +34,13 @@ export interface BillQueryRqInput {
   fromTxnDate?: string;
   /** Iterator mode: TxnDate upper bound. YYYY-MM-DD. */
   toTxnDate?: string;
+  /** Iterator mode: ModifiedDate lower bound. ISO datetime, e.g. "2026-08-25T18:00:00".
+   *  Returns bills whose QB TimeModified is >= this. Enables delta sync — detect
+   *  bills touched since last cursor without re-fetching the full vendor list. */
+  fromModifiedDate?: string;
+  /** Iterator mode: ModifiedDate upper bound. ISO datetime. Rarely set (open-ended
+   *  is the common case: "everything since T"). */
+  toModifiedDate?: string;
   /** Optional request correlation ID. Web Connector echoes this back on the
    *  response so we can pair request→response when batching multiple ops. */
   requestId?: string;
