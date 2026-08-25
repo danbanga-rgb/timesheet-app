@@ -30,10 +30,13 @@
 //   Hover/Procal backlog case needs; require exact match on first cutover
 //   and relax later once trust is established.
 //
-// RefNumber decision for the Intuit path (see [[intuit-push-context]]):
-//   Accountant's historic convention is BLANK RefNumber on Intuit payments.
-//   We preserve that — job-payloads makes refNumber optional when
-//   sourceIngestEventId is set. Traceability lives in memo=`ingest:{id}`.
+// RefNumber decision for the Intuit path (revised 2026-08-25):
+//   Historic convention was BLANK. That caused QB Desktop to auto-consume
+//   the "next check number" on account 8220 for every BillPaymentCheck,
+//   colliding with the physical check pad. Switched to "EFT" — non-numeric
+//   value signals electronic payment, bypasses the check-number sequence.
+//   Convera path unchanged (still blank; separate scripts, no collision
+//   reported there).
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { executeIntents } from '../execute';
@@ -247,6 +250,7 @@ export async function pushIntuitPayBill(
       payeeVendorName: payee,
       bankAccountName: bank,
       txnDate: e.txn_date,
+      refNumber: 'EFT',
       memo: `ingest:${e.id}`,
       applications: [{ billTxnId: e.resolved_bill_txn_id!, paymentAmount: eventAmount }],
       sourceIngestEventId: e.id,

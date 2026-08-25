@@ -217,6 +217,7 @@ export async function pushIntuitCreateBill(
         payeeVendorName: intent.vendorName,
         bankAccountName: bank,
         txnDate: intent.txnDate,
+        refNumber: 'EFT',                       // see intuitPush.ts header
         memo: intent.memo,
         applications: [{ billTxnId: null, paymentAmount: Number(event.amount) }],   // hydrated on parent-drain
         sourceIngestEventId: eventId,
