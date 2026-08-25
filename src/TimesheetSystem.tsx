@@ -565,6 +565,7 @@ interface QbIngestEvent {
   resolvedReason: string | null;
   reconciledAt: string | null;
   matchProvenance: MatchProvenance | null;
+  statusUpdatedAt: string | null;       // when status last flipped (posted, ignored, etc.)
 }
 
 function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
@@ -594,6 +595,7 @@ function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
     resolvedReason: (r.resolved_reason as string) ?? null,
     reconciledAt: (r.reconciled_at as string) ?? null,
     matchProvenance: (r.match_provenance as MatchProvenance) ?? null,
+    statusUpdatedAt: (r.status_updated_at as string) ?? null,
   };
 }
 

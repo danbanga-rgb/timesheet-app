@@ -52,6 +52,7 @@ export interface PreviewEvent {
   resolvedReason: string | null;
   postedQbRefs: Record<string, unknown> | null;   // { posted_source: 'qb_probe' | 'push' | ... }
   matchProvenance: MatchProvenance | null;        // 2026-08-24 — invoice-link strength gate
+  statusUpdatedAt: string | null;                 // when status last flipped
 }
 
 export interface PreviewVendor { listId: string; name: string; }
@@ -226,6 +227,11 @@ export default function QbPushPreviewModal({
     autoClosed: false, ignored: false, postedByPush: false, preOurSystem: false,
   });
   const toggle = (k: string) => setExpanded(prev => ({ ...prev, [k]: !prev[k] }));
+
+  // Month-year filter for the posted bucket. Default to current month.
+  // Format: 'YYYY-MM'. Options derived from actual posted events (below).
+  const nowMonth = new Date().toISOString().slice(0, 7);
+  const [postedMonth, setPostedMonth] = useState<string>(nowMonth);
 
   const toggleSelected = (id: number) => setSelected(prev => {
     const next = new Set(prev);
@@ -663,31 +669,91 @@ export default function QbPushPreviewModal({
             </div>
           )}
 
-          {/* Previously pushed (by us — distinct from auto-closed) */}
-          {parts.postedByPush.length > 0 && (
-            <div>
-              {!expanded.postedByPush ? (
-                <button onClick={() => toggle('postedByPush')} className="text-xs text-gray-500 hover:text-indigo-600 hover:underline">
-                  Show {parts.postedByPush.length} previously pushed by us (idempotency) →
-                </button>
-              ) : (
-                <div className="border border-gray-200 rounded-lg overflow-hidden">
-                  <div className="px-4 py-2 bg-gray-50 flex items-center justify-between text-sm">
-                    <span className="text-gray-600 font-medium">Previously pushed · {parts.postedByPush.length}</span>
-                    <button onClick={() => toggle('postedByPush')} className="text-xs text-gray-500 hover:underline">hide</button>
+          {/* Previously pushed (by us — distinct from auto-closed). Month filter
+              slices the potentially-large all-time list to a manageable window. */}
+          {parts.postedByPush.length > 0 && (() => {
+            // Collect available months from the events' statusUpdatedAt (fallback to txnDate).
+            const monthOf = (e: PreviewEvent): string => {
+              const iso = e.statusUpdatedAt ?? e.txnDate;
+              return iso ? iso.slice(0, 7) : '';
+            };
+            const monthsSet = new Set<string>();
+            for (const e of parts.postedByPush) {
+              const m = monthOf(e);
+              if (m) monthsSet.add(m);
+            }
+            const monthOptions = [...monthsSet].sort().reverse();  // most-recent first
+            // If default (current month) has no events, pick the most-recent month with events.
+            const activeMonth = monthsSet.has(postedMonth) ? postedMonth : (monthOptions[0] ?? postedMonth);
+            const shown = parts.postedByPush.filter(e => monthOf(e) === activeMonth);
+            const shownTotal = shown.reduce((n, e) => n + e.amount, 0);
+            const monthLabel = (m: string) => {
+              if (!m) return '—';
+              const [y, mo] = m.split('-');
+              const date = new Date(Number(y), Number(mo) - 1, 1);
+              return date.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+            };
+            const fmtTime = (iso: string | null) => {
+              if (!iso) return '—';
+              try { return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+              catch { return iso.slice(0, 16); }
+            };
+            return (
+              <div>
+                {!expanded.postedByPush ? (
+                  <button onClick={() => toggle('postedByPush')} className="text-xs text-gray-500 hover:text-indigo-600 hover:underline">
+                    Show {parts.postedByPush.length} previously pushed by us (idempotency) →
+                  </button>
+                ) : (
+                  <div className="border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="px-4 py-2 bg-gray-50 flex items-center justify-between text-sm gap-3 flex-wrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-gray-600 font-medium">{monthLabel(activeMonth)}</span>
+                        <span className="text-gray-500">·</span>
+                        <span className="text-gray-700"><strong>{shown.length}</strong> event{shown.length === 1 ? '' : 's'}</span>
+                        <span className="text-gray-500">·</span>
+                        <span className="font-mono text-gray-700">{money(shownTotal)}</span>
+                        <span className="text-gray-500">·</span>
+                        <span className="text-gray-500">{parts.postedByPush.length} posted all-time</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={activeMonth}
+                          onChange={e => setPostedMonth(e.target.value)}
+                          className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+                        >
+                          {monthOptions.map(m => (
+                            <option key={m} value={m}>{monthLabel(m)}</option>
+                          ))}
+                        </select>
+                        <button onClick={() => toggle('postedByPush')} className="text-xs text-gray-500 hover:underline">hide</button>
+                      </div>
+                    </div>
+                    <table className="w-full text-xs">
+                      <thead className="bg-white text-gray-500 border-b border-gray-100">
+                        <tr>
+                          <th className="px-3 py-1.5 text-left">Txn date</th>
+                          <th className="px-3 py-1.5 text-left">Counterparty</th>
+                          <th className="px-3 py-1.5 text-right">Amount</th>
+                          <th className="px-3 py-1.5 text-left">Posted at</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {shown.map(e => (
+                          <tr key={e.id}>
+                            <td className="px-3 py-1 font-mono">{e.txnDate}</td>
+                            <td className="px-3 py-1 text-gray-700">{e.counterpartyRaw}</td>
+                            <td className="px-3 py-1 text-right font-mono">{money(e.amount)}</td>
+                            <td className="px-3 py-1 text-gray-500 font-mono text-[11px]">{fmtTime(e.statusUpdatedAt)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                  <ul className="px-4 py-2 text-xs text-gray-600 space-y-0.5">
-                    {parts.postedByPush.map(e => (
-                      <li key={e.id} className="flex justify-between">
-                        <span>{e.txnDate} · {e.counterpartyRaw}</span>
-                        <span className="font-mono">{money(e.amount)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Footer */}
