@@ -26,6 +26,10 @@ export interface PushRecord {
   expectedAmount: number;
   expectedVendor: string;
   pushedAt: string;                 // ISO
+  /** Push shape — determines verification path. 'pay_bill' + 'create' both
+   *  read qb_mirror is_settled after drain; 'check' has no bill so its
+   *  terminal state is just the check_add job succeeding. */
+  kind?: 'pay_bill' | 'create' | 'check';
 }
 
 type JobStatus = 'pending' | 'in_flight' | 'done' | 'failed' | 'cancelled';
@@ -44,7 +48,7 @@ interface LiveState {
   overall: 'awaiting-drain' | 'draining' | 'verifying' | 'verified-ok' | 'silent-drop' | 'pay-failed' | 'verify-failed';
 }
 
-function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | null, mirror: MirrorRow | null): LiveState {
+function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | null, mirror: MirrorRow | null, kind: PushRecord['kind'] = 'pay_bill'): LiveState {
   const payStatus = pay?.status ?? 'unknown';
   const verifyStatus = verify == null ? 'not-enqueued' : verify.status;
   const billPmtTxnId = (event?.posted_qb_refs as { bill_pmt?: string } | null)?.bill_pmt ?? null;
@@ -55,8 +59,11 @@ function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | n
   else if (payStatus === 'pending') overall = 'awaiting-drain';
   else if (payStatus === 'in_flight') overall = 'draining';
   else if (payStatus === 'done') {
-    // Pay succeeded — persist step should have written bill_pmt TxnID to the event.
-    if (verifyStatus === 'failed') overall = 'verify-failed';
+    if (kind === 'check') {
+      // Check pushes: no bill mirror, no verify chain. check_add drain success
+      // IS the terminal state. Accountant eyeballs QB for the actual check.
+      overall = 'verified-ok';
+    } else if (verifyStatus === 'failed') overall = 'verify-failed';
     else if (verifyStatus === 'pending' || verifyStatus === 'in_flight') overall = 'verifying';
     else if (verifyStatus === 'done') {
       // Both jobs done. Mirror should show is_settled=true AND event should have bill_pmt TxnID.
@@ -126,7 +133,7 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
       const event = eventById.get(rec.eventId) ?? null;
       const lookupKey = rec.billTxnId || event?.resolved_bill_txn_id || '';
       const mirror = lookupKey ? (mirrorByTxn.get(lookupKey) ?? null) : null;
-      next.set(rec.eventId, classify(pay, verify, event, mirror));
+      next.set(rec.eventId, classify(pay, verify, event, mirror, rec.kind));
     }
     setLiveByEventId(next);
   }, [records, supabase]);

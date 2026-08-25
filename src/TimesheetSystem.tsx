@@ -10587,11 +10587,35 @@ const TimesheetSystem = () => {
                           pushedAt: new Date().toISOString(),
                         });
                       });
+                      // Check pushes: enqueue status-pane records too. No bill mirror
+                      // or verify chain — status pane branches on kind='check' so the
+                      // record flips to verified-ok as soon as check_add drains.
+                      const checkJobIds = checkRes?.jobIds ?? [];
+                      const inelig3 = new Set((checkRes?.skippedIneligible ?? []).map(s => s.eventId));
+                      const rejCheckEventIds = new Set((checkRes?.rejected ?? []).map(rj => (rj.intent.kind === 'check_expense' ? rj.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const dupCheckEventIds = new Set((checkRes?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'check_expense' ? s.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const eligibleCheckInOrder = checkEventIds.filter(id => !inelig3.has(id) && !rejCheckEventIds.has(id) && !dupCheckEventIds.has(id));
+                      checkJobIds.forEach((jobId, i) => {
+                        if (jobId == null) return;
+                        const eventId = eligibleCheckInOrder[i];
+                        if (eventId == null) return;
+                        const event = eventById.get(eventId);
+                        if (!event) return;
+                        newRecords.push({
+                          eventId,
+                          payJobId: jobId,
+                          verifyJobId: null,
+                          billTxnId: '',
+                          expectedAmount: event.amount,
+                          expectedVendor: event.counterpartyRaw,
+                          pushedAt: new Date().toISOString(),
+                          kind: 'check',
+                        });
+                      });
                       setQbPushRecords(prev => [...prev, ...newRecords]);
 
                       const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
                       const createEnqueued = createJobIds.filter((id): id is number => id != null).length;
-                      const checkJobIds = checkRes?.jobIds ?? [];
                       const checkEnqueued = checkJobIds.filter((id): id is number => id != null).length;
                       const parts: string[] = [];
                       if (payEnqueued > 0) parts.push(`${payEnqueued} pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
