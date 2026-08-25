@@ -1210,6 +1210,10 @@ const TimesheetSystem = () => {
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
   });
+  // Month-year filter for the Inbox "Already posted" section. Format: 'YYYY-MM'.
+  // Default to current month; auto-falls-back to most-recent month with events
+  // if current has none (see render).
+  const [qbInboxPostedMonth, setQbInboxPostedMonth] = useState<string>(() => new Date().toISOString().slice(0, 7));
   // Slice F — push preview modal
   const [showQbPushPreview, setShowQbPushPreview] = useState(false);
   const [qbPushRecords, setQbPushRecords] = useState<PushRecord[]>([]);
@@ -10969,14 +10973,47 @@ const TimesheetSystem = () => {
                   );
                 })()}
 
-                {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => (
+                {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => {
+                  // Posted section — precompute month-filtered subset for header + body.
+                  const postedMonthOf = (e: QbIngestEvent): string => {
+                    const iso = e.statusUpdatedAt ?? e.txnDate;
+                    return iso ? iso.slice(0, 7) : '';
+                  };
+                  const postedMonths = g.key === 'posted'
+                    ? [...new Set(g.events.map(postedMonthOf).filter(Boolean))].sort().reverse()
+                    : [];
+                  const postedActiveMonth = g.key === 'posted'
+                    ? (postedMonths.includes(qbInboxPostedMonth) ? qbInboxPostedMonth : (postedMonths[0] ?? qbInboxPostedMonth))
+                    : '';
+                  const postedShown = g.key === 'posted'
+                    ? g.events.filter(e => postedMonthOf(e) === postedActiveMonth)
+                    : g.events;
+                  const postedShownTotal = postedShown.reduce((n, e) => n + e.amount, 0);
+                  const postedMonthLabel = (m: string) => {
+                    if (!m) return '—';
+                    const [y, mo] = m.split('-');
+                    const d = new Date(Number(y), Number(mo) - 1, 1);
+                    return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+                  };
+                  return (
                   <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
                     <button onClick={() => toggle(g.key)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left">
                       <div>
                         <span className="font-semibold text-gray-800">{g.title}</span>
-                        <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
-                        {g.events.length > 0 && (
-                          <span className="ml-2 text-sm text-gray-500">· ${g.events.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}</span>
+                        {g.key === 'posted' && g.events.length > 0 ? (
+                          <>
+                            <span className="ml-2 text-sm text-gray-500">· {postedMonthLabel(postedActiveMonth)}</span>
+                            <span className="ml-2 text-sm text-gray-500">· <strong className="text-gray-700">{postedShown.length}</strong> event{postedShown.length === 1 ? '' : 's'}</span>
+                            <span className="ml-2 text-sm text-gray-500">· <span className="font-mono text-gray-700">${postedShownTotal.toFixed(2)}</span></span>
+                            <span className="ml-2 text-xs text-gray-400">· {g.events.length} posted all-time</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
+                            {g.events.length > 0 && (
+                              <span className="ml-2 text-sm text-gray-500">· ${g.events.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}</span>
+                            )}
+                          </>
                         )}
                       </div>
                       <span className="text-xs text-gray-400">{qbInboxExpanded[g.key] ? '▼' : '▶'}</span>
@@ -11033,6 +11070,20 @@ const TimesheetSystem = () => {
                         ) : (
                           <>
                             <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint}</p>
+                            {g.key === 'posted' && postedMonths.length > 0 && (
+                              <div className="px-4 py-2 border-t border-gray-100 bg-gray-50/50 flex items-center gap-2 text-xs">
+                                <label className="text-gray-600">Month:</label>
+                                <select
+                                  value={postedActiveMonth}
+                                  onChange={e => setQbInboxPostedMonth(e.target.value)}
+                                  className="px-2 py-1 border border-gray-300 rounded bg-white"
+                                >
+                                  {postedMonths.map(m => (
+                                    <option key={m} value={m}>{postedMonthLabel(m)}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
                             <table className="w-full text-xs">
                               <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
                                 <tr>
@@ -11044,10 +11095,11 @@ const TimesheetSystem = () => {
                                   <th className="px-3 py-1.5 text-left" title="Reconciler decision — authoritative for push. Old amount-only matcher output removed 2026-08-21.">Resolved</th>
                                   <th className="px-3 py-1.5 text-left" title="Invoice-link strength. exact-txn is deterministic (invoice.qb_bill_txn_id matches). Only exact-txn / exact-ref events are pushable.">Provenance</th>
                                   <th className="px-3 py-1.5 text-left">Status</th>
+                                  {g.key === 'posted' && <th className="px-3 py-1.5 text-left">Posted at</th>}
                                 </tr>
                               </thead>
                               <tbody>
-                                {g.events.map(e => {
+                                {(g.key === 'posted' ? postedShown : g.events).map(e => {
                                   const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
                                   const badge = (bg: string, fg: string, text: string, title?: string) => (
                                     <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
@@ -11108,6 +11160,13 @@ const TimesheetSystem = () => {
                                           ? <span className="text-gray-500 italic">will not push</span>
                                           : <span className="text-gray-500">{e.status}</span>}
                                       </td>
+                                      {g.key === 'posted' && (
+                                        <td className="px-3 py-1.5 text-gray-500 font-mono text-[11px]">
+                                          {e.statusUpdatedAt
+                                            ? new Date(e.statusUpdatedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : '—'}
+                                        </td>
+                                      )}
                                     </tr>
                                   );
                                 })}
@@ -11118,7 +11177,8 @@ const TimesheetSystem = () => {
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             );
           })()}
