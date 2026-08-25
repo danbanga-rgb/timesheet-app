@@ -3010,11 +3010,13 @@ const TimesheetSystem = () => {
   useEffect(() => {
     if (accountantTab !== 'qb-automation') return;
     if (currentUser?.role !== 'accountant') return;
-    if (qbBillQueryPending === 0) return;   // nothing pending → no need to poll
+    // Poll every 30s regardless of current count. Background inserts (pg_cron
+    // qb-delta-bills, manual probes) can appear at any time; a 0→N transition
+    // needs to be visible in the UI without the accountant having to refresh.
     const iv = setInterval(() => { loadQbBillQueryPending(); }, 30_000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountantTab, currentUser?.role, qbBillQueryPending]);
+  }, [accountantTab, currentUser?.role]);
 
   // Slice D — save a vendor mapping and apply it to all pending events with the same counterparty.
   const openMapWidget = (counterparty: string, source: string, eventCount: number = 0) => {
