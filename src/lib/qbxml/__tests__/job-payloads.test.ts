@@ -11,7 +11,13 @@ describe('PAYLOAD_REQUIRED_KEYS', () => {
     // can't express "any of these three" so we defer to the builder.
     expect(PAYLOAD_REQUIRED_KEYS.bill_query).toEqual([]);
     expect(PAYLOAD_REQUIRED_KEYS.bill_add).toEqual(['vendorName', 'refNumber']);
-    expect(PAYLOAD_REQUIRED_KEYS.bill_pmt_add).toEqual(['sourceConveraTxnId', 'refNumber', 'payeeVendorName', 'applications']);
+    // bill_pmt_add uses { required, oneOf } shape as of 2026-08-21 to support both
+    // Convera path (sourceConveraTxnId + refNumber wire code) and Intuit path
+    // (sourceIngestEventId, blank RefNumber per historic convention).
+    expect(PAYLOAD_REQUIRED_KEYS.bill_pmt_add).toEqual({
+      required: ['payeeVendorName', 'applications'],
+      oneOf: [['refNumber', 'sourceConveraTxnId'], ['sourceIngestEventId']],
+    });
     expect(PAYLOAD_REQUIRED_KEYS.account_query).toEqual([]);
     expect(PAYLOAD_REQUIRED_KEYS.vendor_query).toEqual([]);
   });
@@ -37,22 +43,35 @@ describe('validatePayload', () => {
     expect(result.missing).toEqual([]);
   });
 
-  it('detects the 2026-08-14 regression class: sourceConveraTxnId missing', () => {
+  it('detects the 2026-08-14 regression class: BOTH source refs missing', () => {
     const brokenPayload = {
       payeeVendorName: 'x',
       bankAccountName: 'y',
       txnDate: '2026-08-13',
       refNumber: 'OTR-Z',
-      // sourceConveraTxnId missing — the bug
+      // sourceConveraTxnId AND sourceIngestEventId both missing — the bug
       memo: 'z',
       applications: [{ billTxnId: 'B', paymentAmount: 1 }],
     };
     const result = validatePayload('bill_pmt_add', brokenPayload);
     expect(result.ok).toBe(false);
-    expect(result.missing).toEqual(['sourceConveraTxnId']);
+    expect(result.oneOfFailure).toMatch(/sourceConveraTxnId.*sourceIngestEventId|sourceIngestEventId.*sourceConveraTxnId/);
   });
 
-  it('also detects payload key rename (all required keys missing)', () => {
+  it('accepts the Intuit path (sourceIngestEventId only)', () => {
+    const intuitPayload = {
+      payeeVendorName: 'Flawless APPS LLC',
+      bankAccountName: 'BANK/CASH:8220 - Key Point Checking',
+      txnDate: '2026-08-03',
+      refNumber: 'INTUIT-89',
+      sourceIngestEventId: 89,
+      memo: 'Intuit BillPay - INV 11',
+      applications: [{ billTxnId: '41282-1784756812', paymentAmount: 9625 }],
+    };
+    expect(validatePayload('bill_pmt_add', intuitPayload).ok).toBe(true);
+  });
+
+  it('also detects payload key rename (all required + no source ref)', () => {
     const renamedPayload = {
       // simulates prior version that used `confirmationNumber` instead of the
       // correct keys — persist would silently no-op without this check
@@ -60,7 +79,11 @@ describe('validatePayload', () => {
     };
     const result = validatePayload('bill_pmt_add', renamedPayload);
     expect(result.ok).toBe(false);
-    expect(result.missing.length).toBe(PAYLOAD_REQUIRED_KEYS.bill_pmt_add.length);
+    // required missing (payeeVendorName + applications). refNumber is no longer
+    // in `required` — it's in the Convera arm of `oneOf` — so its absence is
+    // signaled through oneOfFailure, not `missing`. validatePayload short-circuits
+    // on `missing`; oneOfFailure only surfaces once `required` is satisfied.
+    expect(result.missing.sort()).toEqual(['applications', 'payeeVendorName']);
   });
 
   it('rejects null/undefined payloads for kinds with required keys', () => {

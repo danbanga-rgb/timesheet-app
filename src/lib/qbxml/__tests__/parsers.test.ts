@@ -3,6 +3,7 @@ import {
   parseAccountQueryRs,
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
+  parseBillPaymentCheckQueryRs,
   parseBillQueryRs,
   parseVendorQueryRs,
   unwrapQbxmlResponses,
@@ -136,7 +137,39 @@ describe('parseBillQueryRs', () => {
       txnId: '12006-1196864828',
       editSequence: '1234567890',
       refNumber: 'INV 178329594109',
+      txnDate: '2026-05-31',
+      timeModified: '2026-05-31T12:00:00-08:00',
+      amount: 1050,
+      isPaid: false,
     });
+  });
+
+  it('extracts openAmount and isPaid=true for a fully-paid bill', () => {
+    const env = wrap([
+      '  <BillRet>',
+      '    <TxnID>41726-1786742647</TxnID>',
+      '    <TimeCreated>2026-08-14T14:24:07-08:00</TimeCreated>',
+      '    <TimeModified>2026-08-17T12:24:08-08:00</TimeModified>',
+      '    <EditSequence>1786742647</EditSequence>',
+      '    <VendorRef><ListID>V1</ListID><FullName>Native Team Ltd. - Marta Susek</FullName></VendorRef>',
+      '    <TxnDate>2026-06-30</TxnDate>',
+      '    <DueDate>2026-07-30</DueDate>',
+      '    <AmountDue>2400.00</AmountDue>',
+      '    <RefNumber>INV 226/1/1</RefNumber>',
+      '    <IsPaid>true</IsPaid>',
+      '    <OpenAmount>0.00</OpenAmount>',
+      '  </BillRet>',
+    ].join('\n'));
+    const parsed = parseBillQueryRs(env);
+    expect(parsed.results).toHaveLength(1);
+    const r = parsed.results[0];
+    expect(r.amount).toBe(2400);
+    expect(r.openAmount).toBe(0);
+    expect(r.isPaid).toBe(true);
+    expect(r.dueDate).toBe('2026-07-30');
+    expect(r.timeModified).toBe('2026-08-17T12:24:08-08:00');
+    expect(r.vendorFullName).toBe('Native Team Ltd. - Marta Susek');
+    expect(r.vendorListId).toBe('V1');
   });
 
   it('extracts multiple BillRet blocks in document order', () => {
@@ -473,6 +506,110 @@ describe('parseBillPaymentCheckAddRs', () => {
     const parsed = parseBillPaymentCheckAddRs(env);
     expect(parsed.status.statusCode).toBe('3200');
     expect(parsed.result).toBeNull();
+  });
+});
+
+// ─── BillPaymentCheckQueryRs (Slice G2) ──────────────────────────────────────
+
+describe('parseBillPaymentCheckQueryRs', () => {
+  const envelope = (inner: string, status = 'statusCode="0" statusSeverity="Info" statusMessage="Status OK"') =>
+    [
+      '<QBXML><QBXMLMsgsRs>',
+      `  <BillPaymentCheckQueryRs requestID="q-1" ${status}>`,
+      inner,
+      '  </BillPaymentCheckQueryRs>',
+      '</QBXMLMsgsRs></QBXML>',
+    ].join('\n');
+
+  it('parses status when no BillPaymentCheckRet blocks (zero matches valid)', () => {
+    const env = envelope('');
+    const parsed = parseBillPaymentCheckQueryRs(env);
+    expect(parsed.status.statusCode).toBe('0');
+    expect(parsed.results).toEqual([]);
+  });
+
+  it('extracts full BillPaymentCheckRet fields (real prod shape)', () => {
+    const env = envelope([
+      '  <BillPaymentCheckRet>',
+      '    <TxnID>40ADB-1777664715</TxnID>',
+      '    <TimeCreated>2026-05-01T12:45:15-08:00</TimeCreated>',
+      '    <TimeModified>2026-05-01T12:45:15-08:00</TimeModified>',
+      '    <EditSequence>1777664715</EditSequence>',
+      '    <PayeeEntityRef>',
+      '      <ListID>800001CD-1540321756</ListID>',
+      '      <FullName>Burger Livermore Valley LLP</FullName>',
+      '    </PayeeEntityRef>',
+      '    <APAccountRef>',
+      '      <ListID>430000-1142369998</ListID>',
+      '      <FullName>Accounts Payable</FullName>',
+      '    </APAccountRef>',
+      '    <TxnDate>2026-05-01</TxnDate>',
+      '    <BankAccountRef>',
+      '      <ListID>800000F5-1529957073</ListID>',
+      '      <FullName>BANK/CASH:8220 - Key Point Checking</FullName>',
+      '    </BankAccountRef>',
+      '    <Amount>1420.55</Amount>',
+      '    <RefNumber>1480</RefNumber>',
+      "    <Memo>Inv# May&apos;26 - Reny</Memo>",
+      '  </BillPaymentCheckRet>',
+    ].join('\n'));
+    const parsed = parseBillPaymentCheckQueryRs(env);
+    expect(parsed.results).toHaveLength(1);
+    const r = parsed.results[0];
+    expect(r.txnId).toBe('40ADB-1777664715');
+    expect(r.editSequence).toBe('1777664715');
+    expect(r.refNumber).toBe('1480');
+    expect(r.txnDate).toBe('2026-05-01');
+    expect(r.amount).toBe(1420.55);
+    expect(r.payeeEntityListId).toBe('800001CD-1540321756');
+    expect(r.payeeEntityFullName).toBe('Burger Livermore Valley LLP');
+    expect(r.bankAccountListId).toBe('800000F5-1529957073');
+    expect(r.bankAccountFullName).toBe('BANK/CASH:8220 - Key Point Checking');
+    expect(r.timeModified).toBe('2026-05-01T12:45:15-08:00');
+    expect(r.memo).toBe("Inv# May'26 - Reny");
+    expect(r.appliedToBills).toEqual([]);
+  });
+
+  it('extracts AppliedToTxnRet[] blocks when IncludeLineItems=true', () => {
+    const env = envelope([
+      '  <BillPaymentCheckRet>',
+      '    <TxnID>PAY-1</TxnID>',
+      '    <EditSequence>ES</EditSequence>',
+      '    <TxnDate>2026-06-01</TxnDate>',
+      '    <Amount>5000.00</Amount>',
+      '    <AppliedToTxnRet>',
+      '      <TxnID>BILL-A</TxnID>',
+      '      <Amount>3000.00</Amount>',
+      '      <RefNumber>INV 10</RefNumber>',
+      '    </AppliedToTxnRet>',
+      '    <AppliedToTxnRet>',
+      '      <TxnID>BILL-B</TxnID>',
+      '      <Amount>2000.00</Amount>',
+      '      <RefNumber>INV 11</RefNumber>',
+      '    </AppliedToTxnRet>',
+      '  </BillPaymentCheckRet>',
+    ].join('\n'));
+    const parsed = parseBillPaymentCheckQueryRs(env);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].appliedToBills).toEqual([
+      { billTxnId: 'BILL-A', amount: 3000, refNumber: 'INV 10' },
+      { billTxnId: 'BILL-B', amount: 2000, refNumber: 'INV 11' },
+    ]);
+  });
+
+  it('handles multiple BillPaymentCheckRet blocks', () => {
+    const env = envelope([
+      '<BillPaymentCheckRet><TxnID>P1</TxnID><EditSequence>E1</EditSequence></BillPaymentCheckRet>',
+      '<BillPaymentCheckRet><TxnID>P2</TxnID><EditSequence>E2</EditSequence></BillPaymentCheckRet>',
+    ].join('\n'));
+    const parsed = parseBillPaymentCheckQueryRs(env);
+    expect(parsed.results.map(r => r.txnId)).toEqual(['P1', 'P2']);
+  });
+
+  it('skips BillPaymentCheckRet blocks missing required TxnID or EditSequence', () => {
+    const env = envelope('<BillPaymentCheckRet><Amount>100</Amount></BillPaymentCheckRet>');
+    const parsed = parseBillPaymentCheckQueryRs(env);
+    expect(parsed.results).toEqual([]);
   });
 });
 

@@ -196,6 +196,43 @@ import {
   valueEditEntry,
   type InvoiceEditEntry,
 } from '../supabase/functions/_shared/edit-history';
+import { excelDateToIso } from './lib/xlsxHelpers';
+import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
+import {
+  matchEventsToInvoices,
+  type MatchableEvent,
+  type MatcherInvoice,
+} from './lib/matchQbIngestEvents';
+import {
+  classifyBatch,
+  resolveBankAccount,
+  type ClassifiableEvent,
+  type ClassifiableInvoice,
+  type ClassifiableMapping,
+} from './lib/classifyQbIngestEvent';
+import { enqueueBillQueryForVendors } from './lib/qbStateSync/enqueue';
+import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
+import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
+import type { QbOpenBillRow } from './lib/qbStateSync/types';
+import {
+  normalizeRef,
+  reconcileBatch,
+  extractRefsFromMemo,
+  type MirrorBill,
+  type MirrorPayment,
+  type ReconcilableEvent,
+} from './lib/intuit/reconcile';
+import {
+  computeMatchProvenance,
+  memoNamesMatchedInvoice,
+  type MatchProvenance,
+} from './lib/matchProvenance';
+import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from './lib/intuit/config';
+import QbPushPreviewModal from './components/QbPushPreviewModal';
+import QbPushStatusPane, { type PushRecord } from './components/QbPushStatusPane';
+import { pushIntuitPayBill } from './lib/qbWrite/consumers/intuitPush';
+import { pushIntuitCreateBill } from './lib/qbWrite/consumers/intuitCreateBill';
+import { pushIntuitCheck } from './lib/qbWrite/consumers/intuitCheck';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -475,6 +512,90 @@ const WORLD_COUNTRIES = [
   "Ukraine","United Arab Emirates","United Kingdom","United States","Uruguay",
   "Uzbekistan","Vanuatu","Vatican City","Vietnam","Zambia"
 ].sort();
+
+// ─── QB Automation Layer types (Slice C onward) ──────────────────────────────
+// Frontend-facing shape of qb_ingest_events rows. Camel-case; DB is snake_case.
+// See supabase/migrations/20260819000000_qb_ingest_events.sql for the source of
+// truth on columns and enums.
+type QbIngestKind = 'bill_pmt' | 'bill_add_and_pmt' | 'check' | 'ignore';
+type QbIngestStatus = 'pending' | 'ready' | 'queued' | 'posted' | 'failed' | 'ignored';
+
+interface QbVendor { listId: string; name: string; isActive: boolean; }
+interface QbAccount { listId: string; fullName: string; accountType: string; isActive: boolean; }
+type QbPayeeListKind = 'Vendor' | 'OtherName' | 'Employee' | 'Customer';
+
+interface QbVendorMapping {
+  id: number;
+  source: string;
+  counterpartyPattern: string;
+  qbVendorListId: string;              // '' when payee is not in Vendors list (OtherName etc.)
+  defaultTargetKind: QbIngestKind | null;
+  defaultBankAccountListId: string | null;
+  defaultExpenseAccountListId: string | null;
+  payeeFullName: string | null;        // populated for non-Vendor payees (Lucien-style)
+  payeeListKind: QbPayeeListKind | null;
+}
+
+type QbResolvedAction = 'already_done' | 'pay_existing_bill' | 'create_bill_then_pay' | 'check' | 'held' | 'pre_our_system';
+
+interface QbIngestEvent {
+  id: number;
+  ingestedAt: string;
+  source: string;                       // 'intuit_xlsx' | 'convera' | 'manual' | ...
+  sourceRef: string;
+  txnDate: string;                      // YYYY-MM-DD
+  amount: number;                       // positive = money out
+  counterpartyRaw: string;
+  memo: string | null;
+  counterpartyQbVendorListId: string | null;
+  targetQbTxnKind: QbIngestKind | null;
+  qbBankAccountListId: string | null;
+  qbExpenseAccountListId: string | null;
+  matchedInvoiceIds: number[];
+  status: QbIngestStatus;
+  qbSyncJobIds: number[];
+  postedQbRefs: Record<string, unknown> | null;
+  lastError: string | null;
+  rawData: Record<string, unknown> | null;
+  notes: string | null;
+  // Slice G4a — reconciler output. NULL until Slice G4c orchestrator runs.
+  resolvedAction: QbResolvedAction | null;
+  resolvedBillTxnId: string | null;
+  resolvedPaymentTxnId: string | null;
+  resolvedReason: string | null;
+  reconciledAt: string | null;
+  matchProvenance: MatchProvenance | null;
+}
+
+function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
+  return {
+    id: r.id as number,
+    ingestedAt: (r.ingested_at as string) ?? '',
+    source: (r.source as string) ?? '',
+    sourceRef: (r.source_ref as string) ?? '',
+    txnDate: (r.txn_date as string) ?? '',
+    amount: Number(r.amount ?? 0),
+    counterpartyRaw: (r.counterparty_raw as string) ?? '',
+    memo: (r.memo as string) ?? null,
+    counterpartyQbVendorListId: (r.counterparty_qb_vendor_list_id as string) ?? null,
+    targetQbTxnKind: (r.target_qb_txn_kind as QbIngestKind) ?? null,
+    qbBankAccountListId: (r.qb_bank_account_list_id as string) ?? null,
+    qbExpenseAccountListId: (r.qb_expense_account_list_id as string) ?? null,
+    matchedInvoiceIds: Array.isArray(r.matched_invoice_ids) ? (r.matched_invoice_ids as number[]) : [],
+    status: (r.status as QbIngestStatus) ?? 'pending',
+    qbSyncJobIds: Array.isArray(r.qb_sync_job_ids) ? (r.qb_sync_job_ids as number[]) : [],
+    postedQbRefs: (r.posted_qb_refs as Record<string, unknown>) ?? null,
+    lastError: (r.last_error as string) ?? null,
+    rawData: (r.raw_data as Record<string, unknown>) ?? null,
+    notes: (r.notes as string) ?? null,
+    resolvedAction: (r.resolved_action as QbResolvedAction) ?? null,
+    resolvedBillTxnId: (r.resolved_bill_txn_id as string) ?? null,
+    resolvedPaymentTxnId: (r.resolved_payment_txn_id as string) ?? null,
+    resolvedReason: (r.resolved_reason as string) ?? null,
+    reconciledAt: (r.reconciled_at as string) ?? null,
+    matchProvenance: (r.match_provenance as MatchProvenance) ?? null,
+  };
+}
 
 // ─── Live invoice reconciliation (pure, no DB writes) ────────────────────────
 // Called on every render so it always reflects the latest loaded timesheets.
@@ -1066,15 +1187,46 @@ const TimesheetSystem = () => {
   const [beneficiaryFilter, setBeneficiaryFilter] = useState<BeneficiaryFilter>('all');
   type BeneficiarySortKey = 'shortName' | 'vendorId' | 'bankAccount' | 'country' | 'lastUsed' | 'linked';
   const [beneficiarySort, setBeneficiarySort] = useState<{ key: BeneficiarySortKey; dir: 'asc' | 'desc' }>({ key: 'shortName', dir: 'asc' });
-  // Payment import (QuickBooks XLSX + Intuit emails + Convera Beneficiaries)
+  // Payment import (QuickBooks XLSX + Intuit emails + Intuit XLSX + Convera Beneficiaries)
   const [showConveraModal, setShowConveraModal] = useState(false);
-  const [converaTab, setConveraTab] = useState<'quickbooks' | 'intuit' | 'beneficiaries'>('quickbooks');
+  const [converaTab, setConveraTab] = useState<'quickbooks' | 'intuit' | 'intuitXlsx' | 'beneficiaries'>('quickbooks');
   const [qbFile, setQbFile] = useState<File | null>(null);
   const [intuitText, setIntuitText] = useState('');
   const [converaRows, setConveraRows] = useState<ConveraPaymentRow[]>([]);
   const [converaApplying, setConveraApplying] = useState(false);
   const [converaPaidDate, setConveraPaidDate] = useState('');
   const [converaError, setConveraError] = useState('');
+  // Intuit XLSX → qb_ingest_events (Slice B of QB Automation Layer)
+  const [intuitXlsxFile, setIntuitXlsxFile] = useState<File | null>(null);
+  const [intuitXlsxPreview, setIntuitXlsxPreview] = useState<IntuitXlsxRow[] | null>(null);
+  const [intuitXlsxImporting, setIntuitXlsxImporting] = useState(false);
+  const [intuitXlsxResult, setIntuitXlsxResult] = useState<{ inserted: number; skipped: number } | null>(null);
+
+  // QB Automation Inbox (Slice C — read-only view of qb_ingest_events)
+  const [qbIngestEvents, setQbIngestEvents] = useState<QbIngestEvent[]>([]);
+  const [qbIngestLoading, setQbIngestLoading] = useState(false);
+  const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
+    pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
+  });
+  // Slice F — push preview modal
+  const [showQbPushPreview, setShowQbPushPreview] = useState(false);
+  const [qbPushRecords, setQbPushRecords] = useState<PushRecord[]>([]);
+  // Slice G1 — qbStateSync mirror of QB open bills
+  const [qbOpenBills, setQbOpenBills] = useState<QbOpenBillRow[]>([]);
+  const [qbSyncingBills, setQbSyncingBills] = useState(false);
+  // Slice G1 — QBWC heartbeat: most recent qb_wc_sessions.last_seen_at
+  const [qbWcLastSeen, setQbWcLastSeen] = useState<string | null>(null);
+  // Slice G1 — count of in-flight bill_query jobs (pending or in_flight status).
+  // Polled every 30s while the QB Automation tab is open + > 0 pending. Falls
+  // to 0 when QBWC finishes draining; UI auto-refreshes snapshot at that point.
+  const [qbBillQueryPending, setQbBillQueryPending] = useState(0);
+  // Slice D — vendor mapping widget state
+  const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
+  const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
+  const [qbVendorMappings, setQbVendorMappings] = useState<QbVendorMapping[]>([]);
+  const [mapVendorOpenFor, setMapVendorOpenFor] = useState<string | null>(null);  // counterparty currently being mapped
+  const [mapForm, setMapForm] = useState<{ kind: QbIngestKind; vendorListId: string; bankListId: string; expenseListId: string; vendorSearch: string; payeeFullName: string; payeeListKind: QbPayeeListKind; }>({ kind: 'bill_pmt', vendorListId: '', bankListId: '', expenseListId: '', vendorSearch: '', payeeFullName: '', payeeListKind: 'OtherName' });
+  const [mapSaving, setMapSaving] = useState(false);
   // Convera beneficiaries
   const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
 
@@ -2159,6 +2311,781 @@ const TimesheetSystem = () => {
     loadConveraBeneficiaries();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountantTab, currentUser?.role]);
+
+  // Load QB Automation Inbox lazily when tab is opened
+  const loadQbIngestEvents = async () => {
+    setQbIngestLoading(true);
+    const { data, error } = await supabase
+      .from('qb_ingest_events')
+      .select('*')
+      .order('ingested_at', { ascending: false });
+    if (!error) setQbIngestEvents((data ?? []).map(normaliseQbIngestEvent));
+    setQbIngestLoading(false);
+  };
+  // Option 4: recompute matched_invoice_ids for all pending events in DB using the
+  // current matcher + current invoices state. Never touches ready/ignored/posted.
+  // Silent no-op for events whose matches didn't change. Called automatically on
+  // Inbox tab load, and manually via the "Recompute matches" button.
+  const recomputeMatchesForPending = async (): Promise<{ scanned: number; updated: number; skipped?: string }> => {
+    // Guard: if invoices haven't loaded yet, DO NOT run the matcher. An empty
+    // invoices set would produce empty matches and diff-write them back over
+    // whatever good matches are already stored — real destructive bug.
+    if (invoices.length === 0) {
+      console.warn('QB Automation recompute: invoices state empty — skipping to avoid clobbering matched_invoice_ids');
+      return { scanned: 0, updated: 0, skipped: 'invoices-not-loaded' };
+    }
+    const { data: pendingRows } = await supabase
+      .from('qb_ingest_events')
+      .select('id, source, txn_date, counterparty_raw, amount, matched_invoice_ids, raw_data')
+      .eq('status', 'pending');
+    const events = (pendingRows ?? []) as Array<{ id: number; source: string; txn_date: string; counterparty_raw: string; amount: number; matched_invoice_ids: number[]; raw_data: Record<string, unknown> | null }>;
+    if (events.length === 0) return { scanned: 0, updated: 0 };
+    const matcherInvoices: MatcherInvoice[] = invoices.map(i => ({
+      id: i.id, invoiceNumber: i.invoiceNumber, totalAmount: i.totalAmount,
+      periodEnd: i.periodEnd, userName: i.userName, companyName: i.paymentProfile?.companyName ?? null,
+    }));
+    const inputs: MatchableEvent[] = events.map(e => ({
+      date: e.txn_date,
+      counterpartyRaw: e.counterparty_raw,
+      amount: Number(e.amount),
+      invoiceRefs: Array.isArray(e.raw_data?.invoice_refs) ? (e.raw_data!.invoice_refs as string[]) : [],
+    }));
+    const results = matchEventsToInvoices(inputs, matcherInvoices);
+    // Diff — only PATCH rows whose match set actually changed. Sort for order-agnostic compare.
+    const eq = (a: number[], b: number[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+    let updated = 0;
+    for (let i = 0; i < events.length; i++) {
+      const oldIds = [...(events[i].matched_invoice_ids ?? [])].sort((a, b) => a - b);
+      const newIds = [...results[i]].sort((a, b) => a - b);
+      if (eq(oldIds, newIds)) continue;
+      const { error } = await supabase.from('qb_ingest_events').update({ matched_invoice_ids: newIds }).eq('id', events[i].id);
+      if (!error) updated++;
+    }
+    return { scanned: events.length, updated };
+  };
+  // Slice F.5 — auto-classification pass. Applies two passes to all pending events:
+  //   1. Explicit qb_vendor_mappings row → apply.
+  //   2. Profile-chain (event → matched invoice → profile.qbVendorName → qb_vendors) → apply + seed mapping.
+  // Idempotent — only PATCHes events whose classification actually changes.
+  //
+  // Fetches vendors/accounts/mappings FRESH from Supabase rather than reading React
+  // state, so callers don't hit the "setState just fired, closure still stale" trap
+  // when this runs immediately after a load. Invoices come from React state (already
+  // populated app-wide by the time any accountant hits this tab).
+  const applyClassificationPass = async (): Promise<{ classified: number; seeded: number; skipReason?: string }> => {
+    if (invoices.length === 0) return { classified: 0, seeded: 0, skipReason: 'invoices-not-loaded' };
+
+    // .range(0, 4999) — PostgREST default cap is 1000. qb_vendors has 1165+ rows;
+    // without an explicit range Yara/late-alphabetical vendors get silently dropped
+    // and their events stay held-back forever. Same rule as [[feedback-no-hardcoded-cutoff]].
+    const [pendingRes, vendorsRes, accountsRes, mappingsRes] = await Promise.all([
+      supabase
+        .from('qb_ingest_events')
+        .select('id, source, counterparty_raw, matched_invoice_ids, status, counterparty_qb_vendor_list_id, target_qb_txn_kind, qb_bank_account_list_id, qb_expense_account_list_id')
+        .eq('status', 'pending')
+        .range(0, 4999),
+      // .eq('is_active', true) + .range(0, 4999) — PostgREST server-side max-rows
+      // cap is 1000 on this project, so .range alone is not enough for qb_vendors
+      // (1165+ rows total, 997 inactive). Filter inactive server-side to bring
+      // the row count under the cap. Silent truncation dropped alphabetical tail
+      // (Y* vendors like Yara, T* like TechAntz) before 2026-08-24.
+      supabase.from('qb_vendors').select('list_id, name').eq('is_active', true).range(0, 4999),
+      supabase.from('qb_accounts').select('list_id, full_name, account_type').range(0, 4999),
+      supabase.from('qb_vendor_mappings').select('*').range(0, 4999),
+    ]);
+
+    const vendorRows = (vendorsRes.data ?? []) as Array<{ list_id: string; name: string }>;
+    const accountRows = (accountsRes.data ?? []) as Array<{ list_id: string; full_name: string; account_type: string }>;
+    const mappingRows = (mappingsRes.data ?? []) as Array<Record<string, unknown>>;
+    if (vendorRows.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-vendors-empty (check RLS + qb_vendors sync)' };
+    if (accountRows.length === 0) return { classified: 0, seeded: 0, skipReason: 'qb-accounts-empty (check RLS + qb_accounts sync)' };
+
+    const events: ClassifiableEvent[] = (pendingRes.data ?? []).map((r: Record<string, unknown>) => ({
+      id: r.id as number,
+      source: (r.source as string) ?? '',
+      counterpartyRaw: (r.counterparty_raw as string) ?? '',
+      matchedInvoiceIds: Array.isArray(r.matched_invoice_ids) ? (r.matched_invoice_ids as number[]) : [],
+      status: 'pending',
+      counterpartyQbVendorListId: (r.counterparty_qb_vendor_list_id as string | null) ?? null,
+      targetQbTxnKind: (r.target_qb_txn_kind as ClassifiableEvent['targetQbTxnKind']) ?? null,
+      qbBankAccountListId: (r.qb_bank_account_list_id as string | null) ?? null,
+      qbExpenseAccountListId: (r.qb_expense_account_list_id as string | null) ?? null,
+    }));
+    if (events.length === 0) return { classified: 0, seeded: 0 };
+
+    // Invoice.paymentProfile is a JSONB SNAPSHOT taken at invoice creation.
+    // If qbVendorName was set on the profile AFTER the invoice was created,
+    // the snapshot won't have it. Fall back to the LIVE payment_profiles row
+    // via userId lookup. Fixed 2026-08-20 after Slice G5 seed exposed this
+    // (Mek/Sivakumar/Ravi profiles had qbVendorName set live but invoices
+    // #60/#188/etc had NULL in the snapshot → classifier couldn't classify).
+    const liveVendorNameByUserId = new Map<string, string>();
+    for (const pp of paymentProfiles) {
+      const name = pp.qbVendorName?.trim();
+      if (!name) continue;
+      // Prefer default profile; else first-set-wins
+      if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) {
+        liveVendorNameByUserId.set(pp.userId, name);
+      }
+    }
+    const invoicesById = new Map<number, ClassifiableInvoice>(
+      invoices.map(i => [i.id, {
+        id: i.id,
+        paymentProfileQbVendorName: i.paymentProfile?.qbVendorName ?? liveVendorNameByUserId.get(i.userId) ?? null,
+      }]),
+    );
+    const vendorsByLowerName = new Map(vendorRows.map(v => [v.name.toLowerCase().trim(), { listId: v.list_id, name: v.name }]));
+    const bankAccount = resolveBankAccount(accountRows.map(a => ({ listId: a.list_id, fullName: a.full_name })));
+    const mappings: ClassifiableMapping[] = mappingRows.map(r => ({
+      source: (r.source as string) ?? '',
+      counterpartyPattern: (r.counterparty_pattern as string) ?? '',
+      qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
+      defaultTargetKind: (r.default_target_kind as ClassifiableMapping['defaultTargetKind']) ?? null,
+      defaultBankAccountListId: (r.default_bank_account_list_id as string | null) ?? null,
+      defaultExpenseAccountListId: (r.default_expense_account_list_id as string | null) ?? null,
+    }));
+
+    const { results, seedMappings } = classifyBatch(events, {
+      mappings, invoicesById, vendorsByLowerName, bankAccount,
+    });
+
+    let classified = 0;
+    for (const { event, result } of results) {
+      if (Object.keys(result.patch).length === 0) continue;
+      const { error } = await supabase.from('qb_ingest_events').update(result.patch).eq('id', event.id);
+      if (!error) classified++;
+      else console.warn('classification PATCH failed for event', event.id, error);
+    }
+
+    let seeded = 0;
+    if (seedMappings.length > 0) {
+      const rows = seedMappings.filter((s): s is NonNullable<typeof s> => !!s).map(s => ({
+        ...s, updated_at: new Date().toISOString(),
+      }));
+      const { error } = await supabase.from('qb_vendor_mappings').upsert(rows, { onConflict: 'source,counterparty_pattern' });
+      if (!error) seeded = rows.length;
+      else console.warn('seed mappings upsert failed', error);
+    }
+
+    return { classified, seeded };
+  };
+
+  // Slice G4c — reconciliation pass. For every event that's been classified
+  // (has vendor + kind), consult qb_mirror to decide the concrete resolved_action:
+  //   already_done | pay_existing_bill | create_bill_then_pay | check | held
+  //
+  // Fetches mirror fresh (avoids closure trap per [[feedback-state-vs-fresh-fetch]]).
+  // Idempotent — only PATCHes events whose resolved_action actually changes.
+  const applyReconciliationPass = async (): Promise<{ reconciled: number; skipReason?: string }> => {
+    // Load fresh mirror bills + payments across all vendors we care about,
+    // plus the invoice→bill link table for provenance classification.
+    // .range(0, 4999) — PostgREST default cap is 1000; some invoice tables
+    // exceed that. Mirrors the pattern in applyClassificationPass.
+    const [bills, payments, invoiceLinkRes] = await Promise.all([
+      getAllOpenBills(supabase),
+      getAllPayments(supabase),
+      supabase
+        .from('invoices')
+        .select('id, invoice_number, qb_bill_txn_id, matcher_ignore')
+        .not('qb_bill_txn_id', 'is', null)
+        .range(0, 4999),
+    ]);
+
+    // Build maps for provenance classification (see src/lib/matchProvenance.ts):
+    //   invoiceIdByBillTxnId — for the exact-txn deterministic override
+    //   invoicesById         — for memoNamesMatchedInvoice() lookup by matched id
+    const invoiceIdByBillTxnId = new Map<string, number>();
+    const invoicesById = new Map<number, { invoiceNumber: string | null; qbBillTxnId: string | null }>();
+    for (const inv of (invoiceLinkRes.data ?? []) as Array<{
+      id: number; invoice_number: string | null; qb_bill_txn_id: string | null; matcher_ignore: boolean | null;
+    }>) {
+      if (inv.matcher_ignore === true) continue;
+      if (inv.qb_bill_txn_id) invoiceIdByBillTxnId.set(inv.qb_bill_txn_id, inv.id);
+      invoicesById.set(inv.id, { invoiceNumber: inv.invoice_number, qbBillTxnId: inv.qb_bill_txn_id });
+    }
+    // Fetch events that need reconciliation. Include:
+    //   - status IN (pending, ready) — normal reconcile path
+    //   - status='posted' WITH posted_qb_refs.posted_source='qb_probe' —
+    //     events we auto-closed based on mirror state; re-reconcile so that
+    //     a wrong auto-close (e.g. amount-only match on partial-seed mirror)
+    //     self-heals when mirror becomes complete.
+    // Human-pushed events (posted_source='push') stay OUT of scope — they're
+    // final. Ignored/failed also stay out.
+    const { data: rows } = await supabase
+      .from('qb_ingest_events')
+      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs, match_provenance')
+      .or('status.in.(pending,ready),and(status.eq.posted,posted_qb_refs->>posted_source.eq.qb_probe)')
+      .not('target_qb_txn_kind', 'is', null);
+
+    // Backfill invoicesById with any matched invoices we don't already have
+    // (matched_invoice_ids can reference invoices whose qb_bill_txn_id is
+    // still null — those weren't picked up by the qb_bill_txn_id NOT NULL
+    // filter above but are needed for the memo-name provenance check).
+    const missingIds = new Set<number>();
+    for (const r of (rows ?? []) as Array<{ matched_invoice_ids: number[] | null }>) {
+      for (const id of r.matched_invoice_ids ?? []) if (!invoicesById.has(id)) missingIds.add(id);
+    }
+    if (missingIds.size > 0) {
+      const { data: extra } = await supabase
+        .from('invoices')
+        .select('id, invoice_number, qb_bill_txn_id')
+        .in('id', Array.from(missingIds));
+      for (const inv of (extra ?? []) as Array<{ id: number; invoice_number: string | null; qb_bill_txn_id: string | null }>) {
+        invoicesById.set(inv.id, { invoiceNumber: inv.invoice_number, qbBillTxnId: inv.qb_bill_txn_id });
+      }
+    }
+    const events: ReconcilableEvent[] = (rows ?? []).map((r: Record<string, unknown>) => ({
+      id: r.id as number,
+      counterpartyRaw: (r.counterparty_raw as string) ?? '',
+      memo: (r.memo as string | null) ?? null,
+      amount: Number(r.amount ?? 0),
+      txnDate: (r.txn_date as string) ?? '',
+      counterpartyQbVendorListId: (r.counterparty_qb_vendor_list_id as string | null) ?? null,
+      targetQbTxnKind: (r.target_qb_txn_kind as ReconcilableEvent['targetQbTxnKind']) ?? null,
+      matchedInvoiceIds: Array.isArray(r.matched_invoice_ids) ? (r.matched_invoice_ids as number[]) : [],
+      status: (r.status as ReconcilableEvent['status']) ?? 'pending',
+      resolvedBillTxnId: (r.resolved_bill_txn_id as string | null) ?? null,
+    }));
+    if (events.length === 0) return { reconciled: 0 };
+
+    // Group mirror rows by vendor for O(1) lookup in reconciler.
+    const billsByVendor = new Map<string, MirrorBill[]>();
+    for (const b of bills) {
+      const arr = billsByVendor.get(b.vendorListId) ?? [];
+      arr.push({
+        txnId: b.txnId,
+        vendorListId: b.vendorListId,
+        refNumber: b.refNumber,
+        amount: b.amount,
+        isPaid: b.isPaid,
+        txnDate: b.txnDate,
+      });
+      billsByVendor.set(b.vendorListId, arr);
+    }
+    const paymentsByVendor = new Map<string, MirrorPayment[]>();
+    for (const p of payments) {
+      const arr = paymentsByVendor.get(p.vendorListId) ?? [];
+      arr.push({
+        txnId: p.txnId,
+        vendorListId: p.vendorListId,
+        amount: p.amount,
+        txnDate: p.txnDate,
+        appliedToBills: p.appliedToBills.map(a => ({ billTxnId: a.billTxnId, amount: a.amount })),
+      });
+      paymentsByVendor.set(p.vendorListId, arr);
+    }
+
+    // Intuit-source events use the Intuit cutoff; other sources (Convera —
+    // future retrofit) will pass their own cutoff. For now pass Intuit's
+    // — safe because our only current source IS intuit_xlsx, and reconciler
+    // uses cutoff only as a per-event compare (skips it if not applicable).
+    const results = reconcileBatch(events, {
+      billsByVendor,
+      paymentsByVendor,
+      preOurSystemCutoff: INTUIT_PRE_OUR_SYSTEM_CUTOFF,
+    });
+    const nowIso = new Date().toISOString();
+    let reconciled = 0;
+    // We track events whose action becomes 'already_done' so we can also flip
+    // their status to 'posted' with posted_source note. Others just update
+    // resolved_* fields and keep status.
+    for (const { event, result } of results) {
+      const currentRow = (rows ?? []).find((r: Record<string, unknown>) => r.id === event.id) as Record<string, unknown> | undefined;
+      const prevAction = (currentRow?.resolved_action as string | null) ?? null;
+      const prevBillTxnId = (currentRow?.resolved_bill_txn_id as string | null) ?? null;
+      const prevPaymentTxnId = (currentRow?.resolved_payment_txn_id as string | null) ?? null;
+      const prevReason = (currentRow?.resolved_reason as string | null) ?? null;
+      const prevMatchedIds = Array.isArray(currentRow?.matched_invoice_ids)
+        ? [...(currentRow!.matched_invoice_ids as number[])].sort((a, b) => a - b)
+        : [];
+      const prevProvenance = (currentRow?.match_provenance as MatchProvenance | null) ?? null;
+
+      const nextBillTxnId = result.billTxnId ?? null;
+      const nextPaymentTxnId = result.paymentTxnId ?? null;
+      const nextReason = result.reason ?? null;
+
+      // ─── Provenance classification ────────────────────────────────────────
+      // Compute match_provenance from (event.resolved_bill_txn_id, matched
+      // invoices, memo refs) using the smarter normalizeRef normalization.
+      // On exact-txn, force matched_invoice_ids = [authoritativeInvoiceId]
+      // — this is where wrong fuzzy matches get corrected.
+      const matchedInvoiceRecords = event.matchedInvoiceIds
+        .map(id => invoicesById.get(id))
+        .filter((v): v is { invoiceNumber: string | null; qbBillTxnId: string | null } => v != null);
+      const memoRefs = extractRefsFromMemo(event.memo);
+      const provResult = computeMatchProvenance({
+        eventResolvedBillTxnId: nextBillTxnId,
+        matchedInvoiceIds: event.matchedInvoiceIds,
+        memoNamesMatchedInvoice: memoNamesMatchedInvoice(memoRefs, matchedInvoiceRecords),
+        targetQbTxnKind: event.targetQbTxnKind,
+        invoiceIdByBillTxnId,
+      });
+      const nextMatchedIds: number[] = provResult.provenance === 'exact-txn' && provResult.authoritativeInvoiceId != null
+        ? [provResult.authoritativeInvoiceId]
+        : [...event.matchedInvoiceIds];
+      const nextMatchedIdsSorted = [...nextMatchedIds].sort((a, b) => a - b);
+      const nextProvenance = provResult.provenance;
+
+      const matchedIdsChanged = prevMatchedIds.length !== nextMatchedIdsSorted.length
+        || prevMatchedIds.some((v, i) => v !== nextMatchedIdsSorted[i]);
+      const provenanceChanged = prevProvenance !== nextProvenance;
+
+      // Skip PATCH if nothing changed
+      if (
+        prevAction === result.action
+        && prevBillTxnId === nextBillTxnId
+        && prevPaymentTxnId === nextPaymentTxnId
+        && prevReason === nextReason
+        && !matchedIdsChanged
+        && !provenanceChanged
+      ) continue;
+
+      const patch: Record<string, unknown> = {
+        resolved_action: result.action,
+        resolved_bill_txn_id: nextBillTxnId,
+        resolved_payment_txn_id: nextPaymentTxnId,
+        resolved_reason: nextReason,
+        reconciled_at: nowIso,
+        match_provenance: nextProvenance,
+      };
+      if (matchedIdsChanged) patch.matched_invoice_ids = nextMatchedIds;
+
+      // Status transitions driven by reconciliation:
+      //   pending/ready + already_done + exact-txn provenance → posted
+      //     (auto-close only when the invoice link is deterministic; fuzzy
+      //     matches must be human-verified even for auto-close)
+      //   posted(qb_probe) + (NOT already_done OR provenance dropped from
+      //     exact-txn) → back to pending (self-heal)
+      //   ready + already_done + weak provenance → pending
+      //     (classifier promotes any classified event to ready, but an
+      //     already_done event with fuzzy invoice link shouldn't LOOK
+      //     ready-to-push in the Inbox — surface it for review)
+      const wasQbProbePosted = event.status === 'posted'
+        && ((currentRow?.posted_qb_refs as Record<string, unknown> | null)?.posted_source === 'qb_probe');
+      const autoCloseEligible = result.action === 'already_done' && nextProvenance === 'exact-txn';
+      if (autoCloseEligible && event.status !== 'posted') {
+        patch.status = 'posted';
+        patch.status_updated_at = nowIso;
+        patch.posted_qb_refs = {
+          bill_txn_id: nextBillTxnId,
+          payment_txn_id: nextPaymentTxnId,
+          posted_source: 'qb_probe',
+        };
+      } else if (!autoCloseEligible && wasQbProbePosted) {
+        // Auto-close was wrong (action changed OR provenance no longer
+        // exact-txn) — revert to pending so the accountant sees the case.
+        patch.status = 'pending';
+        patch.status_updated_at = nowIso;
+        patch.posted_qb_refs = null;
+      } else if (result.action === 'already_done' && nextProvenance !== 'exact-txn' && event.status === 'ready') {
+        // Classifier promoted event to ready, but reconciler says "QB already
+        // has this + weak invoice link" — this isn't push-ready, revert to
+        // pending so it lands in the review bucket, not the pushable group.
+        patch.status = 'pending';
+        patch.status_updated_at = nowIso;
+      } else if (result.action === 'pre_our_system' && event.status !== 'ignored' && event.status !== 'posted') {
+        // Terminal: predates our cutoff; QB handled these before we came online.
+        // Flip to ignored so they don't clutter the pushable Inbox or inflate
+        // the "Ready to push" counter. resolved_action='pre_our_system' preserved
+        // for audit; they land in the Ignore bucket.
+        patch.status = 'ignored';
+        patch.status_updated_at = nowIso;
+      }
+      const { error } = await supabase.from('qb_ingest_events').update(patch).eq('id', event.id);
+      if (!error) reconciled++;
+      else console.warn('reconciliation PATCH failed for event', event.id, error);
+    }
+    return { reconciled };
+  };
+
+  const [recomputeBusy, setRecomputeBusy] = useState(false);
+  const runRecomputeButton = async () => {
+    setRecomputeBusy(true);
+    try {
+      const result = await recomputeMatchesForPending();
+      const cls = await applyClassificationPass();
+      const rec = await applyReconciliationPass();
+      await loadQbVendorMappings();
+      await loadQbIngestEvents();
+      if (result.skipped === 'invoices-not-loaded') {
+        alert('Cannot recompute yet — invoices are still loading. Wait a moment and try again.');
+      } else {
+        const clsSummary = cls.skipReason
+          ? ` · classification skipped (${cls.skipReason})`
+          : ` · auto-classified ${cls.classified}${cls.seeded > 0 ? `, seeded ${cls.seeded} mapping${cls.seeded === 1 ? '' : 's'}` : ''}`;
+        const recSummary = rec.skipReason
+          ? ` · reconciliation skipped (${rec.skipReason})`
+          : ` · reconciled ${rec.reconciled}`;
+        alert(`Recomputed matches: scanned ${result.scanned} pending event${result.scanned === 1 ? '' : 's'}, updated ${result.updated}${clsSummary}${recSummary}.`);
+      }
+    } finally { setRecomputeBusy(false); }
+  };
+
+  const loadQbVendorMappings = async () => {
+    const { data } = await supabase.from('qb_vendor_mappings').select('*');
+    setQbVendorMappings((data ?? []).map((r: Record<string, unknown>) => ({
+      id: r.id as number,
+      source: (r.source as string) ?? '',
+      counterpartyPattern: (r.counterparty_pattern as string) ?? '',
+      qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
+      defaultTargetKind: (r.default_target_kind as QbIngestKind | null) ?? null,
+      defaultBankAccountListId: (r.default_bank_account_list_id as string) ?? null,
+      defaultExpenseAccountListId: (r.default_expense_account_list_id as string) ?? null,
+      payeeFullName: (r.payee_full_name as string) ?? null,
+      payeeListKind: (r.payee_list_kind as QbPayeeListKind | null) ?? null,
+    })));
+  };
+  const loadQbVendorsAndAccounts = async () => {
+    // Lists rarely change during a session — only fetch if empty.
+    // .range(0, 4999) — qb_vendors is 1165+ rows and PostgREST default cap is
+    // 1000, silently dropping the alphabetical tail (e.g. Yara). See
+    // [[feedback-no-hardcoded-cutoff]].
+    if (qbVendorsList.length === 0) {
+      // .eq('is_active', true) + .range — see comment in applyClassificationPass.
+      // PostgREST project-level max-rows=1000 silently truncates otherwise.
+      const { data } = await supabase.from('qb_vendors').select('list_id, name, is_active').eq('is_active', true).order('name').range(0, 4999);
+      setQbVendorsList((data ?? []).map((r: Record<string, unknown>) => ({
+        listId: (r.list_id as string) ?? '', name: (r.name as string) ?? '', isActive: Boolean(r.is_active),
+      })));
+    }
+    if (qbAccountsList.length === 0) {
+      const { data } = await supabase.from('qb_accounts').select('list_id, full_name, account_type, is_active').order('full_name').range(0, 4999);
+      setQbAccountsList((data ?? []).map((r: Record<string, unknown>) => ({
+        listId: (r.list_id as string) ?? '', fullName: (r.full_name as string) ?? '', accountType: (r.account_type as string) ?? '', isActive: Boolean(r.is_active),
+      })));
+    }
+  };
+  // Slice G1 — load qb_open_bills_snapshot into React state for freshness UI.
+  const loadQbOpenBills = async () => {
+    try {
+      const rows = await getAllOpenBills(supabase);
+      setQbOpenBills(rows);
+    } catch (e) {
+      console.warn('loadQbOpenBills failed', e);
+    }
+  };
+  // Slice G1 — MAX(qb_wc_sessions.last_seen_at) as QBWC heartbeat.
+  const loadQbWcLastSeen = async () => {
+    try {
+      const { data } = await supabase
+        .from('qb_wc_sessions')
+        .select('last_seen_at')
+        .order('last_seen_at', { ascending: false })
+        .limit(1);
+      setQbWcLastSeen((data && data[0]?.last_seen_at) || null);
+    } catch (e) {
+      console.warn('loadQbWcLastSeen failed', e);
+    }
+  };
+  // Slice G1 — count in-flight bill_query jobs. Used to disable the Sync button
+  // and show live progress. Called by the polling effect below.
+  const loadQbBillQueryPending = async () => {
+    try {
+      const { data } = await supabase
+        .from('qb_sync_jobs')
+        .select('id')
+        .eq('kind', 'bill_query')
+        .in('status', ['pending', 'in_flight']);
+      const prev = qbBillQueryPending;
+      const next = (data ?? []).length;
+      setQbBillQueryPending(next);
+      // Transition from >0 → 0 = QBWC just finished draining; refresh snapshot,
+      // heartbeat, and re-reconcile since mirror is now fresher.
+      if (prev > 0 && next === 0) {
+        await loadQbOpenBills();
+        await loadQbWcLastSeen();
+        try {
+          const rec = await applyReconciliationPass();
+          if (rec.reconciled > 0) await loadQbIngestEvents();
+        } catch (e) {
+          console.warn('post-drain reconciliation failed', e);
+        }
+      }
+    } catch (e) {
+      console.warn('loadQbBillQueryPending failed', e);
+    }
+  };
+  // Slice G1 — Sync button handler. Broad seed strategy per Dan's ask:
+  // enqueue iterator-mode bill_query for EVERY QB vendor we care about, not
+  // just event-classified ones. "Care about" =
+  //   (a) any qb_vendor_name set on any payment_profiles row, AND
+  //   (b) any event-resolvable vendor (via mapping or profile chain).
+  // Then filter out vendors that already have a fresh snapshot (< 1h) or an
+  // in-flight bill_query job (dedup lives in enqueueBillQuery).
+  const runSyncQbBills = async () => {
+    setQbSyncingBills(true);
+    try {
+      const vendorsByLowerName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
+      const vendorNamesByListId = new Map(qbVendorsList.map(v => [v.listId, v.name]));
+
+      // Set (a): mapped-in-profiles vendors. These are the ~40 contractors
+      // whose qbVendorName we've curated. Resolve to canonical qb_vendors.name
+      // for exact QBWC lookup.
+      const profileVendorNames = new Set<string>();
+      for (const pp of paymentProfiles) {
+        const name = pp.qbVendorName?.trim();
+        if (!name) continue;
+        const canonical = vendorsByLowerName.get(name.toLowerCase())?.name ?? name;
+        profileVendorNames.add(canonical);
+      }
+
+      // Set (b): event-resolvable vendors. Classified events carry a listId
+      // directly; unclassified events with matched_invoice_ids resolve via
+      // invoice → paymentProfile.qbVendorName.
+      const invById = new Map(invoices.map(i => [i.id, i]));
+      const eventVendorNames = new Set<string>();
+      for (const e of qbIngestEvents) {
+        if (e.counterpartyQbVendorListId) {
+          const name = vendorNamesByListId.get(e.counterpartyQbVendorListId);
+          if (name) eventVendorNames.add(name);
+          continue;
+        }
+        // profile-chain resolution
+        if (e.matchedInvoiceIds.length === 0) continue;
+        const inv = invById.get(e.matchedInvoiceIds[0]);
+        const qvn = inv?.paymentProfile?.qbVendorName?.trim();
+        if (!qvn) continue;
+        const canonical = vendorsByLowerName.get(qvn.toLowerCase())?.name;
+        if (canonical) eventVendorNames.add(canonical);
+      }
+
+      const allVendorNames = Array.from(new Set([...profileVendorNames, ...eventVendorNames])).sort();
+      if (allVendorNames.length === 0) {
+        alert('No vendors need syncing — no payment profiles have qb_vendor_name set and no events resolve to a QB vendor.');
+        return;
+      }
+
+      // Filter by freshness — skip vendors synced within TTL. Fresh snapshot first.
+      await loadQbOpenBills();
+      const freshness = snapshotAge(qbOpenBills);
+      const listIdByName = new Map(qbVendorsList.map(v => [v.name, v.listId]));
+      const staleListIds = vendorsNeedingSync(
+        allVendorNames.map(n => listIdByName.get(n)).filter((x): x is string => !!x),
+        freshness,
+      );
+      const staleVendors = staleListIds
+        .map(id => ({ listId: id, name: vendorNamesByListId.get(id) ?? '' }))
+        .filter(v => v.name !== '');
+      // If nothing is stale, we're up-to-date — no-op with a helpful message.
+      if (staleVendors.length === 0) {
+        alert(`All ${allVendorNames.length} vendors have fresh snapshots (< 1h). Nothing to enqueue.`);
+        return;
+      }
+
+      // Slice G3: delta cursor per vendor. First call for a vendor pulls all
+      // history; subsequent calls pull only bills since MAX(txn_date) - 1d.
+      const result = await enqueueBillQueryForVendors(supabase, staleVendors, {
+        deltaFrom: 'auto',
+        auditTag: 'slice-g1-manual-sync',
+      });
+      await loadQbBillQueryPending();  // update pending counter immediately
+      const deltaCount = Object.values(result.deltaCursorsUsed).filter(c => c !== 'none').length;
+      alert(
+        `Enqueued ${result.jobIds.length} bill_query job${result.jobIds.length === 1 ? '' : 's'} `
+        + `across ${staleVendors.length} vendor${staleVendors.length === 1 ? '' : 's'} `
+        + `(${deltaCount} delta / ${staleVendors.length - deltaCount} full-history)`
+        + (result.skippedInFlight.length > 0 ? `; skipped ${result.skippedInFlight.length} already in flight` : '')
+        + `. QBWC drains the full queue in one session; wait up to 15 min for the next poll, then ~${Math.max(1, Math.ceil(result.jobIds.length * 1 / 60))} min of drain time. `
+        + `This UI updates automatically as they complete.`,
+      );
+    } catch (e) {
+      // Supabase errors come as { message, details, hint, code } — String(e)
+      // renders these as "[object Object]" (session-2026-08-19 post-mortem #4).
+      const err = e as { message?: string; details?: string; hint?: string; code?: string };
+      const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
+        .filter((s): s is string => !!s);
+      const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
+      alert('Sync failed: ' + msg);
+    } finally {
+      setQbSyncingBills(false);
+    }
+  };
+
+  // Rehydrate the status pane from in-flight qb_sync_jobs. Called on tab
+  // load so a page refresh mid-drain doesn't lose the pane (and doesn't
+  // let the preview modal re-offer events with pending pushes). Only
+  // rebuilds bill_pmt_add + check_add rows (verify chain not reconstructed —
+  // acceptable degradation for a refresh; correctness data stays in DB).
+  const loadInflightPushRecords = async () => {
+    const { data: jobs } = await supabase
+      .from('qb_sync_jobs')
+      .select('id, kind, status, payload, created_at')
+      .in('status', ['pending', 'in_flight'])
+      .in('kind', ['bill_pmt_add', 'check_add']);
+    const jobRows = (jobs ?? []) as Array<{ id: number; kind: string; status: string; payload: Record<string, unknown> | null; created_at: string }>;
+    const eventIds = new Set<number>();
+    for (const j of jobRows) {
+      const eid = (j.payload as { sourceIngestEventId?: number } | null)?.sourceIngestEventId;
+      if (eid != null) eventIds.add(eid);
+    }
+    if (eventIds.size === 0) {
+      setQbPushRecords([]);
+      return;
+    }
+    // Fetch fresh — the tab-load useEffect fires loadInflightPushRecords in
+    // the same tick as loadQbVendorMappings + loadQbVendorsAndAccounts, so
+    // React state is stale in this closure. INVARIANTS #27 / [[state-vs-fresh-fetch]].
+    const [eventDataRes, freshMappings, freshVendors] = await Promise.all([
+      supabase
+        .from('qb_ingest_events')
+        .select('id, source, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
+        .in('id', Array.from(eventIds)),
+      supabase.from('qb_vendor_mappings').select('source, counterparty_pattern, payee_full_name'),
+      supabase.from('qb_vendors').select('list_id, name'),
+    ]);
+    const eventById = new Map(((eventDataRes.data ?? []) as Array<{ id: number; source: string; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
+    const vendorNameById = new Map(((freshVendors.data ?? []) as Array<{ list_id: string; name: string }>).map(v => [v.list_id, v.name]));
+    const payeeByKey = new Map<string, string>();
+    for (const m of ((freshMappings.data ?? []) as Array<{ source: string; counterparty_pattern: string; payee_full_name: string | null }>)) {
+      if (m.payee_full_name) payeeByKey.set(`${m.source} ${m.counterparty_pattern}`, m.payee_full_name);
+    }
+    const records: PushRecord[] = [];
+    for (const j of jobRows) {
+      const eid = (j.payload as { sourceIngestEventId?: number } | null)?.sourceIngestEventId;
+      if (eid == null) continue;
+      const event = eventById.get(eid);
+      if (!event) continue;
+      const displayName = (event.counterparty_qb_vendor_list_id && vendorNameById.get(event.counterparty_qb_vendor_list_id))
+        ?? payeeByKey.get(`${event.source} ${event.counterparty_raw}`)
+        ?? event.counterparty_raw;
+      records.push({
+        eventId: eid,
+        payJobId: j.id,
+        verifyJobId: null,
+        billTxnId: event.resolved_bill_txn_id ?? '',
+        expectedAmount: Number(event.amount),
+        expectedVendor: displayName,
+        pushedAt: j.created_at,
+        kind: j.kind === 'check_add' ? 'check' : 'pay_bill',
+      });
+    }
+    setQbPushRecords(records);
+  };
+
+  useEffect(() => {
+    if (accountantTab !== 'qb-automation') return;
+    if (currentUser?.role !== 'accountant') return;
+    (async () => {
+      await loadQbIngestEvents();
+      await loadQbVendorMappings();
+      await loadQbVendorsAndAccounts();
+      await loadQbOpenBills();
+      await loadQbWcLastSeen();
+      await loadQbBillQueryPending();
+      await loadInflightPushRecords();
+      // Auto-recompute matches for pending events using current invoices.
+      // Guarded — skips silently if invoices state is empty (see the guard in
+      // recomputeMatchesForPending). The invoices.length dependency below
+      // ensures we re-run once invoices actually load.
+      try {
+        const { updated } = await recomputeMatchesForPending();
+        // Then auto-classify using mappings + profile chain. Slice F.5.
+        const cls = await applyClassificationPass();
+        // Then reconcile against qb_mirror. Slice G4c.
+        const rec = await applyReconciliationPass();
+        if (updated > 0 || cls.classified > 0 || rec.reconciled > 0) await loadQbIngestEvents();
+        if (cls.seeded > 0) await loadQbVendorMappings();
+      } catch (e) {
+        console.warn('QB Automation: auto-recompute failed', e);
+      }
+    })();
+    // Depend on invoices.length so tab-opens-before-invoices-load still triggers
+    // the recompute when they arrive. Recompute is idempotent (only writes when
+    // matches actually change) so re-firing on later invoice changes is safe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountantTab, currentUser?.role, invoices.length]);
+
+  // Slice G1 — poll qb_sync_jobs while on the QB Automation tab AND there are
+  // pending bill_query jobs. 30s cadence — QBWC drains every 15 min so this
+  // just tracks whether the queue is empty (=> ready to refresh snapshot).
+  useEffect(() => {
+    if (accountantTab !== 'qb-automation') return;
+    if (currentUser?.role !== 'accountant') return;
+    if (qbBillQueryPending === 0) return;   // nothing pending → no need to poll
+    const iv = setInterval(() => { loadQbBillQueryPending(); }, 30_000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountantTab, currentUser?.role, qbBillQueryPending]);
+
+  // Slice D — save a vendor mapping and apply it to all pending events with the same counterparty.
+  const openMapWidget = (counterparty: string, source: string) => {
+    // Prefill from existing mapping if one exists for this (source, counterparty).
+    const existing = qbVendorMappings.find(m => m.source === source && m.counterpartyPattern === counterparty);
+    setMapForm({
+      kind: existing?.defaultTargetKind ?? 'bill_pmt',
+      vendorListId: existing?.qbVendorListId ?? '',
+      bankListId: existing?.defaultBankAccountListId ?? '',
+      expenseListId: existing?.defaultExpenseAccountListId ?? '',
+      vendorSearch: '',
+      payeeFullName: existing?.payeeFullName ?? '',
+      payeeListKind: existing?.payeeListKind ?? 'OtherName',
+    });
+    setMapVendorOpenFor(counterparty);
+  };
+  const saveVendorMapping = async (counterparty: string, source: string) => {
+    const kind = mapForm.kind;
+    // For kind='check' the payee can be an OtherName / Employee / Customer that
+    // is NOT in the Vendors list — accept either a QB vendor OR a free-text
+    // payee_full_name. qbXML CheckAdd resolves <PayeeEntityRef><FullName>
+    // across all payee-eligible lists. Other kinds require a Vendor.
+    if (kind === 'bill_pmt' || kind === 'bill_add_and_pmt') {
+      if (!mapForm.vendorListId) { alert('Pick a QB vendor.'); return; }
+    }
+    if (kind === 'check') {
+      if (!mapForm.vendorListId && !mapForm.payeeFullName.trim()) {
+        alert('Pick a QB vendor OR enter a payee full name (for OtherName/Employee/Customer payees).');
+        return;
+      }
+    }
+    if (kind !== 'ignore' && !mapForm.bankListId) { alert('Pick a bank account.'); return; }
+    if ((kind === 'check' || kind === 'bill_add_and_pmt') && !mapForm.expenseListId) { alert('Pick an expense account.'); return; }
+    setMapSaving(true);
+    try {
+      // Upsert the mapping row so future imports auto-classify.
+      // Migration 20260825 relaxed qb_vendor_list_id to nullable + added
+      // payee_full_name / payee_list_kind for OtherName-style payees.
+      const usePayeeName = kind === 'check' && !mapForm.vendorListId && !!mapForm.payeeFullName.trim();
+      const mappingRow = {
+        source,
+        counterparty_pattern: counterparty,
+        qb_vendor_list_id: kind === 'ignore' ? null : (mapForm.vendorListId || null),
+        default_target_kind: kind,
+        default_bank_account_list_id: kind === 'ignore' ? null : mapForm.bankListId,
+        default_expense_account_list_id: (kind === 'check' || kind === 'bill_add_and_pmt') ? mapForm.expenseListId : null,
+        payee_full_name: usePayeeName ? mapForm.payeeFullName.trim() : null,
+        payee_list_kind: usePayeeName ? mapForm.payeeListKind : null,
+        updated_at: new Date().toISOString(),
+      };
+      const { error: upsertErr } = await supabase.from('qb_vendor_mappings').upsert(mappingRow, { onConflict: 'source,counterparty_pattern' });
+      if (upsertErr) throw upsertErr;
+
+      // Retroactively apply to all pending events for this counterparty.
+      // kind='ignore' → status='ignored' (won't appear in push preview)
+      // kind='bill_pmt'/'bill_add_and_pmt'/'check' → status='ready'
+      const nextStatus = kind === 'ignore' ? 'ignored' : 'ready';
+      const eventUpdate = {
+        counterparty_qb_vendor_list_id: kind === 'ignore' ? null : (mapForm.vendorListId || null),
+        target_qb_txn_kind: kind,
+        qb_bank_account_list_id: kind === 'ignore' ? null : mapForm.bankListId,
+        qb_expense_account_list_id: (kind === 'check' || kind === 'bill_add_and_pmt') ? mapForm.expenseListId : null,
+        status: nextStatus,
+        status_updated_at: new Date().toISOString(),
+      };
+      const { error: updErr } = await supabase.from('qb_ingest_events').update(eventUpdate)
+        .eq('source', source).eq('counterparty_raw', counterparty).eq('status', 'pending');
+      if (updErr) throw updErr;
+
+      await loadQbIngestEvents();
+      await loadQbVendorMappings();
+      setMapVendorOpenFor(null);
+    } catch (e) {
+      const err = e as { message?: string; details?: string; hint?: string; code?: string };
+      const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null].filter((s): s is string => !!s);
+      alert(`Save failed: ${parts.length ? parts.join(' — ') : JSON.stringify(e)}`);
+    } finally {
+      setMapSaving(false);
+    }
+  };
 
   async function loadConveraLastPaymentDates() {
     if (converaLastPaymentDates.size > 0) return;
@@ -3697,23 +4624,8 @@ const TimesheetSystem = () => {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as (string | number)[][];
 
-      const excelSerial = (n: number | string): string => {
-        if (!n) return '';
-        if (typeof n === 'number') {
-          const d = new Date((n - 25569) * 86400 * 1000);
-          return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-        }
-        const s = String(n).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-        const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
-        if (m) {
-          const [, a, b, y] = m;
-          return parseInt(a) > 12
-            ? `${y}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`
-            : `${y}-${a.padStart(2,'0')}-${b.padStart(2,'0')}`;
-        }
-        return '';
-      };
+      // Excel date conversion is imported from ./lib/xlsxHelpers — same function
+      // used by the Intuit XLSX parser and the QB Automation matcher.
 
       const hdrs = rawRows[0].map(h => String(h).trim().toLowerCase());
       // Flexible column resolver — first tries exact match, then falls back to substring match
@@ -3789,7 +4701,7 @@ const TimesheetSystem = () => {
 
       for (let i = 1; i < rawRows.length; i++) {
         const r = rawRows[i];
-        const dateOfOrder  = excelSerial(r[iDate] as number | string);
+        const dateOfOrder  = excelDateToIso(r[iDate]);
         const beneficiary  = String(r[iBenef] ?? '').trim();
         const amount       = parseFloat(String(r[iAmount]));
         const rawRef       = iRef1 >= 0 ? String(r[iRef1] ?? '').trim() : '';
@@ -4329,6 +5241,87 @@ const TimesheetSystem = () => {
     // Pre-populate paid date from first entry if all same
     const dates = [...new Set(rows.map(r => r.suggestedDate).filter(Boolean))];
     if (dates.length === 1 && !converaPaidDate) setConveraPaidDate(dates[0]);
+  };
+
+  // ─── Intuit XLSX → qb_ingest_events (Slice B of QB Automation Layer) ────────
+  const parseIntuitXlsxPreview = async () => {
+    if (!intuitXlsxFile) return;
+    setConveraError('');
+    setIntuitXlsxResult(null);
+    try {
+      const buffer = await intuitXlsxFile.arrayBuffer();
+      const rows = await parseIntuitXlsxBuffer(buffer);
+      if (rows.length === 0) {
+        setConveraError('No payment rows found in this file. Positive-amount rows in the expense/AP account (with "Inv# XXX" memos) are what we look for.');
+        return;
+      }
+      // Layered invoice matcher — see matchEventsToInvoices at top of file for
+      // the algorithm. Same function used by the on-load / manual recompute path
+      // so an improvement propagates to already-imported events without re-ingest.
+      const matcherInvoices: MatcherInvoice[] = invoices.map(i => ({
+        id: i.id, invoiceNumber: i.invoiceNumber, totalAmount: i.totalAmount,
+        periodEnd: i.periodEnd, userName: i.userName, companyName: i.paymentProfile?.companyName ?? null,
+      }));
+      const matchInputs: MatchableEvent[] = rows.map(r => ({
+        date: r.date, counterpartyRaw: r.name, amount: r.amount, invoiceRefs: r.invoiceRefs,
+      }));
+      const matchResults = matchEventsToInvoices(matchInputs, matcherInvoices);
+      rows.forEach((r, i) => { r.matchedInvoiceIds = matchResults[i]; });
+      setIntuitXlsxPreview(rows);
+    } catch (e) {
+      setConveraError(`Parse failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const commitIntuitXlsxToInbox = async () => {
+    if (!intuitXlsxPreview || intuitXlsxPreview.length === 0) return;
+    setIntuitXlsxImporting(true);
+    setConveraError('');
+    try {
+      const inserts = intuitXlsxPreview.map(r => ({
+        source: 'intuit_xlsx' as const,
+        source_ref: r.sourceRef,
+        txn_date: r.date,
+        amount: r.amount,
+        counterparty_raw: r.name,
+        memo: r.memo || null,
+        matched_invoice_ids: r.matchedInvoiceIds,
+        status: 'pending' as const,
+        raw_data: { transaction_type: r.transactionType, num: r.num, split: r.split, invoice_refs: r.invoiceRefs },
+      }));
+      // Upsert with ignoreDuplicates so (source, source_ref) UNIQUE quietly skips
+      // rows we've already seen from a prior import of the same date range.
+      const { data, error } = await supabase
+        .from('qb_ingest_events')
+        .upsert(inserts, { onConflict: 'source,source_ref', ignoreDuplicates: true })
+        .select('id');
+      if (error) throw error;
+      const inserted = data?.length ?? 0;
+      const skipped = intuitXlsxPreview.length - inserted;
+      // Slice F.5 — run auto-classification pass over the freshly-inserted
+      // pending events (also picks up any prior pending events, which is fine).
+      // Silent skip if prereq state is missing; accountant can hit Recompute later.
+      try {
+        await loadQbVendorMappings();
+        await loadQbVendorsAndAccounts();
+        await applyClassificationPass();
+      } catch (e) {
+        console.warn('Post-ingest classification failed', e);
+      }
+      setIntuitXlsxResult({ inserted, skipped });
+      setIntuitXlsxPreview(null);
+      setIntuitXlsxFile(null);
+    } catch (e) {
+      // Format Supabase/PostgREST errors ({ message, details, hint, code }) as well
+      // as regular Error instances. Prior String(e) rendered them as "[object Object]".
+      const err = e as { message?: string; details?: string; hint?: string; code?: string };
+      const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
+        .filter((s): s is string => !!s);
+      const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
+      setConveraError(`Import failed: ${msg}`);
+    } finally {
+      setIntuitXlsxImporting(false);
+    }
   };
 
   const applyConveraPayments = async () => {
@@ -6823,6 +7816,10 @@ const TimesheetSystem = () => {
                   )}
                 </span>
                 <span>Payments</span>
+              </button>
+              <button onClick={() => setAccountantTab('qb-automation')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'qb-automation' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
+                <UploadCloud className="w-5 h-5 flex-shrink-0" />
+                <span className="hidden sm:inline">QB </span><span>Automation</span>
               </button>
               <button onClick={() => setAccountantTab('profiles')} className={'flex-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-3 sm:py-4 px-2 sm:px-6 font-medium text-xs sm:text-sm border-b-2 transition-colors ' + (accountantTab === 'profiles' ? 'text-indigo-600 border-indigo-600 bg-indigo-50' : 'text-gray-500 border-transparent hover:bg-gray-50 hover:text-gray-700')}>
                 <CreditCard className="w-5 h-5 flex-shrink-0" />
@@ -9369,6 +10366,686 @@ const TimesheetSystem = () => {
             );
           })()}
 
+          {accountantTab === 'qb-automation' && (() => {
+            // Read-only Inbox — Slice C of QB Automation Layer.
+            // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
+            // that arrives with Slice F (preview modal) and Slice G (real enqueue).
+            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual' }[s] || s);
+            // Reconciler bill lookup by TxnID for the "Resolved" column (replaces the
+            // legacy matched_invoice_ids display, which over-matched by amount alone).
+            const billByTxnId = new Map(qbOpenBills.map(b => [b.txnId, b]));
+            const isPreOur = (e: QbIngestEvent) => e.resolvedAction === 'pre_our_system';
+
+            // "Missing QB bills" audit — approved invoices in our system that have
+            // no matching Bill in qb_mirror. Read-only visibility so Dan can see the
+            // total pending QB work per contractor, not just Intuit payment events.
+            // Matches invoice.paymentProfile.qbVendorName → vendor listId → any
+            // bill in qbOpenBills with normalizeRef(refNumber) === normalizeRef(invoice_number).
+            //
+            // The invoice.paymentProfile is a JSONB snapshot at invoice creation, so
+            // qbVendorName can be stale if the accountant added it to the profile after
+            // the invoice was created. Fall back to the live payment_profiles row per
+            // userId — same pattern as applyClassificationPass (fix 4e1c7da).
+            const vendorByName = new Map(qbVendorsList.map(v => [v.name, v]));
+            const liveVendorNameByUserId = new Map<string, string>();
+            for (const pp of paymentProfiles) {
+              const name = pp.qbVendorName?.trim();
+              if (!name) continue;
+              if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) {
+                liveVendorNameByUserId.set(pp.userId, name);
+              }
+            }
+            type MissingBill = {
+              invoice: Invoice;
+              paymentPath: string;
+              qbVendorName: string | null;
+              vendorMapped: boolean;
+            };
+            const missingBills: MissingBill[] = invoices
+              .filter(inv => inv.status === 'approved')
+              .filter(inv => (inv.periodEnd || '') >= INTUIT_PRE_OUR_SYSTEM_CUTOFF)
+              .map((inv): MissingBill | null => {
+                const snapshotName = inv.paymentProfile?.qbVendorName?.trim() || null;
+                const liveName = liveVendorNameByUserId.get(inv.userId) || null;
+                const qbVendorName = snapshotName ?? liveName;
+                const vendor = qbVendorName ? vendorByName.get(qbVendorName) : undefined;
+                const vendorListId = vendor?.listId ?? null;
+                const invRef = normalizeRef(inv.invoiceNumber);
+                const hasBill = vendorListId != null && invRef !== '' && qbOpenBills.some(b =>
+                  b.vendorListId === vendorListId && normalizeRef(b.refNumber) === invRef
+                );
+                if (hasBill) return null;
+                return {
+                  invoice: inv,
+                  paymentPath: paymentMethod(inv) || 'Unassigned',
+                  qbVendorName,
+                  vendorMapped: vendorListId != null,
+                };
+              })
+              .filter((x): x is MissingBill => x !== null)
+              // Sort Intuit first (fewer rows, more critical — bill gets created at
+              // next payment push, no batch script involved), then by period, contractor.
+              .sort((a, b) => {
+                const pathOrder = (p: string) => p === 'Intuit' ? 0 : p === 'Convera' ? 1 : 2;
+                const p = pathOrder(a.paymentPath) - pathOrder(b.paymentPath);
+                if (p !== 0) return p;
+                const d = (a.invoice.periodEnd || '').localeCompare(b.invoice.periodEnd || '');
+                if (d !== 0) return d;
+                return (a.invoice.userName || '').localeCompare(b.invoice.userName || '');
+              });
+            const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
+              { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
+              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e) && e.resolvedAction !== 'already_done') },
+              { key: 'already_done',     title: 'Already done in QB — needs verification', hint: 'QB already has bill+payment; matched invoice link is fuzzy (memo doesn\'t name it, or invoice.qb_bill_txn_id doesn\'t match). Review and mark as pre-our-system, orphan, or verify.', events: qbIngestEvents.filter(e => e.resolvedAction === 'already_done' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: `Deliberately never pushed. Includes advance-payment cases (US Signature), retired vendors (CLOUDYGON), and pre-our-system events (predate ${INTUIT_PRE_OUR_SYSTEM_CUTOFF}).`, events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
+              { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: qbIngestEvents.filter(e => e.status === 'posted') },
+            ];
+            const total = qbIngestEvents.length;
+            const ready = qbIngestEvents.filter(e => e.status === 'ready').length;
+            const needsMapping = groups.find(g => g.key === 'pending')?.events.length ?? 0;
+            const toggle = (k: string) => setQbInboxExpanded(prev => ({ ...prev, [k]: !prev[k] }));
+            return (
+              <div className="p-6 max-w-6xl mx-auto">
+                <div className="flex items-baseline justify-between mb-4">
+                  <div>
+                    <h2 className="text-2xl font-bold text-gray-800">QB Automation — Inbox</h2>
+                    <p className="text-sm text-gray-500 mt-0.5">Financial events pending classification and push to QuickBooks. Import via Invoices → Import Payments.</p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="flex gap-2">
+                      <button onClick={runRecomputeButton} disabled={recomputeBusy || qbIngestLoading} className="text-sm px-3 py-1.5 border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-50 disabled:opacity-50" title="Re-run the invoice matcher for all pending events. Use after creating/importing invoices, or after a matcher upgrade ships.">{recomputeBusy ? 'Recomputing…' : 'Recompute matches'}</button>
+                      <button onClick={() => { loadQbIngestEvents(); loadQbOpenBills(); }} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
+                      <button
+                        onClick={() => setShowQbPushPreview(true)}
+                        disabled={qbIngestLoading || qbIngestEvents.length === 0}
+                        className="text-sm px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 font-medium"
+                        title="Preview what will be pushed to QuickBooks."
+                      >
+                        Push to QB
+                      </button>
+                    </div>
+                    {/* Slice G1 — QB state freshness + QBWC heartbeat */}
+                    {(() => {
+                      const freshness = snapshotAge(qbOpenBills);
+                      const snapshotLabel = freshness.newestQueriedAt
+                        ? `QB state · ${humanizeAge(freshness.newestQueriedAt)} · ${freshness.rowCount} bills`
+                        : 'QB state · not synced yet';
+                      const snapshotStale = !freshness.newestQueriedAt
+                        || (Date.now() - Date.parse(freshness.newestQueriedAt)) > 3600 * 1000;
+
+                      // QBWC heartbeat. Poll cadence is 15 min; consider alive if
+                      // last contact < 20 min, delayed 20–30 min, down > 30 min.
+                      const qbwcAgeMs = qbWcLastSeen ? Date.now() - Date.parse(qbWcLastSeen) : Infinity;
+                      const qbwcAlive = qbwcAgeMs < 20 * 60_000;
+                      const qbwcDown = qbwcAgeMs > 30 * 60_000;
+                      const nextPollMs = qbWcLastSeen ? Date.parse(qbWcLastSeen) + 15 * 60_000 - Date.now() : 0;
+                      const nextPollLabel = nextPollMs > 0
+                        ? `next poll in ~${Math.max(1, Math.round(nextPollMs / 60_000))}m`
+                        : `overdue ~${Math.abs(Math.round(nextPollMs / 60_000))}m`;
+                      const qbwcLabel = !qbWcLastSeen
+                        ? 'QBWC · never seen'
+                        : qbwcDown
+                          ? `⚠ QBWC not running (last seen ${humanizeAge(qbWcLastSeen)})`
+                          : qbwcAlive
+                            ? `QBWC alive · ${nextPollLabel}`
+                            : `QBWC delayed · last seen ${humanizeAge(qbWcLastSeen)}`;
+                      const qbwcColor = qbwcDown ? 'text-red-700' : (qbwcAlive ? 'text-green-700' : 'text-amber-700');
+
+                      const syncPending = qbBillQueryPending > 0;
+                      const syncDisabled = qbSyncingBills || syncPending;
+                      const syncLabel = qbSyncingBills
+                        ? 'Enqueuing…'
+                        : syncPending
+                          ? `Syncing… ${qbBillQueryPending} pending`
+                          : 'Sync QB state';
+                      return (
+                        <div className="flex flex-col items-end gap-0.5 text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className={snapshotStale ? 'text-amber-700' : 'text-gray-500'}>
+                              {snapshotStale && '⚠ '}{snapshotLabel}
+                            </span>
+                            <button
+                              onClick={runSyncQbBills}
+                              disabled={syncDisabled}
+                              className={syncDisabled
+                                ? 'text-gray-400 cursor-not-allowed'
+                                : 'text-indigo-600 hover:underline'}
+                              title={syncPending
+                                ? `${qbBillQueryPending} bill_query job${qbBillQueryPending === 1 ? '' : 's'} still draining via QBWC. Wait for them to complete before enqueueing more.`
+                                : 'Enqueue bill_query jobs for all mapped vendors that need refresh. QBWC drains on next poll (~15 min).'}
+                            >
+                              {syncLabel}
+                            </button>
+                          </div>
+                          <div className={qbwcColor}>
+                            {qbwcLabel}
+                            {qbwcDown && (
+                              <span className="ml-1 text-gray-500">— start QBWC on accountant's laptop</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                <QbPushStatusPane
+                  supabase={supabase}
+                  records={qbPushRecords}
+                  onDismiss={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
+                />
+
+                <div className="grid grid-cols-3 gap-3 mb-6">
+                  <div className="p-3 border border-gray-200 rounded-lg bg-white">
+                    <div className="text-xs text-gray-500">Total events</div>
+                    <div className="text-2xl font-bold text-gray-800">{total}</div>
+                  </div>
+                  <div className={`p-3 border rounded-lg ${needsMapping > 0 ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-white'}`}>
+                    <div className="text-xs text-gray-500">Need classification</div>
+                    <div className={`text-2xl font-bold ${needsMapping > 0 ? 'text-amber-800' : 'text-gray-800'}`}>{needsMapping}</div>
+                  </div>
+                  <div className="p-3 border border-gray-200 rounded-lg bg-white">
+                    <div className="text-xs text-gray-500">Ready to push</div>
+                    <div className="text-2xl font-bold text-gray-800">{ready}</div>
+                  </div>
+                </div>
+
+                {total === 0 && !qbIngestLoading && (
+                  <div className="p-8 border border-dashed border-gray-300 rounded-lg text-center text-gray-500">
+                    <UploadCloud className="w-10 h-10 mx-auto text-gray-300 mb-2" />
+                    <p className="text-sm">Inbox is empty. Import Intuit payments via <strong>Invoices → Import Payments → Intuit XLSX</strong>.</p>
+                  </div>
+                )}
+
+                <QbPushPreviewModal
+                  open={showQbPushPreview}
+                  onClose={() => setShowQbPushPreview(false)}
+                  events={qbIngestEvents}
+                  inflightEventIds={new Set(qbPushRecords.map(r => r.eventId))}
+                  qbVendors={qbVendorsList}
+                  qbAccounts={qbAccountsList}
+                  invoices={invoices}
+                  qbMappings={qbVendorMappings.map(m => ({ source: m.source, counterpartyPattern: m.counterpartyPattern, payeeFullName: m.payeeFullName }))}
+                  onConfirm={async (selectedIds) => {
+                    setShowQbPushPreview(false);
+                    try {
+                      // Route by resolved_action: pay_existing_bill → intuitPush,
+                      // create_bill_then_pay → intuitCreateBill, check → intuitCheck.
+                      // Run all in parallel; merge results for the alert + status pane.
+                      const selectedEvents = selectedIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
+                      const payEventIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
+                      const createEventIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
+                      const checkEventIds = selectedEvents.filter(e => e.resolvedAction === 'check').map(e => e.id);
+                      const [payRes, createRes, checkRes] = await Promise.all([
+                        payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
+                        createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
+                        checkEventIds.length > 0 ? pushIntuitCheck(supabase, checkEventIds) : Promise.resolve(null),
+                      ]);
+                      const r = {
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? [])],
+                        skippedIneligible: [...(payRes?.skippedIneligible ?? []), ...(createRes?.skippedIneligible ?? []), ...(checkRes?.skippedIneligible ?? [])],
+                        verifyJobIdByPayJobId: payRes?.verifyJobIdByPayJobId ?? {},
+                      };
+                      const enqueued = r.jobIds.filter((id): id is number => id != null).length;
+                      const payJobIds = payRes?.jobIds ?? [];
+                      const createJobIds = createRes?.jobIds ?? [];
+                      void createJobIds;
+
+                      // Build push records for the live status pane. Only successful
+                      // pay_bill jobs get an entry — status pane's pay+verify state
+                      // machine doesn't model bill_add. bill_add drain success is
+                      // observable via the event's resolved_bill_txn_id flipping
+                      // + subsequent recompute; alert covers the immediate feedback.
+                      const eventById = new Map(qbIngestEvents.map(e => [e.id, e]));
+                      const vendorByListId = new Map(qbVendorsList.map(v => [v.listId, v]));
+                      const newRecords: PushRecord[] = [];
+                      const inelig = new Set(r.skippedIneligible.map(s => s.eventId));
+                      const rejPayEventIds = new Set((payRes?.rejected ?? []).map(rj => (rj.intent.kind === 'pay_bill' ? rj.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const dupPayEventIds = new Set((payRes?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'pay_bill' ? s.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const eligiblePayInOrder = payEventIds.filter(id => !inelig.has(id) && !rejPayEventIds.has(id) && !dupPayEventIds.has(id));
+                      payJobIds.forEach((jobId, i) => {
+                        if (jobId == null) return;
+                        const eventId = eligiblePayInOrder[i];
+                        if (eventId == null) return;
+                        const event = eventById.get(eventId);
+                        if (!event) return;
+                        const vendor = event.counterpartyQbVendorListId ? vendorByListId.get(event.counterpartyQbVendorListId) : null;
+                        newRecords.push({
+                          eventId,
+                          payJobId: jobId,
+                          verifyJobId: r.verifyJobIdByPayJobId[jobId] ?? null,
+                          billTxnId: event.resolvedBillTxnId ?? '',
+                          expectedAmount: event.amount,
+                          expectedVendor: vendor?.name ?? event.counterpartyRaw,
+                          pushedAt: new Date().toISOString(),
+                        });
+                      });
+                      // Phase 3 one-click chain: also track the chained pay+verify
+                      // jobs from intuitCreateBill so the status pane surfaces the
+                      // whole flow (bill_add is upstream but the pay job is what
+                      // shows the money-moved state — same UX shape).
+                      const chainedPay = createRes?.chainedPayJobIdByBillAddJobId ?? {};
+                      const chainedVerify = createRes?.chainedVerifyJobIdByPayJobId ?? {};
+                      const inelig2 = new Set(r.skippedIneligible.map(s => s.eventId));
+                      const eligibleCreateInOrder = createEventIds.filter(id => !inelig2.has(id));
+                      createJobIds.forEach((billAddJobId, i) => {
+                        if (billAddJobId == null) return;
+                        const eventId = eligibleCreateInOrder[i];
+                        if (eventId == null) return;
+                        const event = eventById.get(eventId);
+                        if (!event) return;
+                        const chainedPayId = chainedPay[billAddJobId];
+                        if (chainedPayId == null) return;
+                        const vendor = event.counterpartyQbVendorListId ? vendorByListId.get(event.counterpartyQbVendorListId) : null;
+                        newRecords.push({
+                          eventId,
+                          payJobId: chainedPayId,
+                          verifyJobId: chainedVerify[chainedPayId] ?? null,
+                          billTxnId: '',   // hydrated on parent bill_add drain
+                          expectedAmount: event.amount,
+                          expectedVendor: vendor?.name ?? event.counterpartyRaw,
+                          pushedAt: new Date().toISOString(),
+                        });
+                      });
+                      // Check pushes: enqueue status-pane records too. No bill mirror
+                      // or verify chain — status pane branches on kind='check' so the
+                      // record flips to verified-ok as soon as check_add drains.
+                      const checkJobIds = checkRes?.jobIds ?? [];
+                      const inelig3 = new Set((checkRes?.skippedIneligible ?? []).map(s => s.eventId));
+                      const rejCheckEventIds = new Set((checkRes?.rejected ?? []).map(rj => (rj.intent.kind === 'check_expense' ? rj.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const dupCheckEventIds = new Set((checkRes?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'check_expense' ? s.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
+                      const eligibleCheckInOrder = checkEventIds.filter(id => !inelig3.has(id) && !rejCheckEventIds.has(id) && !dupCheckEventIds.has(id));
+                      const checkPayeeByKey = new Map<string, string>();
+                      for (const m of qbVendorMappings) {
+                        if (m.payeeFullName) checkPayeeByKey.set(`${m.source} ${m.counterpartyPattern}`, m.payeeFullName);
+                      }
+                      checkJobIds.forEach((jobId, i) => {
+                        if (jobId == null) return;
+                        const eventId = eligibleCheckInOrder[i];
+                        if (eventId == null) return;
+                        const event = eventById.get(eventId);
+                        if (!event) return;
+                        const displayName = checkPayeeByKey.get(`${event.source} ${event.counterpartyRaw}`) ?? event.counterpartyRaw;
+                        newRecords.push({
+                          eventId,
+                          payJobId: jobId,
+                          verifyJobId: null,
+                          billTxnId: '',
+                          expectedAmount: event.amount,
+                          expectedVendor: displayName,
+                          pushedAt: new Date().toISOString(),
+                          kind: 'check',
+                        });
+                      });
+                      setQbPushRecords(prev => [...prev, ...newRecords]);
+
+                      const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
+                      const createEnqueued = createJobIds.filter((id): id is number => id != null).length;
+                      const checkEnqueued = checkJobIds.filter((id): id is number => id != null).length;
+                      const parts: string[] = [];
+                      if (payEnqueued > 0) parts.push(`${payEnqueued} pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
+                      if (createEnqueued > 0) parts.push(`${createEnqueued} bill_add job${createEnqueued === 1 ? '' : 's'} enqueued (G7b — wait for drain, then Recompute + push payment step).`);
+                      if (checkEnqueued > 0) parts.push(`${checkEnqueued} check_add job${checkEnqueued === 1 ? '' : 's'} enqueued (direct expense — verify in QB after drain).`);
+                      if (parts.length === 0) parts.push(`0 jobs enqueued.`);
+                      void enqueued;
+                      if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
+                      if (r.skippedDuplicate.length > 0) parts.push(`${r.skippedDuplicate.length} skipped (already done or in-flight).`);
+                      if (r.rejected.length > 0) parts.push(`${r.rejected.length} rejected by invariants.`);
+                      const detail = [
+                        ...r.skippedIneligible.map(s => `• event ${s.eventId}: ${s.reason}`),
+                        ...r.skippedDuplicate.map(s => `• ${s.reason}`),
+                        ...r.rejected.map(rj => `• ${rj.invariant}: ${rj.reason}`),
+                      ].slice(0, 12).join('\n');
+                      alert(`Pushed to QuickBooks queue.\n\n${parts.join(' ')}${detail ? '\n\n' + detail : ''}`);
+                      void loadQbIngestEvents();
+                    } catch (e) {
+                      console.error('[G7a] pushIntuitPayBill failed', e);
+                      alert(`Push failed: ${(e as Error).message}`);
+                    }
+                  }}
+                  onFixMapping={(counterparty, source) => {
+                    setQbInboxExpanded(prev => ({ ...prev, pending: true }));
+                    openMapWidget(counterparty, source);
+                  }}
+                />
+
+                {/* Missing QB bills — approved invoices lacking a QB Bill. Purely
+                    audit / visibility. No writes. Read-only cross-check between
+                    invoices and qb_mirror. */}
+                {(() => {
+                  const totalAmt = missingBills.reduce((s, m) => s + m.invoice.totalAmount, 0);
+                  return (
+                    <div className="mb-4 border border-amber-200 rounded-lg overflow-hidden bg-amber-50/40">
+                      <button
+                        onClick={() => toggle('missing_bills')}
+                        className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40 text-left"
+                      >
+                        <div>
+                          <span className="font-semibold text-amber-900">Missing QB bills — approved invoices without a Bill in QB</span>
+                          <span className="ml-2 text-sm text-amber-800">· {missingBills.length} invoice{missingBills.length === 1 ? '' : 's'}</span>
+                          {missingBills.length > 0 && (
+                            <span className="ml-2 text-sm text-amber-800">· ${totalAmt.toFixed(2)}</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</span>
+                      </button>
+                      {qbInboxExpanded['missing_bills'] && (
+                        <div>
+                          {missingBills.length === 0 ? (
+                            <p className="p-4 text-sm text-gray-500 italic">All approved invoices (period_end ≥ {INTUIT_PRE_OUR_SYSTEM_CUTOFF}) have a matching Bill in QB.</p>
+                          ) : (
+                            <>
+                              <p className="px-4 pt-3 text-xs text-gray-600 italic">
+                                Approved invoices in our system with no matching Bill in <code>qb_mirror</code>.
+                                Intuit path: bill gets created on next payment push. Convera path: bill gets created by the batch script.
+                              </p>
+                              <table className="w-full text-xs">
+                                <thead className="bg-white text-gray-500 border-t border-b border-amber-200">
+                                  <tr>
+                                    <th className="px-3 py-1.5 text-left">Period end</th>
+                                    <th className="px-3 py-1.5 text-left">Contractor</th>
+                                    <th className="px-3 py-1.5 text-left">Invoice #</th>
+                                    <th className="px-3 py-1.5 text-right">Amount</th>
+                                    <th className="px-3 py-1.5 text-left">Path</th>
+                                    <th className="px-3 py-1.5 text-left">QB vendor</th>
+                                    <th className="px-3 py-1.5 text-left">Next action</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {missingBills.map(m => {
+                                    const pathClass = m.paymentPath === 'Intuit' ? 'bg-green-50 text-green-700'
+                                                    : m.paymentPath === 'Convera' ? 'bg-purple-50 text-purple-700'
+                                                    : 'bg-gray-100 text-gray-500';
+                                    const nextAction = !m.vendorMapped
+                                      ? <span className="text-red-600">map QB vendor first</span>
+                                      : m.paymentPath === 'Intuit'
+                                        ? <span className="text-gray-600">bill created at next Intuit payment</span>
+                                        : m.paymentPath === 'Convera'
+                                          ? <span className="text-gray-600">bill created by Convera batch</span>
+                                          : <span className="text-red-600">assign payment method</span>;
+                                    return (
+                                      <tr key={m.invoice.id} className="border-t border-amber-100 hover:bg-amber-100/30">
+                                        <td className="px-3 py-1.5 font-mono">{m.invoice.periodEnd}</td>
+                                        <td className="px-3 py-1.5">{m.invoice.userName}</td>
+                                        <td className="px-3 py-1.5 font-mono">{m.invoice.invoiceNumber}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono">${m.invoice.totalAmount.toFixed(2)}</td>
+                                        <td className="px-3 py-1.5"><span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${pathClass}`}>{m.paymentPath}</span></td>
+                                        <td className="px-3 py-1.5 text-gray-600">{m.qbVendorName || <span className="text-red-500">— unmapped —</span>}</td>
+                                        <td className="px-3 py-1.5">{nextAction}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => (
+                  <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                    <button onClick={() => toggle(g.key)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left">
+                      <div>
+                        <span className="font-semibold text-gray-800">{g.title}</span>
+                        <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
+                        {g.events.length > 0 && (
+                          <span className="ml-2 text-sm text-gray-500">· ${g.events.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}</span>
+                        )}
+                      </div>
+                      <span className="text-xs text-gray-400">{qbInboxExpanded[g.key] ? '▼' : '▶'}</span>
+                    </button>
+                    {qbInboxExpanded[g.key] && (
+                      <div>
+                        {g.events.length === 0 ? (
+                          <div className="p-4 text-sm text-gray-500 italic">{g.hint}</div>
+                        ) : g.key === 'pending' ? (
+                          <>
+                            <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint} Map each counterparty once — future imports auto-classify.</p>
+                            <div className="p-3 space-y-2">
+                              {(() => {
+                                // Sub-group pending events by (source, counterpartyRaw) so accountant maps once per vendor.
+                                const groupsByCp = new Map<string, { source: string; counterparty: string; events: QbIngestEvent[]; total: number }>();
+                                for (const e of g.events) {
+                                  const key = `${e.source}||${e.counterpartyRaw}`;
+                                  const cur = groupsByCp.get(key) ?? { source: e.source, counterparty: e.counterpartyRaw, events: [], total: 0 };
+                                  cur.events.push(e);
+                                  cur.total += e.amount;
+                                  groupsByCp.set(key, cur);
+                                }
+                                const list = [...groupsByCp.values()].sort((a, b) => a.counterparty.localeCompare(b.counterparty));
+                                return list.map(grp => {
+                                  const widgetOpen = mapVendorOpenFor === grp.counterparty;
+                                  const bankAccounts = qbAccountsList.filter(a => a.accountType === 'Bank' && a.isActive);
+                                  const expenseAccounts = qbAccountsList.filter(a => (a.accountType === 'Expense' || a.accountType === 'CostOfGoodsSold' || a.accountType === 'OtherExpense') && a.isActive);
+                                  const vendorMatches = qbVendorsList
+                                    .filter(v => v.isActive && (!mapForm.vendorSearch || v.name.toLowerCase().includes(mapForm.vendorSearch.toLowerCase())))
+                                    .slice(0, 20);
+                                  const chosenVendor = qbVendorsList.find(v => v.listId === mapForm.vendorListId);
+                                  return (
+                                    <div key={grp.counterparty} className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                                      <div className="flex items-center justify-between px-3 py-2 bg-amber-50 border-b border-amber-100">
+                                        <div>
+                                          <span className="font-medium text-gray-800">{grp.counterparty}</span>
+                                          <span className="ml-2 text-xs text-gray-500">{sourceLabel(grp.source)} · {grp.events.length} event{grp.events.length === 1 ? '' : 's'} · ${grp.total.toFixed(2)}</span>
+                                        </div>
+                                        {!widgetOpen && (
+                                          <button onClick={() => openMapWidget(grp.counterparty, grp.source)} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">Map vendor</button>
+                                        )}
+                                      </div>
+                                      {widgetOpen && (
+                                        <div className="p-3 space-y-3 bg-white border-b border-gray-200">
+                                          <div>
+                                            <label className="block text-xs font-medium text-gray-600 mb-1">Action</label>
+                                            <div className="flex flex-wrap gap-2 text-xs">
+                                              {(['bill_pmt','bill_add_and_pmt','check','ignore'] as QbIngestKind[]).map(k => (
+                                                <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.kind === k ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                                                  <input type="radio" className="hidden" checked={mapForm.kind === k} onChange={() => setMapForm(f => ({ ...f, kind: k }))} />
+                                                  {({ bill_pmt: 'Pay Bill', bill_add_and_pmt: 'Create Bill + Pay', check: 'Check', ignore: 'Ignore' } as Record<string, string>)[k]}
+                                                </label>
+                                              ))}
+                                            </div>
+                                          </div>
+                                          {mapForm.kind !== 'ignore' && (
+                                            <>
+                                              <div>
+                                                <label className="block text-xs font-medium text-gray-600 mb-1">
+                                                  QB vendor{mapForm.kind === 'check' ? ' (optional — leave blank if payee is OtherName/Employee)' : ''}
+                                                </label>
+                                                {chosenVendor ? (
+                                                  <div className="flex items-center gap-2">
+                                                    <span className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded text-xs font-mono">{chosenVendor.name}</span>
+                                                    <button onClick={() => setMapForm(f => ({ ...f, vendorListId: '', vendorSearch: '' }))} className="text-xs text-red-500 hover:underline">clear</button>
+                                                  </div>
+                                                ) : (
+                                                  <>
+                                                    <input type="text" placeholder="Search vendors…" value={mapForm.vendorSearch} onChange={e => setMapForm(f => ({ ...f, vendorSearch: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs mb-1" />
+                                                    <div className="max-h-32 overflow-y-auto border border-gray-200 rounded text-xs divide-y divide-gray-100">
+                                                      {vendorMatches.length === 0 && <div className="p-2 text-gray-400">no matches</div>}
+                                                      {vendorMatches.map(v => (
+                                                        <button key={v.listId} onClick={() => setMapForm(f => ({ ...f, vendorListId: v.listId, vendorSearch: '' }))} className="w-full text-left px-2 py-1 hover:bg-indigo-50">{v.name}</button>
+                                                      ))}
+                                                    </div>
+                                                  </>
+                                                )}
+                                              </div>
+                                              {mapForm.kind === 'check' && !mapForm.vendorListId && (
+                                                <div className="p-2 bg-amber-50 border border-amber-200 rounded space-y-2">
+                                                  <div className="text-xs text-amber-800 font-medium">Payee not in Vendors list</div>
+                                                  <div className="text-xs text-amber-700">
+                                                    For Write-Check payees like OtherName / Employee / Customer entities. qbXML resolves the name across all QB payee lists — enter the exact FullName as it appears in QB.
+                                                  </div>
+                                                  <div>
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">Payee full name</label>
+                                                    <input
+                                                      type="text"
+                                                      placeholder="e.g. Lucien C Pinto"
+                                                      value={mapForm.payeeFullName}
+                                                      onChange={e => setMapForm(f => ({ ...f, payeeFullName: e.target.value }))}
+                                                      className="w-full px-2 py-1 border border-amber-300 rounded text-xs bg-white"
+                                                    />
+                                                  </div>
+                                                  <div>
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">Which QB list?</label>
+                                                    <div className="flex flex-wrap gap-2 text-xs">
+                                                      {(['OtherName','Employee','Customer'] as QbPayeeListKind[]).map(k => (
+                                                        <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.payeeListKind === k ? 'bg-amber-600 text-white border-amber-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                                                          <input type="radio" className="hidden" checked={mapForm.payeeListKind === k} onChange={() => setMapForm(f => ({ ...f, payeeListKind: k }))} />
+                                                          {k}
+                                                        </label>
+                                                      ))}
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              )}
+                                              <div>
+                                                <label className="block text-xs font-medium text-gray-600 mb-1">Bank account</label>
+                                                <select value={mapForm.bankListId} onChange={e => setMapForm(f => ({ ...f, bankListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
+                                                  <option value="">— pick a bank —</option>
+                                                  {bankAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
+                                                </select>
+                                              </div>
+                                              {(mapForm.kind === 'check' || mapForm.kind === 'bill_add_and_pmt') && (
+                                                <div>
+                                                  <label className="block text-xs font-medium text-gray-600 mb-1">Expense account</label>
+                                                  <select value={mapForm.expenseListId} onChange={e => setMapForm(f => ({ ...f, expenseListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">
+                                                    <option value="">— pick an expense account —</option>
+                                                    {expenseAccounts.map(a => <option key={a.listId} value={a.listId}>{a.fullName}</option>)}
+                                                  </select>
+                                                </div>
+                                              )}
+                                            </>
+                                          )}
+                                          {mapForm.kind === 'ignore' && (
+                                            <div className="p-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+                                              Ignore means these events (all {grp.events.length} for {grp.counterparty}) will never be pushed to QB. Accountant handles them separately.
+                                            </div>
+                                          )}
+                                          <div className="flex justify-end gap-2 pt-1">
+                                            <button onClick={() => setMapVendorOpenFor(null)} className="text-xs px-3 py-1 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                                            <button onClick={() => saveVendorMapping(grp.counterparty, grp.source)} disabled={mapSaving} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">{mapSaving ? 'Saving…' : `Save & apply to ${grp.events.length}`}</button>
+                                          </div>
+                                        </div>
+                                      )}
+                                      <details className="text-xs">
+                                        <summary className="px-3 py-1.5 cursor-pointer text-gray-500 hover:bg-gray-50">Show {grp.events.length} event{grp.events.length === 1 ? '' : 's'}</summary>
+                                        <table className="w-full">
+                                          <tbody>
+                                            {grp.events.map(e => (
+                                              <tr key={e.id} className="border-t border-gray-100">
+                                                <td className="px-3 py-1 font-mono w-24">{e.txnDate}</td>
+                                                <td className="px-3 py-1 text-right font-mono w-24">${e.amount.toFixed(2)}</td>
+                                                <td className="px-3 py-1 text-gray-600">{e.memo || '—'}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </details>
+                                    </div>
+                                  );
+                                });
+                              })()}
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint}</p>
+                            <table className="w-full text-xs">
+                              <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
+                                <tr>
+                                  <th className="px-3 py-1.5 text-left">Src</th>
+                                  <th className="px-3 py-1.5 text-left">Date</th>
+                                  <th className="px-3 py-1.5 text-left">Counterparty</th>
+                                  <th className="px-3 py-1.5 text-right">Amount</th>
+                                  <th className="px-3 py-1.5 text-left">Memo</th>
+                                  <th className="px-3 py-1.5 text-left" title="Reconciler decision — authoritative for push. Old amount-only matcher output removed 2026-08-21.">Resolved</th>
+                                  <th className="px-3 py-1.5 text-left" title="Invoice-link strength. exact-txn is deterministic (invoice.qb_bill_txn_id matches). Only exact-txn / exact-ref events are pushable.">Provenance</th>
+                                  <th className="px-3 py-1.5 text-left">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {g.events.map(e => {
+                                  const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
+                                  const badge = (bg: string, fg: string, text: string, title?: string) => (
+                                    <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
+                                  );
+                                  let resolvedCell: React.ReactNode = <span className="text-gray-400">—</span>;
+                                  if (e.resolvedAction === 'pre_our_system') {
+                                    resolvedCell = badge('bg-gray-100', 'text-gray-500', 'pre-cutoff · in QB', e.resolvedReason ?? undefined);
+                                  } else if (e.resolvedAction === 'already_done') {
+                                    resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid', e.resolvedBillTxnId ?? undefined);
+                                  } else if (e.resolvedAction === 'pay_existing_bill') {
+                                    resolvedCell = badge('bg-yellow-100', 'text-yellow-700', resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill', e.resolvedBillTxnId ?? undefined);
+                                  } else if (e.resolvedAction === 'create_bill_then_pay') {
+                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will create bill + pay');
+                                  } else if (e.resolvedAction === 'check') {
+                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will write check');
+                                  } else if (e.resolvedAction === 'held') {
+                                    resolvedCell = badge('bg-red-100', 'text-red-700', 'held', e.resolvedReason ?? undefined);
+                                  }
+                                  // Provenance chip — shown for events with an invoice concept.
+                                  // Mirrors QbPushPreviewModal so accountant sees the invoice-link
+                                  // strength in the same view where they'd trigger a push.
+                                  const provRelevant = e.resolvedAction != null && e.resolvedAction !== 'pre_our_system' && e.resolvedAction !== 'check' && e.resolvedAction !== 'held';
+                                  const provCell: React.ReactNode = provRelevant && e.matchProvenance
+                                    ? badge(
+                                        e.matchProvenance === 'exact-txn'   ? 'bg-emerald-100' :
+                                        e.matchProvenance === 'exact-ref'   ? 'bg-teal-100' :
+                                        e.matchProvenance === 'created-pay' ? 'bg-violet-100' :
+                                        e.matchProvenance === 'fuzzy'       ? 'bg-amber-100' :
+                                                                              'bg-gray-100',
+                                        e.matchProvenance === 'exact-txn'   ? 'text-emerald-800' :
+                                        e.matchProvenance === 'exact-ref'   ? 'text-teal-800' :
+                                        e.matchProvenance === 'created-pay' ? 'text-violet-800' :
+                                        e.matchProvenance === 'fuzzy'       ? 'text-amber-800' :
+                                                                              'text-gray-600',
+                                        e.matchProvenance === 'exact-txn'   ? '🔒 exact-txn' :
+                                        e.matchProvenance === 'exact-ref'   ? '✓ exact-ref' :
+                                        e.matchProvenance === 'created-pay' ? '🆕 created-pay' :
+                                        e.matchProvenance === 'fuzzy'       ? '~ fuzzy' :
+                                                                              '— empty',
+                                        e.matchProvenance === 'exact-txn'   ? 'invoice.qb_bill_txn_id matches — deterministic 1:1 link' :
+                                        e.matchProvenance === 'exact-ref'   ? 'memo names this invoice by number' :
+                                        e.matchProvenance === 'created-pay' ? 'we created this bill (G7b orphan) and paid it — mapping-authorized, no invoice link expected' :
+                                        e.matchProvenance === 'fuzzy'       ? 'matched by vendor+amount only — verify before pushing' :
+                                                                              'no invoice link',
+                                      )
+                                    : <span className="text-gray-300">—</span>;
+                                  return (
+                                    <tr key={e.id} className="border-t border-gray-100 hover:bg-indigo-50/40">
+                                      <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
+                                      <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
+                                      <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
+                                      <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
+                                      <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
+                                      <td className="px-3 py-1.5">{resolvedCell}</td>
+                                      <td className="px-3 py-1.5">{provCell}</td>
+                                      <td className="px-3 py-1.5">
+                                        {e.resolvedAction === 'pre_our_system'
+                                          ? <span className="text-gray-500 italic">will not push</span>
+                                          : <span className="text-gray-500">{e.status}</span>}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
           {accountantTab === 'profiles' && (() => {
             const accountantManagedRoles = ['timesheetuser', 'vendormanager'];
             const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
@@ -10826,6 +12503,7 @@ const TimesheetSystem = () => {
                     <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-5 w-fit">
                       <button onClick={() => { setConveraTab('quickbooks'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'quickbooks' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>QuickBooks Export</button>
                       <button onClick={() => { setConveraTab('intuit'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuit' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Intuit Emails</button>
+                      <button onClick={() => { setConveraTab('intuitXlsx'); setConveraError(''); setIntuitXlsxResult(null); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'intuitXlsx' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Intuit XLSX</button>
                       <button onClick={() => { setConveraTab('beneficiaries'); setConveraError(''); }} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${converaTab === 'beneficiaries' ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>Convera Beneficiaries</button>
                     </div>
                   )}
@@ -10876,6 +12554,91 @@ const TimesheetSystem = () => {
                         <button onClick={parseIntuitEmails} disabled={!intuitText.trim()} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
                           <FileText className="w-4 h-4" /> Parse Emails
                         </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Intuit XLSX → QB Automation Inbox (Slice B of QB Automation Layer) */}
+                  {converaRows.length === 0 && converaTab === 'intuitXlsx' && (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-1">Upload the <strong>Intuit BillPay payment report</strong> (.xlsx) — the list of payments Intuit sent on your behalf. Rows land in the <strong>QB Automation Inbox</strong> for classification and push into QuickBooks.</p>
+                      <p className="text-xs text-gray-400 mb-4">Source: Intuit (not QuickBooks). Each row is a payment Intuit made; we don't require anything to be in QB yet.</p>
+                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
+                        {intuitXlsxFile ? (
+                          <div className="flex items-center justify-center gap-2 text-indigo-700">
+                            <FileText className="w-5 h-5" />
+                            <span className="text-sm font-medium">{intuitXlsxFile.name}</span>
+                            <button onClick={() => { setIntuitXlsxFile(null); setIntuitXlsxPreview(null); }} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
+                          </div>
+                        ) : (
+                          <label className="cursor-pointer">
+                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
+                            <p className="text-sm text-gray-600">Click to select .xlsx file</p>
+                            <input type="file" accept=".xlsx" className="hidden" onChange={e => { setIntuitXlsxFile(e.target.files?.[0] ?? null); setIntuitXlsxPreview(null); setIntuitXlsxResult(null); }} />
+                          </label>
+                        )}
+                      </div>
+                      {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
+                      {intuitXlsxResult && (
+                        <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+                          ✓ Imported <strong>{intuitXlsxResult.inserted}</strong> event{intuitXlsxResult.inserted === 1 ? '' : 's'} to the Inbox
+                          {intuitXlsxResult.skipped > 0 && <> · skipped <strong>{intuitXlsxResult.skipped}</strong> duplicate{intuitXlsxResult.skipped === 1 ? '' : 's'} (already ingested)</>}.
+                        </div>
+                      )}
+                      {intuitXlsxPreview && intuitXlsxPreview.length > 0 && (() => {
+                        const matched = intuitXlsxPreview.filter(r => r.matchedInvoiceIds.length > 0).length;
+                        const unmatched = intuitXlsxPreview.length - matched;
+                        return (
+                          <div className="mb-3">
+                            <div className="text-sm text-gray-700 mb-2">
+                              <strong>{intuitXlsxPreview.length}</strong> payment row{intuitXlsxPreview.length === 1 ? '' : 's'} detected · <span className="text-green-700">{matched} matched to invoices</span>{unmatched > 0 && <> · <span className="text-amber-700">{unmatched} unmatched</span></>}
+                            </div>
+                            <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto">
+                              <table className="w-full text-xs">
+                                <thead className="bg-gray-50 text-gray-600 sticky top-0">
+                                  <tr>
+                                    <th className="px-2 py-1.5 text-left">Date</th>
+                                    <th className="px-2 py-1.5 text-left">Vendor</th>
+                                    <th className="px-2 py-1.5 text-right">Amount</th>
+                                    <th className="px-2 py-1.5 text-left">Memo</th>
+                                    <th className="px-2 py-1.5 text-left">Match</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {intuitXlsxPreview.map((r, i) => (
+                                    <tr key={i} className="border-t border-gray-100">
+                                      <td className="px-2 py-1 font-mono">{r.date}</td>
+                                      <td className="px-2 py-1">{r.name}</td>
+                                      <td className="px-2 py-1 text-right font-mono">${r.amount.toFixed(2)}</td>
+                                      <td className="px-2 py-1 text-gray-600 truncate max-w-xs" title={r.memo}>{r.memo || '—'}</td>
+                                      <td className="px-2 py-1">
+                                        {r.matchedInvoiceIds.length > 0
+                                          ? <span className="text-green-700">✓ {r.matchedInvoiceIds.length} invoice{r.matchedInvoiceIds.length === 1 ? '' : 's'}</span>
+                                          : r.invoiceRefs.length > 0
+                                            ? <span className="text-amber-700">? {r.invoiceRefs.join(', ')} not found</span>
+                                            : <span className="text-gray-400">no invoice ref</span>}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      <div className="flex justify-end gap-2">
+                        {intuitXlsxPreview ? (
+                          <>
+                            <button onClick={() => setIntuitXlsxPreview(null)} className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
+                            <button onClick={commitIntuitXlsxToInbox} disabled={intuitXlsxImporting} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                              {intuitXlsxImporting ? 'Importing…' : `Import ${intuitXlsxPreview.length} to Inbox`}
+                            </button>
+                          </>
+                        ) : (
+                          <button onClick={parseIntuitXlsxPreview} disabled={!intuitXlsxFile} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
+                            <FileText className="w-4 h-4" /> Parse & Preview
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}

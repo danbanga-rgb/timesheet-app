@@ -41,6 +41,31 @@ export interface BillQueryRqInput {
   maxReturned?: number;
 }
 
+/** Result of parseBillPaymentCheckQueryRs — one entry per matched payment.
+ *  All fields optional except txnId + refNumber (only known-required). Callers
+ *  that need e.g. appliedToBills should request IncludeLineItems=true in the
+ *  BillPaymentCheckQueryRq payload; otherwise QB returns none. */
+export interface BillPaymentCheckQueryResult {
+  txnId: string;
+  editSequence: string;
+  refNumber?: string;
+  txnDate?: string;
+  amount?: number;
+  memo?: string;
+  timeModified?: string;
+  payeeEntityListId?: string;
+  payeeEntityFullName?: string;
+  bankAccountListId?: string;
+  bankAccountFullName?: string;
+  /** AppliedToTxnRet[] blocks — each records one bill this payment settled.
+   *  Present only if the query requested IncludeLineItems=true. Empty otherwise. */
+  appliedToBills: Array<{
+    billTxnId: string;
+    amount: number;
+    refNumber?: string;
+  }>;
+}
+
 /** Result of parseBillQueryRs — one entry per matched bill. */
 export interface BillQueryResult {
   refNumber: string;
@@ -50,6 +75,24 @@ export interface BillQueryResult {
    *  grouped bills, where refNumber alone doesn't identify the target invoices —
    *  every invoice for that vendor in that period_end month shares the same bill. */
   vendorFullName?: string;
+  /** VendorRef.ListID — QB's stable vendor ID. Needed for qb_open_bills_snapshot
+   *  PK (which keys on vendor_list_id, not name, since names can be edited). */
+  vendorListId?: string;
+  /** Bill date from QB (TxnDate). YYYY-MM-DD. Optional — some responses omit. */
+  txnDate?: string;
+  /** Bill due date. YYYY-MM-DD. Optional. */
+  dueDate?: string;
+  /** Total bill amount (QB's <AmountDue> — despite the name this is the ORIGINAL
+   *  amount at BillAdd time, not what's currently owed). */
+  amount?: number;
+  /** Currently outstanding balance (QB's <OpenAmount>). 0 = fully paid. This is
+   *  the field to check for reconciliation ("did QB already pay this?"). */
+  openAmount?: number;
+  /** QB's <IsPaid> boolean. Equivalent to openAmount === 0 but the DB carries
+   *  the explicit flag for tolerance if QB ever emits inconsistent values. */
+  isPaid?: boolean;
+  /** QB's <TimeModified> — needed later for delta-read cursors. */
+  timeModified?: string;
 }
 
 /** BillAddRq: create a Vendor Bill in QB.
@@ -99,6 +142,66 @@ export interface BillAddResult {
   txnId: string;
   editSequence: string;
   refNumber: string;
+}
+
+/** CheckAddRq: create a Check transaction in QB — direct expense payment
+ *  from a bank account to a payee, with no A/P Bill involved. Distinct from
+ *  BillPaymentCheckAddRq (which pays down existing Bills). Used for the
+ *  passthrough / direct-expense flow — e.g. Lucien C Pinto's Intuit payments
+ *  posted straight to Administration salaries.
+ *
+ *  Represents ONE check to ONE payee, with 1..N expense lines. Multi-line
+ *  supports splitting a single check across categories (e.g. rent + utilities
+ *  in one check) but the MVP flow always writes single-line.
+ *
+ *  qbXML element ordering inside <CheckAdd> per QB SDK v13:
+ *
+ *    AccountRef → PayeeEntityRef → RefNumber? → TxnDate → Memo? →
+ *    Address? → IsToBePrinted? → IsTaxIncluded? → SalesTaxCodeRef? →
+ *    ExpenseLineAdd+
+ *
+ *  We only support the fields needed for direct-expense passthrough. Item
+ *  lines are for inventory purchases (not our use case).
+ */
+export interface CheckAddRqInput {
+  /** Bank account paying out. FullName from qb_accounts.full_name (e.g.
+   *  "BANK/CASH:8220 - Key Point Checking"). Required. */
+  bankAccountName: string;
+  /** Payee — QB vendor or other entity name. Required. */
+  payeeVendorName: string;
+  /** Check date. YYYY-MM-DD. Required. */
+  txnDate: string;
+  /** Check number / reference. Optional. */
+  refNumber?: string;
+  /** Check-level memo. Optional. */
+  memo?: string;
+  /** Whether QB should queue this for printing. Leave unset (default) for
+   *  electronic-only checks like Intuit BillPay passthroughs. */
+  isToBePrinted?: boolean;
+  /** One or more expense-account line splits. Required, min 1. Sum of line
+   *  amounts equals the total check amount. */
+  lines: CheckAddRqLine[];
+  /** Optional request correlation ID. */
+  requestId?: string;
+}
+
+export interface CheckAddRqLine {
+  /** Expense account FullName from qb_accounts.full_name (e.g.
+   *  "Payroll Expenses:Administration salaries"). Required. */
+  expenseAccountName: string;
+  /** Positive amount (debit to the expense account). Required. */
+  amount: number;
+  /** Per-line memo. Optional. */
+  memo?: string;
+}
+
+/** Result of parseCheckAddRs — the newly-created check's identity. RefNumber
+ *  is optional because it's optional on the request (unlike BillAdd where
+ *  it's always echoed). */
+export interface CheckAddResult {
+  txnId: string;
+  editSequence: string;
+  refNumber?: string;
 }
 
 /** BillPaymentCheckAddRq: record a check-style bill payment (Convera wire, ACH,
@@ -278,6 +381,18 @@ export interface ParsedBillAddRs {
 export interface ParsedBillPaymentCheckAddRs {
   status: QbxmlResponseStatus;
   result: BillPaymentCheckAddResult | null;
+}
+
+/** Return shape of parseBillPaymentCheckQueryRs. Zero results = valid (no matches). */
+export interface ParsedBillPaymentCheckQueryRs {
+  status: QbxmlResponseStatus;
+  results: BillPaymentCheckQueryResult[];
+}
+
+/** Return shape of parseCheckAddRs. `result` is null on any non-success status. */
+export interface ParsedCheckAddRs {
+  status: QbxmlResponseStatus;
+  result: CheckAddResult | null;
 }
 
 /** VendorQueryRq: enumerate vendors from QB Desktop's vendor list.

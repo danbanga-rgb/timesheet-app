@@ -28,13 +28,16 @@ import {
   buildBillAddRq,
   buildBillPaymentCheckAddRq,
   buildBillQueryRq,
+  buildCheckAddRq,
   buildVendorQueryRq,
 } from './qbxml/builders.ts';
 import {
   parseAccountQueryRs,
   parseBillAddRs,
   parseBillPaymentCheckAddRs,
+  parseBillPaymentCheckQueryRs,
   parseBillQueryRs,
+  parseCheckAddRs,
   parseVendorQueryRs,
   unwrapQbxmlResponses,
 } from './qbxml/parsers.ts';
@@ -43,6 +46,7 @@ import type {
   BillAddRqInput,
   BillPaymentCheckAddRqInput,
   BillQueryRqInput,
+  CheckAddRqInput,
   VendorQueryRqInput,
 } from './qbxml/types.ts';
 import { validatePayload } from './qbxml/job-payloads.ts';
@@ -57,7 +61,7 @@ import {
 
 interface JobRow {
   id: number;
-  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'account_query' | 'vendor_query';
+  kind: 'bill_query' | 'bill_add' | 'bill_pmt_add' | 'check_add' | 'account_query' | 'vendor_query';
   payload: Record<string, unknown>;
   depends_on: number[] | null;
   status: 'pending' | 'in_flight' | 'done' | 'error' | 'skipped';
@@ -131,6 +135,9 @@ function renderJobRequest(job: JobRow): string {
       break;
     case 'bill_pmt_add':
       element = buildBillPaymentCheckAddRq({ ...(job.payload as BillPaymentCheckAddRqInput), requestId });
+      break;
+    case 'check_add':
+      element = buildCheckAddRq({ ...(job.payload as CheckAddRqInput), requestId });
       break;
     case 'account_query':
       element = buildAccountQueryRq({ ...(job.payload as AccountQueryRqInput), requestId });
@@ -228,6 +235,15 @@ async function persistJobResponse(
     //       bills we actually wanted to reconcile.)
     const payload = job.payload as BillQueryRqInput;
     const isIteratorMode = !payload.txnIds?.length && !payload.refNumbers?.length;
+    // Verify-chain jobs (bill_query enqueued as a post-push verify by intuitPush
+    // et al.) carry __verify_for_event_id. Their purpose is mirror refresh so
+    // the status pane can see is_settled flip — NOT invoice-linkage persist.
+    // For G7b orphan events (TechAntz) the invoice-side is empty by design;
+    // hard-failing on "no payment_profile matches" would break every verify
+    // for orphan-created bills. Skip invoice-linkage errors in verify mode;
+    // mirror upsert (below) is what matters.
+    const isVerifyJob = (job.payload as { __verify_for_event_id?: number }).__verify_for_event_id != null;
+    const tolerateInvoicePersistMiss = isIteratorMode || isVerifyJob;
     let linked = 0;
     let skippedUnmappedVendor = 0;
     let skippedUnknownInvoice = 0;
@@ -246,7 +262,7 @@ async function persistJobResponse(
         .eq('qb_vendor_name', r.vendorFullName);
       const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
       if (userIds.length === 0) {
-        if (isIteratorMode) { skippedUnmappedVendor++; continue; }
+        if (tolerateInvoicePersistMiss) { skippedUnmappedVendor++; continue; }
         return { ok: false, errorMsg: `BillQuery persist: no payment_profile.qb_vendor_name matches "${r.vendorFullName}" (refNumber=${r.refNumber})` };
       }
       const multi = /^MULTI-(\d{4})-(\d{2})$/.exec(r.refNumber);
@@ -267,7 +283,7 @@ async function persistJobResponse(
         return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${updErr.message}` };
       }
       if (!updated || updated.length === 0) {
-        if (isIteratorMode) { skippedUnknownInvoice++; continue; }
+        if (tolerateInvoicePersistMiss) { skippedUnknownInvoice++; continue; }
         return { ok: false, errorMsg: `BillQuery persist: 0 rows updated for vendor="${r.vendorFullName}" refNumber="${r.refNumber}". Invoice(s) may have been deleted/renumbered after enqueue.` };
       }
       linked += updated.length;
@@ -279,6 +295,44 @@ async function persistJobResponse(
     if (isIteratorMode) {
       console.log(`[bill_query iterator job=${job.id} vendor="${payload.entityVendorName}"] results=${parsed.results.length} linked=${linked} skipped_unmapped_vendor=${skippedUnmappedVendor} skipped_unknown_invoice=${skippedUnknownInvoice}`);
     }
+
+    // Slice G1.1: unified qb_mirror (entity_kind='bill'). Runs alongside the
+    // invoice-linkage above (Convera-critical, preserved). Skips rows missing
+    // OpenAmount/IsPaid — older QB responses may omit them and we shouldn't
+    // record a false "settled/unsettled" state.
+    const mirrorRows = parsed.results
+      .filter(r => r.vendorListId && r.vendorFullName && r.amount != null && r.openAmount != null && r.isPaid != null)
+      .map(r => ({
+        entity_kind: 'bill' as const,
+        entity_ref:  r.txnId,
+        vendor_list_id: r.vendorListId!,
+        ref_number:  r.refNumber,
+        amount:      r.amount!,
+        is_settled:  r.isPaid!,
+        data: {
+          vendor_name:   r.vendorFullName!,
+          open_amount:   r.openAmount!,
+          txn_date:      r.txnDate ?? null,
+          due_date:      r.dueDate ?? null,
+          time_modified: r.timeModified ?? null,
+        },
+        queried_at: new Date().toISOString(),
+      }));
+    if (mirrorRows.length > 0) {
+      const { error: snapErr } = await supabase
+        .from('qb_mirror')
+        .upsert(mirrorRows, { onConflict: 'entity_kind,entity_ref' });
+      if (snapErr) {
+        // Do NOT fail the job on mirror upsert failure — the invoice-linkage
+        // (Convera-critical) already succeeded above. Log for investigation.
+        console.warn(`[bill_query job=${job.id}] qb_mirror upsert failed:`, snapErr.message);
+      } else {
+        console.log(`[bill_query job=${job.id}] qb_mirror upserted ${mirrorRows.length} rows (kind=bill)`);
+      }
+    } else if (parsed.results.length > 0) {
+      console.log(`[bill_query job=${job.id}] qb_mirror skipped — no BillRets had complete open-amount/is-paid fields`);
+    }
+
     return { ok: true, errorMsg: null };
   }
 
@@ -287,12 +341,79 @@ async function persistJobResponse(
     if (!parsed.result) {
       return { ok: false, errorMsg: `BillAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Persist TxnID scoped by (vendor, refNumber) — vendorName is baked into the payload.
-    // Same cross-vendor-collision reasoning as bill_query above.
-    const vendorName = (job.payload as { vendorName?: string }).vendorName;
+    const payload = job.payload as { vendorName?: string; sourceIngestEventId?: number; sourceInvoiceIds?: number[] };
+    const vendorName = payload.vendorName;
     if (!vendorName) {
       return { ok: false, errorMsg: `BillAdd payload missing vendorName; cannot safely persist TxnID for refNumber=${parsed.result.refNumber}` };
     }
+    // Phase 3 one-click chain: hydrate any pending child jobs whose payload
+    // has __hydrate_bill_txn_id_from_dep=this job.id. Their placeholder
+    // billTxnId=null (or txnIds=[null]) gets the freshly-created TxnID.
+    //
+    // NOTE: querying by payload marker, NOT depends_on. The verify bill_query
+    // depends_on the chained pay (not this bill_add), but still needs the
+    // bill TxnID hydrated for its txnIds field. Query the JSONB field directly.
+    const { data: dependents } = await supabase
+      .from('qb_sync_jobs')
+      .select('id, kind, payload')
+      .eq('status', 'pending')
+      .eq('payload->>__hydrate_bill_txn_id_from_dep', String(job.id));
+    for (const dep of ((dependents ?? []) as Array<{ id: number; kind: string; payload: Record<string, unknown> }>)) {
+      const dpay = dep.payload as { applications?: Array<Record<string, unknown>>; txnIds?: Array<string | null> };
+      const nextPayload = { ...dep.payload } as Record<string, unknown>;
+      if (dep.kind === 'bill_pmt_add' && Array.isArray(dpay.applications)) {
+        nextPayload.applications = dpay.applications.map((a, i) =>
+          i === 0 ? { ...a, billTxnId: parsed.result!.txnId } : a,
+        );
+      } else if (dep.kind === 'bill_query' && Array.isArray(dpay.txnIds)) {
+        nextPayload.txnIds = [parsed.result!.txnId];
+      }
+      await supabase.from('qb_sync_jobs').update({ payload: nextPayload }).eq('id', dep.id);
+    }
+
+    // Orphan-create path (G7b): bill_add was triggered by a qb_ingest_event
+    // with no matching invoice in our system. Persist the new bill TxnID onto
+    // the event row so the follow-up pay step and reconciler can find it.
+    // Also seed qb_mirror so reconciler treats the new bill as authoritative.
+    if (payload.sourceIngestEventId != null && (!payload.sourceInvoiceIds || payload.sourceInvoiceIds.length === 0)) {
+      // Also set match_provenance='created-pay' — reconciler won't re-touch
+      // posted-via-push events, so we set the provenance here at the moment
+      // it becomes true (we just created the bill; no invoice-side link
+      // possible; mapping is the authorization). Matches what
+      // computeMatchProvenance would return if it ran on this event.
+      const { error: evErr } = await supabase
+        .from('qb_ingest_events')
+        .update({ resolved_bill_txn_id: parsed.result.txnId, match_provenance: 'created-pay' })
+        .eq('id', payload.sourceIngestEventId);
+      if (evErr) {
+        return { ok: false, errorMsg: `BillAdd orphan persist DB error for event=${payload.sourceIngestEventId} vendor="${vendorName}" refNumber="${parsed.result.refNumber}": ${evErr.message}` };
+      }
+      // Seed mirror row so next reconciler pass sees the bill (avoids a round
+      // trip through bill_query). Full hydration happens on the next scheduled
+      // bill_query anyway. amount/is_settled from payload — bill is definitely
+      // unpaid at creation.
+      const totalAmount = ((payload as unknown) as { lines?: Array<{ amount: number }> }).lines
+        ?.reduce((n, l) => n + Number(l.amount ?? 0), 0) ?? 0;
+      const { data: vendorRow } = await supabase.from('qb_vendors').select('list_id').eq('name', vendorName).limit(1).maybeSingle();
+      if (vendorRow?.list_id) {
+        await supabase.from('qb_mirror').upsert({
+          entity_kind: 'bill',
+          entity_ref: parsed.result.txnId,
+          vendor_list_id: vendorRow.list_id,
+          ref_number: parsed.result.refNumber,
+          amount: totalAmount,
+          is_settled: false,
+          data: {
+            vendor_name: vendorName,
+            txn_date: (payload as unknown as { txnDate?: string }).txnDate ?? null,
+            due_date: (payload as unknown as { dueDate?: string }).dueDate ?? null,
+          },
+          queried_at: new Date().toISOString(),
+        }, { onConflict: 'entity_kind,entity_ref' });
+      }
+      return { ok: true, errorMsg: null };
+    }
+    // Invoice-linked path (original): persist onto invoices matching (vendor, refNumber).
     const { data: pps } = await supabase
       .from('payment_profiles')
       .select('user_id')
@@ -324,23 +445,26 @@ async function persistJobResponse(
     if (!isQueryStatusOk(parsed.status, parsed.accounts.length)) {
       return { ok: false, errorMsg: `AccountQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Upsert each account into qb_accounts. Primary key = list_id (stable across
-    // renames — QB assigns it on create and never changes it). This is the
-    // authoritative snapshot of the accountant's chart of accounts.
+    // Slice G1.1: upsert into unified qb_mirror (entity_kind='account'). Legacy
+    // qb_accounts VIEW still queryable by all consumers (frontend loader, etc).
     if (parsed.accounts.length > 0) {
       const rows = parsed.accounts.map(a => ({
-        list_id:          a.listId,
-        name:             a.name,
-        full_name:        a.fullName,
-        account_type:     a.accountType,
-        parent_full_name: a.parentFullName,
-        is_active:        a.isActive,
-        synced_at:        new Date().toISOString(),
+        entity_kind: 'account' as const,
+        entity_ref:  a.listId,
+        is_active:   a.isActive,
+        data: {
+          full_name:        a.fullName,
+          account_type:     a.accountType,
+          name:             a.name,             // preserved for future consumers
+          parent_full_name: a.parentFullName,   // preserved for future consumers
+        },
+        queried_at: new Date().toISOString(),
       }));
-      const { error } = await supabase.from('qb_accounts').upsert(rows, { onConflict: 'list_id' });
+      const { error } = await supabase.from('qb_mirror').upsert(rows, { onConflict: 'entity_kind,entity_ref' });
       if (error) {
-        return { ok: false, errorMsg: `AccountQuery upsert failed: ${error.message}` };
+        return { ok: false, errorMsg: `AccountQuery qb_mirror upsert failed: ${error.message}` };
       }
+      console.log(`[account_query job=${job.id}] qb_mirror upserted ${rows.length} rows (kind=account)`);
     }
     return { ok: true, errorMsg: null };
   }
@@ -350,23 +474,25 @@ async function persistJobResponse(
     if (!isQueryStatusOk(parsed.status, parsed.vendors.length)) {
       return { ok: false, errorMsg: `VendorQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Upsert each vendor into qb_vendors. Primary key = list_id (stable across
-    // renames — QB assigns it on create and never changes it). Authoritative
-    // snapshot of the accountant's vendor list; consumed by pre-batch verification
-    // (payment_profiles.qb_vendor_name must match a row here before enqueueing
-    // bill_pmt_add / bill_add).
+    // Slice G1.1: upsert into unified qb_mirror (entity_kind='vendor'). Legacy
+    // qb_vendors VIEW still queryable — used by Convera qb-batch-dryrun.cjs,
+    // frontend Slice D mapping widget, and edge fn cross-refs.
     if (parsed.vendors.length > 0) {
       const rows = parsed.vendors.map(v => ({
-        list_id:      v.listId,
-        name:         v.name,
-        company_name: v.companyName,
-        is_active:    v.isActive,
-        synced_at:    new Date().toISOString(),
+        entity_kind: 'vendor' as const,
+        entity_ref:  v.listId,
+        is_active:   v.isActive,
+        data: {
+          name:         v.name,
+          ...(v.companyName ? { company_name: v.companyName } : {}),
+        },
+        queried_at: new Date().toISOString(),
       }));
-      const { error } = await supabase.from('qb_vendors').upsert(rows, { onConflict: 'list_id' });
+      const { error } = await supabase.from('qb_mirror').upsert(rows, { onConflict: 'entity_kind,entity_ref' });
       if (error) {
-        return { ok: false, errorMsg: `VendorQuery upsert failed: ${error.message}` };
+        return { ok: false, errorMsg: `VendorQuery qb_mirror upsert failed: ${error.message}` };
       }
+      console.log(`[vendor_query job=${job.id}] qb_mirror upserted ${rows.length} rows (kind=vendor)`);
     }
     return { ok: true, errorMsg: null };
   }
@@ -376,54 +502,162 @@ async function persistJobResponse(
     if (!parsed.result) {
       return { ok: false, errorMsg: `BillPaymentCheckAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Umbrella-safe persist. A single Convera wire can span multiple vendors
+    const payload = job.payload as {
+      sourceConveraTxnId?: number;
+      sourceIngestEventId?: number;
+      payeeVendorName?: string;
+      applications?: { paymentAmount?: number }[];
+    };
+    // Convera path — umbrella-safe: a single Convera wire can span multiple vendors
     // (BIMOSOFT, Native Teams, Teal) → multiple bill_pmt_add jobs share the same
     // sourceConveraTxnId but produce distinct QB payment TxnIDs. Prior code wrote
     // each to convera_transactions.qb_billpmt_txn_id (last-wins, silently lost the
     // other N-1). We now insert per-(wire, vendor) into convera_transaction_billpmts
     // and keep the old column populated as a "at least one recorded" cache.
-    const payload = job.payload as {
-      sourceConveraTxnId?: number;
-      payeeVendorName?: string;
-      applications?: { paymentAmount?: number }[];
-    };
-    if (payload.sourceConveraTxnId == null) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing sourceConveraTxnId. QB payment created (TxnID=${parsed.result.txnId}) but not linked to any convera_transaction row.` };
+    if (payload.sourceConveraTxnId != null) {
+      if (!payload.payeeVendorName) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing payeeVendorName. QB payment created (TxnID=${parsed.result.txnId}) for wire ${payload.sourceConveraTxnId} but vendor unknown — link table row cannot be built.` };
+      }
+      const paymentAmount = (payload.applications ?? []).reduce((s, a) => s + (Number(a.paymentAmount) || 0), 0);
+      const { error: linkErr } = await supabase
+        .from('convera_transaction_billpmts')
+        .upsert({
+          convera_transaction_id: payload.sourceConveraTxnId,
+          qb_vendor_name:         payload.payeeVendorName,
+          qb_billpmt_txn_id:      parsed.result.txnId,
+          payment_amount:         paymentAmount,
+        }, { onConflict: 'convera_transaction_id,qb_vendor_name' });
+      if (linkErr) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist DB error inserting link row for wire=${payload.sourceConveraTxnId} vendor="${payload.payeeVendorName}": ${linkErr.message}` };
+      }
+      // Legacy single-value cache. Deliberately last-write-wins — we don't check for
+      // an existing value; the link table is authoritative for per-vendor lookups.
+      // This column is a "was ever paid" bit for legacy consumers (matcher_ignore
+      // filter, older UI badges). Drop candidate for a future migration.
+      const { error: cacheErr } = await supabase
+        .from('convera_transactions')
+        .update({ qb_billpmt_txn_id: parsed.result.txnId })
+        .eq('id', payload.sourceConveraTxnId);
+      if (cacheErr) {
+        console.warn(`BillPaymentCheckAdd: link row saved but legacy cache update failed for wire=${payload.sourceConveraTxnId}: ${cacheErr.message}`);
+      }
+      return { ok: true, errorMsg: null };
     }
-    if (!payload.payeeVendorName) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload missing payeeVendorName. QB payment created (TxnID=${parsed.result.txnId}) for wire ${payload.sourceConveraTxnId} but vendor unknown — link table row cannot be built.` };
+    // Intuit path (G7a, 2026-08-21) — persist writes the returned TxnID back
+    // to qb_ingest_events.posted_qb_refs.bill_pmt + flips status to 'posted' +
+    // appends this job id. Mirrors the check_add persist pattern below.
+    // INVARIANTS #18: without status='posted', a re-Push would create a duplicate.
+    if (payload.sourceIngestEventId != null) {
+      const { data: existing, error: readErr } = await supabase
+        .from('qb_ingest_events')
+        .select('posted_qb_refs, qb_sync_job_ids')
+        .eq('id', payload.sourceIngestEventId)
+        .maybeSingle();
+      if (readErr) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist (Intuit) DB read error for event ${payload.sourceIngestEventId}: ${readErr.message}. QB payment created (TxnID=${parsed.result.txnId}) but event row not updated — re-push would duplicate.` };
+      }
+      const existingRefs = (existing as { posted_qb_refs?: Record<string, unknown> } | null)?.posted_qb_refs ?? {};
+      const existingJobIds = (existing as { qb_sync_job_ids?: number[] } | null)?.qb_sync_job_ids ?? [];
+      const nextRefs = { ...existingRefs, bill_pmt: parsed.result.txnId, posted_source: 'push' };
+      const nextJobIds = existingJobIds.includes(job.id) ? existingJobIds : [...existingJobIds, job.id];
+      const { error: updErr } = await supabase
+        .from('qb_ingest_events')
+        .update({
+          status: 'posted',
+          status_updated_at: new Date().toISOString(),
+          posted_qb_refs: nextRefs,
+          qb_sync_job_ids: nextJobIds,
+        })
+        .eq('id', payload.sourceIngestEventId);
+      if (updErr) {
+        return { ok: false, errorMsg: `BillPaymentCheckAdd persist (Intuit) DB update error for event ${payload.sourceIngestEventId}: ${updErr.message}. QB payment created (TxnID=${parsed.result.txnId}) but event row not marked posted — re-push would duplicate.` };
+      }
+      return { ok: true, errorMsg: null };
     }
-    const paymentAmount = (payload.applications ?? []).reduce((s, a) => s + (Number(a.paymentAmount) || 0), 0);
-    const { error: linkErr } = await supabase
-      .from('convera_transaction_billpmts')
-      .upsert({
-        convera_transaction_id: payload.sourceConveraTxnId,
-        qb_vendor_name:         payload.payeeVendorName,
-        qb_billpmt_txn_id:      parsed.result.txnId,
-        payment_amount:         paymentAmount,
-      }, { onConflict: 'convera_transaction_id,qb_vendor_name' });
-    if (linkErr) {
-      return { ok: false, errorMsg: `BillPaymentCheckAdd persist DB error inserting link row for wire=${payload.sourceConveraTxnId} vendor="${payload.payeeVendorName}": ${linkErr.message}` };
+    return { ok: false, errorMsg: `BillPaymentCheckAdd persist: payload has neither sourceConveraTxnId nor sourceIngestEventId. QB payment created (TxnID=${parsed.result.txnId}) but no domain row linked.` };
+  }
+
+  if (job.kind === 'check_add') {
+    // Slice E of QB Automation Layer. Direct-expense check written on behalf
+    // of a qb_ingest_events row. Persist writes the returned TxnID back to
+    // qb_ingest_events.posted_qb_refs.check + flips status to 'posted' + adds
+    // this job's id to qb_sync_job_ids.
+    const parsed = parseCheckAddRs(first);
+    if (!parsed.result) {
+      return { ok: false, errorMsg: `CheckAdd status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
     }
-    // Legacy single-value cache. Deliberately last-write-wins — we don't check for
-    // an existing value; the link table is authoritative for per-vendor lookups.
-    // This column is a "was ever paid" bit for legacy consumers (matcher_ignore
-    // filter, older UI badges). Drop candidate for a future migration.
-    const { error: cacheErr } = await supabase
-      .from('convera_transactions')
-      .update({ qb_billpmt_txn_id: parsed.result.txnId })
-      .eq('id', payload.sourceConveraTxnId);
-    if (cacheErr) {
-      // Non-fatal — link table is the source of truth. Log but don't fail.
-      console.warn(`BillPaymentCheckAdd: link row saved but legacy cache update failed for wire=${payload.sourceConveraTxnId}: ${cacheErr.message}`);
+    const payload = job.payload as { sourceIngestEventId?: number };
+    if (payload.sourceIngestEventId == null) {
+      return { ok: false, errorMsg: `CheckAdd persist: payload missing sourceIngestEventId. QB check created (TxnID=${parsed.result.txnId}) but not linked to any qb_ingest_events row.` };
+    }
+    // Merge into posted_qb_refs jsonb + append this job id + flip status.
+    const { data: existing, error: readErr } = await supabase
+      .from('qb_ingest_events')
+      .select('posted_qb_refs, qb_sync_job_ids')
+      .eq('id', payload.sourceIngestEventId)
+      .maybeSingle();
+    if (readErr) {
+      return { ok: false, errorMsg: `CheckAdd persist DB read error for event ${payload.sourceIngestEventId}: ${readErr.message}` };
+    }
+    const existingRefs = (existing as { posted_qb_refs?: Record<string, unknown> } | null)?.posted_qb_refs ?? {};
+    const existingJobIds = (existing as { qb_sync_job_ids?: number[] } | null)?.qb_sync_job_ids ?? [];
+    const nextRefs = { ...existingRefs, check: parsed.result.txnId };
+    const nextJobIds = existingJobIds.includes(job.id) ? existingJobIds : [...existingJobIds, job.id];
+    const { error: updErr } = await supabase
+      .from('qb_ingest_events')
+      .update({
+        status: 'posted',
+        status_updated_at: new Date().toISOString(),
+        posted_qb_refs: nextRefs,
+        qb_sync_job_ids: nextJobIds,
+      })
+      .eq('id', payload.sourceIngestEventId);
+    if (updErr) {
+      return { ok: false, errorMsg: `CheckAdd persist DB update error for event ${payload.sourceIngestEventId}: ${updErr.message}` };
     }
     return { ok: true, errorMsg: null };
   }
 
   if (job.kind === 'bill_pmt_query') {
-    // Exploratory kind. Response XML is already stored in qb_sync_jobs.qbxml_response
-    // (the outer WC pipeline handles that). Nothing to persist structurally —
-    // caller reads the raw response to eyeball patterns.
+    // Slice G2: parse BillPaymentCheckQueryRs, upsert each payment into qb_mirror
+    // (entity_kind='bill_payment'). Skips rows missing required identity fields.
+    // AppliedToTxnRet (which bills a payment settled) is only present if the
+    // request set IncludeLineItems=true; captured in data.applied_to_bills for
+    // the reconciler.
+    const parsed = parseBillPaymentCheckQueryRs(first);
+    if (!isQueryStatusOk(parsed.status, parsed.results.length)) {
+      return { ok: false, errorMsg: `BillPaymentCheckQuery status=${parsed.status.statusCode}: ${parsed.status.statusMessage}` };
+    }
+    if (parsed.results.length === 0) return { ok: true, errorMsg: null };
+    const mirrorRows = parsed.results
+      .filter(r => r.payeeEntityListId && r.amount != null)
+      .map(r => ({
+        entity_kind: 'bill_payment' as const,
+        entity_ref:  r.txnId,
+        vendor_list_id: r.payeeEntityListId!,
+        ref_number:  r.refNumber ?? null,
+        amount:      r.amount!,
+        is_settled:  null,  // not meaningful for payments (bills carry that flag)
+        data: {
+          vendor_name: r.payeeEntityFullName ?? null,
+          txn_date: r.txnDate ?? null,
+          bank_list_id: r.bankAccountListId ?? null,
+          bank_full_name: r.bankAccountFullName ?? null,
+          memo: r.memo ?? null,
+          time_modified: r.timeModified ?? null,
+          applied_to_bills: r.appliedToBills,  // may be empty when IncludeLineItems=false
+        },
+        queried_at: new Date().toISOString(),
+      }));
+    if (mirrorRows.length > 0) {
+      const { error } = await supabase.from('qb_mirror').upsert(mirrorRows, { onConflict: 'entity_kind,entity_ref' });
+      if (error) {
+        return { ok: false, errorMsg: `BillPaymentCheckQuery qb_mirror upsert failed: ${error.message}` };
+      }
+      console.log(`[bill_pmt_query job=${job.id}] qb_mirror upserted ${mirrorRows.length} rows (kind=bill_payment)`);
+    } else if (parsed.results.length > 0) {
+      console.log(`[bill_pmt_query job=${job.id}] qb_mirror skipped — no BillPaymentCheckRets had required identity fields`);
+    }
     return { ok: true, errorMsg: null };
   }
 

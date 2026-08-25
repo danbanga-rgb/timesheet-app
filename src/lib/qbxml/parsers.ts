@@ -23,11 +23,15 @@ import type {
   AccountResult,
   BillAddResult,
   BillPaymentCheckAddResult,
+  BillPaymentCheckQueryResult,
   BillQueryResult,
+  CheckAddResult,
   ParsedAccountQueryRs,
   ParsedBillAddRs,
   ParsedBillPaymentCheckAddRs,
+  ParsedBillPaymentCheckQueryRs,
   ParsedBillQueryRs,
+  ParsedCheckAddRs,
   ParsedVendorQueryRs,
   QbxmlResponseStatus,
   VendorResult,
@@ -193,6 +197,25 @@ const BILLPAYMENTCHECKRET_SUBBLOCKS_TO_STRIP = [
   'DataExtRet',
 ];
 
+/** Sub-blocks to strip from a CheckRet before leaf extraction.
+ *
+ *  Same reasoning as BILLRET_SUBBLOCKS_TO_STRIP. ExpenseLineRet blocks
+ *  contain nested TxnLineID and AccountRef; other Ref blocks contain
+ *  ListID/FullName. Strip all of them so the header-level TxnID +
+ *  EditSequence + RefNumber leaves are unambiguous. */
+const CHECKRET_SUBBLOCKS_TO_STRIP = [
+  'AccountRef',
+  'PayeeEntityRef',
+  'CurrencyRef',
+  'SalesTaxCodeRef',
+  'ExpenseLineRet',
+  'ItemLineRet',
+  'ItemGroupLineRet',
+  'CustomFieldRet',
+  'DataExtRet',
+  'LinkedTxn',
+];
+
 /** Sub-blocks to strip from an AccountRet BEFORE extracting leaves.
  *
  *  ParentRef contains a nested `<FullName>` (the parent account's path) that
@@ -301,16 +324,36 @@ export function parseBillQueryRs(xml: string): ParsedBillQueryRs {
     const txnId = getLeafText(cleaned, 'TxnID');
     const editSequence = getLeafText(cleaned, 'EditSequence');
     const refNumber = getLeafText(cleaned, 'RefNumber');
-    // Pull VendorRef.FullName from the ORIGINAL block (VendorRef is stripped in `cleaned`
-    // to avoid FullName collisions; we need it back for MULTI-YYYY-MM persist logic).
+    // Pull VendorRef.FullName + ListID from the ORIGINAL block (VendorRef is stripped
+    // in `cleaned` to avoid FullName collisions; we need it back for MULTI-YYYY-MM
+    // persist logic and for qb_open_bills_snapshot's vendor_list_id PK.
     const vendorRefBlock = getAllBlocks(block, 'VendorRef')[0];
     const vendorFullName = vendorRefBlock ? getLeafText(vendorRefBlock, 'FullName') : null;
+    const vendorListId = vendorRefBlock ? getLeafText(vendorRefBlock, 'ListID') : null;
+    // Fields needed for the qb_open_bills_snapshot mirror (Slice G1). Optional
+    // on the type so consumers not depending on them (Convera flow) keep working.
+    const txnDate = getLeafText(cleaned, 'TxnDate');
+    const dueDate = getLeafText(cleaned, 'DueDate');
+    const timeModified = getLeafText(cleaned, 'TimeModified');
+    const amountStr = getLeafText(cleaned, 'AmountDue');
+    const openAmountStr = getLeafText(cleaned, 'OpenAmount');
+    const isPaidStr = getLeafText(cleaned, 'IsPaid');
+    const amount = amountStr != null ? Number(amountStr) : undefined;
+    const openAmount = openAmountStr != null ? Number(openAmountStr) : undefined;
+    const isPaid = isPaidStr === 'true' ? true : (isPaidStr === 'false' ? false : undefined);
     if (txnId != null && editSequence != null && refNumber != null) {
       results.push({
         txnId,
         editSequence,
         refNumber,
         ...(vendorFullName != null ? { vendorFullName } : {}),
+        ...(vendorListId != null ? { vendorListId } : {}),
+        ...(txnDate != null ? { txnDate } : {}),
+        ...(dueDate != null ? { dueDate } : {}),
+        ...(timeModified != null ? { timeModified } : {}),
+        ...(amount != null && !Number.isNaN(amount) ? { amount } : {}),
+        ...(openAmount != null && !Number.isNaN(openAmount) ? { openAmount } : {}),
+        ...(isPaid != null ? { isPaid } : {}),
       });
     }
   }
@@ -342,6 +385,48 @@ export function parseBillAddRs(xml: string): ParsedBillAddRs {
     return { status, result: null };
   }
   const out: BillAddResult = { txnId, editSequence, refNumber };
+  return { status, result: out };
+}
+
+/** Parse a `<CheckAddRs>` response element.
+ *
+ *  Returns the newly-created check's identity. RefNumber is optional both
+ *  on the request and the response — if the caller supplied it, QB echoes
+ *  it back; otherwise the field is absent. Same pattern as
+ *  parseBillPaymentCheckAddRs.
+ *
+ *  Response shape:
+ *    <CheckAddRs statusCode="0" ...>
+ *      <CheckRet>
+ *        <TxnID>...</TxnID>
+ *        <EditSequence>...</EditSequence>
+ *        <RefNumber>...</RefNumber>          <!-- may be absent -->
+ *        <AccountRef>...</AccountRef>        <!-- stripped -->
+ *        <PayeeEntityRef>...</PayeeEntityRef> <!-- stripped -->
+ *        <ExpenseLineRet>...</ExpenseLineRet> <!-- stripped -->
+ *      </CheckRet>
+ *    </CheckAddRs>
+ */
+export function parseCheckAddRs(xml: string): ParsedCheckAddRs {
+  const el = getFirstElement(xml, 'CheckAddRs');
+  if (!el) {
+    return {
+      status: { statusCode: '', statusSeverity: '', statusMessage: 'CheckAddRs element not found' },
+      result: null,
+    };
+  }
+  const status = readStatus(el.openingTag);
+  const blocks = getAllBlocks(el.inner, 'CheckRet');
+  if (blocks.length === 0) return { status, result: null };
+  const cleaned = stripSubBlocks(blocks[0], CHECKRET_SUBBLOCKS_TO_STRIP);
+  const txnId = getLeafText(cleaned, 'TxnID');
+  const editSequence = getLeafText(cleaned, 'EditSequence');
+  const refNumber = getLeafText(cleaned, 'RefNumber');
+  if (txnId == null || editSequence == null) {
+    return { status, result: null };
+  }
+  const out: CheckAddResult = { txnId, editSequence };
+  if (refNumber != null) out.refNumber = refNumber;
   return { status, result: out };
 }
 
@@ -428,6 +513,82 @@ export function parseVendorQueryRs(xml: string): ParsedVendorQueryRs {
  *
  *  RefNumber is optional on the request; when absent it will also be absent
  *  on the response Ret block. `result.refNumber` is therefore optional too. */
+/** Parse a `<BillPaymentCheckQueryRs>` response element.
+ *
+ *  Zero `<BillPaymentCheckRet>` blocks is a valid successful result (statusCode=0
+ *  with no matches, or statusCode=1 "no records found" per QB convention). Both
+ *  cases yield `results: []`.
+ *
+ *  Extracts fields needed for qb_mirror (entity_kind='bill_payment') plus the
+ *  AppliedToTxnRet sub-blocks that record which bills this payment settled.
+ *  AppliedToTxnRet is only present if the query set IncludeLineItems=true.
+ */
+export function parseBillPaymentCheckQueryRs(xml: string): ParsedBillPaymentCheckQueryRs {
+  const el = getFirstElement(xml, 'BillPaymentCheckQueryRs');
+  if (!el) {
+    return {
+      status: { statusCode: '', statusSeverity: '', statusMessage: 'BillPaymentCheckQueryRs element not found' },
+      results: [],
+    };
+  }
+  const status = readStatus(el.openingTag);
+  const results: BillPaymentCheckQueryResult[] = [];
+  for (const block of getAllBlocks(el.inner, 'BillPaymentCheckRet')) {
+    const cleaned = stripSubBlocks(block, BILLPAYMENTCHECKRET_SUBBLOCKS_TO_STRIP);
+    const txnId = getLeafText(cleaned, 'TxnID');
+    const editSequence = getLeafText(cleaned, 'EditSequence');
+    if (txnId == null || editSequence == null) continue;
+
+    const refNumber = getLeafText(cleaned, 'RefNumber');
+    const txnDate = getLeafText(cleaned, 'TxnDate');
+    const memo = getLeafText(cleaned, 'Memo');
+    const timeModified = getLeafText(cleaned, 'TimeModified');
+    const amountStr = getLeafText(cleaned, 'Amount');
+    const amount = amountStr != null ? Number(amountStr) : undefined;
+
+    // Pull PayeeEntityRef + BankAccountRef from the ORIGINAL block (they were
+    // stripped in `cleaned` to avoid nested FullName collisions).
+    const payeeBlock = getAllBlocks(block, 'PayeeEntityRef')[0];
+    const payeeEntityListId = payeeBlock ? getLeafText(payeeBlock, 'ListID') : null;
+    const payeeEntityFullName = payeeBlock ? getLeafText(payeeBlock, 'FullName') : null;
+    const bankBlock = getAllBlocks(block, 'BankAccountRef')[0];
+    const bankAccountListId = bankBlock ? getLeafText(bankBlock, 'ListID') : null;
+    const bankAccountFullName = bankBlock ? getLeafText(bankBlock, 'FullName') : null;
+
+    // AppliedToTxnRet[] — each records one bill this payment applied to.
+    // Extracted from ORIGINAL block since stripSubBlocks removed them.
+    const appliedToBills: BillPaymentCheckQueryResult['appliedToBills'] = [];
+    for (const applied of getAllBlocks(block, 'AppliedToTxnRet')) {
+      const billTxnId = getLeafText(applied, 'TxnID');
+      const paymentAmountStr = getLeafText(applied, 'Amount');
+      const billRefNumber = getLeafText(applied, 'RefNumber');
+      if (billTxnId != null && paymentAmountStr != null) {
+        appliedToBills.push({
+          billTxnId,
+          amount: Number(paymentAmountStr),
+          ...(billRefNumber != null ? { refNumber: billRefNumber } : {}),
+        });
+      }
+    }
+
+    results.push({
+      txnId,
+      editSequence,
+      ...(refNumber != null && refNumber !== '' ? { refNumber } : {}),
+      ...(txnDate != null ? { txnDate } : {}),
+      ...(memo != null ? { memo } : {}),
+      ...(timeModified != null ? { timeModified } : {}),
+      ...(amount != null && !Number.isNaN(amount) ? { amount } : {}),
+      ...(payeeEntityListId != null ? { payeeEntityListId } : {}),
+      ...(payeeEntityFullName != null ? { payeeEntityFullName } : {}),
+      ...(bankAccountListId != null ? { bankAccountListId } : {}),
+      ...(bankAccountFullName != null ? { bankAccountFullName } : {}),
+      appliedToBills,
+    });
+  }
+  return { status, results };
+}
+
 export function parseBillPaymentCheckAddRs(
   xml: string,
 ): ParsedBillPaymentCheckAddRs {
