@@ -8,10 +8,12 @@
 //   Check (check)                — push check_add (Lucien-style direct expense)
 //   Held back (held | null)      — reconciler couldn't resolve; requires action
 //
-// G7a (2026-08-21): per-row checkboxes on pay_existing_bill rows, default OFF.
-// create_bill_then_pay + check rows show disabled checkboxes with a "coming in
-// G7.5" tooltip — the intent is to visually communicate the full picture while
-// keeping the first live-push scope small. Push button = "Push N selected to QB".
+// Per-row checkboxes on all pushable rows (pay_existing_bill, create_bill_then_pay,
+// check), default OFF. Selectability is action-specific:
+//   pay_existing_bill: strong provenance (exact-txn/exact-ref) OR G7b post-create step
+//   create_bill_then_pay: always (mapping = authorization)
+//   check: bank + expense both set on event (mapping is complete)
+// Push button = "Push N selected to QB".
 // ============================================================
 
 import { useMemo, useState } from 'react';
@@ -178,16 +180,21 @@ export default function QbPushPreviewModal({
 
   const parts = useMemo(() => partition(activeEvents), [activeEvents]);
 
-  // G7a + G7b: pay_existing_bill (bill_pmt_add) and create_bill_then_pay
-  // (bill_add — G7b Phase 2) are pushable. check/G7.5 come later.
-  const PUSHABLE_ACTIONS: QbResolvedAction[] = ['pay_existing_bill', 'create_bill_then_pay'];
+  // G7a + G7b + check: pay_existing_bill (bill_pmt_add), create_bill_then_pay
+  // (bill_add + chained pay), and check (check_add) are all pushable.
+  const PUSHABLE_ACTIONS: QbResolvedAction[] = ['pay_existing_bill', 'create_bill_then_pay', 'check'];
   const isPushable = (e: PreviewEvent) => e.resolvedAction != null && PUSHABLE_ACTIONS.includes(e.resolvedAction);
   // Provenance gate — pay_existing_bill requires strong invoice link; but
   // create_bill_then_pay's orphan case (TechAntz) is INTENTIONALLY invoice-less
-  // (mapping authorizes create). Gate is action-specific.
+  // (mapping authorizes create). check is direct-expense — mapping IS the auth,
+  // no invoice concept. Gate is action-specific.
   const isSelectable = (e: PreviewEvent) => {
     if (!isPushable(e)) return false;
     if (e.resolvedAction === 'create_bill_then_pay') return true;   // mapping = authorization
+    if (e.resolvedAction === 'check') {
+      // Consumer requires bank + expense on the event (populated by mapping save).
+      return !!e.qbBankAccountListId && !!e.qbExpenseAccountListId;
+    }
     // pay_existing_bill: mapping-authorized (G7b post-create step) OR strong provenance
     if (e.targetQbTxnKind === 'bill_add_and_pmt') return true;      // G7b orphan pay step
     return e.matchProvenance === 'exact-txn' || e.matchProvenance === 'exact-ref';
@@ -440,7 +447,7 @@ export default function QbPushPreviewModal({
                                   title={disabledReason ?? 'not selectable'}
                                 />
                               ) : (
-                                <input type="checkbox" disabled title="Coming in G7.5 — pay_existing_bill only for now" />
+                                <input type="checkbox" disabled title="not pushable in this bucket" />
                               )}
                             </td>
                             <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
@@ -448,7 +455,9 @@ export default function QbPushPreviewModal({
                             <td className="px-3 py-1.5">
                               {vendor
                                 ? <span className="font-mono text-[11px] px-1.5 py-0.5 bg-indigo-50 text-indigo-800 rounded">{vendor.name}</span>
-                                : <span className="text-red-500">— unmapped —</span>}
+                                : e.resolvedAction === 'check'
+                                  ? <span className="font-mono text-[11px] px-1.5 py-0.5 bg-amber-50 text-amber-800 rounded" title="Payee resolved from qb_vendor_mappings.payee_full_name (OtherName/Employee/Customer)">{e.counterpartyRaw}</span>
+                                  : <span className="text-red-500">— unmapped —</span>}
                             </td>
                             <td className="px-3 py-1.5 text-right font-mono">{money(e.amount)}</td>
                             <td className="px-3 py-1.5">
