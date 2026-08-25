@@ -232,6 +232,7 @@ import QbPushPreviewModal from './components/QbPushPreviewModal';
 import QbPushStatusPane, { type PushRecord } from './components/QbPushStatusPane';
 import { pushIntuitPayBill } from './lib/qbWrite/consumers/intuitPush';
 import { pushIntuitCreateBill } from './lib/qbWrite/consumers/intuitCreateBill';
+import { pushIntuitCheck } from './lib/qbWrite/consumers/intuitCheck';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -521,14 +522,18 @@ type QbIngestStatus = 'pending' | 'ready' | 'queued' | 'posted' | 'failed' | 'ig
 
 interface QbVendor { listId: string; name: string; isActive: boolean; }
 interface QbAccount { listId: string; fullName: string; accountType: string; isActive: boolean; }
+type QbPayeeListKind = 'Vendor' | 'OtherName' | 'Employee' | 'Customer';
+
 interface QbVendorMapping {
   id: number;
   source: string;
   counterpartyPattern: string;
-  qbVendorListId: string;
+  qbVendorListId: string;              // '' when payee is not in Vendors list (OtherName etc.)
   defaultTargetKind: QbIngestKind | null;
   defaultBankAccountListId: string | null;
   defaultExpenseAccountListId: string | null;
+  payeeFullName: string | null;        // populated for non-Vendor payees (Lucien-style)
+  payeeListKind: QbPayeeListKind | null;
 }
 
 type QbResolvedAction = 'already_done' | 'pay_existing_bill' | 'create_bill_then_pay' | 'check' | 'held' | 'pre_our_system';
@@ -1220,7 +1225,7 @@ const TimesheetSystem = () => {
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
   const [qbVendorMappings, setQbVendorMappings] = useState<QbVendorMapping[]>([]);
   const [mapVendorOpenFor, setMapVendorOpenFor] = useState<string | null>(null);  // counterparty currently being mapped
-  const [mapForm, setMapForm] = useState<{ kind: QbIngestKind; vendorListId: string; bankListId: string; expenseListId: string; vendorSearch: string; }>({ kind: 'bill_pmt', vendorListId: '', bankListId: '', expenseListId: '', vendorSearch: '' });
+  const [mapForm, setMapForm] = useState<{ kind: QbIngestKind; vendorListId: string; bankListId: string; expenseListId: string; vendorSearch: string; payeeFullName: string; payeeListKind: QbPayeeListKind; }>({ kind: 'bill_pmt', vendorListId: '', bankListId: '', expenseListId: '', vendorSearch: '', payeeFullName: '', payeeListKind: 'OtherName' });
   const [mapSaving, setMapSaving] = useState(false);
   // Convera beneficiaries
   const [converaBeneficiaries, setConveraBeneficiaries] = useState<ConveraBeneficiary[]>([]);
@@ -2726,6 +2731,8 @@ const TimesheetSystem = () => {
       defaultTargetKind: (r.default_target_kind as QbIngestKind | null) ?? null,
       defaultBankAccountListId: (r.default_bank_account_list_id as string) ?? null,
       defaultExpenseAccountListId: (r.default_expense_account_list_id as string) ?? null,
+      payeeFullName: (r.payee_full_name as string) ?? null,
+      payeeListKind: (r.payee_list_kind as QbPayeeListKind | null) ?? null,
     })));
   };
   const loadQbVendorsAndAccounts = async () => {
@@ -2948,24 +2955,43 @@ const TimesheetSystem = () => {
       bankListId: existing?.defaultBankAccountListId ?? '',
       expenseListId: existing?.defaultExpenseAccountListId ?? '',
       vendorSearch: '',
+      payeeFullName: existing?.payeeFullName ?? '',
+      payeeListKind: existing?.payeeListKind ?? 'OtherName',
     });
     setMapVendorOpenFor(counterparty);
   };
   const saveVendorMapping = async (counterparty: string, source: string) => {
     const kind = mapForm.kind;
-    if (kind !== 'ignore' && !mapForm.vendorListId) { alert('Pick a QB vendor.'); return; }
+    // For kind='check' the payee can be an OtherName / Employee / Customer that
+    // is NOT in the Vendors list — accept either a QB vendor OR a free-text
+    // payee_full_name. qbXML CheckAdd resolves <PayeeEntityRef><FullName>
+    // across all payee-eligible lists. Other kinds require a Vendor.
+    if (kind === 'bill_pmt' || kind === 'bill_add_and_pmt') {
+      if (!mapForm.vendorListId) { alert('Pick a QB vendor.'); return; }
+    }
+    if (kind === 'check') {
+      if (!mapForm.vendorListId && !mapForm.payeeFullName.trim()) {
+        alert('Pick a QB vendor OR enter a payee full name (for OtherName/Employee/Customer payees).');
+        return;
+      }
+    }
     if (kind !== 'ignore' && !mapForm.bankListId) { alert('Pick a bank account.'); return; }
     if ((kind === 'check' || kind === 'bill_add_and_pmt') && !mapForm.expenseListId) { alert('Pick an expense account.'); return; }
     setMapSaving(true);
     try {
       // Upsert the mapping row so future imports auto-classify.
+      // Migration 20260825 relaxed qb_vendor_list_id to nullable + added
+      // payee_full_name / payee_list_kind for OtherName-style payees.
+      const usePayeeName = kind === 'check' && !mapForm.vendorListId && !!mapForm.payeeFullName.trim();
       const mappingRow = {
         source,
         counterparty_pattern: counterparty,
-        qb_vendor_list_id: kind === 'ignore' ? '' : mapForm.vendorListId,
+        qb_vendor_list_id: kind === 'ignore' ? null : (mapForm.vendorListId || null),
         default_target_kind: kind,
         default_bank_account_list_id: kind === 'ignore' ? null : mapForm.bankListId,
         default_expense_account_list_id: (kind === 'check' || kind === 'bill_add_and_pmt') ? mapForm.expenseListId : null,
+        payee_full_name: usePayeeName ? mapForm.payeeFullName.trim() : null,
+        payee_list_kind: usePayeeName ? mapForm.payeeListKind : null,
         updated_at: new Date().toISOString(),
       };
       const { error: upsertErr } = await supabase.from('qb_vendor_mappings').upsert(mappingRow, { onConflict: 'source,counterparty_pattern' });
@@ -2976,7 +3002,7 @@ const TimesheetSystem = () => {
       // kind='bill_pmt'/'bill_add_and_pmt'/'check' → status='ready'
       const nextStatus = kind === 'ignore' ? 'ignored' : 'ready';
       const eventUpdate = {
-        counterparty_qb_vendor_list_id: kind === 'ignore' ? null : mapForm.vendorListId,
+        counterparty_qb_vendor_list_id: kind === 'ignore' ? null : (mapForm.vendorListId || null),
         target_qb_txn_kind: kind,
         qb_bank_account_list_id: kind === 'ignore' ? null : mapForm.bankListId,
         qb_expense_account_list_id: (kind === 'check' || kind === 'bill_add_and_pmt') ? mapForm.expenseListId : null,
@@ -10482,20 +10508,22 @@ const TimesheetSystem = () => {
                     setShowQbPushPreview(false);
                     try {
                       // Route by resolved_action: pay_existing_bill → intuitPush,
-                      // create_bill_then_pay → intuitCreateBill. Run both in parallel;
-                      // merge results for the alert + status pane.
+                      // create_bill_then_pay → intuitCreateBill, check → intuitCheck.
+                      // Run all in parallel; merge results for the alert + status pane.
                       const selectedEvents = selectedIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
                       const payEventIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
                       const createEventIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
-                      const [payRes, createRes] = await Promise.all([
+                      const checkEventIds = selectedEvents.filter(e => e.resolvedAction === 'check').map(e => e.id);
+                      const [payRes, createRes, checkRes] = await Promise.all([
                         payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
                         createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
+                        checkEventIds.length > 0 ? pushIntuitCheck(supabase, checkEventIds) : Promise.resolve(null),
                       ]);
                       const r = {
-                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? [])],
-                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? [])],
-                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? [])],
-                        skippedIneligible: [...(payRes?.skippedIneligible ?? []), ...(createRes?.skippedIneligible ?? [])],
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? [])],
+                        skippedIneligible: [...(payRes?.skippedIneligible ?? []), ...(createRes?.skippedIneligible ?? []), ...(checkRes?.skippedIneligible ?? [])],
                         verifyJobIdByPayJobId: payRes?.verifyJobIdByPayJobId ?? {},
                       };
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
@@ -10563,9 +10591,12 @@ const TimesheetSystem = () => {
 
                       const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
                       const createEnqueued = createJobIds.filter((id): id is number => id != null).length;
+                      const checkJobIds = checkRes?.jobIds ?? [];
+                      const checkEnqueued = checkJobIds.filter((id): id is number => id != null).length;
                       const parts: string[] = [];
                       if (payEnqueued > 0) parts.push(`${payEnqueued} pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
                       if (createEnqueued > 0) parts.push(`${createEnqueued} bill_add job${createEnqueued === 1 ? '' : 's'} enqueued (G7b — wait for drain, then Recompute + push payment step).`);
+                      if (checkEnqueued > 0) parts.push(`${checkEnqueued} check_add job${checkEnqueued === 1 ? '' : 's'} enqueued (direct expense — verify in QB after drain).`);
                       if (parts.length === 0) parts.push(`0 jobs enqueued.`);
                       void enqueued;
                       if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
@@ -10731,7 +10762,9 @@ const TimesheetSystem = () => {
                                           {mapForm.kind !== 'ignore' && (
                                             <>
                                               <div>
-                                                <label className="block text-xs font-medium text-gray-600 mb-1">QB vendor</label>
+                                                <label className="block text-xs font-medium text-gray-600 mb-1">
+                                                  QB vendor{mapForm.kind === 'check' ? ' (optional — leave blank if payee is OtherName/Employee)' : ''}
+                                                </label>
                                                 {chosenVendor ? (
                                                   <div className="flex items-center gap-2">
                                                     <span className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded text-xs font-mono">{chosenVendor.name}</span>
@@ -10749,6 +10782,35 @@ const TimesheetSystem = () => {
                                                   </>
                                                 )}
                                               </div>
+                                              {mapForm.kind === 'check' && !mapForm.vendorListId && (
+                                                <div className="p-2 bg-amber-50 border border-amber-200 rounded space-y-2">
+                                                  <div className="text-xs text-amber-800 font-medium">Payee not in Vendors list</div>
+                                                  <div className="text-xs text-amber-700">
+                                                    For Write-Check payees like OtherName / Employee / Customer entities. qbXML resolves the name across all QB payee lists — enter the exact FullName as it appears in QB.
+                                                  </div>
+                                                  <div>
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">Payee full name</label>
+                                                    <input
+                                                      type="text"
+                                                      placeholder="e.g. Lucien C Pinto"
+                                                      value={mapForm.payeeFullName}
+                                                      onChange={e => setMapForm(f => ({ ...f, payeeFullName: e.target.value }))}
+                                                      className="w-full px-2 py-1 border border-amber-300 rounded text-xs bg-white"
+                                                    />
+                                                  </div>
+                                                  <div>
+                                                    <label className="block text-xs font-medium text-gray-600 mb-1">Which QB list?</label>
+                                                    <div className="flex flex-wrap gap-2 text-xs">
+                                                      {(['OtherName','Employee','Customer'] as QbPayeeListKind[]).map(k => (
+                                                        <label key={k} className={`px-2 py-1 border rounded cursor-pointer ${mapForm.payeeListKind === k ? 'bg-amber-600 text-white border-amber-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                                                          <input type="radio" className="hidden" checked={mapForm.payeeListKind === k} onChange={() => setMapForm(f => ({ ...f, payeeListKind: k }))} />
+                                                          {k}
+                                                        </label>
+                                                      ))}
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              )}
                                               <div>
                                                 <label className="block text-xs font-medium text-gray-600 mb-1">Bank account</label>
                                                 <select value={mapForm.bankListId} onChange={e => setMapForm(f => ({ ...f, bankListId: e.target.value }))} className="w-full px-2 py-1 border border-gray-300 rounded text-xs">

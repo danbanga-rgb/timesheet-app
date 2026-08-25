@@ -195,17 +195,19 @@ export function reconcileEvent(
     return { action: 'pre_our_system', reason: `txn_date < ${ctx.preOurSystemCutoff}` };
   }
 
-  // Guardrails: unresolved kind/vendor → held
-  if (!event.counterpartyQbVendorListId) {
-    return { action: 'held', reason: 'no QB vendor mapped' };
-  }
+  // Guardrails: unresolved kind → held.
+  // Order matters: check + ignore route by kind alone and don't need a QB
+  // vendor list_id (check payees can live in OtherName/Employee/Customer
+  // lists via qb_vendor_mappings.payee_full_name). Only bill-based flows
+  // require counterpartyQbVendorListId to look up mirror bills/payments.
   if (event.targetQbTxnKind === 'ignore') {
     return { action: 'held', reason: 'kind=ignore (not reconcilable)' };
   }
-
-  // Check kind (Lucien-style direct expense) — no bill matching
   if (event.targetQbTxnKind === 'check') {
     return { action: 'check' };
+  }
+  if (!event.counterpartyQbVendorListId) {
+    return { action: 'held', reason: 'no QB vendor mapped' };
   }
 
   const bills = ctx.billsByVendor.get(event.counterpartyQbVendorListId) ?? [];

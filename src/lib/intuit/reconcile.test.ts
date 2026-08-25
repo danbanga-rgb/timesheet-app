@@ -183,6 +183,15 @@ describe('reconcileEvent', () => {
     expect(r.billTxnId).toBeUndefined();
   });
 
+  it("action='check' works when event has no counterpartyQbVendorListId (OtherName payee like Lucien)", () => {
+    // Lucien C Pinto is an OtherName in QB — not a Vendor, so events for
+    // him have counterpartyQbVendorListId=null. Kind='check' must bypass
+    // the vendor-list-id guard; the mapping row carries payee_full_name.
+    const e = event({ targetQbTxnKind: 'check', counterpartyQbVendorListId: null });
+    const r = reconcileEvent(e, ctxWith(), new Set());
+    expect(r.action).toBe('check');
+  });
+
   it("action='held' when vendor has no bills AND no payments in mirror (not synced) — bill_pmt kind", () => {
     const e = event();   // default kind bill_pmt
     const r = reconcileEvent(e, ctxWith([], []), new Set());
