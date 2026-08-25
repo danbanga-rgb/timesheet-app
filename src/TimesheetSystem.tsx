@@ -2922,17 +2922,22 @@ const TimesheetSystem = () => {
       setQbPushRecords([]);
       return;
     }
-    const { data: eventData } = await supabase
-      .from('qb_ingest_events')
-      .select('id, source, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
-      .in('id', Array.from(eventIds));
-    const eventById = new Map(((eventData ?? []) as Array<{ id: number; source: string; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
-    // Resolve display name per event: qb_vendors.name (if mapped) → mapping's
-    // payee_full_name (for check/OtherName payees) → counterparty_raw fallback.
-    const vendorNameById = new Map(qbVendorsList.map(v => [v.listId, v.name]));
+    // Fetch fresh — the tab-load useEffect fires loadInflightPushRecords in
+    // the same tick as loadQbVendorMappings + loadQbVendorsAndAccounts, so
+    // React state is stale in this closure. INVARIANTS #27 / [[state-vs-fresh-fetch]].
+    const [eventDataRes, freshMappings, freshVendors] = await Promise.all([
+      supabase
+        .from('qb_ingest_events')
+        .select('id, source, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
+        .in('id', Array.from(eventIds)),
+      supabase.from('qb_vendor_mappings').select('source, counterparty_pattern, payee_full_name'),
+      supabase.from('qb_vendors').select('list_id, name'),
+    ]);
+    const eventById = new Map(((eventDataRes.data ?? []) as Array<{ id: number; source: string; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
+    const vendorNameById = new Map(((freshVendors.data ?? []) as Array<{ list_id: string; name: string }>).map(v => [v.list_id, v.name]));
     const payeeByKey = new Map<string, string>();
-    for (const m of qbVendorMappings) {
-      if (m.payeeFullName) payeeByKey.set(`${m.source} ${m.counterpartyPattern}`, m.payeeFullName);
+    for (const m of ((freshMappings.data ?? []) as Array<{ source: string; counterparty_pattern: string; payee_full_name: string | null }>)) {
+      if (m.payee_full_name) payeeByKey.set(`${m.source} ${m.counterparty_pattern}`, m.payee_full_name);
     }
     const records: PushRecord[] = [];
     for (const j of jobRows) {
