@@ -85,18 +85,28 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
       parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
     }
   } else {
-    // Iterator mode per qbXML 13.0 XSD (BillQueryRq). Field ordering matches
-    // the AccountQueryRq / VendorQueryRq iterator pattern (verified via delta
-    // probe 2026-08-25): FromModifiedDate + ToModifiedDate are DIRECT children,
-    // NOT wrapped in a ModifiedDateRangeFilter element. Earlier probe (job 599)
-    // failed with hresult=0x80040400 (parse error) because we wrapped them.
-    if (input.fromModifiedDate) {
-      assertAscii('fromModifiedDate', input.fromModifiedDate);
-      parts.push(`  <FromModifiedDate>${xmlEscape(input.fromModifiedDate)}</FromModifiedDate>`);
+    // Iterator mode per qbXML 13.0 XSD (BillQueryRq). Strict order:
+    //   MaxReturned? → ModifiedDateRangeFilter? → EntityFilter? →
+    //   AccountFilter? → RefNumberFilter? → TxnDateRangeFilter? → PaidStatus?
+    // MaxReturned must come FIRST. ModifiedDateRangeFilter is a WRAPPER
+    // element (unlike AccountQuery/VendorQuery which take direct children).
+    // Emit MaxReturned + ModifiedDateRangeFilter here in XSD-correct position;
+    // TxnDateRangeFilter/EntityFilter emit below (existing lenient order
+    // that QB accepts for those combos).
+    if (input.maxReturned != null) {
+      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
     }
-    if (input.toModifiedDate) {
-      assertAscii('toModifiedDate', input.toModifiedDate);
-      parts.push(`  <ToModifiedDate>${xmlEscape(input.toModifiedDate)}</ToModifiedDate>`);
+    if (input.fromModifiedDate || input.toModifiedDate) {
+      parts.push('  <ModifiedDateRangeFilter>');
+      if (input.fromModifiedDate) {
+        assertAscii('fromModifiedDate', input.fromModifiedDate);
+        parts.push(`    <FromModifiedDate>${xmlEscape(input.fromModifiedDate)}</FromModifiedDate>`);
+      }
+      if (input.toModifiedDate) {
+        assertAscii('toModifiedDate', input.toModifiedDate);
+        parts.push(`    <ToModifiedDate>${xmlEscape(input.toModifiedDate)}</ToModifiedDate>`);
+      }
+      parts.push('  </ModifiedDateRangeFilter>');
     }
     if (input.fromTxnDate || input.toTxnDate) {
       parts.push('  <TxnDateRangeFilter>');
@@ -116,9 +126,7 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
       parts.push(`    <FullName>${xmlEscape(input.entityVendorName)}</FullName>`);
       parts.push('  </EntityFilter>');
     }
-    if (input.maxReturned != null) {
-      parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
-    }
+    // MaxReturned already emitted at the top of iterator block above.
   }
   parts.push('  <IncludeLineItems>false</IncludeLineItems>');
   parts.push('</BillQueryRq>');
