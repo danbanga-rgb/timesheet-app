@@ -85,22 +85,18 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
       parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
     }
   } else {
-    // Iterator mode per qbXML 13.0 XSD (BillQueryRq). Element ordering:
-    //   FILTERS (ModifiedDateRangeFilter → TxnDateRangeFilter → EntityFilter
-    //            → PaidStatus → CurrencyFilter)
-    //   → MaxReturned? → IncludeLineItems? → OwnerID*
-    // ModifiedDateRangeFilter comes BEFORE TxnDateRangeFilter per XSD.
-    if (input.fromModifiedDate || input.toModifiedDate) {
-      parts.push('  <ModifiedDateRangeFilter>');
-      if (input.fromModifiedDate) {
-        assertAscii('fromModifiedDate', input.fromModifiedDate);
-        parts.push(`    <FromModifiedDate>${xmlEscape(input.fromModifiedDate)}</FromModifiedDate>`);
-      }
-      if (input.toModifiedDate) {
-        assertAscii('toModifiedDate', input.toModifiedDate);
-        parts.push(`    <ToModifiedDate>${xmlEscape(input.toModifiedDate)}</ToModifiedDate>`);
-      }
-      parts.push('  </ModifiedDateRangeFilter>');
+    // Iterator mode per qbXML 13.0 XSD (BillQueryRq). Field ordering matches
+    // the AccountQueryRq / VendorQueryRq iterator pattern (verified via delta
+    // probe 2026-08-25): FromModifiedDate + ToModifiedDate are DIRECT children,
+    // NOT wrapped in a ModifiedDateRangeFilter element. Earlier probe (job 599)
+    // failed with hresult=0x80040400 (parse error) because we wrapped them.
+    if (input.fromModifiedDate) {
+      assertAscii('fromModifiedDate', input.fromModifiedDate);
+      parts.push(`  <FromModifiedDate>${xmlEscape(input.fromModifiedDate)}</FromModifiedDate>`);
+    }
+    if (input.toModifiedDate) {
+      assertAscii('toModifiedDate', input.toModifiedDate);
+      parts.push(`  <ToModifiedDate>${xmlEscape(input.toModifiedDate)}</ToModifiedDate>`);
     }
     if (input.fromTxnDate || input.toTxnDate) {
       parts.push('  <TxnDateRangeFilter>');
