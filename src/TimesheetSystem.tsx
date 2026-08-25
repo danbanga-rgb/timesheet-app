@@ -2901,6 +2901,52 @@ const TimesheetSystem = () => {
     }
   };
 
+  // Rehydrate the status pane from in-flight qb_sync_jobs. Called on tab
+  // load so a page refresh mid-drain doesn't lose the pane (and doesn't
+  // let the preview modal re-offer events with pending pushes). Only
+  // rebuilds bill_pmt_add + check_add rows (verify chain not reconstructed —
+  // acceptable degradation for a refresh; correctness data stays in DB).
+  const loadInflightPushRecords = async () => {
+    const { data: jobs } = await supabase
+      .from('qb_sync_jobs')
+      .select('id, kind, status, payload, created_at')
+      .in('status', ['pending', 'in_flight'])
+      .in('kind', ['bill_pmt_add', 'check_add']);
+    const jobRows = (jobs ?? []) as Array<{ id: number; kind: string; status: string; payload: Record<string, unknown> | null; created_at: string }>;
+    const eventIds = new Set<number>();
+    for (const j of jobRows) {
+      const eid = (j.payload as { sourceIngestEventId?: number } | null)?.sourceIngestEventId;
+      if (eid != null) eventIds.add(eid);
+    }
+    if (eventIds.size === 0) {
+      setQbPushRecords([]);
+      return;
+    }
+    const { data: eventData } = await supabase
+      .from('qb_ingest_events')
+      .select('id, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
+      .in('id', Array.from(eventIds));
+    const eventById = new Map(((eventData ?? []) as Array<{ id: number; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
+    const records: PushRecord[] = [];
+    for (const j of jobRows) {
+      const eid = (j.payload as { sourceIngestEventId?: number } | null)?.sourceIngestEventId;
+      if (eid == null) continue;
+      const event = eventById.get(eid);
+      if (!event) continue;
+      records.push({
+        eventId: eid,
+        payJobId: j.id,
+        verifyJobId: null,
+        billTxnId: event.resolved_bill_txn_id ?? '',
+        expectedAmount: Number(event.amount),
+        expectedVendor: event.counterparty_raw,
+        pushedAt: j.created_at,
+        kind: j.kind === 'check_add' ? 'check' : 'pay_bill',
+      });
+    }
+    setQbPushRecords(records);
+  };
+
   useEffect(() => {
     if (accountantTab !== 'qb-automation') return;
     if (currentUser?.role !== 'accountant') return;
@@ -2911,6 +2957,7 @@ const TimesheetSystem = () => {
       await loadQbOpenBills();
       await loadQbWcLastSeen();
       await loadQbBillQueryPending();
+      await loadInflightPushRecords();
       // Auto-recompute matches for pending events using current invoices.
       // Guarded — skips silently if invoices state is empty (see the guard in
       // recomputeMatchesForPending). The invoices.length dependency below
@@ -10501,6 +10548,7 @@ const TimesheetSystem = () => {
                   open={showQbPushPreview}
                   onClose={() => setShowQbPushPreview(false)}
                   events={qbIngestEvents}
+                  inflightEventIds={new Set(qbPushRecords.map(r => r.eventId))}
                   qbVendors={qbVendorsList}
                   qbAccounts={qbAccountsList}
                   invoices={invoices}

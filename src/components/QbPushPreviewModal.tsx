@@ -17,7 +17,7 @@
 // ============================================================
 
 import { useMemo, useState } from 'react';
-import { X, Send, AlertTriangle, CheckCircle } from 'lucide-react';
+import { X, Send, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -62,6 +62,10 @@ interface Props {
   open: boolean;
   onClose: () => void;
   events: PreviewEvent[];
+  /** Events with a pending/in_flight qb_sync_job. Filtered out of every
+   *  bucket so they can't be re-pushed while their prior push is still
+   *  draining. Visible in the QbPushStatusPane above the modal. */
+  inflightEventIds?: Set<number>;
   qbVendors: PreviewVendor[];
   qbAccounts: PreviewAccount[];
   invoices: PreviewInvoice[];
@@ -170,11 +174,20 @@ function groupByCounterparty<T>(items: T[], keyOf: (t: T) => { source: string; c
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function QbPushPreviewModal({
-  open, onClose, events, qbVendors, qbAccounts, invoices, onConfirm, onFixMapping,
+  open, onClose, events, inflightEventIds, qbVendors, qbAccounts, invoices, onConfirm, onFixMapping,
 }: Props) {
   const [snapshot, setSnapshot] = useState<PreviewEvent[] | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const activeEvents = snapshot ?? events;
+  const rawEvents = snapshot ?? events;
+  // Filter out events with an in-flight qb_sync_job — they were pushed in a
+  // prior session (or earlier this session) and haven't drained yet. Showing
+  // them in any bucket invites a duplicate-push attempt (executor's dedupe
+  // would block it, but the UX is confusing). They live in the status pane
+  // above the modal.
+  const activeEvents = inflightEventIds && inflightEventIds.size > 0
+    ? rawEvents.filter(e => !inflightEventIds.has(e.id))
+    : rawEvents;
+  const inflightCount = rawEvents.length - activeEvents.length;
   if (open && snapshot === null) { setSnapshot(events); setSelected(new Set()); }
   if (!open && snapshot !== null) { setSnapshot(null); setSelected(new Set()); }
 
@@ -264,6 +277,9 @@ export default function QbPushPreviewModal({
               {' · '}<strong>{readyCount}</strong> event{readyCount === 1 ? '' : 's'} ready ({money(readyTotal)})
               {parts.autoClosed.length > 0 && (
                 <>{' · '}<span className="text-green-700"><CheckCircle className="w-3 h-3 inline mr-0.5" />{parts.autoClosed.length} already done ({money(autoClosedTotal)})</span></>
+              )}
+              {inflightCount > 0 && (
+                <>{' · '}<span className="text-amber-700"><Clock className="w-3 h-3 inline mr-0.5" />{inflightCount} in-flight (see status pane)</span></>
               )}
             </p>
             {pushableEvents.length > 0 && (
