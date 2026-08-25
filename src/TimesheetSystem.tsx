@@ -2924,22 +2924,32 @@ const TimesheetSystem = () => {
     }
     const { data: eventData } = await supabase
       .from('qb_ingest_events')
-      .select('id, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
+      .select('id, source, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
       .in('id', Array.from(eventIds));
-    const eventById = new Map(((eventData ?? []) as Array<{ id: number; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
+    const eventById = new Map(((eventData ?? []) as Array<{ id: number; source: string; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
+    // Resolve display name per event: qb_vendors.name (if mapped) → mapping's
+    // payee_full_name (for check/OtherName payees) → counterparty_raw fallback.
+    const vendorNameById = new Map(qbVendorsList.map(v => [v.listId, v.name]));
+    const payeeByKey = new Map<string, string>();
+    for (const m of qbVendorMappings) {
+      if (m.payeeFullName) payeeByKey.set(`${m.source} ${m.counterpartyPattern}`, m.payeeFullName);
+    }
     const records: PushRecord[] = [];
     for (const j of jobRows) {
       const eid = (j.payload as { sourceIngestEventId?: number } | null)?.sourceIngestEventId;
       if (eid == null) continue;
       const event = eventById.get(eid);
       if (!event) continue;
+      const displayName = (event.counterparty_qb_vendor_list_id && vendorNameById.get(event.counterparty_qb_vendor_list_id))
+        ?? payeeByKey.get(`${event.source} ${event.counterparty_raw}`)
+        ?? event.counterparty_raw;
       records.push({
         eventId: eid,
         payJobId: j.id,
         verifyJobId: null,
         billTxnId: event.resolved_bill_txn_id ?? '',
         expectedAmount: Number(event.amount),
-        expectedVendor: event.counterparty_raw,
+        expectedVendor: displayName,
         pushedAt: j.created_at,
         kind: j.kind === 'check_add' ? 'check' : 'pay_bill',
       });
@@ -10644,19 +10654,24 @@ const TimesheetSystem = () => {
                       const rejCheckEventIds = new Set((checkRes?.rejected ?? []).map(rj => (rj.intent.kind === 'check_expense' ? rj.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
                       const dupCheckEventIds = new Set((checkRes?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'check_expense' ? s.intent.sourceIngestEventId : undefined)).filter((id): id is number => id != null));
                       const eligibleCheckInOrder = checkEventIds.filter(id => !inelig3.has(id) && !rejCheckEventIds.has(id) && !dupCheckEventIds.has(id));
+                      const checkPayeeByKey = new Map<string, string>();
+                      for (const m of qbVendorMappings) {
+                        if (m.payeeFullName) checkPayeeByKey.set(`${m.source} ${m.counterpartyPattern}`, m.payeeFullName);
+                      }
                       checkJobIds.forEach((jobId, i) => {
                         if (jobId == null) return;
                         const eventId = eligibleCheckInOrder[i];
                         if (eventId == null) return;
                         const event = eventById.get(eventId);
                         if (!event) return;
+                        const displayName = checkPayeeByKey.get(`${event.source} ${event.counterpartyRaw}`) ?? event.counterpartyRaw;
                         newRecords.push({
                           eventId,
                           payJobId: jobId,
                           verifyJobId: null,
                           billTxnId: '',
                           expectedAmount: event.amount,
-                          expectedVendor: event.counterpartyRaw,
+                          expectedVendor: displayName,
                           pushedAt: new Date().toISOString(),
                           kind: 'check',
                         });
