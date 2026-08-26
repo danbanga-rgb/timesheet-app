@@ -11137,7 +11137,8 @@ const TimesheetSystem = () => {
                 })()}
 
                 {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => {
-                  // Posted section — precompute month-filtered subset for header + body.
+                  // Slice B: posted section is month-rolled up. Each YYYY-MM is a
+                  // clickable group. Current month expanded by default, older collapsed.
                   const postedMonthOf = (e: QbIngestEvent): string => {
                     const iso = e.statusUpdatedAt ?? e.txnDate;
                     return iso ? iso.slice(0, 7) : '';
@@ -11145,38 +11146,116 @@ const TimesheetSystem = () => {
                   const postedMonths = g.key === 'posted'
                     ? [...new Set(g.events.map(postedMonthOf).filter(Boolean))].sort().reverse()
                     : [];
-                  const postedActiveMonth = g.key === 'posted'
-                    ? (postedMonths.includes(qbInboxPostedMonth) ? qbInboxPostedMonth : (postedMonths[0] ?? qbInboxPostedMonth))
-                    : '';
-                  const postedShown = g.key === 'posted'
-                    ? g.events.filter(e => postedMonthOf(e) === postedActiveMonth)
-                    : g.events;
-                  const postedShownTotal = postedShown.reduce((n, e) => n + e.amount, 0);
+                  const currentMonth = new Date().toISOString().slice(0, 7);
+                  const postedEventsByMonth = new Map<string, QbIngestEvent[]>();
+                  if (g.key === 'posted') {
+                    for (const e of g.events) {
+                      const m = postedMonthOf(e);
+                      if (!m) continue;
+                      const list = postedEventsByMonth.get(m) ?? [];
+                      list.push(e);
+                      postedEventsByMonth.set(m, list);
+                    }
+                  }
+                  const totalAmt = g.events.reduce((s, e) => s + e.amount, 0);
                   const postedMonthLabel = (m: string) => {
                     if (!m) return '—';
                     const [y, mo] = m.split('-');
                     const d = new Date(Number(y), Number(mo) - 1, 1);
                     return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
                   };
+                  const monthExpanded = (m: string): boolean => {
+                    const key = `posted_month_${m}`;
+                    const explicit = qbInboxExpanded[key];
+                    if (explicit != null) return explicit;
+                    return m === currentMonth;   // default: current month expanded
+                  };
+                  const toggleMonth = (m: string) => setQbInboxExpanded(prev => ({ ...prev, [`posted_month_${m}`]: !monthExpanded(m) }));
+
+                  // Row + header helpers — shared between per-month posted tables
+                  // and the single-table non-posted buckets.
+                  const badge = (bg: string, fg: string, text: string, title?: string) => (
+                    <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
+                  );
+                  const renderPostedHeader = () => (
+                    <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
+                      <tr>
+                        <th className="px-3 py-1.5 text-left">Src</th>
+                        <th className="px-3 py-1.5 text-left">Date</th>
+                        <th className="px-3 py-1.5 text-left">Counterparty</th>
+                        <th className="px-3 py-1.5 text-right">Amount</th>
+                        <th className="px-3 py-1.5 text-left">Memo</th>
+                        <th className="px-3 py-1.5 text-left" title="Reconciler decision.">Resolved</th>
+                        <th className="px-3 py-1.5 text-left" title="Invoice-link strength.">Provenance</th>
+                        <th className="px-3 py-1.5 text-left">Posted at</th>
+                      </tr>
+                    </thead>
+                  );
+                  const renderPostedRow = (e: QbIngestEvent): React.ReactNode => {
+                    const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
+                    const isPosted = e.status === 'posted';
+                    let resolvedCell: React.ReactNode = <span className="text-gray-400">—</span>;
+                    if (e.resolvedAction === 'already_done') {
+                      resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid', e.resolvedBillTxnId ?? undefined);
+                    } else if (e.resolvedAction === 'pay_existing_bill') {
+                      const label = isPosted
+                        ? (resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid bill')
+                        : (resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill');
+                      resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-yellow-100', isPosted ? 'text-green-700' : 'text-yellow-700', label, e.resolvedBillTxnId ?? undefined);
+                    } else if (e.resolvedAction === 'create_bill_then_pay') {
+                      if (e.source === 'invoice_g75') {
+                        resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `created bill: ${resolvedBill.refNumber}` : 'created bill', e.resolvedBillTxnId ?? undefined);
+                      } else {
+                        const label = isPosted
+                          ? (resolvedBill ? `created bill + paid: ${resolvedBill.refNumber}` : 'created bill + paid')
+                          : 'will create bill + pay';
+                        resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label, e.resolvedBillTxnId ?? undefined);
+                      }
+                    } else if (e.resolvedAction === 'check') {
+                      const label = isPosted ? 'wrote check' : 'will write check';
+                      resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label);
+                    }
+                    const provCell: React.ReactNode = e.matchProvenance
+                      ? badge(
+                          e.matchProvenance === 'exact-txn'   ? 'bg-emerald-100' :
+                          e.matchProvenance === 'exact-ref'   ? 'bg-teal-100' :
+                          e.matchProvenance === 'created-pay' ? 'bg-violet-100' :
+                          e.matchProvenance === 'fuzzy'       ? 'bg-amber-100' : 'bg-gray-100',
+                          e.matchProvenance === 'exact-txn'   ? 'text-emerald-800' :
+                          e.matchProvenance === 'exact-ref'   ? 'text-teal-800' :
+                          e.matchProvenance === 'created-pay' ? 'text-violet-800' :
+                          e.matchProvenance === 'fuzzy'       ? 'text-amber-800' : 'text-gray-600',
+                          e.matchProvenance === 'exact-txn'   ? '🔒 exact-txn' :
+                          e.matchProvenance === 'exact-ref'   ? '✓ exact-ref' :
+                          e.matchProvenance === 'created-pay' ? '🆕 created-pay' :
+                          e.matchProvenance === 'fuzzy'       ? '~ fuzzy' : '— empty',
+                        )
+                      : <span className="text-gray-300">—</span>;
+                    return (
+                      <tr key={e.id} className="border-t border-gray-100 hover:bg-indigo-50/40">
+                        <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
+                        <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
+                        <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
+                        <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
+                        <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
+                        <td className="px-3 py-1.5">{resolvedCell}</td>
+                        <td className="px-3 py-1.5">{provCell}</td>
+                        <td className="px-3 py-1.5 text-gray-500 font-mono text-[11px]">
+                          {e.statusUpdatedAt
+                            ? new Date(e.statusUpdatedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                            : '—'}
+                        </td>
+                      </tr>
+                    );
+                  };
                   return (
                   <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
                     <button onClick={() => toggle(g.key)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left">
                       <div>
                         <span className="font-semibold text-gray-800">{g.title}</span>
-                        {g.key === 'posted' && g.events.length > 0 ? (
-                          <>
-                            <span className="ml-2 text-sm text-gray-500">· {postedMonthLabel(postedActiveMonth)}</span>
-                            <span className="ml-2 text-sm text-gray-500">· <strong className="text-gray-700">{postedShown.length}</strong> event{postedShown.length === 1 ? '' : 's'}</span>
-                            <span className="ml-2 text-sm text-gray-500">· <span className="font-mono text-gray-700">${postedShownTotal.toFixed(2)}</span></span>
-                            <span className="ml-2 text-xs text-gray-400">· {g.events.length} posted all-time</span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
-                            {g.events.length > 0 && (
-                              <span className="ml-2 text-sm text-gray-500">· ${g.events.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}</span>
-                            )}
-                          </>
+                        <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
+                        {g.events.length > 0 && (
+                          <span className="ml-2 text-sm text-gray-500">· ${totalAmt.toFixed(2)}</span>
                         )}
                       </div>
                       <span className="text-xs text-gray-400">{qbInboxExpanded[g.key] ? '▼' : '▶'}</span>
@@ -11230,23 +11309,38 @@ const TimesheetSystem = () => {
                               })()}
                             </div>
                           </>
+                        ) : g.key === 'posted' && postedMonths.length > 0 ? (
+                          <>
+                            <p className="px-4 pt-3 pb-2 text-xs text-gray-500 italic">{g.hint}</p>
+                            {postedMonths.map(m => {
+                              const monthEvents = postedEventsByMonth.get(m) ?? [];
+                              const monthTotal = monthEvents.reduce((s, e) => s + e.amount, 0);
+                              const isOpen = monthExpanded(m);
+                              return (
+                                <div key={m} className="border-t border-gray-100">
+                                  <button onClick={() => toggleMonth(m)} className="w-full flex items-center justify-between px-4 py-2 bg-white hover:bg-gray-50 text-left text-sm">
+                                    <div>
+                                      <span className="font-semibold text-gray-700">{postedMonthLabel(m)}</span>
+                                      <span className="ml-2 text-xs text-gray-500">· {monthEvents.length} event{monthEvents.length === 1 ? '' : 's'}</span>
+                                      <span className="ml-2 text-xs text-gray-500">· <span className="font-mono">${monthTotal.toFixed(2)}</span></span>
+                                    </div>
+                                    <span className="text-xs text-gray-400">{isOpen ? '▼' : '▶'}</span>
+                                  </button>
+                                  {isOpen && (
+                                    <table className="w-full text-xs">
+                                      {renderPostedHeader()}
+                                      <tbody>
+                                        {monthEvents.map(e => renderPostedRow(e))}
+                                      </tbody>
+                                    </table>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </>
                         ) : (
                           <>
                             <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint}</p>
-                            {g.key === 'posted' && postedMonths.length > 0 && (
-                              <div className="px-4 py-2 border-t border-gray-100 bg-gray-50/50 flex items-center gap-2 text-xs">
-                                <label className="text-gray-600">Month:</label>
-                                <select
-                                  value={postedActiveMonth}
-                                  onChange={e => setQbInboxPostedMonth(e.target.value)}
-                                  className="px-2 py-1 border border-gray-300 rounded bg-white"
-                                >
-                                  {postedMonths.map(m => (
-                                    <option key={m} value={m}>{postedMonthLabel(m)}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            )}
                             <table className="w-full text-xs">
                               <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
                                 <tr>
