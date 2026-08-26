@@ -10812,7 +10812,64 @@ const TimesheetSystem = () => {
                 <QbPushPreviewModal
                   open={showQbPushPreview}
                   onClose={() => setShowQbPushPreview(false)}
-                  events={qbIngestEvents}
+                  events={(() => {
+                    // Slice A: fold G7.5-eligible invoices into the modal as
+                    // synthetic ready events so accountant selects them via the
+                    // same checkbox UX as event-driven candidates.
+                    // Eligibility mirrors intuitInvoiceCreateBill.ts.
+                    const mappingByVendor = new Map(qbVendorMappings.map(m => [m.qbVendorListId, m]));
+                    const vendorByName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
+                    const bankAcct = qbAccountsList.find(a => a.fullName.toLowerCase().includes('8220'));
+                    const liveVendorNameByUserId = new Map<string, string>();
+                    for (const pp of paymentProfiles) {
+                      const n = pp.qbVendorName?.trim();
+                      if (!n) continue;
+                      if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) liveVendorNameByUserId.set(pp.userId, n);
+                    }
+                    const g75Ready: QbIngestEvent[] = [];
+                    for (const inv of invoices) {
+                      if (inv.status !== 'approved') continue;
+                      if (inv.qbBillTxnId) continue;
+                      if (paymentMethod(inv) !== 'Intuit') continue;
+                      if (!inv.periodEnd || inv.periodEnd < INTUIT_PRE_OUR_SYSTEM_CUTOFF) continue;
+                      if (!inv.invoiceNumber?.trim()) continue;
+                      const vName = (inv.paymentProfile?.qbVendorName?.trim()) || liveVendorNameByUserId.get(inv.userId);
+                      if (!vName) continue;
+                      const vendor = vendorByName.get(vName.toLowerCase().trim());
+                      if (!vendor) continue;
+                      const mapping = mappingByVendor.get(vendor.listId);
+                      if (!mapping?.defaultExpenseAccountListId) continue;
+                      g75Ready.push({
+                        id: -inv.id,   // negative avoids collision with real events
+                        ingestedAt: '',
+                        source: 'invoice_g75',
+                        sourceRef: `invoice:${inv.id}`,
+                        txnDate: inv.periodEnd,
+                        amount: inv.totalAmount,
+                        counterpartyRaw: inv.userName,
+                        memo: `INV ${inv.invoiceNumber}`,
+                        counterpartyQbVendorListId: vendor.listId,
+                        targetQbTxnKind: 'bill_add_and_pmt',
+                        qbBankAccountListId: bankAcct?.listId ?? null,
+                        qbExpenseAccountListId: mapping.defaultExpenseAccountListId,
+                        matchedInvoiceIds: [inv.id],
+                        status: 'ready',
+                        qbSyncJobIds: [],
+                        postedQbRefs: null,
+                        lastError: null,
+                        rawData: null,
+                        notes: null,
+                        resolvedAction: 'create_bill_then_pay',
+                        resolvedBillTxnId: null,
+                        resolvedPaymentTxnId: null,
+                        resolvedReason: 'G7.5 proactive create (payment via ingest later)',
+                        reconciledAt: null,
+                        matchProvenance: 'exact-ref',
+                        statusUpdatedAt: null,
+                      });
+                    }
+                    return [...qbIngestEvents, ...g75Ready];
+                  })()}
                   inflightEventIds={new Set(qbPushRecords.map(r => r.eventId))}
                   qbVendors={qbVendorsList}
                   qbAccounts={qbAccountsList}
@@ -10821,23 +10878,34 @@ const TimesheetSystem = () => {
                   onConfirm={async (selectedIds) => {
                     setShowQbPushPreview(false);
                     try {
+                      // Slice A: split by id sign — positive = qb_ingest_events,
+                      // negative = G7.5 invoice ids (invert sign).
+                      const g75InvoiceIds = selectedIds.filter(id => id < 0).map(id => -id);
+                      const eventIds = selectedIds.filter(id => id > 0);
                       // Route by resolved_action: pay_existing_bill → intuitPush,
                       // create_bill_then_pay → intuitCreateBill, check → intuitCheck.
                       // Run all in parallel; merge results for the alert + status pane.
-                      const selectedEvents = selectedIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
+                      const selectedEvents = eventIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
                       const payEventIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
                       const createEventIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
                       const checkEventIds = selectedEvents.filter(e => e.resolvedAction === 'check').map(e => e.id);
-                      const [payRes, createRes, checkRes] = await Promise.all([
+                      const [payRes, createRes, checkRes, g75Res] = await Promise.all([
                         payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
                         createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
                         checkEventIds.length > 0 ? pushIntuitCheck(supabase, checkEventIds) : Promise.resolve(null),
+                        g75InvoiceIds.length > 0 ? pushIntuitInvoiceCreateBill(supabase, g75InvoiceIds) : Promise.resolve(null),
                       ]);
                       const r = {
-                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? [])],
-                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? [])],
-                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? [])],
-                        skippedIneligible: [...(payRes?.skippedIneligible ?? []), ...(createRes?.skippedIneligible ?? []), ...(checkRes?.skippedIneligible ?? [])],
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? [])],
+                        skippedIneligible: [
+                          ...(payRes?.skippedIneligible ?? []),
+                          ...(createRes?.skippedIneligible ?? []),
+                          ...(checkRes?.skippedIneligible ?? []),
+                          // G7.5 shape is { invoiceId, reason }; project to { eventId, reason } for the shared alert.
+                          ...((g75Res?.skippedIneligible ?? []).map(s => ({ eventId: -s.invoiceId, reason: s.reason }))),
+                        ],
                         verifyJobIdByPayJobId: payRes?.verifyJobIdByPayJobId ?? {},
                       };
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
@@ -10964,56 +11032,26 @@ const TimesheetSystem = () => {
                 />
 
                 {/* Missing QB bills — approved invoices lacking a QB Bill.
-                    G7.5 (2026-08-26): Intuit-eligible bills can be proactively
-                    pushed via the header button. Convera still relies on the
-                    batch script until G7.6. */}
+                    Read-only visibility. Actual push happens via the top-right
+                    "Push to QB" button; G7.5 rows appear in the modal alongside
+                    event-driven candidates for checkbox selection (Slice A). */}
                 {(() => {
                   const totalAmt = missingBills.reduce((s, m) => s + m.invoice.totalAmount, 0);
-                  // G7.5: Intuit-path, vendor-mapped rows eligible for one-click create_bill.
-                  const intuitEligible = missingBills.filter(m => m.paymentPath === 'Intuit' && m.vendorMapped);
-                  const intuitEligibleAmt = intuitEligible.reduce((s, m) => s + m.invoice.totalAmount, 0);
                   return (
                     <div className="mb-4 border border-amber-200 rounded-lg overflow-hidden bg-amber-50/40">
-                      <div className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40">
-                        <button onClick={() => toggle('missing_bills')} className="text-left flex-1">
+                      <button
+                        onClick={() => toggle('missing_bills')}
+                        className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40 text-left"
+                      >
+                        <div>
                           <span className="font-semibold text-amber-900">Missing QB bills — approved invoices without a Bill in QB</span>
                           <span className="ml-2 text-sm text-amber-800">· {missingBills.length} invoice{missingBills.length === 1 ? '' : 's'}</span>
                           {missingBills.length > 0 && (
                             <span className="ml-2 text-sm text-amber-800">· ${totalAmt.toFixed(2)}</span>
                           )}
-                        </button>
-                        {intuitEligible.length > 0 && (
-                          <button
-                            onClick={async () => {
-                              const invoiceIds = intuitEligible.map(m => m.invoice.id);
-                              const summary = intuitEligible.slice(0, 8).map(m => `• ${m.invoice.userName} · INV ${m.invoice.invoiceNumber} · $${m.invoice.totalAmount.toFixed(2)}`).join('\n');
-                              const more = intuitEligible.length > 8 ? `\n(+${intuitEligible.length - 8} more)` : '';
-                              if (!window.confirm(`Create ${intuitEligible.length} Bill${intuitEligible.length === 1 ? '' : 's'} in QuickBooks?\n\nTotal: $${intuitEligibleAmt.toFixed(2)}\n\n${summary}${more}\n\nBills post to "Vendor Consultants" per vendor mapping. No payments will be pushed.`)) return;
-                              try {
-                                const r = await pushIntuitInvoiceCreateBill(supabase, invoiceIds);
-                                const enq = r.jobIds.filter((x): x is number => x != null).length;
-                                const detail = [
-                                  ...r.skippedIneligible.map(s => `• invoice ${s.invoiceId}: ${s.reason}`),
-                                  ...r.skippedDuplicate.map(s => `• ${s.reason}`),
-                                  ...r.rejected.map(rj => `• ${rj.invariant}: ${rj.reason}`),
-                                ].slice(0, 12).join('\n');
-                                alert(`Enqueued ${enq} bill_add job${enq === 1 ? '' : 's'}.${detail ? '\n\nDetail:\n' + detail : ''}`);
-                                void loadQbOpenBills();
-                                void fetchInvoices();
-                                void loadQbBillQueryPending();  // top-right pending counter refresh
-                              } catch (e) {
-                                console.error('[G7.5] pushIntuitInvoiceCreateBill failed', e);
-                                alert(`Push failed: ${(e as Error).message}`);
-                              }
-                            }}
-                            className="ml-3 text-sm px-3 py-1.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium"
-                            title={`Proactively create ${intuitEligible.length} Bill(s) in QuickBooks for approved Intuit invoices. When the payment ingest fires later, it'll route to pay_existing_bill instead of chained create.`}
-                          >
-                            Push {intuitEligible.length} Intuit Bill{intuitEligible.length === 1 ? '' : 's'} to QB · ${intuitEligibleAmt.toFixed(2)}
-                          </button>
-                        )}
-                        <button onClick={() => toggle('missing_bills')} className="ml-2 text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</button>
-                      </div>
+                        </div>
+                        <span className="text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</span>
+                      </button>
                       {qbInboxExpanded['missing_bills'] && (
                         <div>
                           {missingBills.length === 0 ? (

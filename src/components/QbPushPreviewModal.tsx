@@ -94,7 +94,7 @@ const ACTION_LABEL: Record<Exclude<QbResolvedAction, 'held' | 'pre_our_system'>,
 };
 
 const SOURCE_LABEL: Record<string, string> = {
-  intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual',
+  intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice (G7.5)',
 };
 
 const SECS_PER_JOB = 1.6;
