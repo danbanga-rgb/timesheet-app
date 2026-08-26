@@ -10580,7 +10580,7 @@ const TimesheetSystem = () => {
                     {(() => {
                       const freshness = snapshotAge(qbOpenBills);
                       const snapshotLabel = freshness.newestQueriedAt
-                        ? `QB state · ${humanizeAge(freshness.newestQueriedAt)} · ${freshness.rowCount} bills`
+                        ? `QB state · ${humanizeAge(freshness.newestQueriedAt)}`
                         : 'QB state · not synced yet';
                       const snapshotStale = !freshness.newestQueriedAt
                         || (Date.now() - Date.parse(freshness.newestQueriedAt)) > 3600 * 1000;
