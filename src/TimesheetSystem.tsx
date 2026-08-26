@@ -11201,22 +11201,33 @@ const TimesheetSystem = () => {
                                   const badge = (bg: string, fg: string, text: string, title?: string) => (
                                     <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
                                   );
+                                  // Tense-aware: use PAST for posted rows, FUTURE for everything else.
+                                  // Rule per feedback_ux_consistency: every state variant of every column
+                                  // must be considered together, not per-slice.
+                                  const isPosted = e.status === 'posted';
                                   let resolvedCell: React.ReactNode = <span className="text-gray-400">—</span>;
                                   if (e.resolvedAction === 'pre_our_system') {
                                     resolvedCell = badge('bg-gray-100', 'text-gray-500', 'pre-cutoff · in QB', e.resolvedReason ?? undefined);
                                   } else if (e.resolvedAction === 'already_done') {
                                     resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid', e.resolvedBillTxnId ?? undefined);
                                   } else if (e.resolvedAction === 'pay_existing_bill') {
-                                    resolvedCell = badge('bg-yellow-100', 'text-yellow-700', resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill', e.resolvedBillTxnId ?? undefined);
+                                    const label = isPosted
+                                      ? (resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid bill')
+                                      : (resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill');
+                                    resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-yellow-100', isPosted ? 'text-green-700' : 'text-yellow-700', label, e.resolvedBillTxnId ?? undefined);
                                   } else if (e.resolvedAction === 'create_bill_then_pay') {
-                                    // G7.5 posted rows (source='invoice_g75'): bill IS created; pay comes via ingest event later.
+                                    // G7.5 posted (source='invoice_g75'): bill created; pay comes via ingest event later.
                                     if (e.source === 'invoice_g75') {
-                                      resolvedCell = badge('bg-blue-100', 'text-blue-700', resolvedBill ? `created bill: ${resolvedBill.refNumber}` : 'created bill', e.resolvedBillTxnId ?? undefined);
+                                      resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `created bill: ${resolvedBill.refNumber}` : 'created bill', e.resolvedBillTxnId ?? undefined);
                                     } else {
-                                      resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will create bill + pay');
+                                      const label = isPosted
+                                        ? (resolvedBill ? `created bill + paid: ${resolvedBill.refNumber}` : 'created bill + paid')
+                                        : 'will create bill + pay';
+                                      resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label, e.resolvedBillTxnId ?? undefined);
                                     }
                                   } else if (e.resolvedAction === 'check') {
-                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will write check');
+                                    const label = isPosted ? 'wrote check' : 'will write check';
+                                    resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label);
                                   } else if (e.resolvedAction === 'held') {
                                     resolvedCell = badge('bg-red-100', 'text-red-700', 'held', e.resolvedReason ?? undefined);
                                   }
