@@ -128,7 +128,7 @@ export function buildBillQueryRq(input: BillQueryRqInput): string {
     }
     // MaxReturned already emitted at the top of iterator block above.
   }
-  parts.push('  <IncludeLineItems>false</IncludeLineItems>');
+  parts.push(`  <IncludeLineItems>${input.includeLineItems ? 'true' : 'false'}</IncludeLineItems>`);
   parts.push('</BillQueryRq>');
   return parts.join('\n');
 }
