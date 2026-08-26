@@ -45,6 +45,11 @@ import type { CreateBillIntent, ExecuteResult } from '../types';
 export interface IntuitInvoiceCreateBillResult extends ExecuteResult {
   /** Invoices skipped up-front — never reached the executor. */
   skippedIneligible: Array<{ invoiceId: number; reason: string }>;
+  /** For each successful bill_add job, the chained bill_query verify job id
+   *  (mirror-refresh — parallels INVARIANT #36 verify pattern used by intuitPush
+   *  + intuitCreateBill G7b). qb_mirror gains the new bill on next QBWC drain,
+   *  which the Missing QB Bills panel + reconciler both depend on. */
+  verifyJobIdByBillAddJobId: Record<number, number>;
 }
 
 interface InvoiceRow {
@@ -91,8 +96,9 @@ export async function pushIntuitInvoiceCreateBill(
 ): Promise<IntuitInvoiceCreateBillResult> {
   const auditTag = opts.auditTag ?? `intuit-invoice-create-bill-${new Date().toISOString().slice(0, 10)}`;
   const skippedIneligible: IntuitInvoiceCreateBillResult['skippedIneligible'] = [];
+  const verifyJobIdByBillAddJobId: Record<number, number> = {};
   const emptyReturn = (): IntuitInvoiceCreateBillResult => ({
-    jobIds: [], rejected: [], skippedDuplicate: [], skippedIneligible,
+    jobIds: [], rejected: [], skippedDuplicate: [], skippedIneligible, verifyJobIdByBillAddJobId,
   });
   if (invoiceIds.length === 0) return emptyReturn();
 
@@ -239,5 +245,41 @@ export async function pushIntuitInvoiceCreateBill(
   if (intents.length === 0) return emptyReturn();
 
   const result = await executeIntents(supabase, intents);
-  return { ...result, skippedIneligible };
+
+  // Chain bill_query verify (INVARIANT #36) per successful bill_add so
+  // qb_mirror refreshes with the new Bill on the next QBWC drain. Without this,
+  // the Missing QB Bills panel keeps showing pushed invoices as "missing" until
+  // the hourly pg_cron delta bill_query happens to catch these TxnIDs.
+  //
+  // Same hydrate marker pattern as G7b intuitCreateBill.ts:249. The bill_query
+  // TxnID is hydrated from the parent bill_add's response at drain time.
+  const verifyRows: Array<{ kind: 'bill_query'; payload: Record<string, unknown>; status: 'pending'; depends_on: number[] }> = [];
+  const verifyMeta: Array<{ billAddJobId: number }> = [];
+  result.jobIds.forEach((billAddJobId) => {
+    if (billAddJobId == null) return;
+    verifyRows.push({
+      kind: 'bill_query',
+      payload: {
+        txnIds: [null],
+        __hydrate_bill_txn_id_from_dep: billAddJobId,
+        __audit_tag: `${auditTag}-verify`,
+      },
+      status: 'pending',
+      depends_on: [billAddJobId],
+    });
+    verifyMeta.push({ billAddJobId });
+  });
+  if (verifyRows.length > 0) {
+    const { data: insertedVerify } = await supabase
+      .from('qb_sync_jobs')
+      .insert(verifyRows)
+      .select('id');
+    if (insertedVerify) {
+      (insertedVerify as Array<{ id: number }>).forEach((row, idx) => {
+        verifyJobIdByBillAddJobId[verifyMeta[idx].billAddJobId] = row.id;
+      });
+    }
+  }
+
+  return { ...result, skippedIneligible, verifyJobIdByBillAddJobId };
 }

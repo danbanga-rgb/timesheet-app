@@ -371,6 +371,7 @@ interface Invoice {
   paymentTerms: string | null; // NET15 / NET30 / NET45 / NET60
   qbExportStatus: 'not_exported' | 'exported' | 'confirmed' | 'skipped';
   qbExportStatusAt: string | null;
+  qbBillTxnId: string | null;  // set by bill_add drain handler when a Bill exists in QB
   matcherIgnore: boolean;  // pre-2026-04-28 historical invoices — hidden from matchPaymentToInvoice
   editHistory: InvoiceEditEntry[];
 }
@@ -3339,6 +3340,7 @@ const TimesheetSystem = () => {
       corrected: !!(r.corrected as boolean),
       paymentTerms: (r.payment_terms as string) || null,
       qbExportStatus: ((r.qb_export_status as string) || 'not_exported') as Invoice['qbExportStatus'],
+      qbBillTxnId: (r.qb_bill_txn_id as string) || null,
       matcherIgnore: Boolean(r.matcher_ignore),
       qbExportStatusAt: (r.qb_export_status_at as string) || null,
       editHistory: Array.isArray(r.edit_history) ? (r.edit_history as unknown[]).map(normalizeEditEntry) : [],
@@ -10422,6 +10424,11 @@ const TimesheetSystem = () => {
             const missingBills: MissingBill[] = invoices
               .filter(inv => inv.status === 'approved')
               .filter(inv => (inv.periodEnd || '') >= INTUIT_PRE_OUR_SYSTEM_CUTOFF)
+              // G7.5 fix (2026-08-26): if invoices.qb_bill_txn_id is already set,
+              // we've recorded the QB Bill from our own push response — instant
+              // "has bill" without waiting for qb_mirror to refresh. Prevents just-
+              // pushed invoices from re-appearing until the next bill_query drains.
+              .filter(inv => !inv.qbBillTxnId)
               .map((inv): MissingBill | null => {
                 const snapshotName = inv.paymentProfile?.qbVendorName?.trim() || null;
                 const liveName = liveVendorNameByUserId.get(inv.userId) || null;
