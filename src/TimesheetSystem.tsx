@@ -1208,6 +1208,11 @@ const TimesheetSystem = () => {
 
   // QB Automation Inbox (Slice C — read-only view of qb_ingest_events)
   const [qbIngestEvents, setQbIngestEvents] = useState<QbIngestEvent[]>([]);
+  // Slice A: invoice IDs that were pushed via G7.5 (proactive create_bill).
+  // Rendered as synthetic rows in the Already Posted bucket so accountant sees
+  // both event-driven and invoice-driven pushes in one place with a Resolved
+  // column ("created bill: <ref>"). Loaded by loadQbIngestEvents.
+  const [qbG75PostedInvoiceIds, setQbG75PostedInvoiceIds] = useState<Set<number>>(new Set());
   const [qbIngestLoading, setQbIngestLoading] = useState(false);
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
@@ -2330,11 +2335,23 @@ const TimesheetSystem = () => {
   // Load QB Automation Inbox lazily when tab is opened
   const loadQbIngestEvents = async () => {
     setQbIngestLoading(true);
-    const { data, error } = await supabase
-      .from('qb_ingest_events')
-      .select('*')
-      .order('ingested_at', { ascending: false });
-    if (!error) setQbIngestEvents((data ?? []).map(normaliseQbIngestEvent));
+    const [eventsRes, g75JobsRes] = await Promise.all([
+      supabase.from('qb_ingest_events').select('*').order('ingested_at', { ascending: false }),
+      // Slice A: identify G7.5 proactive-create pushes so the posted bucket can
+      // include them alongside event-driven posts. Filter to bill_add jobs whose
+      // audit tag identifies them as G7.5, then extract sourceInvoiceIds.
+      supabase.from('qb_sync_jobs').select('payload, status').eq('kind', 'bill_add').eq('status', 'done'),
+    ]);
+    if (!eventsRes.error) setQbIngestEvents((eventsRes.data ?? []).map(normaliseQbIngestEvent));
+    if (!g75JobsRes.error) {
+      const ids = new Set<number>();
+      for (const row of (g75JobsRes.data ?? []) as Array<{ payload: { __audit_tag?: string; sourceInvoiceIds?: number[] } | null }>) {
+        const tag = row.payload?.__audit_tag ?? '';
+        if (!tag.startsWith('intuit-invoice-create-bill')) continue;
+        for (const id of row.payload?.sourceInvoiceIds ?? []) ids.add(id);
+      }
+      setQbG75PostedInvoiceIds(ids);
+    }
     setQbIngestLoading(false);
   };
   // Option 4: recompute matched_invoice_ids for all pending events in DB using the
@@ -10390,7 +10407,7 @@ const TimesheetSystem = () => {
             // Read-only Inbox — Slice C of QB Automation Layer.
             // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
             // that arrives with Slice F (preview modal) and Slice G (real enqueue).
-            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual' }[s] || s);
+            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice (G7.5)' }[s] || s);
             // Reconciler bill lookup by TxnID for the "Resolved" column (replaces the
             // legacy matched_invoice_ids display, which over-matched by amount alone).
             const billByTxnId = new Map(qbOpenBills.map(b => [b.txnId, b]));
@@ -10465,7 +10482,42 @@ const TimesheetSystem = () => {
               { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: `Deliberately never pushed. Includes advance-payment cases (US Signature), retired vendors (CLOUDYGON), and pre-our-system events (predate ${INTUIT_PRE_OUR_SYSTEM_CUTOFF}).`, events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
-              { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: qbIngestEvents.filter(e => e.status === 'posted') },
+              { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: [
+                ...qbIngestEvents.filter(e => e.status === 'posted'),
+                // Slice A: G7.5 invoice-driven pushes rendered as synthetic events
+                // so they share the posted bucket with event-driven pushes. Same
+                // row shape + Resolved column. See qb_automation_ux_contract rule #4.
+                ...invoices
+                  .filter(inv => qbG75PostedInvoiceIds.has(inv.id) && inv.qbBillTxnId)
+                  .map((inv): QbIngestEvent => ({
+                    id: -inv.id,   // negative ID avoids collision with real qb_ingest_events
+                    ingestedAt: inv.qbExportStatusAt ?? '',
+                    source: 'invoice_g75',
+                    sourceRef: `invoice:${inv.id}`,
+                    txnDate: inv.periodEnd,
+                    amount: inv.totalAmount,
+                    counterpartyRaw: inv.userName,
+                    memo: `INV ${inv.invoiceNumber}`,
+                    counterpartyQbVendorListId: null,
+                    targetQbTxnKind: 'bill_add_and_pmt',
+                    qbBankAccountListId: null,
+                    qbExpenseAccountListId: null,
+                    matchedInvoiceIds: [inv.id],
+                    status: 'posted',
+                    qbSyncJobIds: [],
+                    postedQbRefs: { bill: inv.qbBillTxnId },
+                    lastError: null,
+                    rawData: null,
+                    notes: null,
+                    resolvedAction: 'create_bill_then_pay',
+                    resolvedBillTxnId: inv.qbBillTxnId,
+                    resolvedPaymentTxnId: null,
+                    resolvedReason: 'G7.5 proactive create (payment arrives via ingest later)',
+                    reconciledAt: null,
+                    matchProvenance: 'exact-ref',
+                    statusUpdatedAt: inv.qbExportStatusAt,
+                  })),
+              ] },
             ];
             const total = qbIngestEvents.length;
             const ready = qbIngestEvents.filter(e => e.status === 'ready').length;
@@ -11157,7 +11209,12 @@ const TimesheetSystem = () => {
                                   } else if (e.resolvedAction === 'pay_existing_bill') {
                                     resolvedCell = badge('bg-yellow-100', 'text-yellow-700', resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill', e.resolvedBillTxnId ?? undefined);
                                   } else if (e.resolvedAction === 'create_bill_then_pay') {
-                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will create bill + pay');
+                                    // G7.5 posted rows (source='invoice_g75'): bill IS created; pay comes via ingest event later.
+                                    if (e.source === 'invoice_g75') {
+                                      resolvedCell = badge('bg-blue-100', 'text-blue-700', resolvedBill ? `created bill: ${resolvedBill.refNumber}` : 'created bill', e.resolvedBillTxnId ?? undefined);
+                                    } else {
+                                      resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will create bill + pay');
+                                    }
                                   } else if (e.resolvedAction === 'check') {
                                     resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will write check');
                                   } else if (e.resolvedAction === 'held') {
