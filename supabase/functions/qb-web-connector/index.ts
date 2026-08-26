@@ -321,6 +321,11 @@ async function persistJobResponse(
           txn_date:      r.txnDate ?? null,
           due_date:      r.dueDate ?? null,
           time_modified: r.timeModified ?? null,
+          // Mirror completeness pass 2026-08-26: persist ExpenseLineRet[] so
+          // consumers can answer "what expense account was this bill posted
+          // to?" from qb_mirror without a fresh probe. Populated only when
+          // the bill_query was issued with includeLineItems=true.
+          expense_lines: r.expenseLines ?? null,
         },
         queried_at: new Date().toISOString(),
       }));

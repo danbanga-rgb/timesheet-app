@@ -105,6 +105,17 @@ export interface BillQueryResult {
   isPaid?: boolean;
   /** QB's <TimeModified> — needed later for delta-read cursors. */
   timeModified?: string;
+  /** ExpenseLineRet[] — populated only when the query requested
+   *  IncludeLineItems=true (Mirror completeness pass 2026-08-26). Each line
+   *  carries the expense account the bill was posted to plus the line amount
+   *  + memo. Consumers use this to answer "which account did the accountant
+   *  use for this vendor's bills?" without a fresh probe. */
+  expenseLines?: Array<{
+    accountListId?: string;
+    accountFullName?: string;
+    amount?: number;
+    memo?: string;
+  }>;
 }
 
 /** BillAddRq: create a Vendor Bill in QB.

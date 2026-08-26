@@ -320,16 +320,35 @@ export function parseBillQueryRs(xml: string): ParsedBillQueryRs {
   const status = readStatus(el.openingTag);
   const results: BillQueryResult[] = [];
   for (const block of getAllBlocks(el.inner, 'BillRet')) {
+    // Extract sub-blocks that need to survive the strip BEFORE cleaning.
+    // - VendorRef (existing): FullName + ListID for MULTI persist + mirror PK
+    // - ExpenseLineRet (Mirror completeness pass 2026-08-26): per-line
+    //   AccountRef so downstream consumers can answer "which account did the
+    //   accountant post this bill to?" without a fresh bill_query probe.
+    const vendorRefBlock = getAllBlocks(block, 'VendorRef')[0];
+    const vendorFullName = vendorRefBlock ? getLeafText(vendorRefBlock, 'FullName') : null;
+    const vendorListId = vendorRefBlock ? getLeafText(vendorRefBlock, 'ListID') : null;
+    const expenseLines: Array<{ accountListId?: string; accountFullName?: string; amount?: number; memo?: string }> = [];
+    for (const line of getAllBlocks(block, 'ExpenseLineRet')) {
+      // Extract AccountRef.FullName + ListID BEFORE stripping the ref block.
+      const acctRef = getAllBlocks(line, 'AccountRef')[0];
+      const acctFullName = acctRef ? getLeafText(acctRef, 'FullName') : null;
+      const acctListId = acctRef ? getLeafText(acctRef, 'ListID') : null;
+      const linePartsCleaned = stripSubBlocks(line, ['AccountRef', 'ClassRef', 'CustomerRef', 'CurrencyRef', 'CustomFieldRet', 'DataExtRet']);
+      const lineAmountStr = getLeafText(linePartsCleaned, 'Amount');
+      const lineMemo = getLeafText(linePartsCleaned, 'Memo');
+      const lineAmount = lineAmountStr != null ? Number(lineAmountStr) : undefined;
+      const entry: { accountListId?: string; accountFullName?: string; amount?: number; memo?: string } = {};
+      if (acctListId != null) entry.accountListId = acctListId;
+      if (acctFullName != null) entry.accountFullName = acctFullName;
+      if (lineAmount != null && !Number.isNaN(lineAmount)) entry.amount = lineAmount;
+      if (lineMemo != null) entry.memo = lineMemo;
+      if (Object.keys(entry).length > 0) expenseLines.push(entry);
+    }
     const cleaned = stripSubBlocks(block, BILLRET_SUBBLOCKS_TO_STRIP);
     const txnId = getLeafText(cleaned, 'TxnID');
     const editSequence = getLeafText(cleaned, 'EditSequence');
     const refNumber = getLeafText(cleaned, 'RefNumber');
-    // Pull VendorRef.FullName + ListID from the ORIGINAL block (VendorRef is stripped
-    // in `cleaned` to avoid FullName collisions; we need it back for MULTI-YYYY-MM
-    // persist logic and for qb_open_bills_snapshot's vendor_list_id PK.
-    const vendorRefBlock = getAllBlocks(block, 'VendorRef')[0];
-    const vendorFullName = vendorRefBlock ? getLeafText(vendorRefBlock, 'FullName') : null;
-    const vendorListId = vendorRefBlock ? getLeafText(vendorRefBlock, 'ListID') : null;
     // Fields needed for the qb_open_bills_snapshot mirror (Slice G1). Optional
     // on the type so consumers not depending on them (Convera flow) keep working.
     const txnDate = getLeafText(cleaned, 'TxnDate');
@@ -354,6 +373,7 @@ export function parseBillQueryRs(xml: string): ParsedBillQueryRs {
         ...(amount != null && !Number.isNaN(amount) ? { amount } : {}),
         ...(openAmount != null && !Number.isNaN(openAmount) ? { openAmount } : {}),
         ...(isPaid != null ? { isPaid } : {}),
+        ...(expenseLines.length > 0 ? { expenseLines } : {}),
       });
     }
   }

@@ -105,6 +105,14 @@ export interface BillQueryResult {
   isPaid?: boolean;
   /** QB's <TimeModified> — needed later for delta-read cursors. */
   timeModified?: string;
+  /** ExpenseLineRet[] — populated only when the query requested
+   *  IncludeLineItems=true (Mirror completeness pass 2026-08-26). */
+  expenseLines?: Array<{
+    accountListId?: string;
+    accountFullName?: string;
+    amount?: number;
+    memo?: string;
+  }>;
 }
 
 /** BillAddRq: create a Vendor Bill in QB.
