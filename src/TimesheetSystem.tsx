@@ -10999,6 +10999,34 @@ const TimesheetSystem = () => {
                           kind: 'check',
                         });
                       });
+                      // Slice A: G7.5 invoice-driven records for the live pane.
+                      // Each pushed invoice → one record (bill_add job + chained verify).
+                      const g75JobIds = g75Res?.jobIds ?? [];
+                      const g75VerifyByBillAdd = g75Res?.verifyJobIdByBillAddJobId ?? {};
+                      const g75InvRejected = new Set((g75Res?.rejected ?? []).map(rj => (rj.intent.kind === 'create_bill' ? (rj.intent.sourceInvoiceIds?.[0] ?? null) : null)).filter((v): v is number => v != null));
+                      const g75InvSkipped = new Set((g75Res?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'create_bill' ? (s.intent.sourceInvoiceIds?.[0] ?? null) : null)).filter((v): v is number => v != null));
+                      const g75IneligIds = new Set((g75Res?.skippedIneligible ?? []).map(s => s.invoiceId));
+                      const g75EligibleInOrder = g75InvoiceIds.filter(id => !g75IneligIds.has(id) && !g75InvRejected.has(id) && !g75InvSkipped.has(id));
+                      const invoiceById = new Map(invoices.map(i => [i.id, i]));
+                      g75JobIds.forEach((jobId, i) => {
+                        if (jobId == null) return;
+                        const invoiceId = g75EligibleInOrder[i];
+                        if (invoiceId == null) return;
+                        const inv = invoiceById.get(invoiceId);
+                        if (!inv) return;
+                        newRecords.push({
+                          eventId: -invoiceId,   // negative so React keys don't collide with real events
+                          sourceKind: 'invoice',
+                          invoiceId,
+                          payJobId: jobId,
+                          verifyJobId: g75VerifyByBillAdd[jobId] ?? null,
+                          billTxnId: '',   // filled by poll from invoices.qb_bill_txn_id after drain
+                          expectedAmount: inv.totalAmount,
+                          expectedVendor: (inv.paymentProfile?.qbVendorName || inv.userName || '').trim(),
+                          pushedAt: new Date().toISOString(),
+                          kind: 'invoice_create_bill',
+                        });
+                      });
                       setQbPushRecords(prev => [...prev, ...newRecords]);
 
                       const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
