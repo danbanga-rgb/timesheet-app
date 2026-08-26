@@ -1208,14 +1208,39 @@ const TimesheetSystem = () => {
 
   // QB Automation Inbox (Slice C — read-only view of qb_ingest_events)
   const [qbIngestEvents, setQbIngestEvents] = useState<QbIngestEvent[]>([]);
+  // Slice C: sort state — one per bucket "class" (posted / non-posted / missing-bills).
+  type PostedSortKey = 'src' | 'date' | 'counterparty' | 'amount' | 'memo' | 'posted_at';
+  const [postedSortKey, setPostedSortKey] = useState<PostedSortKey>('posted_at');
+  const [postedSortDir, setPostedSortDir] = useState<'asc' | 'desc'>('desc');
+  const togglePostedSort = (k: PostedSortKey) => {
+    if (postedSortKey === k) setPostedSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setPostedSortKey(k); setPostedSortDir(k === 'date' || k === 'posted_at' || k === 'amount' ? 'desc' : 'asc'); }
+  };
+  type NonPostedSortKey = 'src' | 'date' | 'counterparty' | 'amount' | 'memo' | 'status';
+  const [nonPostedSortKey, setNonPostedSortKey] = useState<NonPostedSortKey>('date');
+  const [nonPostedSortDir, setNonPostedSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleNonPostedSort = (k: NonPostedSortKey) => {
+    if (nonPostedSortKey === k) setNonPostedSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setNonPostedSortKey(k); setNonPostedSortDir(k === 'date' || k === 'amount' ? 'desc' : 'asc'); }
+  };
+  type MissingBillsSortKey = 'period_end' | 'contractor' | 'invoice_number' | 'amount' | 'path' | 'qb_vendor';
+  const [missingBillsSortKey, setMissingBillsSortKey] = useState<MissingBillsSortKey>('period_end');
+  const [missingBillsSortDir, setMissingBillsSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleMissingBillsSort = (k: MissingBillsSortKey) => {
+    if (missingBillsSortKey === k) setMissingBillsSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setMissingBillsSortKey(k); setMissingBillsSortDir(k === 'period_end' || k === 'amount' ? 'desc' : 'asc'); }
+  };
+  // Slice A: invoice IDs that were pushed via G7.5 (proactive create_bill).
+  // Rendered as synthetic rows in the Already Posted bucket so accountant sees
+  // both event-driven and invoice-driven pushes in one place with a Resolved
+  // column ("created bill: <ref>"). Loaded by loadQbIngestEvents.
+  const [qbG75PostedInvoiceIds, setQbG75PostedInvoiceIds] = useState<Set<number>>(new Set());
   const [qbIngestLoading, setQbIngestLoading] = useState(false);
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
   });
-  // Month-year filter for the Inbox "Already posted" section. Format: 'YYYY-MM'.
-  // Default to current month; auto-falls-back to most-recent month with events
-  // if current has none (see render).
-  const [qbInboxPostedMonth, setQbInboxPostedMonth] = useState<string>(() => new Date().toISOString().slice(0, 7));
+  // (Slice B) posted month filter replaced by per-month expandable groups.
+  // qbInboxExpanded['posted_month_YYYY-MM'] tracks each month's expand state.
   // Slice F — push preview modal
   const [showQbPushPreview, setShowQbPushPreview] = useState(false);
   const [qbPushRecords, setQbPushRecords] = useState<PushRecord[]>([]);
@@ -2330,11 +2355,23 @@ const TimesheetSystem = () => {
   // Load QB Automation Inbox lazily when tab is opened
   const loadQbIngestEvents = async () => {
     setQbIngestLoading(true);
-    const { data, error } = await supabase
-      .from('qb_ingest_events')
-      .select('*')
-      .order('ingested_at', { ascending: false });
-    if (!error) setQbIngestEvents((data ?? []).map(normaliseQbIngestEvent));
+    const [eventsRes, g75JobsRes] = await Promise.all([
+      supabase.from('qb_ingest_events').select('*').order('ingested_at', { ascending: false }),
+      // Slice A: identify G7.5 proactive-create pushes so the posted bucket can
+      // include them alongside event-driven posts. Filter to bill_add jobs whose
+      // audit tag identifies them as G7.5, then extract sourceInvoiceIds.
+      supabase.from('qb_sync_jobs').select('payload, status').eq('kind', 'bill_add').eq('status', 'done'),
+    ]);
+    if (!eventsRes.error) setQbIngestEvents((eventsRes.data ?? []).map(normaliseQbIngestEvent));
+    if (!g75JobsRes.error) {
+      const ids = new Set<number>();
+      for (const row of (g75JobsRes.data ?? []) as Array<{ payload: { __audit_tag?: string; sourceInvoiceIds?: number[] } | null }>) {
+        const tag = row.payload?.__audit_tag ?? '';
+        if (!tag.startsWith('intuit-invoice-create-bill')) continue;
+        for (const id of row.payload?.sourceInvoiceIds ?? []) ids.add(id);
+      }
+      setQbG75PostedInvoiceIds(ids);
+    }
     setQbIngestLoading(false);
   };
   // Option 4: recompute matched_invoice_ids for all pending events in DB using the
@@ -10390,7 +10427,7 @@ const TimesheetSystem = () => {
             // Read-only Inbox — Slice C of QB Automation Layer.
             // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
             // that arrives with Slice F (preview modal) and Slice G (real enqueue).
-            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual' }[s] || s);
+            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice (G7.5)' }[s] || s);
             // Reconciler bill lookup by TxnID for the "Resolved" column (replaces the
             // legacy matched_invoice_ids display, which over-matched by amount alone).
             const billByTxnId = new Map(qbOpenBills.map(b => [b.txnId, b]));
@@ -10465,7 +10502,42 @@ const TimesheetSystem = () => {
               { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: `Deliberately never pushed. Includes advance-payment cases (US Signature), retired vendors (CLOUDYGON), and pre-our-system events (predate ${INTUIT_PRE_OUR_SYSTEM_CUTOFF}).`, events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
-              { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: qbIngestEvents.filter(e => e.status === 'posted') },
+              { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: [
+                ...qbIngestEvents.filter(e => e.status === 'posted'),
+                // Slice A: G7.5 invoice-driven pushes rendered as synthetic events
+                // so they share the posted bucket with event-driven pushes. Same
+                // row shape + Resolved column. See qb_automation_ux_contract rule #4.
+                ...invoices
+                  .filter(inv => qbG75PostedInvoiceIds.has(inv.id) && inv.qbBillTxnId)
+                  .map((inv): QbIngestEvent => ({
+                    id: -inv.id,   // negative ID avoids collision with real qb_ingest_events
+                    ingestedAt: inv.qbExportStatusAt ?? '',
+                    source: 'invoice_g75',
+                    sourceRef: `invoice:${inv.id}`,
+                    txnDate: inv.periodEnd,
+                    amount: inv.totalAmount,
+                    counterpartyRaw: inv.userName,
+                    memo: `INV ${inv.invoiceNumber}`,
+                    counterpartyQbVendorListId: null,
+                    targetQbTxnKind: 'bill_add_and_pmt',
+                    qbBankAccountListId: null,
+                    qbExpenseAccountListId: null,
+                    matchedInvoiceIds: [inv.id],
+                    status: 'posted',
+                    qbSyncJobIds: [],
+                    postedQbRefs: { bill: inv.qbBillTxnId },
+                    lastError: null,
+                    rawData: null,
+                    notes: null,
+                    resolvedAction: 'create_bill_then_pay',
+                    resolvedBillTxnId: inv.qbBillTxnId,
+                    resolvedPaymentTxnId: null,
+                    resolvedReason: 'G7.5 proactive create (payment arrives via ingest later)',
+                    reconciledAt: null,
+                    matchProvenance: 'exact-ref',
+                    statusUpdatedAt: inv.qbExportStatusAt,
+                  })),
+              ] },
             ];
             const total = qbIngestEvents.length;
             const ready = qbIngestEvents.filter(e => e.status === 'ready').length;
@@ -10760,7 +10832,64 @@ const TimesheetSystem = () => {
                 <QbPushPreviewModal
                   open={showQbPushPreview}
                   onClose={() => setShowQbPushPreview(false)}
-                  events={qbIngestEvents}
+                  events={(() => {
+                    // Slice A: fold G7.5-eligible invoices into the modal as
+                    // synthetic ready events so accountant selects them via the
+                    // same checkbox UX as event-driven candidates.
+                    // Eligibility mirrors intuitInvoiceCreateBill.ts.
+                    const mappingByVendor = new Map(qbVendorMappings.map(m => [m.qbVendorListId, m]));
+                    const vendorByName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
+                    const bankAcct = qbAccountsList.find(a => a.fullName.toLowerCase().includes('8220'));
+                    const liveVendorNameByUserId = new Map<string, string>();
+                    for (const pp of paymentProfiles) {
+                      const n = pp.qbVendorName?.trim();
+                      if (!n) continue;
+                      if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) liveVendorNameByUserId.set(pp.userId, n);
+                    }
+                    const g75Ready: QbIngestEvent[] = [];
+                    for (const inv of invoices) {
+                      if (inv.status !== 'approved') continue;
+                      if (inv.qbBillTxnId) continue;
+                      if (paymentMethod(inv) !== 'Intuit') continue;
+                      if (!inv.periodEnd || inv.periodEnd < INTUIT_PRE_OUR_SYSTEM_CUTOFF) continue;
+                      if (!inv.invoiceNumber?.trim()) continue;
+                      const vName = (inv.paymentProfile?.qbVendorName?.trim()) || liveVendorNameByUserId.get(inv.userId);
+                      if (!vName) continue;
+                      const vendor = vendorByName.get(vName.toLowerCase().trim());
+                      if (!vendor) continue;
+                      const mapping = mappingByVendor.get(vendor.listId);
+                      if (!mapping?.defaultExpenseAccountListId) continue;
+                      g75Ready.push({
+                        id: -inv.id,   // negative avoids collision with real events
+                        ingestedAt: '',
+                        source: 'invoice_g75',
+                        sourceRef: `invoice:${inv.id}`,
+                        txnDate: inv.periodEnd,
+                        amount: inv.totalAmount,
+                        counterpartyRaw: inv.userName,
+                        memo: `INV ${inv.invoiceNumber}`,
+                        counterpartyQbVendorListId: vendor.listId,
+                        targetQbTxnKind: 'bill_add_and_pmt',
+                        qbBankAccountListId: bankAcct?.listId ?? null,
+                        qbExpenseAccountListId: mapping.defaultExpenseAccountListId,
+                        matchedInvoiceIds: [inv.id],
+                        status: 'ready',
+                        qbSyncJobIds: [],
+                        postedQbRefs: null,
+                        lastError: null,
+                        rawData: null,
+                        notes: null,
+                        resolvedAction: 'create_bill_then_pay',
+                        resolvedBillTxnId: null,
+                        resolvedPaymentTxnId: null,
+                        resolvedReason: 'G7.5 proactive create (payment via ingest later)',
+                        reconciledAt: null,
+                        matchProvenance: 'exact-ref',
+                        statusUpdatedAt: null,
+                      });
+                    }
+                    return [...qbIngestEvents, ...g75Ready];
+                  })()}
                   inflightEventIds={new Set(qbPushRecords.map(r => r.eventId))}
                   qbVendors={qbVendorsList}
                   qbAccounts={qbAccountsList}
@@ -10769,23 +10898,34 @@ const TimesheetSystem = () => {
                   onConfirm={async (selectedIds) => {
                     setShowQbPushPreview(false);
                     try {
+                      // Slice A: split by id sign — positive = qb_ingest_events,
+                      // negative = G7.5 invoice ids (invert sign).
+                      const g75InvoiceIds = selectedIds.filter(id => id < 0).map(id => -id);
+                      const eventIds = selectedIds.filter(id => id > 0);
                       // Route by resolved_action: pay_existing_bill → intuitPush,
                       // create_bill_then_pay → intuitCreateBill, check → intuitCheck.
                       // Run all in parallel; merge results for the alert + status pane.
-                      const selectedEvents = selectedIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
+                      const selectedEvents = eventIds.map(id => qbIngestEvents.find(e => e.id === id)).filter((e): e is QbIngestEvent => !!e);
                       const payEventIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
                       const createEventIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
                       const checkEventIds = selectedEvents.filter(e => e.resolvedAction === 'check').map(e => e.id);
-                      const [payRes, createRes, checkRes] = await Promise.all([
+                      const [payRes, createRes, checkRes, g75Res] = await Promise.all([
                         payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
                         createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
                         checkEventIds.length > 0 ? pushIntuitCheck(supabase, checkEventIds) : Promise.resolve(null),
+                        g75InvoiceIds.length > 0 ? pushIntuitInvoiceCreateBill(supabase, g75InvoiceIds) : Promise.resolve(null),
                       ]);
                       const r = {
-                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? [])],
-                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? [])],
-                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? [])],
-                        skippedIneligible: [...(payRes?.skippedIneligible ?? []), ...(createRes?.skippedIneligible ?? []), ...(checkRes?.skippedIneligible ?? [])],
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? [])],
+                        skippedIneligible: [
+                          ...(payRes?.skippedIneligible ?? []),
+                          ...(createRes?.skippedIneligible ?? []),
+                          ...(checkRes?.skippedIneligible ?? []),
+                          // G7.5 shape is { invoiceId, reason }; project to { eventId, reason } for the shared alert.
+                          ...((g75Res?.skippedIneligible ?? []).map(s => ({ eventId: -s.invoiceId, reason: s.reason }))),
+                        ],
                         verifyJobIdByPayJobId: payRes?.verifyJobIdByPayJobId ?? {},
                       };
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
@@ -10879,6 +11019,34 @@ const TimesheetSystem = () => {
                           kind: 'check',
                         });
                       });
+                      // Slice A: G7.5 invoice-driven records for the live pane.
+                      // Each pushed invoice → one record (bill_add job + chained verify).
+                      const g75JobIds = g75Res?.jobIds ?? [];
+                      const g75VerifyByBillAdd = g75Res?.verifyJobIdByBillAddJobId ?? {};
+                      const g75InvRejected = new Set((g75Res?.rejected ?? []).map(rj => (rj.intent.kind === 'create_bill' ? (rj.intent.sourceInvoiceIds?.[0] ?? null) : null)).filter((v): v is number => v != null));
+                      const g75InvSkipped = new Set((g75Res?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'create_bill' ? (s.intent.sourceInvoiceIds?.[0] ?? null) : null)).filter((v): v is number => v != null));
+                      const g75IneligIds = new Set((g75Res?.skippedIneligible ?? []).map(s => s.invoiceId));
+                      const g75EligibleInOrder = g75InvoiceIds.filter(id => !g75IneligIds.has(id) && !g75InvRejected.has(id) && !g75InvSkipped.has(id));
+                      const invoiceById = new Map(invoices.map(i => [i.id, i]));
+                      g75JobIds.forEach((jobId, i) => {
+                        if (jobId == null) return;
+                        const invoiceId = g75EligibleInOrder[i];
+                        if (invoiceId == null) return;
+                        const inv = invoiceById.get(invoiceId);
+                        if (!inv) return;
+                        newRecords.push({
+                          eventId: -invoiceId,   // negative so React keys don't collide with real events
+                          sourceKind: 'invoice',
+                          invoiceId,
+                          payJobId: jobId,
+                          verifyJobId: g75VerifyByBillAdd[jobId] ?? null,
+                          billTxnId: '',   // filled by poll from invoices.qb_bill_txn_id after drain
+                          expectedAmount: inv.totalAmount,
+                          expectedVendor: (inv.paymentProfile?.qbVendorName || inv.userName || '').trim(),
+                          pushedAt: new Date().toISOString(),
+                          kind: 'invoice_create_bill',
+                        });
+                      });
                       setQbPushRecords(prev => [...prev, ...newRecords]);
 
                       const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
@@ -10912,56 +11080,26 @@ const TimesheetSystem = () => {
                 />
 
                 {/* Missing QB bills — approved invoices lacking a QB Bill.
-                    G7.5 (2026-08-26): Intuit-eligible bills can be proactively
-                    pushed via the header button. Convera still relies on the
-                    batch script until G7.6. */}
+                    Read-only visibility. Actual push happens via the top-right
+                    "Push to QB" button; G7.5 rows appear in the modal alongside
+                    event-driven candidates for checkbox selection (Slice A). */}
                 {(() => {
                   const totalAmt = missingBills.reduce((s, m) => s + m.invoice.totalAmount, 0);
-                  // G7.5: Intuit-path, vendor-mapped rows eligible for one-click create_bill.
-                  const intuitEligible = missingBills.filter(m => m.paymentPath === 'Intuit' && m.vendorMapped);
-                  const intuitEligibleAmt = intuitEligible.reduce((s, m) => s + m.invoice.totalAmount, 0);
                   return (
                     <div className="mb-4 border border-amber-200 rounded-lg overflow-hidden bg-amber-50/40">
-                      <div className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40">
-                        <button onClick={() => toggle('missing_bills')} className="text-left flex-1">
+                      <button
+                        onClick={() => toggle('missing_bills')}
+                        className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40 text-left"
+                      >
+                        <div>
                           <span className="font-semibold text-amber-900">Missing QB bills — approved invoices without a Bill in QB</span>
                           <span className="ml-2 text-sm text-amber-800">· {missingBills.length} invoice{missingBills.length === 1 ? '' : 's'}</span>
                           {missingBills.length > 0 && (
                             <span className="ml-2 text-sm text-amber-800">· ${totalAmt.toFixed(2)}</span>
                           )}
-                        </button>
-                        {intuitEligible.length > 0 && (
-                          <button
-                            onClick={async () => {
-                              const invoiceIds = intuitEligible.map(m => m.invoice.id);
-                              const summary = intuitEligible.slice(0, 8).map(m => `• ${m.invoice.userName} · INV ${m.invoice.invoiceNumber} · $${m.invoice.totalAmount.toFixed(2)}`).join('\n');
-                              const more = intuitEligible.length > 8 ? `\n(+${intuitEligible.length - 8} more)` : '';
-                              if (!window.confirm(`Create ${intuitEligible.length} Bill${intuitEligible.length === 1 ? '' : 's'} in QuickBooks?\n\nTotal: $${intuitEligibleAmt.toFixed(2)}\n\n${summary}${more}\n\nBills post to "Vendor Consultants" per vendor mapping. No payments will be pushed.`)) return;
-                              try {
-                                const r = await pushIntuitInvoiceCreateBill(supabase, invoiceIds);
-                                const enq = r.jobIds.filter((x): x is number => x != null).length;
-                                const detail = [
-                                  ...r.skippedIneligible.map(s => `• invoice ${s.invoiceId}: ${s.reason}`),
-                                  ...r.skippedDuplicate.map(s => `• ${s.reason}`),
-                                  ...r.rejected.map(rj => `• ${rj.invariant}: ${rj.reason}`),
-                                ].slice(0, 12).join('\n');
-                                alert(`Enqueued ${enq} bill_add job${enq === 1 ? '' : 's'}.${detail ? '\n\nDetail:\n' + detail : ''}`);
-                                void loadQbOpenBills();
-                                void fetchInvoices();
-                                void loadQbBillQueryPending();  // top-right pending counter refresh
-                              } catch (e) {
-                                console.error('[G7.5] pushIntuitInvoiceCreateBill failed', e);
-                                alert(`Push failed: ${(e as Error).message}`);
-                              }
-                            }}
-                            className="ml-3 text-sm px-3 py-1.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium"
-                            title={`Proactively create ${intuitEligible.length} Bill(s) in QuickBooks for approved Intuit invoices. When the payment ingest fires later, it'll route to pay_existing_bill instead of chained create.`}
-                          >
-                            Push {intuitEligible.length} Intuit Bill{intuitEligible.length === 1 ? '' : 's'} to QB · ${intuitEligibleAmt.toFixed(2)}
-                          </button>
-                        )}
-                        <button onClick={() => toggle('missing_bills')} className="ml-2 text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</button>
-                      </div>
+                        </div>
+                        <span className="text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</span>
+                      </button>
                       {qbInboxExpanded['missing_bills'] && (
                         <div>
                           {missingBills.length === 0 ? (
@@ -10972,20 +11110,47 @@ const TimesheetSystem = () => {
                                 Approved invoices in our system with no matching Bill in <code>qb_mirror</code>.
                                 Intuit path: bill gets created on next payment push. Convera path: bill gets created by the batch script.
                               </p>
+                              {(() => {
+                                const chev = (k: MissingBillsSortKey) => missingBillsSortKey === k
+                                  ? <span className="text-gray-600">{missingBillsSortDir === 'asc' ? '▲' : '▼'}</span>
+                                  : <span className="text-gray-300">↕</span>;
+                                const sTh = (k: MissingBillsSortKey, label: string, align: 'left' | 'right' = 'left') => (
+                                  <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-amber-50`} onClick={() => toggleMissingBillsSort(k)}>
+                                    <span className="inline-flex items-center gap-1">{label} {chev(k)}</span>
+                                  </th>
+                                );
+                                const dir = missingBillsSortDir === 'asc' ? 1 : -1;
+                                const key = missingBillsSortKey;
+                                const val = (m: typeof missingBills[0]): string | number => {
+                                  if (key === 'period_end') return m.invoice.periodEnd ?? '';
+                                  if (key === 'contractor') return (m.invoice.userName ?? '').toLowerCase();
+                                  if (key === 'invoice_number') return (m.invoice.invoiceNumber ?? '').toLowerCase();
+                                  if (key === 'amount') return m.invoice.totalAmount ?? 0;
+                                  if (key === 'path') return m.paymentPath ?? '';
+                                  if (key === 'qb_vendor') return (m.qbVendorName ?? '').toLowerCase();
+                                  return '';
+                                };
+                                const sortedMissing = [...missingBills].sort((a, b) => {
+                                  const va = val(a); const vb = val(b);
+                                  if (va < vb) return -1 * dir;
+                                  if (va > vb) return 1 * dir;
+                                  return 0;
+                                });
+                                return (
                               <table className="w-full text-xs">
                                 <thead className="bg-white text-gray-500 border-t border-b border-amber-200">
                                   <tr>
-                                    <th className="px-3 py-1.5 text-left">Period end</th>
-                                    <th className="px-3 py-1.5 text-left">Contractor</th>
-                                    <th className="px-3 py-1.5 text-left">Invoice #</th>
-                                    <th className="px-3 py-1.5 text-right">Amount</th>
-                                    <th className="px-3 py-1.5 text-left">Path</th>
-                                    <th className="px-3 py-1.5 text-left">QB vendor</th>
+                                    {sTh('period_end', 'Period end')}
+                                    {sTh('contractor', 'Contractor')}
+                                    {sTh('invoice_number', 'Invoice #')}
+                                    {sTh('amount', 'Amount', 'right')}
+                                    {sTh('path', 'Path')}
+                                    {sTh('qb_vendor', 'QB vendor')}
                                     <th className="px-3 py-1.5 text-left">Next action</th>
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {missingBills.map(m => {
+                                  {sortedMissing.map(m => {
                                     const pathClass = m.paymentPath === 'Intuit' ? 'bg-green-50 text-green-700'
                                                     : m.paymentPath === 'Convera' ? 'bg-purple-50 text-purple-700'
                                                     : 'bg-gray-100 text-gray-500';
@@ -11010,6 +11175,8 @@ const TimesheetSystem = () => {
                                   })}
                                 </tbody>
                               </table>
+                                );
+                              })()}
                             </>
                           )}
                         </div>
@@ -11019,7 +11186,8 @@ const TimesheetSystem = () => {
                 })()}
 
                 {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => {
-                  // Posted section — precompute month-filtered subset for header + body.
+                  // Slice B: posted section is month-rolled up. Each YYYY-MM is a
+                  // clickable group. Current month expanded by default, older collapsed.
                   const postedMonthOf = (e: QbIngestEvent): string => {
                     const iso = e.statusUpdatedAt ?? e.txnDate;
                     return iso ? iso.slice(0, 7) : '';
@@ -11027,38 +11195,143 @@ const TimesheetSystem = () => {
                   const postedMonths = g.key === 'posted'
                     ? [...new Set(g.events.map(postedMonthOf).filter(Boolean))].sort().reverse()
                     : [];
-                  const postedActiveMonth = g.key === 'posted'
-                    ? (postedMonths.includes(qbInboxPostedMonth) ? qbInboxPostedMonth : (postedMonths[0] ?? qbInboxPostedMonth))
-                    : '';
-                  const postedShown = g.key === 'posted'
-                    ? g.events.filter(e => postedMonthOf(e) === postedActiveMonth)
-                    : g.events;
-                  const postedShownTotal = postedShown.reduce((n, e) => n + e.amount, 0);
+                  const currentMonth = new Date().toISOString().slice(0, 7);
+                  const postedEventsByMonth = new Map<string, QbIngestEvent[]>();
+                  if (g.key === 'posted') {
+                    for (const e of g.events) {
+                      const m = postedMonthOf(e);
+                      if (!m) continue;
+                      const list = postedEventsByMonth.get(m) ?? [];
+                      list.push(e);
+                      postedEventsByMonth.set(m, list);
+                    }
+                  }
+                  const totalAmt = g.events.reduce((s, e) => s + e.amount, 0);
                   const postedMonthLabel = (m: string) => {
                     if (!m) return '—';
                     const [y, mo] = m.split('-');
                     const d = new Date(Number(y), Number(mo) - 1, 1);
                     return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
                   };
+                  const monthExpanded = (m: string): boolean => {
+                    const key = `posted_month_${m}`;
+                    const explicit = qbInboxExpanded[key];
+                    if (explicit != null) return explicit;
+                    return m === currentMonth;   // default: current month expanded
+                  };
+                  const toggleMonth = (m: string) => setQbInboxExpanded(prev => ({ ...prev, [`posted_month_${m}`]: !monthExpanded(m) }));
+
+                  // Row + header helpers — shared between per-month posted tables
+                  // and the single-table non-posted buckets.
+                  const badge = (bg: string, fg: string, text: string, title?: string) => (
+                    <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
+                  );
+                  const sortChevron = (k: PostedSortKey) => postedSortKey === k
+                    ? <span className="text-gray-600">{postedSortDir === 'asc' ? '▲' : '▼'}</span>
+                    : <span className="text-gray-300">↕</span>;
+                  const sortableTh = (k: PostedSortKey, label: string, align: 'left' | 'right' = 'left') => (
+                    <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-gray-50`} onClick={() => togglePostedSort(k)}>
+                      <span className="inline-flex items-center gap-1">{label} {sortChevron(k)}</span>
+                    </th>
+                  );
+                  const renderPostedHeader = () => (
+                    <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
+                      <tr>
+                        {sortableTh('src', 'Src')}
+                        {sortableTh('date', 'Date')}
+                        {sortableTh('counterparty', 'Counterparty')}
+                        {sortableTh('amount', 'Amount', 'right')}
+                        {sortableTh('memo', 'Memo')}
+                        <th className="px-3 py-1.5 text-left" title="Reconciler decision.">Resolved</th>
+                        <th className="px-3 py-1.5 text-left" title="Invoice-link strength.">Provenance</th>
+                        {sortableTh('posted_at', 'Posted at')}
+                      </tr>
+                    </thead>
+                  );
+                  const sortPosted = (events: QbIngestEvent[]): QbIngestEvent[] => {
+                    const dir = postedSortDir === 'asc' ? 1 : -1;
+                    const key = postedSortKey;
+                    const val = (e: QbIngestEvent): string | number => {
+                      if (key === 'src') return sourceLabel(e.source);
+                      if (key === 'date') return e.txnDate ?? '';
+                      if (key === 'counterparty') return (e.counterpartyRaw ?? '').toLowerCase();
+                      if (key === 'amount') return e.amount ?? 0;
+                      if (key === 'memo') return (e.memo ?? '').toLowerCase();
+                      if (key === 'posted_at') return e.statusUpdatedAt ?? '';
+                      return '';
+                    };
+                    return [...events].sort((a, b) => {
+                      const va = val(a); const vb = val(b);
+                      if (va < vb) return -1 * dir;
+                      if (va > vb) return  1 * dir;
+                      return 0;
+                    });
+                  };
+                  const renderPostedRow = (e: QbIngestEvent): React.ReactNode => {
+                    const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
+                    const isPosted = e.status === 'posted';
+                    let resolvedCell: React.ReactNode = <span className="text-gray-400">—</span>;
+                    if (e.resolvedAction === 'already_done') {
+                      resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid', e.resolvedBillTxnId ?? undefined);
+                    } else if (e.resolvedAction === 'pay_existing_bill') {
+                      const label = isPosted
+                        ? (resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid bill')
+                        : (resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill');
+                      resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-yellow-100', isPosted ? 'text-green-700' : 'text-yellow-700', label, e.resolvedBillTxnId ?? undefined);
+                    } else if (e.resolvedAction === 'create_bill_then_pay') {
+                      if (e.source === 'invoice_g75') {
+                        resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `created bill: ${resolvedBill.refNumber}` : 'created bill', e.resolvedBillTxnId ?? undefined);
+                      } else {
+                        const label = isPosted
+                          ? (resolvedBill ? `created bill + paid: ${resolvedBill.refNumber}` : 'created bill + paid')
+                          : 'will create bill + pay';
+                        resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label, e.resolvedBillTxnId ?? undefined);
+                      }
+                    } else if (e.resolvedAction === 'check') {
+                      const label = isPosted ? 'wrote check' : 'will write check';
+                      resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label);
+                    }
+                    const provCell: React.ReactNode = e.matchProvenance
+                      ? badge(
+                          e.matchProvenance === 'exact-txn'   ? 'bg-emerald-100' :
+                          e.matchProvenance === 'exact-ref'   ? 'bg-teal-100' :
+                          e.matchProvenance === 'created-pay' ? 'bg-violet-100' :
+                          e.matchProvenance === 'fuzzy'       ? 'bg-amber-100' : 'bg-gray-100',
+                          e.matchProvenance === 'exact-txn'   ? 'text-emerald-800' :
+                          e.matchProvenance === 'exact-ref'   ? 'text-teal-800' :
+                          e.matchProvenance === 'created-pay' ? 'text-violet-800' :
+                          e.matchProvenance === 'fuzzy'       ? 'text-amber-800' : 'text-gray-600',
+                          e.matchProvenance === 'exact-txn'   ? '🔒 exact-txn' :
+                          e.matchProvenance === 'exact-ref'   ? '✓ exact-ref' :
+                          e.matchProvenance === 'created-pay' ? '🆕 created-pay' :
+                          e.matchProvenance === 'fuzzy'       ? '~ fuzzy' : '— empty',
+                        )
+                      : <span className="text-gray-300">—</span>;
+                    return (
+                      <tr key={e.id} className="border-t border-gray-100 hover:bg-indigo-50/40">
+                        <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
+                        <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
+                        <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
+                        <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
+                        <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
+                        <td className="px-3 py-1.5">{resolvedCell}</td>
+                        <td className="px-3 py-1.5">{provCell}</td>
+                        <td className="px-3 py-1.5 text-gray-500 font-mono text-[11px]">
+                          {e.statusUpdatedAt
+                            ? new Date(e.statusUpdatedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                            : '—'}
+                        </td>
+                      </tr>
+                    );
+                  };
                   return (
                   <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
                     <button onClick={() => toggle(g.key)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left">
                       <div>
                         <span className="font-semibold text-gray-800">{g.title}</span>
-                        {g.key === 'posted' && g.events.length > 0 ? (
-                          <>
-                            <span className="ml-2 text-sm text-gray-500">· {postedMonthLabel(postedActiveMonth)}</span>
-                            <span className="ml-2 text-sm text-gray-500">· <strong className="text-gray-700">{postedShown.length}</strong> event{postedShown.length === 1 ? '' : 's'}</span>
-                            <span className="ml-2 text-sm text-gray-500">· <span className="font-mono text-gray-700">${postedShownTotal.toFixed(2)}</span></span>
-                            <span className="ml-2 text-xs text-gray-400">· {g.events.length} posted all-time</span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
-                            {g.events.length > 0 && (
-                              <span className="ml-2 text-sm text-gray-500">· ${g.events.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}</span>
-                            )}
-                          </>
+                        <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
+                        {g.events.length > 0 && (
+                          <span className="ml-2 text-sm text-gray-500">· ${totalAmt.toFixed(2)}</span>
                         )}
                       </div>
                       <span className="text-xs text-gray-400">{qbInboxExpanded[g.key] ? '▼' : '▶'}</span>
@@ -11112,54 +11385,111 @@ const TimesheetSystem = () => {
                               })()}
                             </div>
                           </>
+                        ) : g.key === 'posted' && postedMonths.length > 0 ? (
+                          <>
+                            <p className="px-4 pt-3 pb-2 text-xs text-gray-500 italic">{g.hint}</p>
+                            {postedMonths.map(m => {
+                              const monthEvents = postedEventsByMonth.get(m) ?? [];
+                              const monthTotal = monthEvents.reduce((s, e) => s + e.amount, 0);
+                              const isOpen = monthExpanded(m);
+                              return (
+                                <div key={m} className="border-t border-gray-100">
+                                  <button onClick={() => toggleMonth(m)} className="w-full flex items-center justify-between px-4 py-2 bg-white hover:bg-gray-50 text-left text-sm">
+                                    <div>
+                                      <span className="font-semibold text-gray-700">{postedMonthLabel(m)}</span>
+                                      <span className="ml-2 text-xs text-gray-500">· {monthEvents.length} event{monthEvents.length === 1 ? '' : 's'}</span>
+                                      <span className="ml-2 text-xs text-gray-500">· <span className="font-mono">${monthTotal.toFixed(2)}</span></span>
+                                    </div>
+                                    <span className="text-xs text-gray-400">{isOpen ? '▼' : '▶'}</span>
+                                  </button>
+                                  {isOpen && (
+                                    <table className="w-full text-xs">
+                                      {renderPostedHeader()}
+                                      <tbody>
+                                        {sortPosted(monthEvents).map(e => renderPostedRow(e))}
+                                      </tbody>
+                                    </table>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </>
                         ) : (
                           <>
                             <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint}</p>
-                            {g.key === 'posted' && postedMonths.length > 0 && (
-                              <div className="px-4 py-2 border-t border-gray-100 bg-gray-50/50 flex items-center gap-2 text-xs">
-                                <label className="text-gray-600">Month:</label>
-                                <select
-                                  value={postedActiveMonth}
-                                  onChange={e => setQbInboxPostedMonth(e.target.value)}
-                                  className="px-2 py-1 border border-gray-300 rounded bg-white"
-                                >
-                                  {postedMonths.map(m => (
-                                    <option key={m} value={m}>{postedMonthLabel(m)}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            )}
+                            {(() => {
+                              const chev = (k: NonPostedSortKey) => nonPostedSortKey === k
+                                ? <span className="text-gray-600">{nonPostedSortDir === 'asc' ? '▲' : '▼'}</span>
+                                : <span className="text-gray-300">↕</span>;
+                              const sTh = (k: NonPostedSortKey, label: string, align: 'left' | 'right' = 'left') => (
+                                <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-gray-50`} onClick={() => toggleNonPostedSort(k)}>
+                                  <span className="inline-flex items-center gap-1">{label} {chev(k)}</span>
+                                </th>
+                              );
+                              const dir = nonPostedSortDir === 'asc' ? 1 : -1;
+                              const key = nonPostedSortKey;
+                              const val = (e: QbIngestEvent): string | number => {
+                                if (key === 'src') return sourceLabel(e.source);
+                                if (key === 'date') return e.txnDate ?? '';
+                                if (key === 'counterparty') return (e.counterpartyRaw ?? '').toLowerCase();
+                                if (key === 'amount') return e.amount ?? 0;
+                                if (key === 'memo') return (e.memo ?? '').toLowerCase();
+                                if (key === 'status') return e.status ?? '';
+                                return '';
+                              };
+                              const sortedEvents = [...g.events].sort((a, b) => {
+                                const va = val(a); const vb = val(b);
+                                if (va < vb) return -1 * dir;
+                                if (va > vb) return  1 * dir;
+                                return 0;
+                              });
+                              return (
                             <table className="w-full text-xs">
                               <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
                                 <tr>
-                                  <th className="px-3 py-1.5 text-left">Src</th>
-                                  <th className="px-3 py-1.5 text-left">Date</th>
-                                  <th className="px-3 py-1.5 text-left">Counterparty</th>
-                                  <th className="px-3 py-1.5 text-right">Amount</th>
-                                  <th className="px-3 py-1.5 text-left">Memo</th>
-                                  <th className="px-3 py-1.5 text-left" title="Reconciler decision — authoritative for push. Old amount-only matcher output removed 2026-08-21.">Resolved</th>
-                                  <th className="px-3 py-1.5 text-left" title="Invoice-link strength. exact-txn is deterministic (invoice.qb_bill_txn_id matches). Only exact-txn / exact-ref events are pushable.">Provenance</th>
-                                  <th className="px-3 py-1.5 text-left">Status</th>
-                                  {g.key === 'posted' && <th className="px-3 py-1.5 text-left">Posted at</th>}
+                                  {sTh('src', 'Src')}
+                                  {sTh('date', 'Date')}
+                                  {sTh('counterparty', 'Counterparty')}
+                                  {sTh('amount', 'Amount', 'right')}
+                                  {sTh('memo', 'Memo')}
+                                  <th className="px-3 py-1.5 text-left" title="Reconciler decision.">Resolved</th>
+                                  <th className="px-3 py-1.5 text-left" title="Invoice-link strength.">Provenance</th>
+                                  {sTh('status', 'Status')}
                                 </tr>
                               </thead>
                               <tbody>
-                                {(g.key === 'posted' ? postedShown : g.events).map(e => {
+                                {sortedEvents.map(e => {
                                   const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
                                   const badge = (bg: string, fg: string, text: string, title?: string) => (
                                     <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
                                   );
+                                  // Tense-aware: use PAST for posted rows, FUTURE for everything else.
+                                  // Rule per feedback_ux_consistency: every state variant of every column
+                                  // must be considered together, not per-slice.
+                                  const isPosted = e.status === 'posted';
                                   let resolvedCell: React.ReactNode = <span className="text-gray-400">—</span>;
                                   if (e.resolvedAction === 'pre_our_system') {
                                     resolvedCell = badge('bg-gray-100', 'text-gray-500', 'pre-cutoff · in QB', e.resolvedReason ?? undefined);
                                   } else if (e.resolvedAction === 'already_done') {
                                     resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid', e.resolvedBillTxnId ?? undefined);
                                   } else if (e.resolvedAction === 'pay_existing_bill') {
-                                    resolvedCell = badge('bg-yellow-100', 'text-yellow-700', resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill', e.resolvedBillTxnId ?? undefined);
+                                    const label = isPosted
+                                      ? (resolvedBill ? `paid: ${resolvedBill.refNumber}` : 'paid bill')
+                                      : (resolvedBill ? `will pay: ${resolvedBill.refNumber}` : 'will pay bill');
+                                    resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-yellow-100', isPosted ? 'text-green-700' : 'text-yellow-700', label, e.resolvedBillTxnId ?? undefined);
                                   } else if (e.resolvedAction === 'create_bill_then_pay') {
-                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will create bill + pay');
+                                    // G7.5 posted (source='invoice_g75'): bill created; pay comes via ingest event later.
+                                    if (e.source === 'invoice_g75') {
+                                      resolvedCell = badge('bg-green-100', 'text-green-700', resolvedBill ? `created bill: ${resolvedBill.refNumber}` : 'created bill', e.resolvedBillTxnId ?? undefined);
+                                    } else {
+                                      const label = isPosted
+                                        ? (resolvedBill ? `created bill + paid: ${resolvedBill.refNumber}` : 'created bill + paid')
+                                        : 'will create bill + pay';
+                                      resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label, e.resolvedBillTxnId ?? undefined);
+                                    }
                                   } else if (e.resolvedAction === 'check') {
-                                    resolvedCell = badge('bg-blue-100', 'text-blue-700', 'will write check');
+                                    const label = isPosted ? 'wrote check' : 'will write check';
+                                    resolvedCell = badge(isPosted ? 'bg-green-100' : 'bg-blue-100', isPosted ? 'text-green-700' : 'text-blue-700', label);
                                   } else if (e.resolvedAction === 'held') {
                                     resolvedCell = badge('bg-red-100', 'text-red-700', 'held', e.resolvedReason ?? undefined);
                                   }
@@ -11200,11 +11530,13 @@ const TimesheetSystem = () => {
                                       <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
                                       <td className="px-3 py-1.5">{resolvedCell}</td>
                                       <td className="px-3 py-1.5">{provCell}</td>
-                                      <td className="px-3 py-1.5">
-                                        {e.resolvedAction === 'pre_our_system'
-                                          ? <span className="text-gray-500 italic">will not push</span>
-                                          : <span className="text-gray-500">{e.status}</span>}
-                                      </td>
+                                      {g.key !== 'posted' && (
+                                        <td className="px-3 py-1.5">
+                                          {e.resolvedAction === 'pre_our_system'
+                                            ? <span className="text-gray-500 italic">will not push</span>
+                                            : <span className="text-gray-500">{e.status}</span>}
+                                        </td>
+                                      )}
                                       {g.key === 'posted' && (
                                         <td className="px-3 py-1.5 text-gray-500 font-mono text-[11px]">
                                           {e.statusUpdatedAt
@@ -11217,6 +11549,8 @@ const TimesheetSystem = () => {
                                 })}
                               </tbody>
                             </table>
+                              );
+                            })()}
                           </>
                         )}
                       </div>

@@ -19,17 +19,25 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { CheckCircle, AlertTriangle, Clock, X, Copy } from 'lucide-react';
 
 export interface PushRecord {
+  /** React key + poll dispatch id. For source='event' this is qb_ingest_events.id.
+   *  For source='invoice' (G7.5) this is -invoice.id (negative avoids collision). */
   eventId: number;
+  /** Domain the record was pushed from. Default 'event' for back-compat. */
+  sourceKind?: 'event' | 'invoice';
+  /** When sourceKind='invoice', the positive invoices.id. */
+  invoiceId?: number;
   payJobId: number;
   verifyJobId: number | null;
   billTxnId: string;
   expectedAmount: number;
   expectedVendor: string;
   pushedAt: string;                 // ISO
-  /** Push shape — determines verification path. 'pay_bill' + 'create' both
-   *  read qb_mirror is_settled after drain; 'check' has no bill so its
-   *  terminal state is just the check_add job succeeding. */
-  kind?: 'pay_bill' | 'create' | 'check';
+  /** Push shape — determines verification path.
+   *   'pay_bill'          — event-driven BillPmt; success = mirror is_settled=true
+   *   'create'            — event-driven create_bill (G7b orphan); mirror seed
+   *   'check'             — check_add only; success = job done
+   *   'invoice_create_bill'— G7.5 proactive; success = bill_add done + mirror has bill */
+  kind?: 'pay_bill' | 'create' | 'check' | 'invoice_create_bill';
 }
 
 type JobStatus = 'pending' | 'in_flight' | 'done' | 'failed' | 'cancelled';
@@ -63,6 +71,15 @@ function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | n
       // Check pushes: no bill mirror, no verify chain. check_add drain success
       // IS the terminal state. Accountant eyeballs QB for the actual check.
       overall = 'verified-ok';
+    } else if (kind === 'invoice_create_bill') {
+      // G7.5: success = bill_add done + verify (bill_query) done + mirror has bill.
+      // No BillPmt concept; is_settled is expected FALSE (bill unpaid until ingest pays it).
+      if (verifyStatus === 'failed') overall = 'verify-failed';
+      else if (verifyStatus === 'pending' || verifyStatus === 'in_flight') overall = 'verifying';
+      else if (verifyStatus === 'done') {
+        // mirror row existing (regardless of is_settled) = success for the create step.
+        overall = mirror != null ? 'verified-ok' : 'silent-drop';
+      } else overall = 'verifying';
     } else if (verifyStatus === 'failed') overall = 'verify-failed';
     else if (verifyStatus === 'pending' || verifyStatus === 'in_flight') overall = 'verifying';
     else if (verifyStatus === 'done') {
@@ -93,30 +110,38 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
   const poll = useCallback(async () => {
     if (records.length === 0) return;
     const jobIds = records.flatMap(r => [r.payJobId, ...(r.verifyJobId != null ? [r.verifyJobId] : [])]);
-    const eventIds = records.map(r => r.eventId);
-    // For chained-create events (G7b Phase 3), rec.billTxnId is empty at push
-    // time — TxnID becomes known only after bill_add drains and gets persisted
-    // on qb_ingest_events.resolved_bill_txn_id. We do a first mirror pass for
-    // known-billTxnId records, then a second pass for chained records using
-    // the event's resolved_bill_txn_id.
+    // Split by source domain (Slice A: PushRecord now supports 'invoice' for G7.5).
+    const eventRecs = records.filter(r => (r.sourceKind ?? 'event') === 'event');
+    const invoiceRecs = records.filter(r => r.sourceKind === 'invoice');
+    const eventIds = eventRecs.map(r => r.eventId);
+    const invoiceIds = invoiceRecs.map(r => r.invoiceId).filter((v): v is number => v != null);
     const billTxnIds = Array.from(new Set(records.map(r => r.billTxnId).filter(Boolean)));
 
-    const [jobsRes, eventsRes, mirrorRes] = await Promise.all([
+    const [jobsRes, eventsRes, invoicesRes, mirrorRes] = await Promise.all([
       supabase.from('qb_sync_jobs').select('id, status, error_msg').in('id', jobIds),
-      supabase.from('qb_ingest_events').select('id, status, posted_qb_refs, resolved_bill_txn_id').in('id', eventIds),
+      eventIds.length > 0
+        ? supabase.from('qb_ingest_events').select('id, status, posted_qb_refs, resolved_bill_txn_id').in('id', eventIds)
+        : Promise.resolve({ data: [] as EventRow[] }),
+      invoiceIds.length > 0
+        ? supabase.from('invoices').select('id, qb_bill_txn_id').in('id', invoiceIds)
+        : Promise.resolve({ data: [] as Array<{ id: number; qb_bill_txn_id: string | null }> }),
       supabase.from('qb_mirror').select('entity_ref, is_settled, data').eq('entity_kind', 'bill').in('entity_ref', billTxnIds),
     ]);
     const jobById = new Map(((jobsRes.data ?? []) as JobRow[]).map(r => [r.id, r]));
     const eventById = new Map(((eventsRes.data ?? []) as EventRow[]).map(r => [r.id, r]));
+    const invoiceBillTxnById = new Map(((invoicesRes.data ?? []) as Array<{ id: number; qb_bill_txn_id: string | null }>).map(r => [r.id, r.qb_bill_txn_id]));
     const mirrorByTxn = new Map(((mirrorRes.data ?? []) as MirrorRow[]).map(r => [r.entity_ref, r]));
 
-    // Second mirror pass: fetch mirror rows for chained-create events whose
-    // rec.billTxnId was empty at push time but now have resolved_bill_txn_id
-    // set on the event (post bill_add drain).
+    // Second mirror pass: bill TxnIDs that became known AFTER push time.
+    // Events → resolved_bill_txn_id from qb_ingest_events (G7b chained-create).
+    // Invoices → qb_bill_txn_id from invoices (G7.5).
     const backfillTxnIds = Array.from(new Set(
       records
         .filter(r => !r.billTxnId)
-        .map(r => (eventById.get(r.eventId)?.resolved_bill_txn_id ?? null))
+        .map(r => {
+          if ((r.sourceKind ?? 'event') === 'event') return eventById.get(r.eventId)?.resolved_bill_txn_id ?? null;
+          return r.invoiceId != null ? (invoiceBillTxnById.get(r.invoiceId) ?? null) : null;
+        })
         .filter((v): v is string => !!v && !mirrorByTxn.has(v)),
     ));
     if (backfillTxnIds.length > 0) {
@@ -130,8 +155,9 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
     for (const rec of records) {
       const pay = jobById.get(rec.payJobId) ?? null;
       const verify = rec.verifyJobId != null ? (jobById.get(rec.verifyJobId) ?? null) : null;
-      const event = eventById.get(rec.eventId) ?? null;
-      const lookupKey = rec.billTxnId || event?.resolved_bill_txn_id || '';
+      const event = (rec.sourceKind ?? 'event') === 'event' ? (eventById.get(rec.eventId) ?? null) : null;
+      const invoiceBillTxn = rec.sourceKind === 'invoice' && rec.invoiceId != null ? invoiceBillTxnById.get(rec.invoiceId) : null;
+      const lookupKey = rec.billTxnId || event?.resolved_bill_txn_id || invoiceBillTxn || '';
       const mirror = lookupKey ? (mirrorByTxn.get(lookupKey) ?? null) : null;
       next.set(rec.eventId, classify(pay, verify, event, mirror, rec.kind));
     }
@@ -167,7 +193,9 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <StatusBadge overall={overall} />
-                  <span className="font-mono text-xs text-gray-500">event {rec.eventId}</span>
+                  <span className="font-mono text-xs text-gray-500">
+                    {rec.sourceKind === 'invoice' ? `invoice ${rec.invoiceId ?? '?'}` : `event ${rec.eventId}`}
+                  </span>
                   <span className="text-gray-800 font-medium">{rec.expectedVendor}</span>
                   <span className="font-mono text-gray-600">${rec.expectedAmount.toFixed(2)}</span>
                 </div>
@@ -193,7 +221,7 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
                 )}
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
-                {(overall === 'verified-ok' || overall === 'silent-drop' || overall === 'pay-failed' || overall === 'verify-failed') && (
+                {rec.sourceKind !== 'invoice' && (overall === 'verified-ok' || overall === 'silent-drop' || overall === 'pay-failed' || overall === 'verify-failed') && (
                   <button
                     onClick={() => setVoidFor(rec)}
                     className="text-xs text-red-700 hover:text-red-900 hover:underline"

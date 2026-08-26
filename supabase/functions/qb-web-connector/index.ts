@@ -433,7 +433,7 @@ async function persistJobResponse(
     }
     const { data: updated, error: updErr } = await supabase
       .from('invoices')
-      .update({ qb_bill_txn_id: parsed.result.txnId, qb_export_status: 'exported' })
+      .update({ qb_bill_txn_id: parsed.result.txnId, qb_export_status: 'exported', qb_export_status_at: new Date().toISOString() })
       .in('user_id', userIds)
       .eq('invoice_number', parsed.result.refNumber)
       .select('id');
