@@ -11191,7 +11191,7 @@ const TimesheetSystem = () => {
                                   <th className="px-3 py-1.5 text-left">Memo</th>
                                   <th className="px-3 py-1.5 text-left" title="Reconciler decision — authoritative for push. Old amount-only matcher output removed 2026-08-21.">Resolved</th>
                                   <th className="px-3 py-1.5 text-left" title="Invoice-link strength. exact-txn is deterministic (invoice.qb_bill_txn_id matches). Only exact-txn / exact-ref events are pushable.">Provenance</th>
-                                  <th className="px-3 py-1.5 text-left">Status</th>
+                                  {g.key !== 'posted' && <th className="px-3 py-1.5 text-left">Status</th>}
                                   {g.key === 'posted' && <th className="px-3 py-1.5 text-left">Posted at</th>}
                                 </tr>
                               </thead>
@@ -11268,11 +11268,13 @@ const TimesheetSystem = () => {
                                       <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
                                       <td className="px-3 py-1.5">{resolvedCell}</td>
                                       <td className="px-3 py-1.5">{provCell}</td>
-                                      <td className="px-3 py-1.5">
-                                        {e.resolvedAction === 'pre_our_system'
-                                          ? <span className="text-gray-500 italic">will not push</span>
-                                          : <span className="text-gray-500">{e.status}</span>}
-                                      </td>
+                                      {g.key !== 'posted' && (
+                                        <td className="px-3 py-1.5">
+                                          {e.resolvedAction === 'pre_our_system'
+                                            ? <span className="text-gray-500 italic">will not push</span>
+                                            : <span className="text-gray-500">{e.status}</span>}
+                                        </td>
+                                      )}
                                       {g.key === 'posted' && (
                                         <td className="px-3 py-1.5 text-gray-500 font-mono text-[11px]">
                                           {e.statusUpdatedAt
