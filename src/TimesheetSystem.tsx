@@ -10428,6 +10428,8 @@ const TimesheetSystem = () => {
             // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
             // that arrives with Slice F (preview modal) and Slice G (real enqueue).
             const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice (G7.5)' }[s] || s);
+            // Thousands separator + 2dp everywhere in this tab.
+            const fmtMoney = (n: number) => '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             // Reconciler bill lookup by TxnID for the "Resolved" column (replaces the
             // legacy matched_invoice_ids display, which over-matched by amount alone).
             const billByTxnId = new Map(qbOpenBills.map(b => [b.txnId, b]));
@@ -10495,6 +10497,17 @@ const TimesheetSystem = () => {
                 if (d !== 0) return d;
                 return (a.invoice.userName || '').localeCompare(b.invoice.userName || '');
               });
+            // Section color palette — semantic per bucket. Same colors used
+            // for border + header bg + hover so the tab reads at a glance.
+            const sectionColors: Record<string, { border: string; head: string; hover: string; title: string }> = {
+              pending:          { border: 'border-amber-200',  head: 'bg-amber-50',   hover: 'hover:bg-amber-100/60',   title: 'text-amber-900' },
+              bill_pmt:         { border: 'border-sky-200',    head: 'bg-sky-50',     hover: 'hover:bg-sky-100/60',     title: 'text-sky-900' },
+              already_done:     { border: 'border-yellow-200', head: 'bg-yellow-50',  hover: 'hover:bg-yellow-100/60',  title: 'text-yellow-900' },
+              bill_add_and_pmt: { border: 'border-violet-200', head: 'bg-violet-50',  hover: 'hover:bg-violet-100/60',  title: 'text-violet-900' },
+              check:            { border: 'border-indigo-200', head: 'bg-indigo-50',  hover: 'hover:bg-indigo-100/60',  title: 'text-indigo-900' },
+              ignore:           { border: 'border-gray-200',   head: 'bg-gray-50',    hover: 'hover:bg-gray-100/60',    title: 'text-gray-700' },
+              posted:           { border: 'border-emerald-200',head: 'bg-emerald-50', hover: 'hover:bg-emerald-100/60', title: 'text-emerald-900' },
+            };
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
               { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
               { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e) && e.resolvedAction !== 'already_done') },
@@ -11095,7 +11108,7 @@ const TimesheetSystem = () => {
                           <span className="font-semibold text-amber-900">Missing QB bills — approved invoices without a Bill in QB</span>
                           <span className="ml-2 text-sm text-amber-800">· {missingBills.length} invoice{missingBills.length === 1 ? '' : 's'}</span>
                           {missingBills.length > 0 && (
-                            <span className="ml-2 text-sm text-amber-800">· ${totalAmt.toFixed(2)}</span>
+                            <span className="ml-2 text-sm text-amber-800">· {fmtMoney(totalAmt)}</span>
                           )}
                         </div>
                         <span className="text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</span>
@@ -11166,7 +11179,7 @@ const TimesheetSystem = () => {
                                         <td className="px-3 py-1.5 font-mono">{m.invoice.periodEnd}</td>
                                         <td className="px-3 py-1.5">{m.invoice.userName}</td>
                                         <td className="px-3 py-1.5 font-mono">{m.invoice.invoiceNumber}</td>
-                                        <td className="px-3 py-1.5 text-right font-mono">${m.invoice.totalAmount.toFixed(2)}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono">{fmtMoney(m.invoice.totalAmount)}</td>
                                         <td className="px-3 py-1.5"><span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${pathClass}`}>{m.paymentPath}</span></td>
                                         <td className="px-3 py-1.5 text-gray-600">{m.qbVendorName || <span className="text-red-500">— unmapped —</span>}</td>
                                         <td className="px-3 py-1.5">{nextAction}</td>
@@ -11312,7 +11325,7 @@ const TimesheetSystem = () => {
                         <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
                         <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
                         <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
-                        <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
+                        <td className="px-3 py-1.5 text-right font-mono">{fmtMoney(e.amount)}</td>
                         <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
                         <td className="px-3 py-1.5">{resolvedCell}</td>
                         <td className="px-3 py-1.5">{provCell}</td>
@@ -11324,14 +11337,15 @@ const TimesheetSystem = () => {
                       </tr>
                     );
                   };
+                  const c = sectionColors[g.key] ?? sectionColors['ignore'];
                   return (
-                  <div key={g.key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
-                    <button onClick={() => toggle(g.key)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left">
+                  <div key={g.key} className={`mb-4 border ${c.border} rounded-lg overflow-hidden`}>
+                    <button onClick={() => toggle(g.key)} className={`w-full flex items-center justify-between px-4 py-3 ${c.head} ${c.hover} text-left`}>
                       <div>
-                        <span className="font-semibold text-gray-800">{g.title}</span>
+                        <span className={`font-semibold ${c.title}`}>{g.title}</span>
                         <span className="ml-2 text-sm text-gray-500">· {g.events.length} event{g.events.length === 1 ? '' : 's'}</span>
                         {g.events.length > 0 && (
-                          <span className="ml-2 text-sm text-gray-500">· ${totalAmt.toFixed(2)}</span>
+                          <span className="ml-2 text-sm text-gray-500">· {fmtMoney(totalAmt)}</span>
                         )}
                       </div>
                       <span className="text-xs text-gray-400">{qbInboxExpanded[g.key] ? '▼' : '▶'}</span>
@@ -11361,7 +11375,7 @@ const TimesheetSystem = () => {
                                       <div className="flex items-center justify-between px-3 py-2 bg-amber-50 border-b border-amber-100">
                                         <div>
                                           <span className="font-medium text-gray-800">{grp.counterparty}</span>
-                                          <span className="ml-2 text-xs text-gray-500">{sourceLabel(grp.source)} · {grp.events.length} event{grp.events.length === 1 ? '' : 's'} · ${grp.total.toFixed(2)}</span>
+                                          <span className="ml-2 text-xs text-gray-500">{sourceLabel(grp.source)} · {grp.events.length} event{grp.events.length === 1 ? '' : 's'} · {fmtMoney(grp.total)}</span>
                                         </div>
                                         <button onClick={() => openMapWidget(grp.counterparty, grp.source, grp.events.length)} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">Map vendor</button>
                                       </div>
@@ -11372,7 +11386,7 @@ const TimesheetSystem = () => {
                                             {grp.events.map(e => (
                                               <tr key={e.id} className="border-t border-gray-100">
                                                 <td className="px-3 py-1 font-mono w-24">{e.txnDate}</td>
-                                                <td className="px-3 py-1 text-right font-mono w-24">${e.amount.toFixed(2)}</td>
+                                                <td className="px-3 py-1 text-right font-mono w-24">{fmtMoney(e.amount)}</td>
                                                 <td className="px-3 py-1 text-gray-600">{e.memo || '—'}</td>
                                               </tr>
                                             ))}
@@ -11398,7 +11412,7 @@ const TimesheetSystem = () => {
                                     <div>
                                       <span className="font-semibold text-gray-700">{postedMonthLabel(m)}</span>
                                       <span className="ml-2 text-xs text-gray-500">· {monthEvents.length} event{monthEvents.length === 1 ? '' : 's'}</span>
-                                      <span className="ml-2 text-xs text-gray-500">· <span className="font-mono">${monthTotal.toFixed(2)}</span></span>
+                                      <span className="ml-2 text-xs text-gray-500">· <span className="font-mono">{fmtMoney(monthTotal)}</span></span>
                                     </div>
                                     <span className="text-xs text-gray-400">{isOpen ? '▼' : '▶'}</span>
                                   </button>
@@ -11526,7 +11540,7 @@ const TimesheetSystem = () => {
                                       <td className="px-3 py-1.5"><span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(e.source)}</span></td>
                                       <td className="px-3 py-1.5 font-mono">{e.txnDate}</td>
                                       <td className="px-3 py-1.5">{e.counterpartyRaw}</td>
-                                      <td className="px-3 py-1.5 text-right font-mono">${e.amount.toFixed(2)}</td>
+                                      <td className="px-3 py-1.5 text-right font-mono">{fmtMoney(e.amount)}</td>
                                       <td className="px-3 py-1.5 text-gray-600 truncate max-w-xs" title={e.memo ?? ''}>{e.memo || '—'}</td>
                                       <td className="px-3 py-1.5">{resolvedCell}</td>
                                       <td className="px-3 py-1.5">{provCell}</td>
