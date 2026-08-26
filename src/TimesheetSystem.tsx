@@ -11018,6 +11018,62 @@ const TimesheetSystem = () => {
                   );
                 })()}
 
+                {/* Bills we created (proactive G7.5 pushes) — surfaced under
+                    Already Posted per UX contract rule #4. Reads invoices with
+                    qb_bill_txn_id set + qb_export_status='exported'. Slice A of
+                    the modal-rework will unify this into the main posted bucket. */}
+                {(() => {
+                  const proactiveBills = invoices
+                    .filter(inv => inv.qbBillTxnId && inv.qbExportStatus === 'exported')
+                    .sort((a, b) => (b.qbExportStatusAt ?? '').localeCompare(a.qbExportStatusAt ?? ''));
+                  if (proactiveBills.length === 0) return null;
+                  const total = proactiveBills.reduce((s, i) => s + i.totalAmount, 0);
+                  const expanded = qbInboxExpanded['proactive_bills'] ?? false;
+                  return (
+                    <div className="mb-4 border border-emerald-200 rounded-lg overflow-hidden bg-emerald-50/30">
+                      <button onClick={() => setQbInboxExpanded(prev => ({ ...prev, proactive_bills: !prev['proactive_bills'] }))} className="w-full flex items-center justify-between px-4 py-3 hover:bg-emerald-100/40 text-left">
+                        <div>
+                          <span className="font-semibold text-emerald-900">Bills we created (proactive)</span>
+                          <span className="ml-2 text-sm text-emerald-800">· {proactiveBills.length} bill{proactiveBills.length === 1 ? '' : 's'}</span>
+                          <span className="ml-2 text-sm text-emerald-800">· ${total.toFixed(2)}</span>
+                        </div>
+                        <span className="text-xs text-emerald-700">{expanded ? '▼' : '▶'}</span>
+                      </button>
+                      {expanded && (
+                        <div>
+                          <p className="px-4 pt-3 text-xs text-gray-600 italic">
+                            Approved invoices where we proactively pushed a Bill to QB (G7.5). Payment will be handled by the ingest event when it arrives.
+                          </p>
+                          <table className="w-full text-xs">
+                            <thead className="bg-white text-gray-500 border-t border-b border-emerald-200">
+                              <tr>
+                                <th className="px-3 py-1.5 text-left">Pushed at</th>
+                                <th className="px-3 py-1.5 text-left">Contractor</th>
+                                <th className="px-3 py-1.5 text-left">Invoice #</th>
+                                <th className="px-3 py-1.5 text-right">Amount</th>
+                                <th className="px-3 py-1.5 text-left">QB Bill TxnID</th>
+                                <th className="px-3 py-1.5 text-left">Period end</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {proactiveBills.map(inv => (
+                                <tr key={inv.id} className="border-t border-emerald-100 hover:bg-emerald-100/30">
+                                  <td className="px-3 py-1.5 font-mono text-gray-600">{inv.qbExportStatusAt ? new Date(inv.qbExportStatusAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}</td>
+                                  <td className="px-3 py-1.5">{inv.userName}</td>
+                                  <td className="px-3 py-1.5 font-mono">{inv.invoiceNumber}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">${inv.totalAmount.toFixed(2)}</td>
+                                  <td className="px-3 py-1.5 font-mono text-gray-600 text-[10px]">{inv.qbBillTxnId}</td>
+                                  <td className="px-3 py-1.5 font-mono text-gray-500">{inv.periodEnd}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {groups.filter(g => g.events.length > 0 || (g.key !== 'posted' && g.key !== 'ignore')).map(g => {
                   // Posted section — precompute month-filtered subset for header + body.
                   const postedMonthOf = (e: QbIngestEvent): string => {
