@@ -1229,10 +1229,8 @@ const TimesheetSystem = () => {
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
   });
-  // Month-year filter for the Inbox "Already posted" section. Format: 'YYYY-MM'.
-  // Default to current month; auto-falls-back to most-recent month with events
-  // if current has none (see render).
-  const [qbInboxPostedMonth, setQbInboxPostedMonth] = useState<string>(() => new Date().toISOString().slice(0, 7));
+  // (Slice B) posted month filter replaced by per-month expandable groups.
+  // qbInboxExpanded['posted_month_YYYY-MM'] tracks each month's expand state.
   // Slice F — push preview modal
   const [showQbPushPreview, setShowQbPushPreview] = useState(false);
   const [qbPushRecords, setQbPushRecords] = useState<PushRecord[]>([]);
@@ -11395,7 +11393,7 @@ const TimesheetSystem = () => {
                                 </tr>
                               </thead>
                               <tbody>
-                                {(g.key === 'posted' ? postedShown : g.events).map(e => {
+                                {g.events.map(e => {
                                   const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
                                   const badge = (bg: string, fg: string, text: string, title?: string) => (
                                     <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
