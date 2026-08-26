@@ -249,7 +249,13 @@ async function persistJobResponse(
     // for orphan-created bills. Skip invoice-linkage errors in verify mode;
     // mirror upsert (below) is what matters.
     const isVerifyJob = (job.payload as { __verify_for_event_id?: number }).__verify_for_event_id != null;
-    const tolerateInvoicePersistMiss = isIteratorMode || isVerifyJob;
+    // Mirror completeness backfill (2026-08-26): script enqueues bill_query
+    // targeted at mirror-only rows. Some may lack a matching invoice (deleted,
+    // renumbered, or pre-our-system). Tolerate the miss so the mirror upsert
+    // for expense_lines still runs.
+    const auditTag = (job.payload as { __audit_tag?: string }).__audit_tag;
+    const isMirrorBackfill = auditTag === 'mirror-backfill-expense-lines';
+    const tolerateInvoicePersistMiss = isIteratorMode || isVerifyJob || isMirrorBackfill;
     let linked = 0;
     let skippedUnmappedVendor = 0;
     let skippedUnknownInvoice = 0;
