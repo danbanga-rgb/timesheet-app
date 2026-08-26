@@ -3061,6 +3061,54 @@ const TimesheetSystem = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountantTab, currentUser?.role]);
 
+  // Already-done bucket row actions. These update OUR tracking (qb_ingest_events
+  // + invoices), NOT QB. Bill + payment already exist in QB per the reconciler.
+  const markAlreadyDonePreOurSystem = async (eventId: number) => {
+    const { error } = await supabase
+      .from('qb_ingest_events')
+      .update({ resolved_action: 'pre_our_system', resolved_reason: 'manually marked pre-our-system' })
+      .eq('id', eventId);
+    if (error) { alert('Failed: ' + error.message); return; }
+    await loadQbIngestEvents();
+  };
+  const markAlreadyDoneOrphan = async (eventId: number) => {
+    const { error } = await supabase
+      .from('qb_ingest_events')
+      .update({ status: 'ignored', notes: 'marked orphan (unrelated to our invoices)' })
+      .eq('id', eventId);
+    if (error) { alert('Failed: ' + error.message); return; }
+    await loadQbIngestEvents();
+  };
+  const acceptAlreadyDoneFuzzyMatch = async (eventId: number) => {
+    const e = qbIngestEvents.find(x => x.id === eventId);
+    if (!e) return;
+    if (!e.resolvedBillTxnId) { alert('No resolved bill TxnID on event — cannot accept.'); return; }
+    const invoiceIds = e.matchedInvoiceIds ?? [];
+    const linkDetail = invoiceIds.length > 0
+      ? `Will also link invoice${invoiceIds.length === 1 ? '' : 's'} ${invoiceIds.join(', ')} → qb_bill_txn_id = ${e.resolvedBillTxnId}.`
+      : 'No linked invoices (accepting without writeback).';
+    if (!window.confirm(`Accept fuzzy match for ${e.counterpartyRaw} $${e.amount.toFixed(2)}?\n\n${linkDetail}\n\nMarks event as posted. QB is not touched.`)) return;
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from('qb_ingest_events')
+      .update({
+        status: 'posted',
+        status_updated_at: nowIso,
+        posted_qb_refs: { bill: e.resolvedBillTxnId, ...(e.resolvedPaymentTxnId ? { bill_pmt: e.resolvedPaymentTxnId } : {}), posted_source: 'manual_accept_fuzzy' },
+      })
+      .eq('id', eventId);
+    if (error) { alert('Failed: ' + error.message); return; }
+    if (invoiceIds.length > 0 && e.resolvedBillTxnId) {
+      const { error: invErr } = await supabase
+        .from('invoices')
+        .update({ qb_bill_txn_id: e.resolvedBillTxnId, qb_export_status: 'exported', qb_export_status_at: nowIso })
+        .in('id', invoiceIds)
+        .is('qb_bill_txn_id', null);   // only if not already set
+      if (invErr) console.warn('invoice link writeback failed:', invErr.message);
+    }
+    await Promise.all([loadQbIngestEvents(), fetchInvoices()]);
+  };
+
   // Slice D — save a vendor mapping and apply it to all pending events with the same counterparty.
   const openMapWidget = (counterparty: string, source: string, eventCount: number = 0) => {
     // Prefill from existing mapping if one exists for this (source, counterparty).
@@ -10511,7 +10559,7 @@ const TimesheetSystem = () => {
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
               { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
               { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e) && e.resolvedAction !== 'already_done') },
-              { key: 'already_done',     title: 'Already done in QB — needs verification', hint: 'QB already has bill+payment; matched invoice link is fuzzy (memo doesn\'t name it, or invoice.qb_bill_txn_id doesn\'t match). Review and mark as pre-our-system, orphan, or verify.', events: qbIngestEvents.filter(e => e.resolvedAction === 'already_done' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'already_done',     title: 'Already done in QB — needs verification', hint: 'QB already has bill+payment; the invoice link is fuzzy. Actions below update OUR tracking only — QB is not touched. Choose per row: mark pre-our-system, orphan (unrelated to us), or accept the fuzzy match (writes back to our invoice).', events: qbIngestEvents.filter(e => e.resolvedAction === 'already_done' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: `Deliberately never pushed. Includes advance-payment cases (US Signature), retired vendors (CLOUDYGON), and pre-our-system events (predate ${INTUIT_PRE_OUR_SYSTEM_CUTOFF}).`, events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
@@ -11469,6 +11517,7 @@ const TimesheetSystem = () => {
                                   <th className="px-3 py-1.5 text-left" title="Reconciler decision.">Resolved</th>
                                   <th className="px-3 py-1.5 text-left" title="Invoice-link strength.">Provenance</th>
                                   {sTh('status', 'Status')}
+                                  {g.key === 'already_done' && <th className="px-3 py-1.5 text-left">Actions (our system only)</th>}
                                 </tr>
                               </thead>
                               <tbody>
@@ -11549,6 +11598,27 @@ const TimesheetSystem = () => {
                                           {e.resolvedAction === 'pre_our_system'
                                             ? <span className="text-gray-500 italic">will not push</span>
                                             : <span className="text-gray-500">{e.status}</span>}
+                                        </td>
+                                      )}
+                                      {g.key === 'already_done' && (
+                                        <td className="px-3 py-1.5">
+                                          <div className="flex gap-1">
+                                            <button
+                                              onClick={() => markAlreadyDonePreOurSystem(e.id)}
+                                              className="text-[10px] px-2 py-0.5 border border-gray-300 rounded text-gray-700 hover:bg-gray-100"
+                                              title="Predates our system's involvement. Moves to pre-cutoff bucket."
+                                            >Pre-our-system</button>
+                                            <button
+                                              onClick={() => markAlreadyDoneOrphan(e.id)}
+                                              className="text-[10px] px-2 py-0.5 border border-gray-300 rounded text-gray-700 hover:bg-gray-100"
+                                              title="Not related to any of our invoices. Moves to Ignore bucket."
+                                            >Orphan</button>
+                                            <button
+                                              onClick={() => acceptAlreadyDoneFuzzyMatch(e.id)}
+                                              className="text-[10px] px-2 py-0.5 border border-emerald-300 rounded text-emerald-700 hover:bg-emerald-50"
+                                              title="Accept the fuzzy match. Marks event posted + writes qb_bill_txn_id back to our invoice(s)."
+                                            >Accept match</button>
+                                          </div>
                                         </td>
                                       )}
                                       {g.key === 'posted' && (
