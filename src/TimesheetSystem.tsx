@@ -10941,6 +10941,7 @@ const TimesheetSystem = () => {
                                 alert(`Enqueued ${enq} bill_add job${enq === 1 ? '' : 's'}.${detail ? '\n\nDetail:\n' + detail : ''}`);
                                 void loadQbOpenBills();
                                 void fetchInvoices();
+                                void loadQbBillQueryPending();  // top-right pending counter refresh
                               } catch (e) {
                                 console.error('[G7.5] pushIntuitInvoiceCreateBill failed', e);
                                 alert(`Push failed: ${(e as Error).message}`);
