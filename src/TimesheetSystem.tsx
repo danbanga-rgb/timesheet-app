@@ -1208,6 +1208,18 @@ const TimesheetSystem = () => {
 
   // QB Automation Inbox (Slice C — read-only view of qb_ingest_events)
   const [qbIngestEvents, setQbIngestEvents] = useState<QbIngestEvent[]>([]);
+  // Slice C: sort state for the Already Posted section (applies to all months).
+  type PostedSortKey = 'src' | 'date' | 'counterparty' | 'amount' | 'memo' | 'posted_at';
+  const [postedSortKey, setPostedSortKey] = useState<PostedSortKey>('posted_at');
+  const [postedSortDir, setPostedSortDir] = useState<'asc' | 'desc'>('desc');
+  const togglePostedSort = (k: PostedSortKey) => {
+    if (postedSortKey === k) {
+      setPostedSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setPostedSortKey(k);
+      setPostedSortDir(k === 'date' || k === 'posted_at' || k === 'amount' ? 'desc' : 'asc');
+    }
+  };
   // Slice A: invoice IDs that were pushed via G7.5 (proactive create_bill).
   // Rendered as synthetic rows in the Already Posted bucket so accountant sees
   // both event-driven and invoice-driven pushes in one place with a Resolved
@@ -11177,20 +11189,47 @@ const TimesheetSystem = () => {
                   const badge = (bg: string, fg: string, text: string, title?: string) => (
                     <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
                   );
+                  const sortChevron = (k: PostedSortKey) => postedSortKey === k
+                    ? <span className="text-gray-600">{postedSortDir === 'asc' ? '▲' : '▼'}</span>
+                    : <span className="text-gray-300">↕</span>;
+                  const sortableTh = (k: PostedSortKey, label: string, align: 'left' | 'right' = 'left') => (
+                    <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-gray-50`} onClick={() => togglePostedSort(k)}>
+                      <span className="inline-flex items-center gap-1">{label} {sortChevron(k)}</span>
+                    </th>
+                  );
                   const renderPostedHeader = () => (
                     <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
                       <tr>
-                        <th className="px-3 py-1.5 text-left">Src</th>
-                        <th className="px-3 py-1.5 text-left">Date</th>
-                        <th className="px-3 py-1.5 text-left">Counterparty</th>
-                        <th className="px-3 py-1.5 text-right">Amount</th>
-                        <th className="px-3 py-1.5 text-left">Memo</th>
+                        {sortableTh('src', 'Src')}
+                        {sortableTh('date', 'Date')}
+                        {sortableTh('counterparty', 'Counterparty')}
+                        {sortableTh('amount', 'Amount', 'right')}
+                        {sortableTh('memo', 'Memo')}
                         <th className="px-3 py-1.5 text-left" title="Reconciler decision.">Resolved</th>
                         <th className="px-3 py-1.5 text-left" title="Invoice-link strength.">Provenance</th>
-                        <th className="px-3 py-1.5 text-left">Posted at</th>
+                        {sortableTh('posted_at', 'Posted at')}
                       </tr>
                     </thead>
                   );
+                  const sortPosted = (events: QbIngestEvent[]): QbIngestEvent[] => {
+                    const dir = postedSortDir === 'asc' ? 1 : -1;
+                    const key = postedSortKey;
+                    const val = (e: QbIngestEvent): string | number => {
+                      if (key === 'src') return sourceLabel(e.source);
+                      if (key === 'date') return e.txnDate ?? '';
+                      if (key === 'counterparty') return (e.counterpartyRaw ?? '').toLowerCase();
+                      if (key === 'amount') return e.amount ?? 0;
+                      if (key === 'memo') return (e.memo ?? '').toLowerCase();
+                      if (key === 'posted_at') return e.statusUpdatedAt ?? '';
+                      return '';
+                    };
+                    return [...events].sort((a, b) => {
+                      const va = val(a); const vb = val(b);
+                      if (va < vb) return -1 * dir;
+                      if (va > vb) return  1 * dir;
+                      return 0;
+                    });
+                  };
                   const renderPostedRow = (e: QbIngestEvent): React.ReactNode => {
                     const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
                     const isPosted = e.status === 'posted';
@@ -11330,7 +11369,7 @@ const TimesheetSystem = () => {
                                     <table className="w-full text-xs">
                                       {renderPostedHeader()}
                                       <tbody>
-                                        {monthEvents.map(e => renderPostedRow(e))}
+                                        {sortPosted(monthEvents).map(e => renderPostedRow(e))}
                                       </tbody>
                                     </table>
                                   )}
