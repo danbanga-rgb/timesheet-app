@@ -233,6 +233,7 @@ import QbPushStatusPane, { type PushRecord } from './components/QbPushStatusPane
 import { pushIntuitPayBill } from './lib/qbWrite/consumers/intuitPush';
 import { pushIntuitCreateBill } from './lib/qbWrite/consumers/intuitCreateBill';
 import { pushIntuitCheck } from './lib/qbWrite/consumers/intuitCheck';
+import { pushIntuitInvoiceCreateBill } from './lib/qbWrite/consumers/intuitInvoiceCreateBill';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -1610,6 +1611,10 @@ const TimesheetSystem = () => {
   }
 
   async function fetchTimesheets() {
+    // GOTCHA: unbounded wholesale fetch. Supabase PostgREST caps responses at
+    // max_rows (currently 10000, raised from 1000 on 2026-08-26). At ~65
+    // contractors × ~1 week, we hit 10k in ~2 years. When admin view starts
+    // dropping rows, paginate here or add a rolling-window filter.
     const { data } = await supabase
       .from('timesheets')
       .select('*')
@@ -10899,26 +10904,56 @@ const TimesheetSystem = () => {
                   }}
                 />
 
-                {/* Missing QB bills — approved invoices lacking a QB Bill. Purely
-                    audit / visibility. No writes. Read-only cross-check between
-                    invoices and qb_mirror. */}
+                {/* Missing QB bills — approved invoices lacking a QB Bill.
+                    G7.5 (2026-08-26): Intuit-eligible bills can be proactively
+                    pushed via the header button. Convera still relies on the
+                    batch script until G7.6. */}
                 {(() => {
                   const totalAmt = missingBills.reduce((s, m) => s + m.invoice.totalAmount, 0);
+                  // G7.5: Intuit-path, vendor-mapped rows eligible for one-click create_bill.
+                  const intuitEligible = missingBills.filter(m => m.paymentPath === 'Intuit' && m.vendorMapped);
+                  const intuitEligibleAmt = intuitEligible.reduce((s, m) => s + m.invoice.totalAmount, 0);
                   return (
                     <div className="mb-4 border border-amber-200 rounded-lg overflow-hidden bg-amber-50/40">
-                      <button
-                        onClick={() => toggle('missing_bills')}
-                        className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40 text-left"
-                      >
-                        <div>
+                      <div className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40">
+                        <button onClick={() => toggle('missing_bills')} className="text-left flex-1">
                           <span className="font-semibold text-amber-900">Missing QB bills — approved invoices without a Bill in QB</span>
                           <span className="ml-2 text-sm text-amber-800">· {missingBills.length} invoice{missingBills.length === 1 ? '' : 's'}</span>
                           {missingBills.length > 0 && (
                             <span className="ml-2 text-sm text-amber-800">· ${totalAmt.toFixed(2)}</span>
                           )}
-                        </div>
-                        <span className="text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</span>
-                      </button>
+                        </button>
+                        {intuitEligible.length > 0 && (
+                          <button
+                            onClick={async () => {
+                              const invoiceIds = intuitEligible.map(m => m.invoice.id);
+                              const summary = intuitEligible.slice(0, 8).map(m => `• ${m.invoice.userName} · INV ${m.invoice.invoiceNumber} · $${m.invoice.totalAmount.toFixed(2)}`).join('\n');
+                              const more = intuitEligible.length > 8 ? `\n(+${intuitEligible.length - 8} more)` : '';
+                              if (!window.confirm(`Create ${intuitEligible.length} Bill${intuitEligible.length === 1 ? '' : 's'} in QuickBooks?\n\nTotal: $${intuitEligibleAmt.toFixed(2)}\n\n${summary}${more}\n\nBills post to "Vendor Consultants" per vendor mapping. No payments will be pushed.`)) return;
+                              try {
+                                const r = await pushIntuitInvoiceCreateBill(supabase, invoiceIds);
+                                const enq = r.jobIds.filter((x): x is number => x != null).length;
+                                const detail = [
+                                  ...r.skippedIneligible.map(s => `• invoice ${s.invoiceId}: ${s.reason}`),
+                                  ...r.skippedDuplicate.map(s => `• ${s.reason}`),
+                                  ...r.rejected.map(rj => `• ${rj.invariant}: ${rj.reason}`),
+                                ].slice(0, 12).join('\n');
+                                alert(`Enqueued ${enq} bill_add job${enq === 1 ? '' : 's'}.${detail ? '\n\nDetail:\n' + detail : ''}`);
+                                void loadQbOpenBills();
+                                void fetchInvoices();
+                              } catch (e) {
+                                console.error('[G7.5] pushIntuitInvoiceCreateBill failed', e);
+                                alert(`Push failed: ${(e as Error).message}`);
+                              }
+                            }}
+                            className="ml-3 text-sm px-3 py-1.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium"
+                            title={`Proactively create ${intuitEligible.length} Bill(s) in QuickBooks for approved Intuit invoices. When the payment ingest fires later, it'll route to pay_existing_bill instead of chained create.`}
+                          >
+                            Push {intuitEligible.length} Intuit Bill{intuitEligible.length === 1 ? '' : 's'} to QB · ${intuitEligibleAmt.toFixed(2)}
+                          </button>
+                        )}
+                        <button onClick={() => toggle('missing_bills')} className="ml-2 text-xs text-amber-700">{qbInboxExpanded['missing_bills'] ? '▼' : '▶'}</button>
+                      </div>
                       {qbInboxExpanded['missing_bills'] && (
                         <div>
                           {missingBills.length === 0 ? (

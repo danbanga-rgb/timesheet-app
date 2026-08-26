@@ -620,6 +620,11 @@ serve(async (req) => {
   const channelMap = new Map<number, 'portal' | 'direct' | 'forwarded' | 'auto_yes'>();
 
   if (allTimesheetIds.length > 0) {
+    // GOTCHA: .range(0, ROW_CAP) does NOT bypass PostgREST max_rows cap
+    // (currently 10000, raised from 1000 on 2026-08-26). email_import_log
+    // grows every poll and will cross 10k within ~1-2 years. When channelMap
+    // starts missing entries, chunk allTimesheetIds into 500-id batches and
+    // union the results.
     const { data: logRows } = await db
       .from('email_import_log')
       .select('timesheet_id, from_email, resolved_email, message_id')

@@ -46,6 +46,11 @@ export interface BillQueryRqInput {
   requestId?: string;
   /** Optional cap on results. Default: unbounded. */
   maxReturned?: number;
+  /** Request line-item detail (ExpenseLineRet, ItemLineRet). Default false —
+   *  header-only response is enough for TxnID/RefNumber verification and the
+   *  mirror doesn't retain line detail. Set true for one-off probes that need
+   *  to inspect ExpenseLineRet.AccountRef (e.g. G7.5 expense-account probe). */
+  includeLineItems?: boolean;
 }
 
 /** Result of parseBillPaymentCheckQueryRs — one entry per matched payment.
