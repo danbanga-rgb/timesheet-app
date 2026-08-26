@@ -166,11 +166,16 @@ function renderJobRequest(job: JobRow): string {
  *   - statusCode="0"                       → success, N results
  *   - statusCode="500" statusSeverity="Warn" + zero results
  *                                          → success, no match (legitimate answer)
+ *   - statusCode="1"   statusSeverity="Info" + zero results
+ *                                          → success, no match (delta-filter empty window)
  *   - anything else                        → real error
  *
  *  Prior code treated any non-zero code with empty results as an error, which
  *  polluted the log with "Object cannot be found in QuickBooks" false alarms
- *  (Aug 17 jobs 233/234/235 during Intuit Phase 1a discovery).
+ *  (Aug 17 jobs 233/234/235 during Intuit Phase 1a discovery). The status=1
+ *  Info case is what pg_cron qb-delta-bills returns every hour when no bills
+ *  have been modified in the 90-min window (per [[qb-delta-reads-facts]]);
+ *  marking those as `error` polluted the SLO signal (2026-08-26 fix).
  */
 function isQueryStatusOk(
   status: { statusCode: string; statusSeverity: string; statusMessage: string },
@@ -178,6 +183,7 @@ function isQueryStatusOk(
 ): boolean {
   if (status.statusCode === '0') return true;
   if (status.statusCode === '500' && status.statusSeverity === 'Warn' && resultsLen === 0) return true;
+  if (status.statusCode === '1' && status.statusSeverity === 'Info' && resultsLen === 0) return true;
   return false;
 }
 
