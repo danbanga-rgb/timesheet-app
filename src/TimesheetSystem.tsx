@@ -1208,17 +1208,27 @@ const TimesheetSystem = () => {
 
   // QB Automation Inbox (Slice C — read-only view of qb_ingest_events)
   const [qbIngestEvents, setQbIngestEvents] = useState<QbIngestEvent[]>([]);
-  // Slice C: sort state for the Already Posted section (applies to all months).
+  // Slice C: sort state — one per bucket "class" (posted / non-posted / missing-bills).
   type PostedSortKey = 'src' | 'date' | 'counterparty' | 'amount' | 'memo' | 'posted_at';
   const [postedSortKey, setPostedSortKey] = useState<PostedSortKey>('posted_at');
   const [postedSortDir, setPostedSortDir] = useState<'asc' | 'desc'>('desc');
   const togglePostedSort = (k: PostedSortKey) => {
-    if (postedSortKey === k) {
-      setPostedSortDir(d => d === 'asc' ? 'desc' : 'asc');
-    } else {
-      setPostedSortKey(k);
-      setPostedSortDir(k === 'date' || k === 'posted_at' || k === 'amount' ? 'desc' : 'asc');
-    }
+    if (postedSortKey === k) setPostedSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setPostedSortKey(k); setPostedSortDir(k === 'date' || k === 'posted_at' || k === 'amount' ? 'desc' : 'asc'); }
+  };
+  type NonPostedSortKey = 'src' | 'date' | 'counterparty' | 'amount' | 'memo' | 'status';
+  const [nonPostedSortKey, setNonPostedSortKey] = useState<NonPostedSortKey>('date');
+  const [nonPostedSortDir, setNonPostedSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleNonPostedSort = (k: NonPostedSortKey) => {
+    if (nonPostedSortKey === k) setNonPostedSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setNonPostedSortKey(k); setNonPostedSortDir(k === 'date' || k === 'amount' ? 'desc' : 'asc'); }
+  };
+  type MissingBillsSortKey = 'period_end' | 'contractor' | 'invoice_number' | 'amount' | 'path' | 'qb_vendor';
+  const [missingBillsSortKey, setMissingBillsSortKey] = useState<MissingBillsSortKey>('period_end');
+  const [missingBillsSortDir, setMissingBillsSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleMissingBillsSort = (k: MissingBillsSortKey) => {
+    if (missingBillsSortKey === k) setMissingBillsSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setMissingBillsSortKey(k); setMissingBillsSortDir(k === 'period_end' || k === 'amount' ? 'desc' : 'asc'); }
   };
   // Slice A: invoice IDs that were pushed via G7.5 (proactive create_bill).
   // Rendered as synthetic rows in the Already Posted bucket so accountant sees
@@ -11100,20 +11110,47 @@ const TimesheetSystem = () => {
                                 Approved invoices in our system with no matching Bill in <code>qb_mirror</code>.
                                 Intuit path: bill gets created on next payment push. Convera path: bill gets created by the batch script.
                               </p>
+                              {(() => {
+                                const chev = (k: MissingBillsSortKey) => missingBillsSortKey === k
+                                  ? <span className="text-gray-600">{missingBillsSortDir === 'asc' ? '▲' : '▼'}</span>
+                                  : <span className="text-gray-300">↕</span>;
+                                const sTh = (k: MissingBillsSortKey, label: string, align: 'left' | 'right' = 'left') => (
+                                  <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-amber-50`} onClick={() => toggleMissingBillsSort(k)}>
+                                    <span className="inline-flex items-center gap-1">{label} {chev(k)}</span>
+                                  </th>
+                                );
+                                const dir = missingBillsSortDir === 'asc' ? 1 : -1;
+                                const key = missingBillsSortKey;
+                                const val = (m: typeof missingBills[0]): string | number => {
+                                  if (key === 'period_end') return m.invoice.periodEnd ?? '';
+                                  if (key === 'contractor') return (m.invoice.userName ?? '').toLowerCase();
+                                  if (key === 'invoice_number') return (m.invoice.invoiceNumber ?? '').toLowerCase();
+                                  if (key === 'amount') return m.invoice.totalAmount ?? 0;
+                                  if (key === 'path') return m.paymentPath ?? '';
+                                  if (key === 'qb_vendor') return (m.qbVendorName ?? '').toLowerCase();
+                                  return '';
+                                };
+                                const sortedMissing = [...missingBills].sort((a, b) => {
+                                  const va = val(a); const vb = val(b);
+                                  if (va < vb) return -1 * dir;
+                                  if (va > vb) return 1 * dir;
+                                  return 0;
+                                });
+                                return (
                               <table className="w-full text-xs">
                                 <thead className="bg-white text-gray-500 border-t border-b border-amber-200">
                                   <tr>
-                                    <th className="px-3 py-1.5 text-left">Period end</th>
-                                    <th className="px-3 py-1.5 text-left">Contractor</th>
-                                    <th className="px-3 py-1.5 text-left">Invoice #</th>
-                                    <th className="px-3 py-1.5 text-right">Amount</th>
-                                    <th className="px-3 py-1.5 text-left">Path</th>
-                                    <th className="px-3 py-1.5 text-left">QB vendor</th>
+                                    {sTh('period_end', 'Period end')}
+                                    {sTh('contractor', 'Contractor')}
+                                    {sTh('invoice_number', 'Invoice #')}
+                                    {sTh('amount', 'Amount', 'right')}
+                                    {sTh('path', 'Path')}
+                                    {sTh('qb_vendor', 'QB vendor')}
                                     <th className="px-3 py-1.5 text-left">Next action</th>
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {missingBills.map(m => {
+                                  {sortedMissing.map(m => {
                                     const pathClass = m.paymentPath === 'Intuit' ? 'bg-green-50 text-green-700'
                                                     : m.paymentPath === 'Convera' ? 'bg-purple-50 text-purple-700'
                                                     : 'bg-gray-100 text-gray-500';
@@ -11138,6 +11175,8 @@ const TimesheetSystem = () => {
                                   })}
                                 </tbody>
                               </table>
+                                );
+                              })()}
                             </>
                           )}
                         </div>
@@ -11378,22 +11417,48 @@ const TimesheetSystem = () => {
                         ) : (
                           <>
                             <p className="px-4 pt-3 text-xs text-gray-500 italic">{g.hint}</p>
+                            {(() => {
+                              const chev = (k: NonPostedSortKey) => nonPostedSortKey === k
+                                ? <span className="text-gray-600">{nonPostedSortDir === 'asc' ? '▲' : '▼'}</span>
+                                : <span className="text-gray-300">↕</span>;
+                              const sTh = (k: NonPostedSortKey, label: string, align: 'left' | 'right' = 'left') => (
+                                <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-gray-50`} onClick={() => toggleNonPostedSort(k)}>
+                                  <span className="inline-flex items-center gap-1">{label} {chev(k)}</span>
+                                </th>
+                              );
+                              const dir = nonPostedSortDir === 'asc' ? 1 : -1;
+                              const key = nonPostedSortKey;
+                              const val = (e: QbIngestEvent): string | number => {
+                                if (key === 'src') return sourceLabel(e.source);
+                                if (key === 'date') return e.txnDate ?? '';
+                                if (key === 'counterparty') return (e.counterpartyRaw ?? '').toLowerCase();
+                                if (key === 'amount') return e.amount ?? 0;
+                                if (key === 'memo') return (e.memo ?? '').toLowerCase();
+                                if (key === 'status') return e.status ?? '';
+                                return '';
+                              };
+                              const sortedEvents = [...g.events].sort((a, b) => {
+                                const va = val(a); const vb = val(b);
+                                if (va < vb) return -1 * dir;
+                                if (va > vb) return  1 * dir;
+                                return 0;
+                              });
+                              return (
                             <table className="w-full text-xs">
                               <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
                                 <tr>
-                                  <th className="px-3 py-1.5 text-left">Src</th>
-                                  <th className="px-3 py-1.5 text-left">Date</th>
-                                  <th className="px-3 py-1.5 text-left">Counterparty</th>
-                                  <th className="px-3 py-1.5 text-right">Amount</th>
-                                  <th className="px-3 py-1.5 text-left">Memo</th>
-                                  <th className="px-3 py-1.5 text-left" title="Reconciler decision — authoritative for push. Old amount-only matcher output removed 2026-08-21.">Resolved</th>
-                                  <th className="px-3 py-1.5 text-left" title="Invoice-link strength. exact-txn is deterministic (invoice.qb_bill_txn_id matches). Only exact-txn / exact-ref events are pushable.">Provenance</th>
-                                  {g.key !== 'posted' && <th className="px-3 py-1.5 text-left">Status</th>}
-                                  {g.key === 'posted' && <th className="px-3 py-1.5 text-left">Posted at</th>}
+                                  {sTh('src', 'Src')}
+                                  {sTh('date', 'Date')}
+                                  {sTh('counterparty', 'Counterparty')}
+                                  {sTh('amount', 'Amount', 'right')}
+                                  {sTh('memo', 'Memo')}
+                                  <th className="px-3 py-1.5 text-left" title="Reconciler decision.">Resolved</th>
+                                  <th className="px-3 py-1.5 text-left" title="Invoice-link strength.">Provenance</th>
+                                  {sTh('status', 'Status')}
                                 </tr>
                               </thead>
                               <tbody>
-                                {g.events.map(e => {
+                                {sortedEvents.map(e => {
                                   const resolvedBill = e.resolvedBillTxnId ? billByTxnId.get(e.resolvedBillTxnId) : undefined;
                                   const badge = (bg: string, fg: string, text: string, title?: string) => (
                                     <span title={title} className={`inline-block mr-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${bg} ${fg}`}>{text}</span>
@@ -11484,6 +11549,8 @@ const TimesheetSystem = () => {
                                 })}
                               </tbody>
                             </table>
+                              );
+                            })()}
                           </>
                         )}
                       </div>
