@@ -10515,6 +10515,34 @@ const TimesheetSystem = () => {
                 liveVendorNameByUserId.set(pp.userId, name);
               }
             }
+            // G7.6 group_key resolution: for umbrella members whose own
+            // snapshot+live payment_profile both lack qb_vendor_name (Iskra
+            // Kochova / Teal), inherit the vendor from any sibling that DOES
+            // resolve. Same primitive the modal + consumer use. Without this,
+            // this panel would show umbrella orphans as "⚠ unmapped" even
+            // though they're pushable via the group.
+            const groupVendorByKey = new Map<string, string>();
+            const groupMembersByKey = new Map<string, Invoice[]>();
+            for (const inv of invoices) {
+              if (!inv.groupKey) continue;
+              const arr = groupMembersByKey.get(inv.groupKey) ?? [];
+              arr.push(inv);
+              groupMembersByKey.set(inv.groupKey, arr);
+            }
+            for (const [key, members] of groupMembersByKey) {
+              const candidates = new Set<string>();
+              for (const m of members) {
+                const s = m.paymentProfile?.qbVendorName?.trim();
+                if (s) candidates.add(s);
+              }
+              if (candidates.size === 0) {
+                for (const m of members) {
+                  const l = liveVendorNameByUserId.get(m.userId);
+                  if (l) candidates.add(l);
+                }
+              }
+              if (candidates.size === 1) groupVendorByKey.set(key, [...candidates][0]);
+            }
             type MissingBill = {
               invoice: Invoice;
               paymentPath: string;
@@ -10539,13 +10567,23 @@ const TimesheetSystem = () => {
               .map((inv): MissingBill | null => {
                 const snapshotName = inv.paymentProfile?.qbVendorName?.trim() || null;
                 const liveName = liveVendorNameByUserId.get(inv.userId) || null;
-                const qbVendorName = snapshotName ?? liveName;
+                const groupName = inv.groupKey ? (groupVendorByKey.get(inv.groupKey) ?? null) : null;
+                const qbVendorName = snapshotName ?? liveName ?? groupName;
                 const vendor = qbVendorName ? vendorByName.get(qbVendorName) : undefined;
                 const vendorListId = vendor?.listId ?? null;
                 const invRef = normalizeRef(inv.invoiceNumber);
-                const hasBill = vendorListId != null && invRef !== '' && qbOpenBills.some(b =>
-                  b.vendorListId === vendorListId && normalizeRef(b.refNumber) === invRef
-                );
+                // Period-scope the match: same (vendor, refNumber) but a different
+                // yyyy-mm is NOT the same bill. Croatian contractors reset invoice
+                // numbers annually — "INV 12" for 2026-07 collides with "Inv# 12"
+                // from 2023-12 (Yara Solutions Inc.), silently hiding legitimate
+                // unpushed invoices from this panel (2026-08-27).
+                const invMonth = (inv.periodEnd ?? '').slice(0, 7);
+                const hasBill = vendorListId != null && invRef !== '' && invMonth !== '' && qbOpenBills.some(b => {
+                  if (b.vendorListId !== vendorListId) return false;
+                  if (normalizeRef(b.refNumber) !== invRef) return false;
+                  const bMonth = (b.txnDate ?? '').slice(0, 7);
+                  return bMonth === invMonth;
+                });
                 if (hasBill) return null;
                 return {
                   invoice: inv,
