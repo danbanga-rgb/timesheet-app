@@ -13,6 +13,8 @@ export type InvoiceEditKind =
   | 'guardrail'        // Beneficiary guardrail deprecated-id resolution during ingest.
   | 'anomaly'          // Anomaly detector post-ingest fixes/flags.
   | 'manual_repair'    // Manual DB patch (rare — parse failure fallback recoveries).
+  | 'auto_vendor_map'  // Approval-time auto-fill of payment_profile.qb_vendor_name from sibling profiles (Marta pattern).
+  | 'manual_vendor_map'// Accountant picked a QB vendor in the vendor-decision modal.
   | 'other';           // Legacy or unclassified — kept so backfill never drops audit rows.
 
 export interface InvoiceEditEntry {
@@ -80,6 +82,31 @@ export function guardrailEntry(args: {
     before: {},
     after: {},
     details: { events: args.events },
+  };
+}
+
+export function vendorMapEntry(args: {
+  by: string;
+  mode: 'auto' | 'manual';
+  reason: string;
+  paymentProfileId: number;
+  paymentProfileCompany: string;
+  beforeVendorName: string | null;
+  afterVendorName: string;
+  siblingSignal?: { agreesOn?: string; conflictNames?: string[] };
+}): InvoiceEditEntry {
+  return {
+    at: new Date().toISOString(),
+    by: args.by,
+    kind: args.mode === 'auto' ? 'auto_vendor_map' : 'manual_vendor_map',
+    reason: args.reason,
+    before: { qb_vendor_name: args.beforeVendorName },
+    after: { qb_vendor_name: args.afterVendorName },
+    details: {
+      payment_profile_id: args.paymentProfileId,
+      payment_profile_company: args.paymentProfileCompany,
+      ...(args.siblingSignal ? { sibling_signal: args.siblingSignal } : {}),
+    },
   };
 }
 

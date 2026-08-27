@@ -194,8 +194,10 @@ import {
   normalizeEditEntry,
   periodEditEntry,
   valueEditEntry,
+  vendorMapEntry,
   type InvoiceEditEntry,
 } from '../supabase/functions/_shared/edit-history';
+import { resolveNewProfileVendor, type ResolverPaymentProfile } from './lib/vendorResolution';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
 import {
@@ -3590,6 +3592,89 @@ const TimesheetSystem = () => {
     }
   }
 
+  // Slice 1: at approval time, ensure the invoice's snap payment_profile is
+  // linked to a QB vendor. Auto-fills from sibling pps when they unambiguously
+  // agree (Marta pattern); blocks with an alert when ambiguous (Tomislav
+  // pattern — Slice 2 replaces this alert with a picker modal).
+  //
+  // Only fires when the effective payment method is Intuit or Convera —
+  // non-QB paths don't need vendor resolution.
+  //
+  // Fresh-fetch pattern (feedback_state_vs_fresh_fetch): the paymentProfiles
+  // React state may not reflect the latest DB write (e.g., an admin just
+  // added qb_vendor_name to a pp seconds ago); read from Supabase directly.
+  const tryResolveVendorForApproval = async (
+    invoice: Invoice,
+    effectivePaymentMethod: string,
+  ): Promise<'proceed' | 'blocked'> => {
+    if (!['Intuit', 'Convera'].includes(effectivePaymentMethod)) return 'proceed';
+    const { data: liveData, error } = await supabase
+      .from('payment_profiles')
+      .select('id, user_id, qb_vendor_name, company_name, is_default')
+      .eq('user_id', invoice.userId);
+    if (error) {
+      alert('Cannot approve: failed to fetch payment profiles — ' + error.message);
+      return 'blocked';
+    }
+    const livePps: ResolverPaymentProfile[] = (liveData ?? []).map((r) => ({
+      id: r.id as number,
+      userId: r.user_id as string,
+      qbVendorName: (r.qb_vendor_name as string | null) ?? null,
+      companyName: (r.company_name as string | null) ?? null,
+      isDefault: (r.is_default as boolean | null) ?? null,
+    }));
+    const snap = invoice.paymentProfile ?? null;
+    const rawSnapId = snap && typeof snap.id !== 'undefined' ? snap.id : null;
+    const snapPpId = typeof rawSnapId === 'number' && rawSnapId > 0
+      ? rawSnapId
+      : (typeof rawSnapId === 'string' && /^\d+$/.test(rawSnapId) && Number(rawSnapId) > 0 ? Number(rawSnapId) : null);
+    const result = resolveNewProfileVendor(
+      {
+        snapPaymentProfileId: snapPpId,
+        snapQbVendorName: snap?.qbVendorName ?? null,
+        userId: invoice.userId,
+      },
+      livePps,
+    );
+    if (result.mode === 'no-action') return 'proceed';
+    if (result.mode === 'ambiguous') {
+      alert(`Cannot approve: ${result.reason}\n\nSet the QB vendor on the contractor's payment profile (Payments tab → Profiles), then try again.`);
+      return 'blocked';
+    }
+    // 'auto' — write pp.qb_vendor_name and log to invoice edit_history.
+    const targetPp = livePps.find(p => p.id === result.targetPaymentProfileId);
+    const { error: ppErr } = await supabase
+      .from('payment_profiles')
+      .update({ qb_vendor_name: result.vendorName })
+      .eq('id', result.targetPaymentProfileId);
+    if (ppErr) {
+      alert('Auto-vendor-mapping failed: ' + ppErr.message);
+      return 'blocked';
+    }
+    const entry = vendorMapEntry({
+      by: currentUser?.name || 'unknown',
+      mode: 'auto',
+      reason: `Payment profile "${result.snapCompany || targetPp?.companyName || 'unnamed'}" auto-mapped to QB vendor "${result.vendorName}" (inferred from contractor's other payment profiles at approval time).`,
+      paymentProfileId: result.targetPaymentProfileId,
+      paymentProfileCompany: result.snapCompany || targetPp?.companyName || '',
+      beforeVendorName: null,
+      afterVendorName: result.vendorName,
+      siblingSignal: { agreesOn: result.vendorName },
+    });
+    const nextHistory = [...(invoice.editHistory || []), entry];
+    const { error: histErr } = await supabase
+      .from('invoices')
+      .update({ edit_history: nextHistory })
+      .eq('id', invoice.id);
+    if (histErr) {
+      // Non-fatal — pp update succeeded; only the audit log failed. Warn but proceed.
+      console.warn('vendor-map edit_history write failed', histErr);
+    }
+    // Reflect the vendor update in React state so the next approval / render sees it.
+    setPaymentProfiles(prev => prev.map(p => p.id === result.targetPaymentProfileId ? { ...p, qbVendorName: result.vendorName } : p));
+    return 'proceed';
+  };
+
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
     const invoice = invoices.find(i => i.id === invoiceId);
     // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b). Refuse approval when
@@ -3602,6 +3687,11 @@ const TimesheetSystem = () => {
       if (nextPM && ['Intuit', 'Convera'].includes(nextPM) && num.length > 20) {
         alert(`Cannot approve: invoice number "${num}" is ${num.length} chars. QuickBooks caps Bill.RefNumber at 20. Edit the invoice number on the Invoices tab first, then approve.`);
         return;
+      }
+      // Slice 1: vendor resolution guard.
+      if (invoice) {
+        const outcome = await tryResolveVendorForApproval(invoice, nextPM);
+        if (outcome === 'blocked') return;
       }
     }
     const update: Record<string, unknown> = {
@@ -4015,6 +4105,11 @@ const TimesheetSystem = () => {
     }
     if (fields.invoiceNumber !== undefined && fields.invoiceNumber.length > 20 && !confirm(`Invoice number "${fields.invoiceNumber}" is ${fields.invoiceNumber.length} chars. QuickBooks caps Bill.RefNumber at 20 and will refuse any push. Continue anyway?`)) {
       return;
+    }
+    // Slice 1: vendor resolution guard on approval transitions.
+    if (fields.status === 'approved' && invoice && pushablePM) {
+      const outcome = await tryResolveVendorForApproval(invoice, nextPaymentMethod);
+      if (outcome === 'blocked') return;
     }
     const update: Record<string, unknown> = {};
     if (fields.status !== undefined) {
@@ -14077,8 +14172,8 @@ const TimesheetSystem = () => {
                               <summary className="text-xs font-medium text-gray-600 cursor-pointer">Edit history ({inv.editHistory.length})</summary>
                               <ul className="mt-2 space-y-1.5 text-xs text-gray-700">
                                 {[...inv.editHistory].reverse().map((h, i) => {
-                                  const kindBadge = { period_edit: 'Period', value_edit: 'Values', guardrail: 'Guardrail', anomaly: 'Anomaly', manual_repair: 'Manual repair', other: 'Edit' }[h.kind] || 'Edit';
-                                  const kindColor = { period_edit: 'bg-indigo-100 text-indigo-700', value_edit: 'bg-emerald-100 text-emerald-700', guardrail: 'bg-amber-100 text-amber-700', anomaly: 'bg-rose-100 text-rose-700', manual_repair: 'bg-blue-100 text-blue-700', other: 'bg-gray-100 text-gray-600' }[h.kind] || 'bg-gray-100 text-gray-600';
+                                  const kindBadge = { period_edit: 'Period', value_edit: 'Values', guardrail: 'Guardrail', anomaly: 'Anomaly', manual_repair: 'Manual repair', auto_vendor_map: 'Auto vendor map', manual_vendor_map: 'Vendor map', other: 'Edit' }[h.kind] || 'Edit';
+                                  const kindColor = { period_edit: 'bg-indigo-100 text-indigo-700', value_edit: 'bg-emerald-100 text-emerald-700', guardrail: 'bg-amber-100 text-amber-700', anomaly: 'bg-rose-100 text-rose-700', manual_repair: 'bg-blue-100 text-blue-700', auto_vendor_map: 'bg-teal-100 text-teal-700', manual_vendor_map: 'bg-cyan-100 text-cyan-700', other: 'bg-gray-100 text-gray-600' }[h.kind] || 'bg-gray-100 text-gray-600';
                                   const bps = (h.before as { period_start?: string })?.period_start;
                                   const bpe = (h.before as { period_end?: string })?.period_end;
                                   const aps = (h.after as { period_start?: string })?.period_start;
