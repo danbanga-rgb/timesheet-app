@@ -10721,6 +10721,41 @@ const TimesheetSystem = () => {
                 liveVendorNameByUserId.set(pp.userId, name);
               }
             }
+            // Slice 3: needs-vendor-decision set. Approved Intuit/Convera
+            // invoices whose snap payment_profile has no QB vendor mapping AND
+            // the contractor's other pps don't unambiguously agree on one.
+            // These invoices are filtered OUT of the Missing QB Bills panel
+            // and the Push modal, and rendered in their own bucket instead
+            // so the accountant can resolve first. Marta-friendly cases don't
+            // land here (they auto-resolve at approval time via Slice 1).
+            const needsVendorDecisionByInvoiceId = new Map<number, { snapCompany: string | null; conflictNames?: string[]; targetPaymentProfileId: number | null }>();
+            for (const inv of invoices) {
+              if (inv.status !== 'approved') continue;
+              if (inv.qbBillTxnId) continue;
+              const pm = paymentMethod(inv);
+              if (!['Intuit', 'Convera'].includes(pm)) continue;
+              const cutoff = pm === 'Convera' ? CONVERA_PRE_OUR_SYSTEM_CUTOFF : INTUIT_PRE_OUR_SYSTEM_CUTOFF;
+              if ((inv.periodEnd || '') < cutoff) continue;
+              const userPps: ResolverPaymentProfile[] = paymentProfiles
+                .filter(p => p.userId === inv.userId)
+                .map(p => ({ id: p.id, userId: p.userId, qbVendorName: p.qbVendorName, companyName: p.companyName, isDefault: p.isDefault }));
+              const snap = inv.paymentProfile ?? null;
+              const rawSnapId = snap && typeof (snap as { id?: unknown }).id !== 'undefined' ? (snap as { id?: unknown }).id : null;
+              const snapPpId = typeof rawSnapId === 'number' && rawSnapId > 0
+                ? rawSnapId
+                : (typeof rawSnapId === 'string' && /^\d+$/.test(rawSnapId) && Number(rawSnapId) > 0 ? Number(rawSnapId) : null);
+              const result = resolveNewProfileVendor(
+                { snapPaymentProfileId: snapPpId, snapQbVendorName: snap?.qbVendorName ?? null, userId: inv.userId },
+                userPps,
+              );
+              if (result.mode === 'ambiguous') {
+                needsVendorDecisionByInvoiceId.set(inv.id, {
+                  snapCompany: result.snapCompany,
+                  conflictNames: result.conflictNames,
+                  targetPaymentProfileId: result.targetPaymentProfileId,
+                });
+              }
+            }
             // G7.6 group_key resolution: for umbrella members whose own
             // snapshot+live payment_profile both lack qb_vendor_name (Iskra
             // Kochova / Teal), inherit the vendor from any sibling that DOES
@@ -10770,6 +10805,9 @@ const TimesheetSystem = () => {
               // "has bill" without waiting for qb_mirror to refresh. Prevents just-
               // pushed invoices from re-appearing until the next bill_query drains.
               .filter(inv => !inv.qbBillTxnId)
+              // Slice 3: skip invoices that need a vendor decision first — they
+              // render in their own bucket, not as "missing bills".
+              .filter(inv => !needsVendorDecisionByInvoiceId.has(inv.id))
               .map((inv): MissingBill | null => {
                 const snapshotName = inv.paymentProfile?.qbVendorName?.trim() || null;
                 const liveName = liveVendorNameByUserId.get(inv.userId) || null;
@@ -11240,6 +11278,10 @@ const TimesheetSystem = () => {
                       if (inv.qbBillTxnId) continue;
                       if (!inv.periodEnd) continue;
                       if (!inv.invoiceNumber?.trim()) continue;
+                      // Slice 3: skip invoices in the "Needs vendor decision"
+                      // bucket — accountant must resolve those first before
+                      // they show up as pushable.
+                      if (needsVendorDecisionByInvoiceId.has(inv.id)) continue;
                       const pm = paymentMethod(inv);
                       const isIntuit = pm === 'Intuit';
                       const isConvera = pm === 'Convera';
@@ -11529,6 +11571,110 @@ const TimesheetSystem = () => {
                     openMapWidget(counterparty, source);
                   }}
                 />
+
+                {/* Slice 3: Needs vendor decision — approved invoices whose
+                    payment profile isn't mapped to a QB vendor AND the
+                    contractor's other profiles don't unambiguously agree on
+                    one. Blocker: these are filtered out of Missing QB Bills
+                    + Push modal until resolved. Click "Resolve" to open the
+                    picker (Slice 2 modal). */}
+                {needsVendorDecisionByInvoiceId.size > 0 && (() => {
+                  const rows = [...needsVendorDecisionByInvoiceId.entries()]
+                    .map(([invId, info]) => {
+                      const inv = invoices.find(i => i.id === invId);
+                      return inv ? { inv, info } : null;
+                    })
+                    .filter((x): x is { inv: Invoice; info: { snapCompany: string | null; conflictNames?: string[]; targetPaymentProfileId: number | null } } => x !== null)
+                    .sort((a, b) => {
+                      const d = (a.inv.periodEnd || '').localeCompare(b.inv.periodEnd || '');
+                      if (d !== 0) return d;
+                      return (a.inv.userName || '').localeCompare(b.inv.userName || '');
+                    });
+                  const total = rows.reduce((s, r) => s + r.inv.totalAmount, 0);
+                  return (
+                    <div className="mb-4 border border-red-300 rounded-lg overflow-hidden bg-red-50/40">
+                      <button
+                        onClick={() => toggle('needs_vendor_decision')}
+                        className="w-full flex items-center justify-between px-4 py-3 hover:bg-red-100/40 text-left"
+                      >
+                        <div>
+                          <span className="font-semibold text-red-900">Needs vendor decision — approved invoices missing QB vendor mapping</span>
+                          <span className="ml-2 text-sm text-red-800">· {rows.length} invoice{rows.length === 1 ? '' : 's'}</span>
+                          {rows.length > 0 && <span className="ml-2 text-sm text-red-800">· {fmtMoney(total)}</span>}
+                        </div>
+                        <span className="text-xs text-red-700">{qbInboxExpanded['needs_vendor_decision'] ? '▼' : '▶'}</span>
+                      </button>
+                      {qbInboxExpanded['needs_vendor_decision'] && (
+                        <div>
+                          <p className="px-4 pt-3 text-xs text-gray-700 italic">
+                            These invoices can't be pushed to QuickBooks yet — their payment profile isn't linked to a QB vendor and we can't infer one automatically. Click <strong>Resolve</strong> to pick an existing QB vendor (or create a new one, once that flow ships).
+                          </p>
+                          <table className="w-full text-xs mt-2">
+                            <thead>
+                              <tr className="bg-red-100/60 text-red-900">
+                                <th className="px-3 py-1.5 text-left">Period end</th>
+                                <th className="px-3 py-1.5 text-left">Contractor</th>
+                                <th className="px-3 py-1.5 text-left">Invoice #</th>
+                                <th className="px-3 py-1.5 text-right">Amount</th>
+                                <th className="px-3 py-1.5 text-left">Payment profile</th>
+                                <th className="px-3 py-1.5 text-left">Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.map(({ inv, info }) => {
+                                const targetPp = info.targetPaymentProfileId != null
+                                  ? paymentProfiles.find(p => p.id === info.targetPaymentProfileId)
+                                  : paymentProfiles.find(p => p.userId === inv.userId && p.isDefault);
+                                const siblings = paymentProfiles.filter(p =>
+                                  p.userId === inv.userId
+                                  && p.id !== targetPp?.id
+                                  && p.qbVendorName && p.qbVendorName.trim().length > 0
+                                );
+                                const distinct = new Set(siblings.map(s => s.qbVendorName!.trim()));
+                                const hint = distinct.size === 1 ? [...distinct][0] : undefined;
+                                return (
+                                  <tr key={inv.id} className="border-t border-red-100 hover:bg-red-50/60">
+                                    <td className="px-3 py-1.5">{inv.periodEnd || '—'}</td>
+                                    <td className="px-3 py-1.5">{inv.userName}</td>
+                                    <td className="px-3 py-1.5 font-mono">{inv.invoiceNumber}</td>
+                                    <td className="px-3 py-1.5 text-right">{fmtMoney(inv.totalAmount)}</td>
+                                    <td className="px-3 py-1.5">{info.snapCompany || targetPp?.companyName || '(no company)'}</td>
+                                    <td className="px-3 py-1.5">
+                                      <button
+                                        onClick={() => {
+                                          const finalTargetId = info.targetPaymentProfileId ?? targetPp?.id;
+                                          if (!finalTargetId) {
+                                            alert(`Contractor has no payment profile — add one on the Payments tab first.`);
+                                            return;
+                                          }
+                                          const finalTargetPp = paymentProfiles.find(p => p.id === finalTargetId);
+                                          setVendorDecisionState({
+                                            invoice: inv,
+                                            targetPaymentProfileId: finalTargetId,
+                                            targetPaymentProfileCompany: info.snapCompany || finalTargetPp?.companyName || '',
+                                            targetPaymentProfileIban: finalTargetPp?.iban ?? null,
+                                            siblingVendorHint: hint,
+                                            conflictNames: info.conflictNames,
+                                            // No afterResolve — invoice will just fall out of this
+                                            // bucket into Missing QB Bills / Push modal on next render.
+                                            afterResolve: undefined,
+                                          });
+                                        }}
+                                        className="px-2 py-1 bg-red-600 text-white rounded hover:bg-red-700 text-xs font-medium"
+                                      >
+                                        Resolve
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Missing QB bills — approved invoices lacking a QB Bill.
                     Read-only visibility. Actual push happens via the top-right
