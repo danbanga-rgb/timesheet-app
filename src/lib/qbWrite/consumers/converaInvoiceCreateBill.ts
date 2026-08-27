@@ -64,6 +64,19 @@ export interface ConveraInvoiceCreateBillResult extends ExecuteResult {
   skippedIneligible: Array<{ invoiceId: number; reason: string }>;
   /** For each successful bill_add job, the chained bill_query verify job id. */
   verifyJobIdByBillAddJobId: Record<number, number>;
+  /** One entry per emitted intent — parallel to ExecuteResult.jobIds.
+   *  Frontend uses this to build status-pane records keyed on the real
+   *  identity (sourceInvoiceIds, vendorName, totalAmount) instead of the
+   *  ambiguous index-into-jobIds it was guessing before (2026-08-27 bug:
+   *  status pane swapped Vladimir/Liya labels and dropped Naretena). */
+  perIntent: Array<{
+    sourceInvoiceIds: number[];
+    vendorName: string;
+    refNumber: string;
+    totalAmount: number;
+    jobId: number | null;
+    verifyJobId: number | null;
+  }>;
 }
 
 interface InvoiceRow {
@@ -92,6 +105,14 @@ function memoRef(invoiceNumber: string): string {
   const trimmed = invoiceNumber.trim();
   if (/^inv/i.test(trimmed)) return trimmed;
   return `INV ${trimmed}`;
+}
+
+/** Fold Unicode diacritics to ASCII for qbxml memo output. QB Desktop rejects
+ *  non-ASCII via Xerces UTFDataFormatException (INVARIANTS #1). Contractor
+ *  names from profiles.name carry Slavic diacritics (Senad Ibrahimpašić →
+ *  Senad Ibrahimpasic, Fadil Kalača → Fadil Kalaca). Fixes 2026-08-27. */
+function toAsciiMemo(s: string): string {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 
 interface PaymentProfileRow {
@@ -132,7 +153,7 @@ export async function pushConveraInvoiceCreateBill(
   const skippedIneligible: ConveraInvoiceCreateBillResult['skippedIneligible'] = [];
   const verifyJobIdByBillAddJobId: Record<number, number> = {};
   const emptyReturn = (): ConveraInvoiceCreateBillResult => ({
-    jobIds: [], rejected: [], skippedDuplicate: [], skippedIneligible, verifyJobIdByBillAddJobId,
+    jobIds: [], rejected: [], skippedDuplicate: [], skippedIneligible, verifyJobIdByBillAddJobId, perIntent: [],
   });
   if (invoiceIds.length === 0) return emptyReturn();
 
@@ -347,8 +368,11 @@ export async function pushConveraInvoiceCreateBill(
       return na.localeCompare(nb);
     });
     // Bill-level memo: for singleton use per-invoice memo; for group summarise.
+    // Contractor names go through toAsciiMemo() — profiles.name carries Slavic
+    // diacritics (Senad Ibrahimpašić, Fadil Kalača) which QB Xerces rejects
+    // (INVARIANTS #1). Vendor/refNumber are ASCII by convention already.
     const billMemo = sortedMembers.length === 1
-      ? `${monthLabel} - ${profileByUserId.get(sortedMembers[0].user_id)?.name ?? ''} - ${memoRef(sortedMembers[0].invoice_number!)}`.trim()
+      ? `${monthLabel} - ${toAsciiMemo(profileByUserId.get(sortedMembers[0].user_id)?.name ?? '')} - ${memoRef(sortedMembers[0].invoice_number!)}`.trim()
       : `${monthLabel} - ${r.vendor.name} - ${r.refNumber} (${sortedMembers.length} lines)`;
     intents.push({
       kind: 'create_bill',
@@ -360,7 +384,7 @@ export async function pushConveraInvoiceCreateBill(
       defaultExpenseAccountName: expenseName,
       lines: sortedMembers.map(m => ({
         amount: Number(m.total_amount),
-        memo: `${monthLabel} - ${profileByUserId.get(m.user_id)?.name ?? ''} - ${memoRef(m.invoice_number!)}`.trim(),
+        memo: `${monthLabel} - ${toAsciiMemo(profileByUserId.get(m.user_id)?.name ?? '')} - ${memoRef(m.invoice_number!)}`.trim(),
         expenseAccountName: expenseName,
       })),
       sourceInvoiceIds: sortedMembers.map(m => m.id),
@@ -400,5 +424,17 @@ export async function pushConveraInvoiceCreateBill(
     }
   }
 
-  return { ...result, skippedIneligible, verifyJobIdByBillAddJobId };
+  const perIntent = intents.map((intent, i) => {
+    const jobId = result.jobIds[i] ?? null;
+    return {
+      sourceInvoiceIds: intent.sourceInvoiceIds,
+      vendorName: intent.vendorName,
+      refNumber: intent.refNumber,
+      totalAmount: intent.lines.reduce((sum, l) => sum + Number(l.amount), 0),
+      jobId,
+      verifyJobId: jobId != null ? (verifyJobIdByBillAddJobId[jobId] ?? null) : null,
+    };
+  });
+
+  return { ...result, skippedIneligible, verifyJobIdByBillAddJobId, perIntent };
 }

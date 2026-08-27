@@ -11265,69 +11265,29 @@ const TimesheetSystem = () => {
                         });
                       });
                       // G7.6 Convera invoice-driven records for the live pane.
-                      // Groups invoices by (vendor, YYYY-MM) inside the pusher, so
-                      // multiple invoice ids may share a single bill_add job. The
-                      // eligibility-order derivation below can only reason about
-                      // individual invoice ids that made it through; for MULTI
-                      // groups each invoice yields the same shared job — de-dup
-                      // by job id.
-                      const g76JobIds = g76Res?.jobIds ?? [];
-                      const g76VerifyByBillAdd = g76Res?.verifyJobIdByBillAddJobId ?? {};
-                      const g76Rejected = (g76Res?.rejected ?? []).flatMap(rj => rj.intent.kind === 'create_bill' ? (rj.intent.sourceInvoiceIds ?? []) : []);
-                      const g76Skipped = (g76Res?.skippedDuplicate ?? []).flatMap(s => s.intent.kind === 'create_bill' ? (s.intent.sourceInvoiceIds ?? []) : []);
-                      const g76BlockedIds = new Set<number>([
-                        ...(g76Res?.skippedIneligible ?? []).map(s => s.invoiceId),
-                        ...g76Rejected,
-                        ...g76Skipped,
-                      ]);
-                      // Rebuild the eligibility-invoice list, group into (vendor,YYYY-MM)
-                      // to align with intents 1:1. Any invoice blocked drops from its group.
-                      const g76EligibleInvoices = g76InvoiceIds
-                        .filter(id => !g76BlockedIds.has(id))
-                        .map(id => invoiceById.get(id))
-                        .filter((inv): inv is NonNullable<typeof inv> => !!inv);
-                      const g76GroupOrder: Array<{ invoices: typeof g76EligibleInvoices; totalAmount: number; displayVendor: string }> = [];
-                      const g76GroupIdx = new Map<string, number>();
-                      const liveVendorForInv = (inv: (typeof g76EligibleInvoices)[number]): string => {
-                        const snap = inv.paymentProfile?.qbVendorName?.trim();
-                        if (snap) return snap;
-                        for (const pp of paymentProfiles) {
-                          if (pp.userId === inv.userId && pp.qbVendorName) return pp.qbVendorName;
-                        }
-                        return inv.userName || '';
-                      };
-                      for (const inv of g76EligibleInvoices) {
-                        const ym = (inv.periodEnd ?? '').slice(0, 7);
-                        const key = `${liveVendorForInv(inv).toLowerCase()}::${ym}`;
-                        let idx = g76GroupIdx.get(key);
-                        if (idx == null) {
-                          idx = g76GroupOrder.length;
-                          g76GroupIdx.set(key, idx);
-                          g76GroupOrder.push({ invoices: [], totalAmount: 0, displayVendor: liveVendorForInv(inv) });
-                        }
-                        g76GroupOrder[idx].invoices.push(inv);
-                        g76GroupOrder[idx].totalAmount += inv.totalAmount;
-                      }
-                      g76JobIds.forEach((jobId, i) => {
-                        if (jobId == null) return;
-                        const group = g76GroupOrder[i];
-                        if (!group || group.invoices.length === 0) return;
-                        // One live-pane record per group. For MULTI, uses first invoice's id
-                        // as the React key and sums amounts for display.
-                        const firstInv = group.invoices[0];
+                      // Now uses the consumer's perIntent[] contract (introduced
+                      // 2026-08-27) which returns one entry per emitted intent
+                      // with (sourceInvoiceIds, vendorName, refNumber, totalAmount,
+                      // jobId, verifyJobId). No index-into-jobIds guessing that
+                      // could scramble records if the consumer's iteration order
+                      // and this rebuild disagreed (2026-08-27 bug: Vladimir/Liya
+                      // swapped, Naretena dropped from pane despite being enqueued).
+                      for (const pi of (g76Res?.perIntent ?? [])) {
+                        if (pi.jobId == null) continue;
+                        const firstInv = invoiceById.get(pi.sourceInvoiceIds[0]);
                         newRecords.push({
-                          eventId: -firstInv.id,
+                          eventId: -(firstInv?.id ?? pi.sourceInvoiceIds[0]),
                           sourceKind: 'invoice',
-                          invoiceId: firstInv.id,
-                          payJobId: jobId,
-                          verifyJobId: g76VerifyByBillAdd[jobId] ?? null,
+                          invoiceId: firstInv?.id ?? pi.sourceInvoiceIds[0],
+                          payJobId: pi.jobId,
+                          verifyJobId: pi.verifyJobId,
                           billTxnId: '',
-                          expectedAmount: group.totalAmount,
-                          expectedVendor: group.displayVendor,
+                          expectedAmount: pi.totalAmount,
+                          expectedVendor: pi.vendorName,
                           pushedAt: new Date().toISOString(),
                           kind: 'invoice_create_bill',
                         });
-                      });
+                      }
                       setQbPushRecords(prev => [...prev, ...newRecords]);
 
                       const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
