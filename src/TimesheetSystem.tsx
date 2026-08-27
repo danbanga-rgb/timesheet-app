@@ -3607,9 +3607,12 @@ const TimesheetSystem = () => {
   }
 
   // Slice 1: at approval time, ensure the invoice's snap payment_profile is
-  // linked to a QB vendor. Auto-fills from sibling pps when they unambiguously
-  // agree (Marta pattern); blocks with an alert when ambiguous (Tomislav
-  // pattern — Slice 2 replaces this alert with a picker modal).
+  // explicitly mapped to a QB vendor. NO auto-inference across siblings —
+  // every first use of an untagged pp opens the picker modal for confirmation.
+  // Reasoning captured in [[invoice-snapshot-vs-live]] correction 2026-08-27:
+  // Marta's siblings agreeing is not proof that a NEW pp routes there;
+  // Tomislav's Fat Struct should never be silently mapped to Ponny based on
+  // his one prior tag.
   //
   // Only fires when the effective payment method is Intuit or Convera —
   // non-QB paths don't need vendor resolution.
@@ -3652,61 +3655,27 @@ const TimesheetSystem = () => {
       livePps,
     );
     if (result.mode === 'no-action') return 'proceed';
-    if (result.mode === 'ambiguous') {
-      // Slice 2: open the picker modal. Approval halts until the accountant
-      // resolves the vendor; the modal's afterResolve callback re-runs this
-      // approval action (which will now find the pp tagged and proceed).
-      const fullLivePp = liveData?.find(r => r.id === result.targetPaymentProfileId)
-        // Legacy invoice with no snap_pp_id: fall back to the user's default pp.
-        ?? liveData?.find(r => r.is_default === true)
-        ?? null;
-      if (!fullLivePp) {
-        alert(`Cannot approve: ${result.reason}\n\nContractor has no default payment profile. Add one on the Payments tab first.`);
-        return 'blocked';
-      }
-      setVendorDecisionState({
-        invoice,
-        targetPaymentProfileId: fullLivePp.id as number,
-        targetPaymentProfileCompany: (fullLivePp.company_name as string | null) ?? result.snapCompany ?? '',
-        targetPaymentProfileIban: (fullLivePp.iban as string | null) ?? null,
-        siblingVendorHint: result.conflictNames ? undefined : livePps.find(p => p.qbVendorName)?.qbVendorName ?? undefined,
-        conflictNames: result.conflictNames,
-        afterResolve: onAmbiguousRetry,
-      });
+    // 'ambiguous' — open the picker modal. Approval halts until the accountant
+    // resolves the vendor; the modal's afterResolve callback re-runs this
+    // approval action (which will now find the pp tagged and proceed).
+    const fullLivePp = liveData?.find(r => r.id === result.targetPaymentProfileId)
+      // Legacy invoice with no snap_pp_id: fall back to the user's default pp.
+      ?? liveData?.find(r => r.is_default === true)
+      ?? null;
+    if (!fullLivePp) {
+      alert(`Cannot approve: ${result.reason}\n\nContractor has no default payment profile. Add one on the Payments tab first.`);
       return 'blocked';
     }
-    // 'auto' — write pp.qb_vendor_name and log to invoice edit_history.
-    const targetPp = livePps.find(p => p.id === result.targetPaymentProfileId);
-    const { error: ppErr } = await supabase
-      .from('payment_profiles')
-      .update({ qb_vendor_name: result.vendorName })
-      .eq('id', result.targetPaymentProfileId);
-    if (ppErr) {
-      alert('Auto-vendor-mapping failed: ' + ppErr.message);
-      return 'blocked';
-    }
-    const entry = vendorMapEntry({
-      by: currentUser?.name || 'unknown',
-      mode: 'auto',
-      reason: `Payment profile "${result.snapCompany || targetPp?.companyName || 'unnamed'}" auto-mapped to QB vendor "${result.vendorName}" (inferred from contractor's other payment profiles at approval time).`,
-      paymentProfileId: result.targetPaymentProfileId,
-      paymentProfileCompany: result.snapCompany || targetPp?.companyName || '',
-      beforeVendorName: null,
-      afterVendorName: result.vendorName,
-      siblingSignal: { agreesOn: result.vendorName },
+    setVendorDecisionState({
+      invoice,
+      targetPaymentProfileId: fullLivePp.id as number,
+      targetPaymentProfileCompany: (fullLivePp.company_name as string | null) ?? result.snapCompany ?? '',
+      targetPaymentProfileIban: (fullLivePp.iban as string | null) ?? null,
+      siblingVendorHint: result.siblingHint,
+      conflictNames: result.conflictNames,
+      afterResolve: onAmbiguousRetry,
     });
-    const nextHistory = [...(invoice.editHistory || []), entry];
-    const { error: histErr } = await supabase
-      .from('invoices')
-      .update({ edit_history: nextHistory })
-      .eq('id', invoice.id);
-    if (histErr) {
-      // Non-fatal — pp update succeeded; only the audit log failed. Warn but proceed.
-      console.warn('vendor-map edit_history write failed', histErr);
-    }
-    // Reflect the vendor update in React state so the next approval / render sees it.
-    setPaymentProfiles(prev => prev.map(p => p.id === result.targetPaymentProfileId ? { ...p, qbVendorName: result.vendorName } : p));
-    return 'proceed';
+    return 'blocked';
   };
 
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {

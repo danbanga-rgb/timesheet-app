@@ -4,25 +4,28 @@
 // accountant chose at ingest. The live payment_profiles row (identified by
 // the snapshot's id field) is the source of truth for downstream QB routing.
 //
-// When a contractor uses multiple beneficiaries (Marta Sušek — OBAI vs IT
-// STUFF, both routing to "Native Team Ltd. - Marta Susek"), the accountant
-// tags each pp with the same qb_vendor_name so bills post consistently to
-// one QB vendor. When a contractor genuinely changes to a new entity
-// (Tomislav Škoda — Ponny → Fat Struct d.o.o), the new pp is created without
-// a qb_vendor_name until the accountant decides whether the new entity maps
-// to an existing QB vendor or requires a fresh one.
+// Rule (2026-08-27): the check is PER-PP, not across pps. If this specific
+// payment_profile has never been explicitly mapped to a QB vendor (snapshot
+// null AND live null), it holds for accountant confirmation — regardless
+// of what sibling pps look like.
 //
-// This resolver runs at APPROVAL TIME (fresh from DB) so the accountant hits
-// the decision point in context. It runs again at push time via the QB
-// Automation "Needs vendor decision" bucket to catch invoices whose pps
-// changed after approval.
+//   - Marta Sušek OBAI pp + IT STUFF pp — both already tagged to
+//     "Native Team Ltd. - Marta Susek" → invoices using either resolve to
+//     no-action.
+//   - Marta hypothetical new pp 57 (untagged) → holds even though her
+//     siblings agree, because pp 57 itself has never been confirmed.
+//   - Tomislav Škoda pp 104 (Fat Struct, untagged) → holds despite pp 69
+//     (Ponny) being tagged, because pp 104 itself has never been confirmed.
+//   - Juran Dadić — his pps already have distinct vendors set → invoices
+//     using either pp use its snapshot directly.
+//
+// No auto-inference across pps. Every FIRST use of an untagged pp opens
+// the picker modal so the accountant explicitly maps it. Once mapped, the
+// pp is tagged in the DB and future invoices with that pp are no-action.
 //
 // Contract:
-//   'no-action'   snap pp already has qb_vendor_name; nothing to fill in.
-//   'auto'        snap pp is null; sibling pps unambiguously agree on ONE
-//                 vendor name; safe to auto-fill (Marta pattern).
-//   'ambiguous'   snap pp is null AND sibling pps disagree OR none have a
-//                 vendor name; must be resolved manually via picker.
+//   'no-action'   snap pp (or its live row) already has qb_vendor_name.
+//   'ambiguous'   snap pp has never been mapped; requires accountant decision.
 
 export interface ResolverPaymentProfile {
   id: number;
@@ -43,8 +46,7 @@ export interface ResolverInvoiceSnapshot {
 
 export type ResolverResult =
   | { mode: 'no-action' }
-  | { mode: 'auto'; vendorName: string; targetPaymentProfileId: number; snapCompany: string }
-  | { mode: 'ambiguous'; reason: string; targetPaymentProfileId: number | null; snapCompany: string | null; conflictNames?: string[] };
+  | { mode: 'ambiguous'; reason: string; targetPaymentProfileId: number | null; snapCompany: string | null; siblingHint?: string; conflictNames?: string[] };
 
 /**
  * Resolve the QB vendor for an invoice at approval or push time.
@@ -84,8 +86,12 @@ export function resolveNewProfileVendor(
     && p.qbVendorName.trim().length > 0
   );
 
+  // Snap pp has never been mapped. Always ambiguous. We surface sibling
+  // context (hint or conflict) so the picker modal can prefill or warn,
+  // but we NEVER decide automatically. Every new pp requires explicit
+  // accountant confirmation the first time it's used.
+  const distinctNames = new Set(siblings.map(s => s.qbVendorName!.trim()));
   if (siblings.length === 0) {
-    // No signal at all — must be resolved manually.
     return {
       mode: 'ambiguous',
       reason: targetPp
@@ -95,36 +101,21 @@ export function resolveNewProfileVendor(
       snapCompany,
     };
   }
-
-  // Do the siblings agree on ONE vendor name?
-  const distinctNames = new Set(siblings.map(s => s.qbVendorName!.trim()));
-  if (distinctNames.size === 1) {
-    const vendorName = [...distinctNames][0];
-    // Auto-resolvable only if we know which target pp to update. Legacy
-    // invoices without snap_pp_id can't be auto-updated because we don't
-    // know which pp to write qb_vendor_name onto.
-    if (targetPpId == null) {
-      return {
-        mode: 'ambiguous',
-        reason: `Invoice snapshot has no payment profile id (legacy invoice) — accountant must pick a QB vendor even though sibling profiles agree on "${vendorName}".`,
-        targetPaymentProfileId: null,
-        snapCompany,
-      };
-    }
+  if (distinctNames.size > 1) {
     return {
-      mode: 'auto',
-      vendorName,
+      mode: 'ambiguous',
+      reason: `Payment profile "${snapCompany ?? 'unnamed'}" has no QB vendor mapping. Sibling profiles map to different QB vendors (${[...distinctNames].join(', ')}) — accountant must pick which one applies, or map to a new vendor entirely.`,
       targetPaymentProfileId: targetPpId,
-      snapCompany: snapCompany ?? '',
+      snapCompany,
+      conflictNames: [...distinctNames],
     };
   }
-
-  // Conflicting signal — Juran-class.
+  const siblingHint = [...distinctNames][0];
   return {
     mode: 'ambiguous',
-    reason: `Sibling payment profiles for this contractor map to different QB vendors (${[...distinctNames].join(', ')}). Accountant must pick which one applies to this invoice, or map to a different vendor entirely.`,
+    reason: `Payment profile "${snapCompany ?? 'unnamed'}" has no QB vendor mapping. Sibling profiles are tagged to "${siblingHint}" but that isn't proof this new beneficiary belongs to the same vendor — accountant must confirm or pick a different vendor.`,
     targetPaymentProfileId: targetPpId,
     snapCompany,
-    conflictNames: [...distinctNames],
+    siblingHint,
   };
 }
