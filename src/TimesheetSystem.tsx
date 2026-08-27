@@ -238,6 +238,7 @@ import { pushIntuitCreateBill } from './lib/qbWrite/consumers/intuitCreateBill';
 import { pushIntuitCheck } from './lib/qbWrite/consumers/intuitCheck';
 import { pushIntuitInvoiceCreateBill } from './lib/qbWrite/consumers/intuitInvoiceCreateBill';
 import { pushConveraInvoiceCreateBill } from './lib/qbWrite/consumers/converaInvoiceCreateBill';
+import VendorDecisionModal from './components/VendorDecisionModal';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -1243,6 +1244,19 @@ const TimesheetSystem = () => {
   // synthetic posted rows so accountant sees Convera proactive-create pushes
   // in the same posted bucket. MULTI-YYYY-MM pushes carry N invoice ids each.
   const [qbG76PostedInvoiceIds, setQbG76PostedInvoiceIds] = useState<Set<number>>(new Set());
+  // Slice 2: VendorDecisionModal state. Opened by the approval flow when
+  // the resolver returns 'ambiguous', or by the Slice 3 "Needs vendor
+  // decision" bucket's Resolve button. `afterResolve` re-runs the caller's
+  // upstream flow (e.g., the blocked approval) once the vendor is set.
+  const [vendorDecisionState, setVendorDecisionState] = useState<{
+    invoice: Invoice;
+    targetPaymentProfileId: number;
+    targetPaymentProfileCompany: string;
+    targetPaymentProfileIban: string | null;
+    siblingVendorHint?: string;
+    conflictNames?: string[];
+    afterResolve?: () => Promise<void> | void;
+  } | null>(null);
   const [qbIngestLoading, setQbIngestLoading] = useState(false);
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
@@ -3606,11 +3620,12 @@ const TimesheetSystem = () => {
   const tryResolveVendorForApproval = async (
     invoice: Invoice,
     effectivePaymentMethod: string,
+    onAmbiguousRetry?: () => Promise<void> | void,
   ): Promise<'proceed' | 'blocked'> => {
     if (!['Intuit', 'Convera'].includes(effectivePaymentMethod)) return 'proceed';
     const { data: liveData, error } = await supabase
       .from('payment_profiles')
-      .select('id, user_id, qb_vendor_name, company_name, is_default')
+      .select('id, user_id, qb_vendor_name, company_name, is_default, iban')
       .eq('user_id', invoice.userId);
     if (error) {
       alert('Cannot approve: failed to fetch payment profiles — ' + error.message);
@@ -3638,7 +3653,26 @@ const TimesheetSystem = () => {
     );
     if (result.mode === 'no-action') return 'proceed';
     if (result.mode === 'ambiguous') {
-      alert(`Cannot approve: ${result.reason}\n\nSet the QB vendor on the contractor's payment profile (Payments tab → Profiles), then try again.`);
+      // Slice 2: open the picker modal. Approval halts until the accountant
+      // resolves the vendor; the modal's afterResolve callback re-runs this
+      // approval action (which will now find the pp tagged and proceed).
+      const fullLivePp = liveData?.find(r => r.id === result.targetPaymentProfileId)
+        // Legacy invoice with no snap_pp_id: fall back to the user's default pp.
+        ?? liveData?.find(r => r.is_default === true)
+        ?? null;
+      if (!fullLivePp) {
+        alert(`Cannot approve: ${result.reason}\n\nContractor has no default payment profile. Add one on the Payments tab first.`);
+        return 'blocked';
+      }
+      setVendorDecisionState({
+        invoice,
+        targetPaymentProfileId: fullLivePp.id as number,
+        targetPaymentProfileCompany: (fullLivePp.company_name as string | null) ?? result.snapCompany ?? '',
+        targetPaymentProfileIban: (fullLivePp.iban as string | null) ?? null,
+        siblingVendorHint: result.conflictNames ? undefined : livePps.find(p => p.qbVendorName)?.qbVendorName ?? undefined,
+        conflictNames: result.conflictNames,
+        afterResolve: onAmbiguousRetry,
+      });
       return 'blocked';
     }
     // 'auto' — write pp.qb_vendor_name and log to invoice edit_history.
@@ -3688,9 +3722,13 @@ const TimesheetSystem = () => {
         alert(`Cannot approve: invoice number "${num}" is ${num.length} chars. QuickBooks caps Bill.RefNumber at 20. Edit the invoice number on the Invoices tab first, then approve.`);
         return;
       }
-      // Slice 1: vendor resolution guard.
+      // Slice 1/2: vendor resolution guard. Ambiguous cases open the picker
+      // modal (Slice 2); the modal's afterResolve re-runs this approval action
+      // which now succeeds because the resolver returns 'no-action' or 'auto'.
       if (invoice) {
-        const outcome = await tryResolveVendorForApproval(invoice, nextPM);
+        const outcome = await tryResolveVendorForApproval(invoice, nextPM, async () => {
+          await handleInvoiceAction(invoiceId, status, payOnDate, paidDate, pmOverride, paymentTerms);
+        });
         if (outcome === 'blocked') return;
       }
     }
@@ -4106,9 +4144,11 @@ const TimesheetSystem = () => {
     if (fields.invoiceNumber !== undefined && fields.invoiceNumber.length > 20 && !confirm(`Invoice number "${fields.invoiceNumber}" is ${fields.invoiceNumber.length} chars. QuickBooks caps Bill.RefNumber at 20 and will refuse any push. Continue anyway?`)) {
       return;
     }
-    // Slice 1: vendor resolution guard on approval transitions.
+    // Slice 1/2: vendor resolution guard on approval transitions.
     if (fields.status === 'approved' && invoice && pushablePM) {
-      const outcome = await tryResolveVendorForApproval(invoice, nextPaymentMethod);
+      const outcome = await tryResolveVendorForApproval(invoice, nextPaymentMethod, async () => {
+        await saveInvoiceEdits(invoiceId, fields);
+      });
       if (outcome === 'blocked') return;
     }
     const update: Record<string, unknown> = {};
@@ -8006,6 +8046,49 @@ const TimesheetSystem = () => {
 
     return (
       <div className="min-h-screen bg-gray-50 p-3 sm:p-6">
+        {vendorDecisionState && (
+          <VendorDecisionModal
+            open={true}
+            contractorName={vendorDecisionState.invoice.userName || ''}
+            invoiceNumber={vendorDecisionState.invoice.invoiceNumber || ''}
+            invoiceAmount={vendorDecisionState.invoice.totalAmount}
+            invoicePeriodEnd={vendorDecisionState.invoice.periodEnd || null}
+            targetPaymentProfileCompany={vendorDecisionState.targetPaymentProfileCompany}
+            targetPaymentProfileIban={vendorDecisionState.targetPaymentProfileIban}
+            siblingVendorHint={vendorDecisionState.siblingVendorHint}
+            conflictNames={vendorDecisionState.conflictNames}
+            qbVendors={qbVendorsList.map(v => ({ listId: v.listId, name: v.name }))}
+            onCancel={() => setVendorDecisionState(null)}
+            onConfirm={async (vendorName) => {
+              const st = vendorDecisionState;
+              const { error: ppErr } = await supabase
+                .from('payment_profiles')
+                .update({ qb_vendor_name: vendorName })
+                .eq('id', st.targetPaymentProfileId);
+              if (ppErr) throw new Error(`Failed to save vendor: ${ppErr.message}`);
+              const entry = vendorMapEntry({
+                by: currentUser?.name || 'unknown',
+                mode: 'manual',
+                reason: `Accountant picked QB vendor "${vendorName}" for payment profile "${st.targetPaymentProfileCompany || 'unnamed'}" via vendor decision modal.`,
+                paymentProfileId: st.targetPaymentProfileId,
+                paymentProfileCompany: st.targetPaymentProfileCompany,
+                beforeVendorName: null,
+                afterVendorName: vendorName,
+                siblingSignal: st.conflictNames ? { conflictNames: st.conflictNames } : (st.siblingVendorHint ? { agreesOn: st.siblingVendorHint } : undefined),
+              });
+              const nextHistory = [...(st.invoice.editHistory || []), entry];
+              const { error: histErr } = await supabase
+                .from('invoices')
+                .update({ edit_history: nextHistory })
+                .eq('id', st.invoice.id);
+              if (histErr) console.warn('vendor-map edit_history write failed', histErr);
+              setPaymentProfiles(prev => prev.map(p => p.id === st.targetPaymentProfileId ? { ...p, qbVendorName: vendorName } : p));
+              const cb = st.afterResolve;
+              setVendorDecisionState(null);
+              if (cb) await cb();
+            }}
+          />
+        )}
         <div className="max-w-7xl mx-auto">
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
             <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
