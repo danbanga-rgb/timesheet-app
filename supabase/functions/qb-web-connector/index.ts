@@ -444,10 +444,16 @@ async function persistJobResponse(
     // extra safety is cheap).
     const sourceInvoiceIds = payload.sourceInvoiceIds ?? [];
     if (sourceInvoiceIds.length > 0) {
-      // Vendor safety check: fetch the target invoices' user_ids and confirm
-      // they resolve to a payment_profile with the same qb_vendor_name we
-      // just wrote in QB. Cheap guardrail against wrong-invoice writeback if
-      // sourceInvoiceIds ever came from a stale event.
+      // Vendor safety check: fetch target invoices' user_ids and confirm the
+      // group is umbrella-consistent with the vendor. Historically this
+      // required ALL user_ids to map to the vendor, but G7.6 umbrellas break
+      // that — Teal Crossroads bills 6 contractors on one PDF, and members
+      // like Iskra may have no qb_vendor_name on their live profile (data-
+      // entry gap that the group_key resolution in the consumer papers over).
+      // Relaxed rule (2026-08-27): AT LEAST ONE user_id must map to the
+      // vendor. That guarantees the group has a vendor-mapped anchor without
+      // hard-blocking legitimate umbrella writes. If zero map, we're in
+      // "totally wrong invoices" territory (the class the guard was for).
       const { data: targetInvoices, error: fetchErr } = await supabase
         .from('invoices')
         .select('id, user_id')
@@ -464,9 +470,9 @@ async function persistJobResponse(
         .select('user_id')
         .eq('qb_vendor_name', vendorName);
       const vendorUserIds = new Set((pps ?? []).map((p: { user_id: string }) => p.user_id));
-      const stray = targetUserIds.filter(uid => !vendorUserIds.has(uid));
-      if (stray.length > 0) {
-        return { ok: false, errorMsg: `BillAdd persist: sourceInvoiceIds resolve to user_ids [${stray.join(',')}] that don't map to qb_vendor_name="${vendorName}". QB bill (TxnID=${parsed.result.txnId}) created but writeback aborted — vendor mismatch.` };
+      const anchored = targetUserIds.some(uid => vendorUserIds.has(uid));
+      if (!anchored) {
+        return { ok: false, errorMsg: `BillAdd persist: none of the sourceInvoiceIds' user_ids [${targetUserIds.join(',')}] map to qb_vendor_name="${vendorName}". QB bill (TxnID=${parsed.result.txnId}) created but writeback aborted — no umbrella anchor.` };
       }
       const { data: updated, error: updErr } = await supabase
         .from('invoices')

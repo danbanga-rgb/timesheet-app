@@ -10960,6 +10960,35 @@ const TimesheetSystem = () => {
                       if (!n) continue;
                       if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) liveVendorNameByUserId.set(pp.userId, n);
                     }
+                    // Precompute: for each group_key, resolve vendor from ANY member's
+                    // snapshot or live payment_profile. This lets umbrella members
+                    // whose OWN qb_vendor_name is null (e.g. Iskra Kochova in Teal
+                    // group_key) inherit the group's vendor and render as pushable.
+                    // Non-grouped invoices resolve per-invoice as before.
+                    const groupVendorByKey = new Map<string, string>();
+                    const invoicesByGroupKey = new Map<string, typeof invoices>();
+                    for (const inv of invoices) {
+                      if (!inv.groupKey) continue;
+                      const arr = invoicesByGroupKey.get(inv.groupKey) ?? [];
+                      arr.push(inv);
+                      invoicesByGroupKey.set(inv.groupKey, arr);
+                    }
+                    for (const [key, members] of invoicesByGroupKey) {
+                      const candidates = new Set<string>();
+                      for (const m of members) {
+                        const s = m.paymentProfile?.qbVendorName?.trim();
+                        if (s) candidates.add(s);
+                      }
+                      if (candidates.size === 0) {
+                        for (const m of members) {
+                          const l = liveVendorNameByUserId.get(m.userId);
+                          if (l) candidates.add(l);
+                        }
+                      }
+                      // Only pin the group when members agree. Disagreement is a
+                      // data anomaly the consumer will hold — same UX in the modal.
+                      if (candidates.size === 1) groupVendorByKey.set(key, [...candidates][0]);
+                    }
                     const g75Ready: QbIngestEvent[] = [];
                     const g76Ready: QbIngestEvent[] = [];
                     for (const inv of invoices) {
@@ -10973,10 +11002,10 @@ const TimesheetSystem = () => {
                       if (!isIntuit && !isConvera) continue;
                       if (isIntuit && inv.periodEnd < INTUIT_PRE_OUR_SYSTEM_CUTOFF) continue;
                       if (isConvera && inv.periodEnd < CONVERA_PRE_OUR_SYSTEM_CUTOFF) continue;
-                      const vName = (inv.paymentProfile?.qbVendorName?.trim()) || liveVendorNameByUserId.get(inv.userId);
+                      // Vendor resolution: snapshot → live → group_key sibling.
+                      let vName = inv.paymentProfile?.qbVendorName?.trim() || liveVendorNameByUserId.get(inv.userId);
+                      if (!vName && inv.groupKey) vName = groupVendorByKey.get(inv.groupKey);
                       if (!vName) continue;
-                      // G7.6 Bimosoft UK ALT guardrail — mirror consumer check so the
-                      // row never renders as pushable in the modal.
                       if (isConvera) {
                         const lower = vName.toLowerCase();
                         if (lower.includes('bimosoft') && !lower.includes('uk alt')) continue;
@@ -10986,7 +11015,7 @@ const TimesheetSystem = () => {
                       const mapping = mappingByVendor.get(vendor.listId);
                       if (!mapping?.defaultExpenseAccountListId) continue;
                       const row: QbIngestEvent = {
-                        id: -inv.id,   // negative avoids collision with real events
+                        id: -inv.id,
                         ingestedAt: '',
                         source: isIntuit ? 'invoice_g75' : 'invoice_g76',
                         sourceRef: `invoice:${inv.id}`,
@@ -11010,7 +11039,9 @@ const TimesheetSystem = () => {
                         resolvedPaymentTxnId: null,
                         resolvedReason: isIntuit
                           ? 'G7.5 proactive create (payment via ingest later)'
-                          : 'G7.6 proactive Convera create (payment side deferred to retrofit W2/W3)',
+                          : (inv.groupKey
+                              ? `G7.6 proactive Convera create · part of group_key umbrella (auto-expands to full group on push)`
+                              : 'G7.6 proactive Convera create (payment side deferred to retrofit W2/W3)'),
                         reconciledAt: null,
                         matchProvenance: 'exact-ref',
                         statusUpdatedAt: null,

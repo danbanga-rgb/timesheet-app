@@ -1,57 +1,56 @@
 // converaInvoiceCreateBill — G7.6 consumer of qbWrite executor.
 //
-// Scope (settled 2026-08-26, executed 2026-08-27):
-//   Proactively push create_bill for APPROVED Convera invoices that don't
-//   yet have a corresponding Bill in QB. Groups invoices by (vendor, YYYY-MM):
-//     N=1 → RefNumber = invoice_number (per-invoice bill)
-//     N>1 → RefNumber = MULTI-YYYY-MM   (umbrella / month-rollup bill)
-//   Mirrors the accountant's IIF grouping convention codified in
-//   [[qb-bill-grouping]] so a proactive push is byte-for-byte equivalent to
-//   the manual IIF import.
+// Scope (redesigned 2026-08-27 around invoices.group_key):
+//   Proactively push create_bill for APPROVED Convera invoices that don't yet
+//   have a Bill in QB. Groups by invoices.group_key first (the ingest-time
+//   attachment-group used everywhere else in the app — Invoices tab, IIF
+//   exporter, matcher). Falls back to (vendor, YYYY-MM) rollup only for
+//   invoices that arrived independently (group_key = null).
 //
-// Scope excludes (deferred):
-//   - Intuit invoices → G7.5 handles those (intuitInvoiceCreateBill)
-//   - Payment side entirely — Convera retrofit W2/W3 covers 3-account bank
-//     split + umbrella N-per-1 fanout + fee allocation (see [[convera-retrofit-reality]])
-//   - Bimosoft non-UK-ALT profiles (per [[bimosoft-uk-alt-rule]])
-//   - period_end < CONVERA_PRE_OUR_SYSTEM_CUTOFF
+// Why group_key first (2026-08-27 correction):
+//   The Teal Crossroads case exposed a real gap. All 6 Teal contractors on a
+//   single PDF share invoice_number + group_key, but individual snapshot
+//   qb_vendor_name entries can be null (data-entry gaps like Iskra Kochova
+//   whose live payment_profile.qb_vendor_name is unset). The (vendor,
+//   YYYY-MM) grouping I built first:
+//     (a) silently dropped Iskra
+//     (b) would have emitted RefNumber = MULTI-YYYY-MM for the other 5, when
+//         the accountant's manual convention (and the source PDF) uses the
+//         shared invoice_number.
+//   Grouping by group_key (with group-scope vendor resolution) fixes both.
+//
+// Vendor resolution for a group:
+//   Consult ALL members. Prefer snapshot payment_profile.qbVendorName; fall
+//   back to live payment_profiles.qb_vendor_name (default profile preferred).
+//   Any member resolving pins the vendor for the whole group. If two members
+//   disagree on non-empty vendor names, hold the group with a mismatch reason
+//   (real data anomaly worth surfacing, not silently reconciling).
+//
+// RefNumber for a group:
+//   All members share the same invoice_number → use it (single PDF case).
+//   Members have distinct invoice_numbers → MULTI-YYYY-MM (independent invoices
+//   that happen to share (vendor, month) via the fallback path).
+//   Singleton group → invoice_number.
+//
+// Atomicity:
+//   Group pushes are all-or-nothing. If ANY member fails eligibility (not
+//   approved, wrong payment method, pre-cutoff, missing invoice_number, or
+//   qb_bill_txn_id already set) the whole group is skipped with a reason
+//   naming the failing member. A QB Bill cannot cover a partial group.
+//
+// Auto-expansion:
+//   Callers can pass any subset of invoice ids; if any id has a group_key,
+//   the consumer auto-pulls all siblings sharing that group_key. Prevents
+//   half-selecting an umbrella from the modal.
 //
 // Per-invariant handling (see src/lib/qbWrite/INVARIANTS.md):
-//   #14 — Payload contract: executor validates; consumer supplies sourceInvoiceIds
-//   #18/#19 — Idempotency: executor skips if ANY invoice in the group has
-//         qb_bill_txn_id set, or a pending/in_flight bill_add already
-//         references any of these invoice ids
-//   #22 — Snapshot vs live: invoice.paymentProfile is a JSONB SNAPSHOT taken
-//         at invoice creation. Vendor name resolution ALWAYS falls back to the
-//         live payment_profiles row by userId.
-//   #27 — Fresh fetch: consumer reads invoices + payment_profiles + qb_vendors
-//         + qb_vendor_mappings + qb_mirror freshly from Supabase, not React state.
+//   #14 payload contract, #18/#19 idempotency, #22 snapshot-vs-live, #27
+//   fresh-fetch — all preserved.
 //
-// Extra guardrails (G7.6-specific):
-//   Bimosoft UK ALT rule ([[bimosoft-uk-alt-rule]]): any invoice resolving
-//     to a Bimosoft-flavored qb_vendor_name that isn't "UK ALT" is skipped
-//     with a hold reason. Prevents recurrence of the 2026-08 money-loss
-//     incidents (Amar 162, Anela 180).
-//   MULTI idempotency (Layer 3): before emitting a MULTI intent, check
-//     qb_mirror for an existing MULTI-YYYY-MM bill for that vendor. If
-//     present, the accountant already created it (typically via IIF) —
-//     skip to avoid duplicating.
-//
-// Bill construction (single-invoice case):
-//   vendorName      = resolved (snapshot → live fallback)
-//   refNumber       = invoice_number
-//   txnDate         = invoice.period_end
-//   memo            = `${MMM YYYY} - ${userName} - INV ${invoiceNumber}` — mirrors G7.5
-//   lines           = [{ amount: totalAmount, memo, expenseAccountName }]
-//   sourceInvoiceIds = [invoice.id]
-//
-// Bill construction (MULTI case, N > 1):
-//   vendorName      = resolved
-//   refNumber       = MULTI-YYYY-MM
-//   txnDate         = MAX(period_end) across the group (end of billing month)
-//   memo            = `${MMM YYYY} - ${userName} - MULTI (${N} invoices)`
-//   lines           = one per invoice in the group (preserves per-invoice memo trail)
-//   sourceInvoiceIds = [invoice.id, ...] all N
+// Extra guardrails:
+//   Bimosoft UK ALT guardrail ([[bimosoft-uk-alt-rule]]) on resolved vendor.
+//   Idempotency Layer 3: qb_mirror lookup for existing bill at (vendor, refNumber).
+//     Applies to BOTH shared-invoice-number groups AND MULTI-YYYY-MM groups.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { CONVERA_PRE_OUR_SYSTEM_CUTOFF } from '../../convera/config';
@@ -59,10 +58,10 @@ import { executeIntents } from '../execute';
 import type { CreateBillIntent, ExecuteResult } from '../types';
 
 export interface ConveraInvoiceCreateBillResult extends ExecuteResult {
-  /** Invoices skipped up-front — never reached the executor. */
+  /** Invoices skipped up-front — never reached the executor.
+   *  For a group skip, EVERY member appears with the shared reason. */
   skippedIneligible: Array<{ invoiceId: number; reason: string }>;
-  /** For each successful bill_add job, the chained bill_query verify job id
-   *  (mirror refresh — same pattern as G7.5). */
+  /** For each successful bill_add job, the chained bill_query verify job id. */
   verifyJobIdByBillAddJobId: Record<number, number>;
 }
 
@@ -76,6 +75,7 @@ interface InvoiceRow {
   payment_method: string | null;
   qb_bill_txn_id: string | null;
   payment_profile: Record<string, unknown> | null;
+  group_key: string | null;
 }
 
 interface ProfileRow {
@@ -100,19 +100,18 @@ interface MirrorBillRow {
   ref_number: string;
 }
 
+const INVOICE_COLUMNS = 'id, user_id, invoice_number, total_amount, period_end, status, payment_method, qb_bill_txn_id, payment_profile, group_key';
+
 function fmtMonth(iso: string): string {
   const [y, m] = iso.split('-');
   const d = new Date(Number(y), Number(m) - 1, 1);
   return d.toLocaleString('en-US', { month: 'short', year: 'numeric' });
 }
 
-/** YYYY-MM from an ISO date string. */
 function yyyyMm(iso: string): string {
   return iso.slice(0, 7);
 }
 
-/** True if the resolved qb_vendor_name looks Bimosoft-flavored but is NOT
- *  the UK ALT canonical vendor. [[bimosoft-uk-alt-rule]] */
 function isBimosoftNonUkAlt(vendorName: string): boolean {
   const n = vendorName.toLowerCase();
   if (!n.includes('bimosoft')) return false;
@@ -132,51 +131,68 @@ export async function pushConveraInvoiceCreateBill(
   });
   if (invoiceIds.length === 0) return emptyReturn();
 
-  // ─── Fetch invoices ─────────────────────────────────────────────────────
-  const { data: invoiceData } = await supabase
+  // ─── Fetch input invoices ───────────────────────────────────────────────
+  const { data: inputData } = await supabase
     .from('invoices')
-    .select('id, user_id, invoice_number, total_amount, period_end, status, payment_method, qb_bill_txn_id, payment_profile')
+    .select(INVOICE_COLUMNS)
     .in('id', invoiceIds);
-  const invoices = (invoiceData ?? []) as InvoiceRow[];
-  const foundIds = new Set(invoices.map(i => i.id));
+  const inputInvoices = (inputData ?? []) as InvoiceRow[];
+  const foundIds = new Set(inputInvoices.map(i => i.id));
   for (const id of invoiceIds) {
     if (!foundIds.has(id)) skippedIneligible.push({ invoiceId: id, reason: 'not found in invoices' });
   }
 
-  // ─── Eligibility filter ─────────────────────────────────────────────────
-  const eligible: InvoiceRow[] = [];
-  for (const inv of invoices) {
-    if (inv.status !== 'approved') {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `status='${inv.status}' — must be 'approved'` });
-      continue;
+  // ─── Auto-expand by group_key ───────────────────────────────────────────
+  // Any input invoice with a group_key pulls in ALL siblings sharing that key,
+  // even if the caller didn't include them. A Bill cannot cover a partial
+  // group, so pushing "Damjan" implicitly pushes the whole Teal PDF.
+  const inputGroupKeys = [...new Set(
+    inputInvoices.map(i => i.group_key).filter((k): k is string => !!k),
+  )];
+  const invoicesById = new Map(inputInvoices.map(i => [i.id, i]));
+  if (inputGroupKeys.length > 0) {
+    const { data: siblings } = await supabase
+      .from('invoices')
+      .select(INVOICE_COLUMNS)
+      .in('group_key', inputGroupKeys);
+    for (const sib of ((siblings ?? []) as InvoiceRow[])) {
+      if (!invoicesById.has(sib.id)) invoicesById.set(sib.id, sib);
     }
-    if (inv.qb_bill_txn_id) {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `qb_bill_txn_id already set (${inv.qb_bill_txn_id}) — Bill exists in QB` });
-      continue;
-    }
-    if (inv.payment_method !== 'Convera') {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `payment_method='${inv.payment_method ?? 'null'}' — G7.6 handles Convera only (Intuit in G7.5)` });
-      continue;
-    }
-    if (!inv.period_end || inv.period_end < CONVERA_PRE_OUR_SYSTEM_CUTOFF) {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `period_end=${inv.period_end ?? 'null'} < cutoff ${CONVERA_PRE_OUR_SYSTEM_CUTOFF} — pre-our-system` });
-      continue;
-    }
-    if (!inv.invoice_number || !inv.invoice_number.trim()) {
-      skippedIneligible.push({ invoiceId: inv.id, reason: 'invoice_number is empty — required as Bill RefNumber (or as part of MULTI group)' });
-      continue;
-    }
-    eligible.push(inv);
   }
-  if (eligible.length === 0) return emptyReturn();
+  const allInvoices = [...invoicesById.values()];
 
-  // ─── Vendor resolution: snapshot → live fallback (INVARIANT #22) ────────
-  const userIds = Array.from(new Set(eligible.map(i => i.user_id)));
-  const { data: liveProfilesData } = await supabase
-    .from('payment_profiles')
-    .select('user_id, qb_vendor_name, is_default')
-    .in('user_id', userIds);
-  const liveProfiles = (liveProfilesData ?? []) as PaymentProfileRow[];
+  // ─── Build groups ───────────────────────────────────────────────────────
+  // Key: group_key when present, else synthetic single-invoice key.
+  interface Group {
+    key: string;
+    isAttachmentGroup: boolean;
+    members: InvoiceRow[];
+  }
+  const groupsByKey = new Map<string, Group>();
+  for (const inv of allInvoices) {
+    const key = inv.group_key ?? `__solo::${inv.id}`;
+    let g = groupsByKey.get(key);
+    if (!g) {
+      g = { key, isAttachmentGroup: inv.group_key != null, members: [] };
+      groupsByKey.set(key, g);
+    }
+    g.members.push(inv);
+  }
+
+  // ─── Load supporting tables (once) ──────────────────────────────────────
+  const allUserIds = [...new Set(allInvoices.map(i => i.user_id))];
+  const [liveProfilesRes, vendorRes, mappingRes, profileRes] = await Promise.all([
+    supabase.from('payment_profiles').select('user_id, qb_vendor_name, is_default').in('user_id', allUserIds),
+    supabase.from('qb_vendors').select('list_id, name'),
+    supabase.from('qb_vendor_mappings').select('qb_vendor_list_id, default_expense_account_list_id'),
+    supabase.from('profiles').select('id, full_name').in('id', allUserIds),
+  ]);
+  const liveProfiles = (liveProfilesRes.data ?? []) as PaymentProfileRow[];
+  const vendors = (vendorRes.data ?? []) as VendorRow[];
+  const mappings = (mappingRes.data ?? []) as MappingRow[];
+  const profileByUserId = new Map(((profileRes.data ?? []) as ProfileRow[]).map(p => [p.id, p]));
+
+  // Live vendor name per user_id (default profile wins; else first non-empty).
   const liveVendorByUser = new Map<string, string>();
   for (const pp of liveProfiles) {
     const name = pp.qb_vendor_name?.trim();
@@ -185,179 +201,169 @@ export async function pushConveraInvoiceCreateBill(
       liveVendorByUser.set(pp.user_id, name);
     }
   }
-  const resolvedVendorName = (inv: InvoiceRow): string | null => {
-    const snap = ((inv.payment_profile ?? {}) as Record<string, unknown>).qbVendorName;
-    const snapshot = typeof snap === 'string' ? snap.trim() : '';
-    if (snapshot) return snapshot;
-    return liveVendorByUser.get(inv.user_id) ?? null;
-  };
-
-  // ─── Load supporting tables ─────────────────────────────────────────────
-  const { data: vendorData } = await supabase.from('qb_vendors').select('list_id, name');
-  const vendors = (vendorData ?? []) as VendorRow[];
   const vendorByLowerName = new Map(vendors.map(v => [v.name.toLowerCase().trim(), v]));
-
-  const { data: mappingData } = await supabase
-    .from('qb_vendor_mappings')
-    .select('qb_vendor_list_id, default_expense_account_list_id');
-  const mappings = (mappingData ?? []) as MappingRow[];
   const mappingByVendorListId = new Map(mappings.map(m => [m.qb_vendor_list_id, m]));
 
-  const { data: profileData } = await supabase
-    .from('profiles')
-    .select('id, full_name')
-    .in('id', userIds);
-  const profileByUserId = new Map(((profileData ?? []) as ProfileRow[]).map(p => [p.id, p]));
-
-  // ─── Per-invoice vendor/expense resolution + Bimosoft guardrail ─────────
-  interface Resolved {
-    invoice: InvoiceRow;
+  // ─── Per-group eligibility, vendor resolution, and intent build ────────
+  interface ResolvedGroup {
+    group: Group;
     vendor: VendorRow;
     expenseListId: string;
+    refNumber: string;
+    txnDate: string;
+    yyyyMm: string;
   }
-  const resolved: Resolved[] = [];
+  const resolved: ResolvedGroup[] = [];
   const needsExpenseAccountLookup = new Set<string>();
 
-  for (const inv of eligible) {
-    const vendorName = resolvedVendorName(inv);
-    if (!vendorName) {
-      skippedIneligible.push({ invoiceId: inv.id, reason: 'no qb_vendor_name — snapshot + live payment_profiles both empty (set qbVendorName on the profile)' });
+  const groupSkip = (g: Group, reason: string) => {
+    for (const m of g.members) skippedIneligible.push({ invoiceId: m.id, reason });
+  };
+
+  for (const g of groupsByKey.values()) {
+    // ── Eligibility: all members must pass ──
+    let eligibilityReason: string | null = null;
+    for (const m of g.members) {
+      if (m.status !== 'approved') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.full_name ?? '?'}) status='${m.status}'`; break; }
+      if (m.qb_bill_txn_id) { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.full_name ?? '?'}) already has qb_bill_txn_id=${m.qb_bill_txn_id}`; break; }
+      if (m.payment_method !== 'Convera') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.full_name ?? '?'}) payment_method='${m.payment_method ?? 'null'}'`; break; }
+      if (!m.period_end || m.period_end < CONVERA_PRE_OUR_SYSTEM_CUTOFF) { eligibilityReason = `group blocked: invoice ${m.id} period_end=${m.period_end ?? 'null'} < cutoff ${CONVERA_PRE_OUR_SYSTEM_CUTOFF}`; break; }
+      if (!m.invoice_number || !m.invoice_number.trim()) { eligibilityReason = `group blocked: invoice ${m.id} has empty invoice_number`; break; }
+    }
+    if (eligibilityReason) { groupSkip(g, eligibilityReason); continue; }
+
+    // ── Vendor resolution across ALL members ──
+    // Collect distinct non-empty candidates from snapshot first, then live.
+    const candidates = new Set<string>();
+    for (const m of g.members) {
+      const snap = ((m.payment_profile ?? {}) as Record<string, unknown>).qbVendorName;
+      const s = typeof snap === 'string' ? snap.trim() : '';
+      if (s) candidates.add(s);
+    }
+    if (candidates.size === 0) {
+      for (const m of g.members) {
+        const live = liveVendorByUser.get(m.user_id);
+        if (live) candidates.add(live);
+      }
+    }
+    if (candidates.size === 0) {
+      groupSkip(g, `group blocked: no qb_vendor_name on any member's payment_profile (snapshot or live). Set qbVendorName on at least one member's profile (Payments tab → Profiles → click "⚠ Not mapped").`);
       continue;
     }
-    // Slice 3 — Bimosoft UK ALT guardrail.
+    if (candidates.size > 1) {
+      groupSkip(g, `group blocked: members resolve to different qb_vendor_names (${[...candidates].join(', ')}). Data anomaly — reconcile before pushing.`);
+      continue;
+    }
+    const vendorName = [...candidates][0];
+
+    // ── Bimosoft UK ALT guardrail ──
     if (isBimosoftNonUkAlt(vendorName)) {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `Bimosoft guardrail: qb_vendor_name="${vendorName}" is Bimosoft-flavored but not "UK ALT". All Bimosoft invoices must route through Bimosoft UK ALT per bimosoft-uk-alt-rule (2026-08 money-loss incidents Amar 162 / Anela 180).` });
+      groupSkip(g, `Bimosoft guardrail: resolved qb_vendor_name="${vendorName}" is Bimosoft-flavored but not "UK ALT". All Bimosoft invoices must route through Bimosoft UK ALT (2026-08 money-loss incidents Amar 162 / Anela 180).`);
       continue;
     }
+
+    // ── Vendor lookup ──
     const vendor = vendorByLowerName.get(vendorName.toLowerCase().trim());
     if (!vendor) {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `qb_vendor "${vendorName}" not found in qb_vendors (sync qb_mirror)` });
+      groupSkip(g, `qb_vendor "${vendorName}" not found in qb_vendors (sync qb_mirror)`);
       continue;
     }
+
+    // ── Expense account mapping ──
     const mapping = mappingByVendorListId.get(vendor.list_id);
     const expenseListId = mapping?.default_expense_account_list_id;
     if (!expenseListId) {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `qb_vendor_mappings for "${vendor.name}" has no default_expense_account_list_id — set it via Mappings UI first` });
+      groupSkip(g, `qb_vendor_mappings for "${vendor.name}" has no default_expense_account_list_id — set it via Mappings UI (or run migration 20260827000000_g76_seed_convera_expense_defaults.sql).`);
       continue;
     }
     needsExpenseAccountLookup.add(expenseListId);
-    resolved.push({ invoice: inv, vendor, expenseListId });
+
+    // ── RefNumber decision ──
+    // Members sharing invoice_number → use the shared number.
+    // Members with distinct invoice_numbers → MULTI-YYYY-MM.
+    const invoiceNumbers = new Set(g.members.map(m => m.invoice_number!.trim()));
+    // Group txnDate = MAX(period_end) among members (end of billing month).
+    const txnDate = g.members.map(m => m.period_end!).sort().slice(-1)[0]!;
+    const ym = yyyyMm(txnDate);
+    const refNumber = invoiceNumbers.size === 1
+      ? [...invoiceNumbers][0]
+      : `MULTI-${ym}`;
+
+    resolved.push({ group: g, vendor, expenseListId, refNumber, txnDate, yyyyMm: ym });
   }
+
   if (resolved.length === 0) return emptyReturn();
 
-  // Resolve expense account list_id → full_name
+  // ─── Expense account name lookup ────────────────────────────────────────
   const { data: expenseData } = await supabase
     .from('qb_accounts')
     .select('list_id, full_name')
     .in('list_id', Array.from(needsExpenseAccountLookup));
   const expenseNameByListId = new Map(((expenseData ?? []) as AccountRow[]).map(a => [a.list_id, a.full_name]));
 
-  // ─── Group by (vendorListId, YYYY-MM) ───────────────────────────────────
-  // Same convention as IIF exporter (see [[qb-bill-grouping]]).
-  interface Group {
-    vendor: VendorRow;
-    expenseListId: string;
-    yyyyMm: string;
-    invoices: InvoiceRow[];
-  }
-  const groupKey = (vendorListId: string, ym: string) => `${vendorListId}::${ym}`;
-  const groupByKey = new Map<string, Group>();
-  for (const r of resolved) {
-    const ym = yyyyMm(r.invoice.period_end!);
-    const key = groupKey(r.vendor.list_id, ym);
-    let g = groupByKey.get(key);
-    if (!g) {
-      g = { vendor: r.vendor, expenseListId: r.expenseListId, yyyyMm: ym, invoices: [] };
-      groupByKey.set(key, g);
-    }
-    g.invoices.push(r.invoice);
-  }
-
-  // ─── Slice 3.5 — MULTI idempotency (Layer 3): skip groups where a
-  // MULTI-YYYY-MM bill already exists in qb_mirror for this vendor.
-  // Accountant may have created it via IIF pre-G7.6; do not duplicate.
-  const multiGroups = Array.from(groupByKey.values()).filter(g => g.invoices.length > 1);
-  const multiRefNumbers = multiGroups.map(g => `MULTI-${g.yyyyMm}`);
-  const multiVendorListIds = [...new Set(multiGroups.map(g => g.vendor.list_id))];
-  if (multiRefNumbers.length > 0) {
+  // ─── Idempotency Layer 3: qb_mirror bill lookup by (vendor, refNumber) ─
+  // Applies uniformly to both shared-invoice-number groups AND MULTI groups.
+  // The accountant may have created either shape manually via IIF.
+  const idempotencyKeys = resolved.map(r => `${r.vendor.list_id}::${r.refNumber}`);
+  if (idempotencyKeys.length > 0) {
     const { data: mirrorRows } = await supabase
       .from('qb_mirror')
       .select('vendor_list_id, ref_number')
       .eq('entity_kind', 'bill')
-      .in('vendor_list_id', multiVendorListIds)
-      .in('ref_number', multiRefNumbers);
+      .in('vendor_list_id', [...new Set(resolved.map(r => r.vendor.list_id))])
+      .in('ref_number', [...new Set(resolved.map(r => r.refNumber))]);
     const existing = new Set(((mirrorRows ?? []) as MirrorBillRow[]).map(r => `${r.vendor_list_id}::${r.ref_number}`));
-    for (const g of multiGroups) {
-      const key = `${g.vendor.list_id}::MULTI-${g.yyyyMm}`;
+    for (let i = resolved.length - 1; i >= 0; i--) {
+      const r = resolved[i];
+      const key = `${r.vendor.list_id}::${r.refNumber}`;
       if (existing.has(key)) {
-        for (const inv of g.invoices) {
-          skippedIneligible.push({ invoiceId: inv.id, reason: `MULTI idempotency: qb_mirror already has bill MULTI-${g.yyyyMm} for vendor "${g.vendor.name}" (accountant likely created via IIF). Not pushing duplicate.` });
-        }
-        groupByKey.delete(groupKey(g.vendor.list_id, g.yyyyMm));
+        groupSkip(r.group, `mirror idempotency: qb_mirror already has bill (${r.vendor.name}, ${r.refNumber}). Not pushing duplicate.`);
+        resolved.splice(i, 1);
       }
     }
   }
 
   // ─── Build intents ──────────────────────────────────────────────────────
   const intents: CreateBillIntent[] = [];
-  for (const g of groupByKey.values()) {
-    const expenseName = expenseNameByListId.get(g.expenseListId);
+  for (const r of resolved) {
+    const expenseName = expenseNameByListId.get(r.expenseListId);
     if (!expenseName) {
-      for (const inv of g.invoices) {
-        skippedIneligible.push({ invoiceId: inv.id, reason: `qb_account "${g.expenseListId}" not found in qb_accounts (sync qb_mirror)` });
-      }
+      groupSkip(r.group, `qb_account "${r.expenseListId}" not found in qb_accounts (sync qb_mirror)`);
       continue;
     }
-    // Group txnDate = MAX(period_end) — end of the billing month.
-    const groupTxnDate = g.invoices.map(i => i.period_end!).sort().slice(-1)[0]!;
-    const monthLabel = fmtMonth(groupTxnDate);
-    const userId = g.invoices[0].user_id;   // MULTI groups share vendor → share userId
-    const userName = profileByUserId.get(userId)?.full_name ?? '';
-    if (g.invoices.length === 1) {
-      const inv = g.invoices[0];
-      const memo = `${monthLabel} - ${userName} - INV ${inv.invoice_number}`.trim();
-      intents.push({
-        kind: 'create_bill',
-        auditTag,
-        vendorName: g.vendor.name,
-        refNumber: inv.invoice_number!.trim(),
-        txnDate: inv.period_end!,
-        memo,
-        defaultExpenseAccountName: expenseName,
-        lines: [{
-          amount: Number(inv.total_amount),
-          memo,
-          expenseAccountName: expenseName,
-        }],
-        sourceInvoiceIds: [inv.id],
-      });
-    } else {
-      const refNumber = `MULTI-${g.yyyyMm}`;
-      const groupMemo = `${monthLabel} - ${userName} - MULTI (${g.invoices.length} invoices)`;
-      intents.push({
-        kind: 'create_bill',
-        auditTag,
-        vendorName: g.vendor.name,
-        refNumber,
-        txnDate: groupTxnDate,
-        memo: groupMemo,
-        defaultExpenseAccountName: expenseName,
-        lines: g.invoices.map(inv => ({
-          amount: Number(inv.total_amount),
-          memo: `${monthLabel} - ${userName} - INV ${inv.invoice_number}`.trim(),
-          expenseAccountName: expenseName,
-        })),
-        sourceInvoiceIds: g.invoices.map(i => i.id),
-      });
-    }
+    const monthLabel = fmtMonth(r.txnDate);
+    // Sort members by user name for stable line ordering.
+    const sortedMembers = [...r.group.members].sort((a, b) => {
+      const na = profileByUserId.get(a.user_id)?.full_name ?? '';
+      const nb = profileByUserId.get(b.user_id)?.full_name ?? '';
+      return na.localeCompare(nb);
+    });
+    // Bill-level memo: for singleton use per-invoice memo; for group summarise.
+    const billMemo = sortedMembers.length === 1
+      ? `${monthLabel} - ${profileByUserId.get(sortedMembers[0].user_id)?.full_name ?? ''} - INV ${sortedMembers[0].invoice_number}`.trim()
+      : `${monthLabel} - ${r.vendor.name} - ${r.refNumber} (${sortedMembers.length} lines)`;
+    intents.push({
+      kind: 'create_bill',
+      auditTag,
+      vendorName: r.vendor.name,
+      refNumber: r.refNumber,
+      txnDate: r.txnDate,
+      memo: billMemo,
+      defaultExpenseAccountName: expenseName,
+      lines: sortedMembers.map(m => ({
+        amount: Number(m.total_amount),
+        memo: `${monthLabel} - ${profileByUserId.get(m.user_id)?.full_name ?? ''} - INV ${m.invoice_number}`.trim(),
+        expenseAccountName: expenseName,
+      })),
+      sourceInvoiceIds: sortedMembers.map(m => m.id),
+    });
   }
 
   if (intents.length === 0) return emptyReturn();
 
   const result = await executeIntents(supabase, intents);
 
-  // Chain bill_query verify (INVARIANT #36) per successful bill_add.
-  // Mirror the G7.5 pattern (see intuitInvoiceCreateBill.ts:256).
+  // Chain bill_query verify (INVARIANT #36) — same pattern as G7.5.
   const verifyRows: Array<{ kind: 'bill_query'; payload: Record<string, unknown>; status: 'pending'; depends_on: number[] }> = [];
   const verifyMeta: Array<{ billAddJobId: number }> = [];
   result.jobIds.forEach((billAddJobId) => {
