@@ -11044,10 +11044,11 @@ const TimesheetSystem = () => {
                       let vName = inv.paymentProfile?.qbVendorName?.trim() || liveVendorNameByUserId.get(inv.userId);
                       if (!vName && inv.groupKey) vName = groupVendorByKey.get(inv.groupKey);
                       if (!vName) continue;
-                      if (isConvera) {
-                        const lower = vName.toLowerCase();
-                        if (lower.includes('bimosoft') && !lower.includes('uk alt')) continue;
-                      }
+                      // Bimosoft UK ALT guardrail lives ONLY in the consumer. Do NOT
+                      // mirror it here — mirroring silently hid the residual rows
+                      // (Naretena Arnaut, etc.) so the accountant never saw them get
+                      // skipped. Better: render, let the consumer skip at push time,
+                      // let the alert message name them. (Fix 2026-08-27.)
                       const vendor = vendorByName.get(vName.toLowerCase().trim());
                       if (!vendor) continue;
                       const mapping = mappingByVendor.get(vendor.listId);
@@ -11086,6 +11087,13 @@ const TimesheetSystem = () => {
                       };
                       if (isIntuit) g75Ready.push(row); else g76Ready.push(row);
                     }
+                    // Sort G7.5 + G7.6 synthetic rows by contractor name so accountant
+                    // can scan alphabetically. Real qb_ingest_events keep their order
+                    // (grouped by kind in the modal component itself). Case-insensitive.
+                    const byName = (a: QbIngestEvent, b: QbIngestEvent) =>
+                      (a.counterpartyRaw || '').localeCompare(b.counterpartyRaw || '', undefined, { sensitivity: 'base' });
+                    g75Ready.sort(byName);
+                    g76Ready.sort(byName);
                     return [...qbIngestEvents, ...g75Ready, ...g76Ready];
                   })()}
                   inflightEventIds={new Set(qbPushRecords.map(r => r.eventId))}
