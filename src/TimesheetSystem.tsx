@@ -10516,7 +10516,7 @@ const TimesheetSystem = () => {
             // Read-only Inbox — Slice C of QB Automation Layer.
             // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
             // that arrives with Slice F (preview modal) and Slice G (real enqueue).
-            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice (G7.5)', invoice_g76: 'Invoice (G7.6)' }[s] || s);
+            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice → Bill (Intuit)', invoice_g76: 'Invoice → Bill (Convera)' }[s] || s);
             // Thousands separator + 2dp everywhere in this tab.
             const fmtMoney = (n: number) => '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             // Reconciler bill lookup by TxnID for the "Resolved" column (replaces the
@@ -10679,7 +10679,7 @@ const TimesheetSystem = () => {
                     resolvedAction: 'create_bill_then_pay',
                     resolvedBillTxnId: inv.qbBillTxnId,
                     resolvedPaymentTxnId: null,
-                    resolvedReason: 'G7.5 proactive create (payment arrives via ingest later)',
+                    resolvedReason: 'Bill created ahead of payment — payment ingest will link later',
                     reconciledAt: null,
                     matchProvenance: 'exact-ref',
                     statusUpdatedAt: inv.qbExportStatusAt,
@@ -10712,7 +10712,7 @@ const TimesheetSystem = () => {
                     resolvedAction: 'create_bill_then_pay',
                     resolvedBillTxnId: inv.qbBillTxnId,
                     resolvedPaymentTxnId: null,
-                    resolvedReason: 'G7.6 proactive Convera create (payment side deferred to retrofit W2/W3)',
+                    resolvedReason: 'Bill created — Convera payment step handled outside our system for now',
                     reconciledAt: null,
                     matchProvenance: 'exact-ref',
                     statusUpdatedAt: inv.qbExportStatusAt,
@@ -11104,10 +11104,10 @@ const TimesheetSystem = () => {
                         resolvedBillTxnId: null,
                         resolvedPaymentTxnId: null,
                         resolvedReason: isIntuit
-                          ? 'G7.5 proactive create (payment via ingest later)'
+                          ? 'Bill created ahead of payment — payment ingest will link later'
                           : (inv.groupKey
-                              ? `G7.6 proactive Convera create · part of group_key umbrella (auto-expands to full group on push)`
-                              : 'G7.6 proactive Convera create (payment side deferred to retrofit W2/W3)'),
+                              ? 'Bill created — part of umbrella invoice group (pushing any row pushes the whole group)'
+                              : 'Bill created — Convera payment step handled outside our system for now'),
                         reconciledAt: null,
                         matchProvenance: 'exact-ref',
                         statusUpdatedAt: null,
@@ -11325,10 +11325,10 @@ const TimesheetSystem = () => {
                       const g76Enqueued = (g76Res?.jobIds ?? []).filter((id): id is number => id != null).length;
                       const parts: string[] = [];
                       if (payEnqueued > 0) parts.push(`${payEnqueued} pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
-                      if (createEnqueued > 0) parts.push(`${createEnqueued} bill_add job${createEnqueued === 1 ? '' : 's'} enqueued (G7b — wait for drain, then Recompute + push payment step).`);
+                      if (createEnqueued > 0) parts.push(`${createEnqueued} bill_add job${createEnqueued === 1 ? '' : 's'} enqueued — wait for QuickBooks drain, then Recompute, then push payment step.`);
                       if (checkEnqueued > 0) parts.push(`${checkEnqueued} check_add job${checkEnqueued === 1 ? '' : 's'} enqueued (direct expense — verify in QB after drain).`);
-                      if (g75Enqueued > 0) parts.push(`${g75Enqueued} Intuit invoice bill_add job${g75Enqueued === 1 ? '' : 's'} enqueued (G7.5 proactive).`);
-                      if (g76Enqueued > 0) parts.push(`${g76Enqueued} Convera invoice bill_add job${g76Enqueued === 1 ? '' : 's'} enqueued (G7.6 proactive — payment side deferred).`);
+                      if (g75Enqueued > 0) parts.push(`${g75Enqueued} Intuit invoice bill_add job${g75Enqueued === 1 ? '' : 's'} enqueued (created from approved Intuit invoice).`);
+                      if (g76Enqueued > 0) parts.push(`${g76Enqueued} Convera invoice bill_add job${g76Enqueued === 1 ? '' : 's'} enqueued (created from approved Convera invoice — payment handled separately).`);
                       if (parts.length === 0) parts.push(`0 jobs enqueued.`);
                       void enqueued;
                       if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
@@ -11791,7 +11791,7 @@ const TimesheetSystem = () => {
                                                                               '— empty',
                                         e.matchProvenance === 'exact-txn'   ? 'invoice.qb_bill_txn_id matches — deterministic 1:1 link' :
                                         e.matchProvenance === 'exact-ref'   ? 'memo names this invoice by number' :
-                                        e.matchProvenance === 'created-pay' ? 'we created this bill (G7b orphan) and paid it — mapping-authorized, no invoice link expected' :
+                                        e.matchProvenance === 'created-pay' ? 'We created this bill (no matching invoice in our system) and paid it — vendor mapping authorizes this' :
                                         e.matchProvenance === 'fuzzy'       ? 'matched by vendor+amount only — verify before pushing' :
                                                                               'no invoice link',
                                       )
