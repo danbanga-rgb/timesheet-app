@@ -430,16 +430,70 @@ async function persistJobResponse(
       }
       return { ok: true, errorMsg: null };
     }
-    // Invoice-linked path (original): persist onto invoices matching (vendor, refNumber).
+    // Invoice-linked path: persist onto invoices.
+    //
+    // Preferred key: payload.sourceInvoiceIds (Slice 0, 2026-08-27). The
+    // consumer knows exactly which invoice rows this bill covers — pass them
+    // in and we update by id. Required for MULTI-YYYY-MM (G7.6) where the
+    // RefNumber literally doesn't match any single invoice_number. Works for
+    // G7.5 single-invoice pushes too (length=1). Vendor is still cross-checked
+    // for defence in depth — any mismatch is a hard error.
+    //
+    // Fallback (legacy): (vendor, refNumber). Retained for older bill_add
+    // pushes that predate sourceInvoiceIds (there are none in flight, but
+    // extra safety is cheap).
+    const sourceInvoiceIds = payload.sourceInvoiceIds ?? [];
+    if (sourceInvoiceIds.length > 0) {
+      // Vendor safety check: fetch target invoices' user_ids and confirm the
+      // group is umbrella-consistent with the vendor. Historically this
+      // required ALL user_ids to map to the vendor, but G7.6 umbrellas break
+      // that — Teal Crossroads bills 6 contractors on one PDF, and members
+      // like Iskra may have no qb_vendor_name on their live profile (data-
+      // entry gap that the group_key resolution in the consumer papers over).
+      // Relaxed rule (2026-08-27): AT LEAST ONE user_id must map to the
+      // vendor. That guarantees the group has a vendor-mapped anchor without
+      // hard-blocking legitimate umbrella writes. If zero map, we're in
+      // "totally wrong invoices" territory (the class the guard was for).
+      const { data: targetInvoices, error: fetchErr } = await supabase
+        .from('invoices')
+        .select('id, user_id')
+        .in('id', sourceInvoiceIds);
+      if (fetchErr) {
+        return { ok: false, errorMsg: `BillAdd persist: failed to fetch target invoices [${sourceInvoiceIds.join(',')}]: ${fetchErr.message}` };
+      }
+      if (!targetInvoices || targetInvoices.length === 0) {
+        return { ok: false, errorMsg: `BillAdd persist: sourceInvoiceIds [${sourceInvoiceIds.join(',')}] not found. QB bill created (TxnID=${parsed.result.txnId}) but no matching invoice rows.` };
+      }
+      const targetUserIds = [...new Set((targetInvoices as Array<{ user_id: string }>).map(r => r.user_id))];
+      const { data: pps } = await supabase
+        .from('payment_profiles')
+        .select('user_id')
+        .eq('qb_vendor_name', vendorName);
+      const vendorUserIds = new Set((pps ?? []).map((p: { user_id: string }) => p.user_id));
+      const anchored = targetUserIds.some(uid => vendorUserIds.has(uid));
+      if (!anchored) {
+        return { ok: false, errorMsg: `BillAdd persist: none of the sourceInvoiceIds' user_ids [${targetUserIds.join(',')}] map to qb_vendor_name="${vendorName}". QB bill (TxnID=${parsed.result.txnId}) created but writeback aborted — no umbrella anchor.` };
+      }
+      const { data: updated, error: updErr } = await supabase
+        .from('invoices')
+        .update({ qb_bill_txn_id: parsed.result.txnId, qb_export_status: 'exported', qb_export_status_at: new Date().toISOString() })
+        .in('id', sourceInvoiceIds)
+        .select('id');
+      if (updErr) {
+        return { ok: false, errorMsg: `BillAdd persist DB error for vendor="${vendorName}" sourceInvoiceIds=[${sourceInvoiceIds.join(',')}]: ${updErr.message}` };
+      }
+      if (!updated || updated.length !== sourceInvoiceIds.length) {
+        return { ok: false, errorMsg: `BillAdd persist: expected ${sourceInvoiceIds.length} rows updated, got ${updated?.length ?? 0} for vendor="${vendorName}" refNumber="${parsed.result.refNumber}" (TxnID=${parsed.result.txnId}). Some invoices deleted/renumbered after enqueue?` };
+      }
+      return { ok: true, errorMsg: null };
+    }
+    // Legacy path — (vendor, refNumber) lookup.
     const { data: pps } = await supabase
       .from('payment_profiles')
       .select('user_id')
       .eq('qb_vendor_name', vendorName);
     const userIds = [...new Set((pps ?? []).map((p: { user_id: string }) => p.user_id))];
     if (userIds.length === 0) {
-      // Bill successfully created in QB but our DB has no mapping for the vendor —
-      // silent orphan. Fail-fast: the QB bill exists (with TxnID `parsed.result.txnId`)
-      // but we can't attribute it. Human must add the mapping and manually re-link.
       return { ok: false, errorMsg: `BillAdd persist: no payment_profile.qb_vendor_name matches "${vendorName}". QB bill created (TxnID=${parsed.result.txnId}) but not linked to any invoice.` };
     }
     const { data: updated, error: updErr } = await supabase

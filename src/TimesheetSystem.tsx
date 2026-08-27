@@ -228,12 +228,14 @@ import {
   type MatchProvenance,
 } from './lib/matchProvenance';
 import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from './lib/intuit/config';
+import { CONVERA_PRE_OUR_SYSTEM_CUTOFF } from './lib/convera/config';
 import QbPushPreviewModal from './components/QbPushPreviewModal';
 import QbPushStatusPane, { type PushRecord } from './components/QbPushStatusPane';
 import { pushIntuitPayBill } from './lib/qbWrite/consumers/intuitPush';
 import { pushIntuitCreateBill } from './lib/qbWrite/consumers/intuitCreateBill';
 import { pushIntuitCheck } from './lib/qbWrite/consumers/intuitCheck';
 import { pushIntuitInvoiceCreateBill } from './lib/qbWrite/consumers/intuitInvoiceCreateBill';
+import { pushConveraInvoiceCreateBill } from './lib/qbWrite/consumers/converaInvoiceCreateBill';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
 interface UserProfile {
@@ -1230,11 +1232,15 @@ const TimesheetSystem = () => {
     if (missingBillsSortKey === k) setMissingBillsSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setMissingBillsSortKey(k); setMissingBillsSortDir(k === 'period_end' || k === 'amount' ? 'desc' : 'asc'); }
   };
-  // Slice A: invoice IDs that were pushed via G7.5 (proactive create_bill).
+  // Slice A: invoice IDs that were pushed via G7.5 (proactive Intuit create_bill).
   // Rendered as synthetic rows in the Already Posted bucket so accountant sees
   // both event-driven and invoice-driven pushes in one place with a Resolved
   // column ("created bill: <ref>"). Loaded by loadQbIngestEvents.
   const [qbG75PostedInvoiceIds, setQbG75PostedInvoiceIds] = useState<Set<number>>(new Set());
+  // G7.6: parallel to G7.5 but for Convera invoices. Same rendering pattern —
+  // synthetic posted rows so accountant sees Convera proactive-create pushes
+  // in the same posted bucket. MULTI-YYYY-MM pushes carry N invoice ids each.
+  const [qbG76PostedInvoiceIds, setQbG76PostedInvoiceIds] = useState<Set<number>>(new Set());
   const [qbIngestLoading, setQbIngestLoading] = useState(false);
   const [qbInboxExpanded, setQbInboxExpanded] = useState<Record<string, boolean>>({
     pending: true, bill_pmt: true, bill_add_and_pmt: true, check: true, ignore: false, posted: false,
@@ -2355,22 +2361,29 @@ const TimesheetSystem = () => {
   // Load QB Automation Inbox lazily when tab is opened
   const loadQbIngestEvents = async () => {
     setQbIngestLoading(true);
-    const [eventsRes, g75JobsRes] = await Promise.all([
+    const [eventsRes, proactiveJobsRes] = await Promise.all([
       supabase.from('qb_ingest_events').select('*').order('ingested_at', { ascending: false }),
-      // Slice A: identify G7.5 proactive-create pushes so the posted bucket can
-      // include them alongside event-driven posts. Filter to bill_add jobs whose
-      // audit tag identifies them as G7.5, then extract sourceInvoiceIds.
+      // Slice A + G7.6: identify proactive-create pushes so the posted bucket
+      // can include them alongside event-driven posts. Two audit-tag prefixes:
+      //   'intuit-invoice-create-bill'   → G7.5 (Intuit invoices)
+      //   'convera-invoice-create-bill'  → G7.6 (Convera invoices)
       supabase.from('qb_sync_jobs').select('payload, status').eq('kind', 'bill_add').eq('status', 'done'),
     ]);
     if (!eventsRes.error) setQbIngestEvents((eventsRes.data ?? []).map(normaliseQbIngestEvent));
-    if (!g75JobsRes.error) {
-      const ids = new Set<number>();
-      for (const row of (g75JobsRes.data ?? []) as Array<{ payload: { __audit_tag?: string; sourceInvoiceIds?: number[] } | null }>) {
+    if (!proactiveJobsRes.error) {
+      const g75Ids = new Set<number>();
+      const g76Ids = new Set<number>();
+      for (const row of (proactiveJobsRes.data ?? []) as Array<{ payload: { __audit_tag?: string; sourceInvoiceIds?: number[] } | null }>) {
         const tag = row.payload?.__audit_tag ?? '';
-        if (!tag.startsWith('intuit-invoice-create-bill')) continue;
-        for (const id of row.payload?.sourceInvoiceIds ?? []) ids.add(id);
+        const ids = row.payload?.sourceInvoiceIds ?? [];
+        if (tag.startsWith('intuit-invoice-create-bill')) {
+          for (const id of ids) g75Ids.add(id);
+        } else if (tag.startsWith('convera-invoice-create-bill')) {
+          for (const id of ids) g76Ids.add(id);
+        }
       }
-      setQbG75PostedInvoiceIds(ids);
+      setQbG75PostedInvoiceIds(g75Ids);
+      setQbG76PostedInvoiceIds(g76Ids);
     }
     setQbIngestLoading(false);
   };
@@ -3579,6 +3592,18 @@ const TimesheetSystem = () => {
 
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
     const invoice = invoices.find(i => i.id === invoiceId);
+    // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b). Refuse approval when
+    // invoice_number is too long for a QB-bound payment method — QB would
+    // reject the push anyway. Only fires on approve→push-path transitions;
+    // reject/paid still work regardless.
+    if (status === 'approved') {
+      const nextPM = pmOverride !== undefined ? pmOverride : (invoice?.paymentMethodOverride ?? '');
+      const num = invoice?.invoiceNumber ?? '';
+      if (nextPM && ['Intuit', 'Convera'].includes(nextPM) && num.length > 20) {
+        alert(`Cannot approve: invoice number "${num}" is ${num.length} chars. QuickBooks caps Bill.RefNumber at 20. Edit the invoice number on the Invoices tab first, then approve.`);
+        return;
+      }
+    }
     const update: Record<string, unknown> = {
       status,
       reviewed_at: new Date().toISOString(),
@@ -3975,6 +4000,22 @@ const TimesheetSystem = () => {
   // Save approval status and/or pay on date without closing modal
   const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string; invoiceNumber?: string }) => {
     const invoice = invoices.find(i => i.id === invoiceId);
+    // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b, 2026-08-27 Vladimir
+    // "INV SYNERGIE 07/01-31/2026" rejection). Refuse approval when the
+    // effective invoice_number would exceed QB's limit and the invoice
+    // is Intuit/Convera-bound. Editing invoice_number alone at any status
+    // is warned but not blocked.
+    const nextInvoiceNumber = fields.invoiceNumber !== undefined ? fields.invoiceNumber : (invoice?.invoiceNumber ?? '');
+    const nextPaymentMethod = fields.paymentMethod !== undefined ? fields.paymentMethod : (invoice?.paymentMethodOverride ?? '');
+    const willBeApproved = fields.status === 'approved' || (fields.status === undefined && invoice?.status === 'approved');
+    const pushablePM = nextPaymentMethod && ['Intuit', 'Convera'].includes(nextPaymentMethod);
+    if (willBeApproved && pushablePM && nextInvoiceNumber && nextInvoiceNumber.length > 20) {
+      alert(`Cannot approve: invoice number "${nextInvoiceNumber}" is ${nextInvoiceNumber.length} chars. QuickBooks caps Bill.RefNumber at 20. Shorten the invoice number first (edit inline on the Invoices tab or in this modal).`);
+      return;
+    }
+    if (fields.invoiceNumber !== undefined && fields.invoiceNumber.length > 20 && !confirm(`Invoice number "${fields.invoiceNumber}" is ${fields.invoiceNumber.length} chars. QuickBooks caps Bill.RefNumber at 20 and will refuse any push. Continue anyway?`)) {
+      return;
+    }
     const update: Record<string, unknown> = {};
     if (fields.status !== undefined) {
       update.status = fields.status;
@@ -10475,7 +10516,7 @@ const TimesheetSystem = () => {
             // Read-only Inbox — Slice C of QB Automation Layer.
             // Groups qb_ingest_events by target_qb_txn_kind. Nothing pushes to QB yet;
             // that arrives with Slice F (preview modal) and Slice G (real enqueue).
-            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice (G7.5)' }[s] || s);
+            const sourceLabel = (s: string) => ({ intuit_xlsx: 'Intuit', convera: 'Convera', manual: 'Manual', invoice_g75: 'Invoice (G7.5)', invoice_g76: 'Invoice (G7.6)' }[s] || s);
             // Thousands separator + 2dp everywhere in this tab.
             const fmtMoney = (n: number) => '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             // Reconciler bill lookup by TxnID for the "Resolved" column (replaces the
@@ -10502,6 +10543,34 @@ const TimesheetSystem = () => {
                 liveVendorNameByUserId.set(pp.userId, name);
               }
             }
+            // G7.6 group_key resolution: for umbrella members whose own
+            // snapshot+live payment_profile both lack qb_vendor_name (Iskra
+            // Kochova / Teal), inherit the vendor from any sibling that DOES
+            // resolve. Same primitive the modal + consumer use. Without this,
+            // this panel would show umbrella orphans as "⚠ unmapped" even
+            // though they're pushable via the group.
+            const groupVendorByKey = new Map<string, string>();
+            const groupMembersByKey = new Map<string, Invoice[]>();
+            for (const inv of invoices) {
+              if (!inv.groupKey) continue;
+              const arr = groupMembersByKey.get(inv.groupKey) ?? [];
+              arr.push(inv);
+              groupMembersByKey.set(inv.groupKey, arr);
+            }
+            for (const [key, members] of groupMembersByKey) {
+              const candidates = new Set<string>();
+              for (const m of members) {
+                const s = m.paymentProfile?.qbVendorName?.trim();
+                if (s) candidates.add(s);
+              }
+              if (candidates.size === 0) {
+                for (const m of members) {
+                  const l = liveVendorNameByUserId.get(m.userId);
+                  if (l) candidates.add(l);
+                }
+              }
+              if (candidates.size === 1) groupVendorByKey.set(key, [...candidates][0]);
+            }
             type MissingBill = {
               invoice: Invoice;
               paymentPath: string;
@@ -10510,7 +10579,14 @@ const TimesheetSystem = () => {
             };
             const missingBills: MissingBill[] = invoices
               .filter(inv => inv.status === 'approved')
-              .filter(inv => (inv.periodEnd || '') >= INTUIT_PRE_OUR_SYSTEM_CUTOFF)
+              // Cutoff differs by payment path: Intuit June 2026+, Convera April 2026+.
+              // Unassigned falls back to Intuit's cutoff (stricter) so unclassified
+              // rows aren't over-surfaced.
+              .filter(inv => {
+                const pm = paymentMethod(inv);
+                const cutoff = pm === 'Convera' ? CONVERA_PRE_OUR_SYSTEM_CUTOFF : INTUIT_PRE_OUR_SYSTEM_CUTOFF;
+                return (inv.periodEnd || '') >= cutoff;
+              })
               // G7.5 fix (2026-08-26): if invoices.qb_bill_txn_id is already set,
               // we've recorded the QB Bill from our own push response — instant
               // "has bill" without waiting for qb_mirror to refresh. Prevents just-
@@ -10519,13 +10595,23 @@ const TimesheetSystem = () => {
               .map((inv): MissingBill | null => {
                 const snapshotName = inv.paymentProfile?.qbVendorName?.trim() || null;
                 const liveName = liveVendorNameByUserId.get(inv.userId) || null;
-                const qbVendorName = snapshotName ?? liveName;
+                const groupName = inv.groupKey ? (groupVendorByKey.get(inv.groupKey) ?? null) : null;
+                const qbVendorName = snapshotName ?? liveName ?? groupName;
                 const vendor = qbVendorName ? vendorByName.get(qbVendorName) : undefined;
                 const vendorListId = vendor?.listId ?? null;
                 const invRef = normalizeRef(inv.invoiceNumber);
-                const hasBill = vendorListId != null && invRef !== '' && qbOpenBills.some(b =>
-                  b.vendorListId === vendorListId && normalizeRef(b.refNumber) === invRef
-                );
+                // Period-scope the match: same (vendor, refNumber) but a different
+                // yyyy-mm is NOT the same bill. Croatian contractors reset invoice
+                // numbers annually — "INV 12" for 2026-07 collides with "Inv# 12"
+                // from 2023-12 (Yara Solutions Inc.), silently hiding legitimate
+                // unpushed invoices from this panel (2026-08-27).
+                const invMonth = (inv.periodEnd ?? '').slice(0, 7);
+                const hasBill = vendorListId != null && invRef !== '' && invMonth !== '' && qbOpenBills.some(b => {
+                  if (b.vendorListId !== vendorListId) return false;
+                  if (normalizeRef(b.refNumber) !== invRef) return false;
+                  const bMonth = (b.txnDate ?? '').slice(0, 7);
+                  return bMonth === invMonth;
+                });
                 if (hasBill) return null;
                 return {
                   invoice: inv,
@@ -10594,6 +10680,39 @@ const TimesheetSystem = () => {
                     resolvedBillTxnId: inv.qbBillTxnId,
                     resolvedPaymentTxnId: null,
                     resolvedReason: 'G7.5 proactive create (payment arrives via ingest later)',
+                    reconciledAt: null,
+                    matchProvenance: 'exact-ref',
+                    statusUpdatedAt: inv.qbExportStatusAt,
+                  })),
+                // G7.6: proactive Convera create_bill pushes. Same shape as G7.5;
+                // MULTI groups render as one synthetic row per invoice in the group
+                // (each carries the shared bill TxnID via inv.qbBillTxnId).
+                ...invoices
+                  .filter(inv => qbG76PostedInvoiceIds.has(inv.id) && inv.qbBillTxnId)
+                  .map((inv): QbIngestEvent => ({
+                    id: -inv.id,
+                    ingestedAt: inv.qbExportStatusAt ?? '',
+                    source: 'invoice_g76',
+                    sourceRef: `invoice:${inv.id}`,
+                    txnDate: inv.periodEnd,
+                    amount: inv.totalAmount,
+                    counterpartyRaw: inv.userName,
+                    memo: `INV ${inv.invoiceNumber}`,
+                    counterpartyQbVendorListId: null,
+                    targetQbTxnKind: 'bill_add_and_pmt',
+                    qbBankAccountListId: null,
+                    qbExpenseAccountListId: null,
+                    matchedInvoiceIds: [inv.id],
+                    status: 'posted',
+                    qbSyncJobIds: [],
+                    postedQbRefs: { bill: inv.qbBillTxnId },
+                    lastError: null,
+                    rawData: null,
+                    notes: null,
+                    resolvedAction: 'create_bill_then_pay',
+                    resolvedBillTxnId: inv.qbBillTxnId,
+                    resolvedPaymentTxnId: null,
+                    resolvedReason: 'G7.6 proactive Convera create (payment side deferred to retrofit W2/W3)',
                     reconciledAt: null,
                     matchProvenance: 'exact-ref',
                     statusUpdatedAt: inv.qbExportStatusAt,
@@ -10907,23 +11026,64 @@ const TimesheetSystem = () => {
                       if (!n) continue;
                       if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) liveVendorNameByUserId.set(pp.userId, n);
                     }
+                    // Precompute: for each group_key, resolve vendor from ANY member's
+                    // snapshot or live payment_profile. This lets umbrella members
+                    // whose OWN qb_vendor_name is null (e.g. Iskra Kochova in Teal
+                    // group_key) inherit the group's vendor and render as pushable.
+                    // Non-grouped invoices resolve per-invoice as before.
+                    const groupVendorByKey = new Map<string, string>();
+                    const invoicesByGroupKey = new Map<string, typeof invoices>();
+                    for (const inv of invoices) {
+                      if (!inv.groupKey) continue;
+                      const arr = invoicesByGroupKey.get(inv.groupKey) ?? [];
+                      arr.push(inv);
+                      invoicesByGroupKey.set(inv.groupKey, arr);
+                    }
+                    for (const [key, members] of invoicesByGroupKey) {
+                      const candidates = new Set<string>();
+                      for (const m of members) {
+                        const s = m.paymentProfile?.qbVendorName?.trim();
+                        if (s) candidates.add(s);
+                      }
+                      if (candidates.size === 0) {
+                        for (const m of members) {
+                          const l = liveVendorNameByUserId.get(m.userId);
+                          if (l) candidates.add(l);
+                        }
+                      }
+                      // Only pin the group when members agree. Disagreement is a
+                      // data anomaly the consumer will hold — same UX in the modal.
+                      if (candidates.size === 1) groupVendorByKey.set(key, [...candidates][0]);
+                    }
                     const g75Ready: QbIngestEvent[] = [];
+                    const g76Ready: QbIngestEvent[] = [];
                     for (const inv of invoices) {
                       if (inv.status !== 'approved') continue;
                       if (inv.qbBillTxnId) continue;
-                      if (paymentMethod(inv) !== 'Intuit') continue;
-                      if (!inv.periodEnd || inv.periodEnd < INTUIT_PRE_OUR_SYSTEM_CUTOFF) continue;
+                      if (!inv.periodEnd) continue;
                       if (!inv.invoiceNumber?.trim()) continue;
-                      const vName = (inv.paymentProfile?.qbVendorName?.trim()) || liveVendorNameByUserId.get(inv.userId);
+                      const pm = paymentMethod(inv);
+                      const isIntuit = pm === 'Intuit';
+                      const isConvera = pm === 'Convera';
+                      if (!isIntuit && !isConvera) continue;
+                      if (isIntuit && inv.periodEnd < INTUIT_PRE_OUR_SYSTEM_CUTOFF) continue;
+                      if (isConvera && inv.periodEnd < CONVERA_PRE_OUR_SYSTEM_CUTOFF) continue;
+                      // Vendor resolution: snapshot → live → group_key sibling.
+                      let vName = inv.paymentProfile?.qbVendorName?.trim() || liveVendorNameByUserId.get(inv.userId);
+                      if (!vName && inv.groupKey) vName = groupVendorByKey.get(inv.groupKey);
                       if (!vName) continue;
+                      // No Bimosoft filter here (or in the consumer, as of 2026-08-27).
+                      // The UK ALT rule governs wire routing (payment side), not bill
+                      // vendor identity. Bills correctly post against per-contractor
+                      // "Bimosoft - X" sub-vendors per accountant's QB convention.
                       const vendor = vendorByName.get(vName.toLowerCase().trim());
                       if (!vendor) continue;
                       const mapping = mappingByVendor.get(vendor.listId);
                       if (!mapping?.defaultExpenseAccountListId) continue;
-                      g75Ready.push({
-                        id: -inv.id,   // negative avoids collision with real events
+                      const row: QbIngestEvent = {
+                        id: -inv.id,
                         ingestedAt: '',
-                        source: 'invoice_g75',
+                        source: isIntuit ? 'invoice_g75' : 'invoice_g76',
                         sourceRef: `invoice:${inv.id}`,
                         txnDate: inv.periodEnd,
                         amount: inv.totalAmount,
@@ -10943,13 +11103,25 @@ const TimesheetSystem = () => {
                         resolvedAction: 'create_bill_then_pay',
                         resolvedBillTxnId: null,
                         resolvedPaymentTxnId: null,
-                        resolvedReason: 'G7.5 proactive create (payment via ingest later)',
+                        resolvedReason: isIntuit
+                          ? 'G7.5 proactive create (payment via ingest later)'
+                          : (inv.groupKey
+                              ? `G7.6 proactive Convera create · part of group_key umbrella (auto-expands to full group on push)`
+                              : 'G7.6 proactive Convera create (payment side deferred to retrofit W2/W3)'),
                         reconciledAt: null,
                         matchProvenance: 'exact-ref',
                         statusUpdatedAt: null,
-                      });
+                      };
+                      if (isIntuit) g75Ready.push(row); else g76Ready.push(row);
                     }
-                    return [...qbIngestEvents, ...g75Ready];
+                    // Sort G7.5 + G7.6 synthetic rows by contractor name so accountant
+                    // can scan alphabetically. Real qb_ingest_events keep their order
+                    // (grouped by kind in the modal component itself). Case-insensitive.
+                    const byName = (a: QbIngestEvent, b: QbIngestEvent) =>
+                      (a.counterpartyRaw || '').localeCompare(b.counterpartyRaw || '', undefined, { sensitivity: 'base' });
+                    g75Ready.sort(byName);
+                    g76Ready.sort(byName);
+                    return [...qbIngestEvents, ...g75Ready, ...g76Ready];
                   })()}
                   inflightEventIds={new Set(qbPushRecords.map(r => r.eventId))}
                   qbVendors={qbVendorsList}
@@ -10959,9 +11131,20 @@ const TimesheetSystem = () => {
                   onConfirm={async (selectedIds) => {
                     setShowQbPushPreview(false);
                     try {
-                      // Slice A: split by id sign — positive = qb_ingest_events,
-                      // negative = G7.5 invoice ids (invert sign).
-                      const g75InvoiceIds = selectedIds.filter(id => id < 0).map(id => -id);
+                      // Slice A + G7.6: split by id sign — positive = qb_ingest_events,
+                      // negative = invoice ids (invert sign). Then split negatives by
+                      // paymentMethod: Intuit → G7.5 pusher, Convera → G7.6 pusher.
+                      const invoiceById = new Map(invoices.map(i => [i.id, i]));
+                      const negativeInvoiceIds = selectedIds.filter(id => id < 0).map(id => -id);
+                      const g75InvoiceIds: number[] = [];
+                      const g76InvoiceIds: number[] = [];
+                      for (const invId of negativeInvoiceIds) {
+                        const inv = invoiceById.get(invId);
+                        if (!inv) continue;
+                        const pm = paymentMethod(inv);
+                        if (pm === 'Intuit') g75InvoiceIds.push(invId);
+                        else if (pm === 'Convera') g76InvoiceIds.push(invId);
+                      }
                       const eventIds = selectedIds.filter(id => id > 0);
                       // Route by resolved_action: pay_existing_bill → intuitPush,
                       // create_bill_then_pay → intuitCreateBill, check → intuitCheck.
@@ -10970,22 +11153,24 @@ const TimesheetSystem = () => {
                       const payEventIds = selectedEvents.filter(e => e.resolvedAction === 'pay_existing_bill').map(e => e.id);
                       const createEventIds = selectedEvents.filter(e => e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
                       const checkEventIds = selectedEvents.filter(e => e.resolvedAction === 'check').map(e => e.id);
-                      const [payRes, createRes, checkRes, g75Res] = await Promise.all([
+                      const [payRes, createRes, checkRes, g75Res, g76Res] = await Promise.all([
                         payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
                         createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
                         checkEventIds.length > 0 ? pushIntuitCheck(supabase, checkEventIds) : Promise.resolve(null),
                         g75InvoiceIds.length > 0 ? pushIntuitInvoiceCreateBill(supabase, g75InvoiceIds) : Promise.resolve(null),
+                        g76InvoiceIds.length > 0 ? pushConveraInvoiceCreateBill(supabase, g76InvoiceIds) : Promise.resolve(null),
                       ]);
                       const r = {
-                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? [])],
-                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? [])],
-                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? [])],
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? []), ...(g76Res?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? []), ...(g76Res?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? []), ...(g76Res?.skippedDuplicate ?? [])],
                         skippedIneligible: [
                           ...(payRes?.skippedIneligible ?? []),
                           ...(createRes?.skippedIneligible ?? []),
                           ...(checkRes?.skippedIneligible ?? []),
-                          // G7.5 shape is { invoiceId, reason }; project to { eventId, reason } for the shared alert.
+                          // G7.5/G7.6 shape is { invoiceId, reason }; project to { eventId, reason } for the shared alert.
                           ...((g75Res?.skippedIneligible ?? []).map(s => ({ eventId: -s.invoiceId, reason: s.reason }))),
+                          ...((g76Res?.skippedIneligible ?? []).map(s => ({ eventId: -s.invoiceId, reason: s.reason }))),
                         ],
                         verifyJobIdByPayJobId: payRes?.verifyJobIdByPayJobId ?? {},
                       };
@@ -11088,7 +11273,6 @@ const TimesheetSystem = () => {
                       const g75InvSkipped = new Set((g75Res?.skippedDuplicate ?? []).map(s => (s.intent.kind === 'create_bill' ? (s.intent.sourceInvoiceIds?.[0] ?? null) : null)).filter((v): v is number => v != null));
                       const g75IneligIds = new Set((g75Res?.skippedIneligible ?? []).map(s => s.invoiceId));
                       const g75EligibleInOrder = g75InvoiceIds.filter(id => !g75IneligIds.has(id) && !g75InvRejected.has(id) && !g75InvSkipped.has(id));
-                      const invoiceById = new Map(invoices.map(i => [i.id, i]));
                       g75JobIds.forEach((jobId, i) => {
                         if (jobId == null) return;
                         const invoiceId = g75EligibleInOrder[i];
@@ -11108,15 +11292,43 @@ const TimesheetSystem = () => {
                           kind: 'invoice_create_bill',
                         });
                       });
+                      // G7.6 Convera invoice-driven records for the live pane.
+                      // Now uses the consumer's perIntent[] contract (introduced
+                      // 2026-08-27) which returns one entry per emitted intent
+                      // with (sourceInvoiceIds, vendorName, refNumber, totalAmount,
+                      // jobId, verifyJobId). No index-into-jobIds guessing that
+                      // could scramble records if the consumer's iteration order
+                      // and this rebuild disagreed (2026-08-27 bug: Vladimir/Liya
+                      // swapped, Naretena dropped from pane despite being enqueued).
+                      for (const pi of (g76Res?.perIntent ?? [])) {
+                        if (pi.jobId == null) continue;
+                        const firstInv = invoiceById.get(pi.sourceInvoiceIds[0]);
+                        newRecords.push({
+                          eventId: -(firstInv?.id ?? pi.sourceInvoiceIds[0]),
+                          sourceKind: 'invoice',
+                          invoiceId: firstInv?.id ?? pi.sourceInvoiceIds[0],
+                          payJobId: pi.jobId,
+                          verifyJobId: pi.verifyJobId,
+                          billTxnId: '',
+                          expectedAmount: pi.totalAmount,
+                          expectedVendor: pi.vendorName,
+                          pushedAt: new Date().toISOString(),
+                          kind: 'invoice_create_bill',
+                        });
+                      }
                       setQbPushRecords(prev => [...prev, ...newRecords]);
 
                       const payEnqueued = payJobIds.filter((id): id is number => id != null).length;
                       const createEnqueued = createJobIds.filter((id): id is number => id != null).length;
                       const checkEnqueued = checkJobIds.filter((id): id is number => id != null).length;
+                      const g75Enqueued = (g75Res?.jobIds ?? []).filter((id): id is number => id != null).length;
+                      const g76Enqueued = (g76Res?.jobIds ?? []).filter((id): id is number => id != null).length;
                       const parts: string[] = [];
                       if (payEnqueued > 0) parts.push(`${payEnqueued} pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
                       if (createEnqueued > 0) parts.push(`${createEnqueued} bill_add job${createEnqueued === 1 ? '' : 's'} enqueued (G7b — wait for drain, then Recompute + push payment step).`);
                       if (checkEnqueued > 0) parts.push(`${checkEnqueued} check_add job${checkEnqueued === 1 ? '' : 's'} enqueued (direct expense — verify in QB after drain).`);
+                      if (g75Enqueued > 0) parts.push(`${g75Enqueued} Intuit invoice bill_add job${g75Enqueued === 1 ? '' : 's'} enqueued (G7.5 proactive).`);
+                      if (g76Enqueued > 0) parts.push(`${g76Enqueued} Convera invoice bill_add job${g76Enqueued === 1 ? '' : 's'} enqueued (G7.6 proactive — payment side deferred).`);
                       if (parts.length === 0) parts.push(`0 jobs enqueued.`);
                       void enqueued;
                       if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
@@ -11164,7 +11376,7 @@ const TimesheetSystem = () => {
                       {qbInboxExpanded['missing_bills'] && (
                         <div>
                           {missingBills.length === 0 ? (
-                            <p className="p-4 text-sm text-gray-500 italic">All approved invoices (period_end ≥ {INTUIT_PRE_OUR_SYSTEM_CUTOFF}) have a matching Bill in QB.</p>
+                            <p className="p-4 text-sm text-gray-500 italic">All approved invoices past their pre-our-system cutoff (Intuit {INTUIT_PRE_OUR_SYSTEM_CUTOFF} / Convera {CONVERA_PRE_OUR_SYSTEM_CUTOFF}) have a matching Bill in QB.</p>
                           ) : (
                             <>
                               <p className="px-4 pt-3 text-xs text-gray-600 italic">

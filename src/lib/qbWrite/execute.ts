@@ -21,6 +21,10 @@ type SB = SupabaseClient;
 
 /** QB Desktop hard cap on BillPaymentCheck.RefNumber. See INVARIANTS #5. */
 const PAY_BILL_REFNUMBER_MAX = 11;
+/** QB Desktop hard cap on Bill.RefNumber. Empirically verified 2026-08-27
+ *  via qb_mirror probe: max observed length across 200+ bills is exactly 20;
+ *  0 bills > 20. QB rejects longer with status=3070. See INVARIANTS #5b. */
+const CREATE_BILL_REFNUMBER_MAX = 20;
 
 export interface ValidateFailure {
   reason: string;
@@ -93,6 +97,17 @@ export function validateIntent(intent: WriteIntent): ValidateFailure | null {
     return {
       reason: `pay_bill refNumber '${intent.refNumber}' is ${intent.refNumber.length} chars; QB Desktop hard cap is ${PAY_BILL_REFNUMBER_MAX} (BillPaymentCheck field limit). Use the wire confirmation code instead of the invoice number.`,
       invariant: 'INVARIANTS #5 — pay_bill refNumber max 11 chars',
+    };
+  }
+
+  // ─── INVARIANTS #5b — create_bill RefNumber max 20 chars ───
+  // Discovered 2026-08-27 by Vladimir Simsic invoice 190 "INV SYNERGIE 07/01-31/2026"
+  // (26 chars) hitting QB status=3070 mid-drain. Catches this class at click time
+  // instead of after the QBWC round-trip.
+  if (intent.kind === 'create_bill' && intent.refNumber.length > CREATE_BILL_REFNUMBER_MAX) {
+    return {
+      reason: `create_bill refNumber '${intent.refNumber}' is ${intent.refNumber.length} chars; QB Desktop hard cap is ${CREATE_BILL_REFNUMBER_MAX} (Bill.RefNumber field limit). Shorten the invoice_number on the source invoice.`,
+      invariant: 'INVARIANTS #5b — create_bill refNumber max 20 chars',
     };
   }
 
