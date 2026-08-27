@@ -66,7 +66,16 @@ interface InvoiceRow {
 
 interface ProfileRow {
   id: string;
-  full_name: string | null;
+  name: string | null;
+}
+
+/** Format an invoice_number for memo output. See converaInvoiceCreateBill for
+ *  the original rationale — invoice numbers often already carry an "INV" or
+ *  "Inv#" prefix; don't double-prefix. Fixes 2026-08-27. */
+function memoRef(invoiceNumber: string): string {
+  const trimmed = invoiceNumber.trim();
+  if (/^inv/i.test(trimmed)) return trimmed;
+  return `INV ${trimmed}`;
 }
 
 interface PaymentProfileRow {
@@ -175,7 +184,7 @@ export async function pushIntuitInvoiceCreateBill(
 
   const { data: profileData } = await supabase
     .from('profiles')
-    .select('id, full_name')
+    .select('id, name')
     .in('id', userIds);
   const profileByUserId = new Map(((profileData ?? []) as ProfileRow[]).map(p => [p.id, p]));
 
@@ -222,9 +231,9 @@ export async function pushIntuitInvoiceCreateBill(
       skippedIneligible.push({ invoiceId: inv.id, reason: `qb_account "${p.expenseListId}" not found in qb_accounts (sync qb_mirror)` });
       continue;
     }
-    const userName = profileByUserId.get(inv.user_id)?.full_name ?? '';
+    const userName = profileByUserId.get(inv.user_id)?.name ?? '';
     const monthLabel = fmtMonth(inv.period_end!);
-    const memo = `${monthLabel} - ${userName} - INV ${inv.invoice_number}`.trim();
+    const memo = `${monthLabel} - ${userName} - ${memoRef(inv.invoice_number!)}`.trim();
     intents.push({
       kind: 'create_bill',
       auditTag,

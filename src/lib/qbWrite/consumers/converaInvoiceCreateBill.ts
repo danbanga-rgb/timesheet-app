@@ -80,7 +80,17 @@ interface InvoiceRow {
 
 interface ProfileRow {
   id: string;
-  full_name: string | null;
+  name: string | null;
+}
+
+/** Format an invoice_number for memo output. Invoice numbers in our DB often
+ *  already carry an "INV" or "Inv#" prefix ("INV 12", "Inv# 07"), sometimes
+ *  don't ("12", "58"). Always prefix with "INV " but never double-prefix.
+ *  Case-insensitive detection. Fixes 2026-08-27 memo bug ("INV INV 12"). */
+function memoRef(invoiceNumber: string): string {
+  const trimmed = invoiceNumber.trim();
+  if (/^inv/i.test(trimmed)) return trimmed;
+  return `INV ${trimmed}`;
 }
 
 interface PaymentProfileRow {
@@ -185,7 +195,7 @@ export async function pushConveraInvoiceCreateBill(
     supabase.from('payment_profiles').select('user_id, qb_vendor_name, is_default').in('user_id', allUserIds),
     supabase.from('qb_vendors').select('list_id, name'),
     supabase.from('qb_vendor_mappings').select('qb_vendor_list_id, default_expense_account_list_id'),
-    supabase.from('profiles').select('id, full_name').in('id', allUserIds),
+    supabase.from('profiles').select('id, name').in('id', allUserIds),
   ]);
   const liveProfiles = (liveProfilesRes.data ?? []) as PaymentProfileRow[];
   const vendors = (vendorRes.data ?? []) as VendorRow[];
@@ -224,9 +234,9 @@ export async function pushConveraInvoiceCreateBill(
     // ── Eligibility: all members must pass ──
     let eligibilityReason: string | null = null;
     for (const m of g.members) {
-      if (m.status !== 'approved') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.full_name ?? '?'}) status='${m.status}'`; break; }
-      if (m.qb_bill_txn_id) { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.full_name ?? '?'}) already has qb_bill_txn_id=${m.qb_bill_txn_id}`; break; }
-      if (m.payment_method !== 'Convera') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.full_name ?? '?'}) payment_method='${m.payment_method ?? 'null'}'`; break; }
+      if (m.status !== 'approved') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) status='${m.status}'`; break; }
+      if (m.qb_bill_txn_id) { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) already has qb_bill_txn_id=${m.qb_bill_txn_id}`; break; }
+      if (m.payment_method !== 'Convera') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) payment_method='${m.payment_method ?? 'null'}'`; break; }
       if (!m.period_end || m.period_end < CONVERA_PRE_OUR_SYSTEM_CUTOFF) { eligibilityReason = `group blocked: invoice ${m.id} period_end=${m.period_end ?? 'null'} < cutoff ${CONVERA_PRE_OUR_SYSTEM_CUTOFF}`; break; }
       if (!m.invoice_number || !m.invoice_number.trim()) { eligibilityReason = `group blocked: invoice ${m.id} has empty invoice_number`; break; }
     }
@@ -334,13 +344,13 @@ export async function pushConveraInvoiceCreateBill(
     const monthLabel = fmtMonth(r.txnDate);
     // Sort members by user name for stable line ordering.
     const sortedMembers = [...r.group.members].sort((a, b) => {
-      const na = profileByUserId.get(a.user_id)?.full_name ?? '';
-      const nb = profileByUserId.get(b.user_id)?.full_name ?? '';
+      const na = profileByUserId.get(a.user_id)?.name ?? '';
+      const nb = profileByUserId.get(b.user_id)?.name ?? '';
       return na.localeCompare(nb);
     });
     // Bill-level memo: for singleton use per-invoice memo; for group summarise.
     const billMemo = sortedMembers.length === 1
-      ? `${monthLabel} - ${profileByUserId.get(sortedMembers[0].user_id)?.full_name ?? ''} - INV ${sortedMembers[0].invoice_number}`.trim()
+      ? `${monthLabel} - ${profileByUserId.get(sortedMembers[0].user_id)?.name ?? ''} - ${memoRef(sortedMembers[0].invoice_number!)}`.trim()
       : `${monthLabel} - ${r.vendor.name} - ${r.refNumber} (${sortedMembers.length} lines)`;
     intents.push({
       kind: 'create_bill',
@@ -352,7 +362,7 @@ export async function pushConveraInvoiceCreateBill(
       defaultExpenseAccountName: expenseName,
       lines: sortedMembers.map(m => ({
         amount: Number(m.total_amount),
-        memo: `${monthLabel} - ${profileByUserId.get(m.user_id)?.full_name ?? ''} - INV ${m.invoice_number}`.trim(),
+        memo: `${monthLabel} - ${profileByUserId.get(m.user_id)?.name ?? ''} - ${memoRef(m.invoice_number!)}`.trim(),
         expenseAccountName: expenseName,
       })),
       sourceInvoiceIds: sortedMembers.map(m => m.id),
