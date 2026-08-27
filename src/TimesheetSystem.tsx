@@ -11044,11 +11044,10 @@ const TimesheetSystem = () => {
                       let vName = inv.paymentProfile?.qbVendorName?.trim() || liveVendorNameByUserId.get(inv.userId);
                       if (!vName && inv.groupKey) vName = groupVendorByKey.get(inv.groupKey);
                       if (!vName) continue;
-                      // Bimosoft UK ALT guardrail lives ONLY in the consumer. Do NOT
-                      // mirror it here — mirroring silently hid the residual rows
-                      // (Naretena Arnaut, etc.) so the accountant never saw them get
-                      // skipped. Better: render, let the consumer skip at push time,
-                      // let the alert message name them. (Fix 2026-08-27.)
+                      // No Bimosoft filter here (or in the consumer, as of 2026-08-27).
+                      // The UK ALT rule governs wire routing (payment side), not bill
+                      // vendor identity. Bills correctly post against per-contractor
+                      // "Bimosoft - X" sub-vendors per accountant's QB convention.
                       const vendor = vendorByName.get(vName.toLowerCase().trim());
                       if (!vendor) continue;
                       const mapping = mappingByVendor.get(vendor.listId);

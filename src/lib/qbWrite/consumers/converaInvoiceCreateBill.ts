@@ -48,7 +48,8 @@
 //   fresh-fetch — all preserved.
 //
 // Extra guardrails:
-//   Bimosoft UK ALT guardrail ([[bimosoft-uk-alt-rule]]) on resolved vendor.
+//   NO Bimosoft UK ALT guardrail — that rule governs WIRE routing (payment
+//   side, deferred). Bills correctly post against per-contractor sub-vendors.
 //   Idempotency Layer 3: qb_mirror lookup for existing bill at (vendor, refNumber).
 //     Applies to BOTH shared-invoice-number groups AND MULTI-YYYY-MM groups.
 
@@ -120,12 +121,6 @@ function fmtMonth(iso: string): string {
 
 function yyyyMm(iso: string): string {
   return iso.slice(0, 7);
-}
-
-function isBimosoftNonUkAlt(vendorName: string): boolean {
-  const n = vendorName.toLowerCase();
-  if (!n.includes('bimosoft')) return false;
-  return !n.includes('uk alt');
 }
 
 export async function pushConveraInvoiceCreateBill(
@@ -266,11 +261,14 @@ export async function pushConveraInvoiceCreateBill(
     }
     const vendorName = [...candidates][0];
 
-    // ── Bimosoft UK ALT guardrail ──
-    if (isBimosoftNonUkAlt(vendorName)) {
-      groupSkip(g, `Bimosoft guardrail: resolved qb_vendor_name="${vendorName}" is Bimosoft-flavored but not "UK ALT". All Bimosoft invoices must route through Bimosoft UK ALT (2026-08 money-loss incidents Amar 162 / Anela 180).`);
-      continue;
-    }
+    // No Bimosoft guardrail here. The UK ALT rule from [[bimosoft-uk-alt-rule]]
+    // governs WIRE ROUTING (payment side — IBAN must be UK ALT canonical), not
+    // BILL VENDOR IDENTITY. Accountant's established QB convention is to post
+    // Bills against per-contractor sub-vendors ("Bimosoft - Amar Pljevljk",
+    // "Bimosoft - Naretena Arnaut", etc.) — see May/Jun 2026 mirror history.
+    // The wire umbrella (UK ALT) is a payment concern that belongs in the
+    // future Convera retrofit W2/W3 bill_pmt consumer, not here. Conflating
+    // the two here silently held Naretena's legitimate July invoice 2026-08-27.
 
     // ── Vendor lookup ──
     const vendor = vendorByLowerName.get(vendorName.toLowerCase().trim());
