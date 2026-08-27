@@ -3592,6 +3592,18 @@ const TimesheetSystem = () => {
 
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
     const invoice = invoices.find(i => i.id === invoiceId);
+    // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b). Refuse approval when
+    // invoice_number is too long for a QB-bound payment method — QB would
+    // reject the push anyway. Only fires on approve→push-path transitions;
+    // reject/paid still work regardless.
+    if (status === 'approved') {
+      const nextPM = pmOverride !== undefined ? pmOverride : (invoice?.paymentMethodOverride ?? '');
+      const num = invoice?.invoiceNumber ?? '';
+      if (nextPM && ['Intuit', 'Convera'].includes(nextPM) && num.length > 20) {
+        alert(`Cannot approve: invoice number "${num}" is ${num.length} chars. QuickBooks caps Bill.RefNumber at 20. Edit the invoice number on the Invoices tab first, then approve.`);
+        return;
+      }
+    }
     const update: Record<string, unknown> = {
       status,
       reviewed_at: new Date().toISOString(),
@@ -3988,6 +4000,22 @@ const TimesheetSystem = () => {
   // Save approval status and/or pay on date without closing modal
   const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string; invoiceNumber?: string }) => {
     const invoice = invoices.find(i => i.id === invoiceId);
+    // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b, 2026-08-27 Vladimir
+    // "INV SYNERGIE 07/01-31/2026" rejection). Refuse approval when the
+    // effective invoice_number would exceed QB's limit and the invoice
+    // is Intuit/Convera-bound. Editing invoice_number alone at any status
+    // is warned but not blocked.
+    const nextInvoiceNumber = fields.invoiceNumber !== undefined ? fields.invoiceNumber : (invoice?.invoiceNumber ?? '');
+    const nextPaymentMethod = fields.paymentMethod !== undefined ? fields.paymentMethod : (invoice?.paymentMethodOverride ?? '');
+    const willBeApproved = fields.status === 'approved' || (fields.status === undefined && invoice?.status === 'approved');
+    const pushablePM = nextPaymentMethod && ['Intuit', 'Convera'].includes(nextPaymentMethod);
+    if (willBeApproved && pushablePM && nextInvoiceNumber && nextInvoiceNumber.length > 20) {
+      alert(`Cannot approve: invoice number "${nextInvoiceNumber}" is ${nextInvoiceNumber.length} chars. QuickBooks caps Bill.RefNumber at 20. Shorten the invoice number first (edit inline on the Invoices tab or in this modal).`);
+      return;
+    }
+    if (fields.invoiceNumber !== undefined && fields.invoiceNumber.length > 20 && !confirm(`Invoice number "${fields.invoiceNumber}" is ${fields.invoiceNumber.length} chars. QuickBooks caps Bill.RefNumber at 20 and will refuse any push. Continue anyway?`)) {
+      return;
+    }
     const update: Record<string, unknown> = {};
     if (fields.status !== undefined) {
       update.status = fields.status;
