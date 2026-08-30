@@ -683,6 +683,28 @@ function sanitizeIban(s: string): string {
   return (s || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 }
 
+// Best-effort ASCII transliteration for Convera Short Name suggestions. SWIFT MT103
+// field 59 uses the `x` character set which excludes Croatian/Bosnian diacritics —
+// correspondent banks strip them anyway on the international leg — and existing
+// Convera short names in our data are already ASCII (accountant convention). Long
+// Name is left untouched: it should match the beneficiary's legal registered name.
+// Combining diacritics (Š, Ž, Č, Ć, á, é, …) fall to NFD-strip. Distinct letters
+// that aren't combining chars (Đ, Ł, Ø, ß, Æ, Œ, Þ) need an explicit map.
+function transliterateAscii(s: string): string {
+  const LETTER_MAP: Record<string, string> = {
+    'Đ': 'D', 'đ': 'd',
+    'Ł': 'L', 'ł': 'l',
+    'Ø': 'O', 'ø': 'o',
+    'ß': 'ss',
+    'Þ': 'Th', 'þ': 'th',
+    'Æ': 'AE', 'æ': 'ae',
+    'Œ': 'OE', 'œ': 'oe',
+  };
+  return (s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .split('').map(c => LETTER_MAP[c] ?? c).join('');
+}
+
 // ISO 13616 mod-97 IBAN checksum. Same implementation as scripts/invoice-parser/parser.js
 // and supabase/functions/ingest-invoice/index.ts — kept inline (3 copies) rather than
 // factored to avoid a shared-module bundling change for one 8-line helper.
@@ -12745,7 +12767,7 @@ const TimesheetSystem = () => {
                                 // "NEJRA MUZAFERIJA NATIVE TEAMS"). autoMatchBeneficiary
                                 // does a substring match on the full contractor name, so
                                 // first-name-only breaks the auto-link on next import.
-                                const suggestedShort = `${(s.contractorName || '').toUpperCase()}${s.companyName ? ' ' + s.companyName.split(/\s+/).slice(0, 2).join(' ').toUpperCase() : ''}`.trim().slice(0, 40);
+                                const suggestedShort = transliterateAscii(`${(s.contractorName || '').toUpperCase()}${s.companyName ? ' ' + s.companyName.split(/\s+/).slice(0, 2).join(' ').toUpperCase() : ''}`).trim().slice(0, 40);
                                 const cleanIban = sanitizeIban(s.iban || '');
                                 const ibanCheck = cleanIban ? checkIbanLength(cleanIban) : null;
                                 // Copy chip that reuses the copiedIntuitField state — one "copied" indicator
