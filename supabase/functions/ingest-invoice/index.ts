@@ -692,6 +692,34 @@ serve(async (req) => {
     // When identity_mismatch fires, we keep the snapshot null — the parsed bank details
     // likely belong to a different contractor, and accountant assigns during review.
     const pd = paymentDetails as Record<string, string | null> | null;
+
+    // IBAN checksum guard (defense in depth — parser.js is authoritative but if a candidate
+    // slips through, drop it here so we never store an IBAN that won't route). ISO 13616
+    // mod-97. See pp #105 incident: 20-char HR IBAN silently stored, pasted into Convera,
+    // then wired successfully to a wrong-length string. Any bad IBAN gets stripped; pp
+    // falls back to the SWIFT+account path, and a guardrail event surfaces to the accountant.
+    if (pd && pd.iban) {
+      const cleanIban = pd.iban.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      const csValid = (iban: string): boolean => {
+        if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban) || iban.length < 15 || iban.length > 34) return false;
+        const rearranged = iban.slice(4) + iban.slice(0, 4);
+        const numeric = rearranged.replace(/[A-Z]/g, c => (c.charCodeAt(0) - 55).toString());
+        let r = 0;
+        for (const d of numeric) r = (r * 10 + parseInt(d, 10)) % 97;
+        return r === 1;
+      };
+      if (!csValid(cleanIban)) {
+        beneGuardrailEvents.push({
+          stage: 'parsed_iban_checksum_failed',
+          original: 0, resolved: null,
+          note: `Parsed IBAN "${pd.iban}" fails ISO 13616 mod-97 checksum (len ${cleanIban.length}). Stripped from snapshot; accountant to fill from PDF.`,
+        });
+        pd.iban = '';
+      } else if (cleanIban !== pd.iban) {
+        pd.iban = cleanIban;
+      }
+    }
+
     let paymentProfileSnapshot = (pd && !hasIdentityMismatch) ? {
       id:             0,
       userId,

@@ -548,24 +548,31 @@ function ibanStripBleed(candidate) {
 }
 
 function extractIban(text) {
+  // Any candidate we return MUST pass ISO 13616 mod-97 checksum. Without this, a PDF
+  // where a digit is missing (OCR error, contractor typo) silently produces a length-N
+  // IBAN that we store, then paste into Convera, which either rejects the row or —
+  // worse — accepts it and routes the wire wrong. pp #105 (TCode) hit this: parser
+  // returned a 20-char HR IBAN (correct HR length is 21). We now return null instead.
+  // Downstream ingest-invoice creates the pp with empty IBAN; accountant fills from PDF.
+  const accept = (c) => (c.length >= 15 && c.length <= 34 && ibanChecksumValid(ibanStripBleed(c))) ? ibanStripBleed(c) : null;
   // Labeled: "IBAN:", "IBAN/IFSC:", "IBAN/BIC:" — allow horizontal whitespace only (no newline crossing)
   // Lookahead (?=...) stops greedy match before adjacent words (e.g. "Acc. No." after IBAN)
   const labeled = text.match(/IBAN(?:\/[A-Z]+)?[:\s#]+([A-Z]{2}[ \t]*\d{2}(?:[ \t]*[A-Z0-9]){11,30})(?=[ \t\n\r]|[^A-Za-z0-9]|$)/i);
   if (labeled) {
-    const candidate = labeled[1].replace(/[ \t]/g, '').toUpperCase();
-    if (candidate.length >= 15 && candidate.length <= 34) return ibanStripBleed(candidate);
+    const ok = accept(labeled[1].replace(/[ \t]/g, '').toUpperCase());
+    if (ok) return ok;
   }
   // Bare IBAN: compact (no spaces)
   const bare = text.match(/\b([A-Z]{2}\d{2}[A-Z0-9]{11,30})\b/);
   if (bare) {
-    const candidate = bare[1];
-    if (candidate.length >= 15 && candidate.length <= 34) return ibanStripBleed(candidate);
+    const ok = accept(bare[1]);
+    if (ok) return ok;
   }
   // Bare IBAN: space-grouped like "LT60 3250 0022 8875 3177"
   const spaceGrouped = text.match(/\b([A-Z]{2}\d{2}(?:\s[A-Z0-9]{4}){2,8})\b/);
   if (spaceGrouped) {
-    const candidate = spaceGrouped[1].replace(/\s/g, '').toUpperCase();
-    if (candidate.length >= 15 && candidate.length <= 34) return ibanStripBleed(candidate);
+    const ok = accept(spaceGrouped[1].replace(/\s/g, '').toUpperCase());
+    if (ok) return ok;
   }
   return null;
 }

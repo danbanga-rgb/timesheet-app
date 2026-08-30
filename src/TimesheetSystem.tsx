@@ -683,6 +683,19 @@ function sanitizeIban(s: string): string {
   return (s || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 }
 
+// ISO 13616 mod-97 IBAN checksum. Same implementation as scripts/invoice-parser/parser.js
+// and supabase/functions/ingest-invoice/index.ts — kept inline (3 copies) rather than
+// factored to avoid a shared-module bundling change for one 8-line helper.
+function ibanChecksumValid(iban: string): boolean {
+  const s = sanitizeIban(iban);
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(s) || s.length < 15 || s.length > 34) return false;
+  const rearranged = s.slice(4) + s.slice(0, 4);
+  const numeric = rearranged.replace(/[A-Z]/g, c => (c.charCodeAt(0) - 55).toString());
+  let r = 0;
+  for (const d of numeric) r = (r * 10 + parseInt(d, 10)) % 97;
+  return r === 1;
+}
+
 // Expected IBAN length by country prefix, limited to the countries our contractors use.
 // If the stored IBAN's length doesn't match, we surface a warning in the Create-Beneficiary
 // panel — the underlying profile is broken and pasting it into Convera will fail silently.
@@ -4438,6 +4451,25 @@ const TimesheetSystem = () => {
   const savePaymentProfile = async () => {
     if (!profileForm.profileName || !profileForm.companyName || !profileForm.bankName || !profileForm.accountNumber || !profileForm.swift) {
       alert('Please fill in all required fields: Profile Label, Company Name, Bank Name, Account Number and SWIFT/BIC.'); return;
+    }
+    // IBAN validation — same rule as parser/ingest-invoice. If the IBAN fails checksum
+    // OR its length is wrong for its country prefix, force the accountant to confirm.
+    // See pp #105 incident: a length-20 HR IBAN silently landed from PDF parse and
+    // was pasted into Convera before anyone noticed.
+    if (profileForm.iban) {
+      const cleaned = sanitizeIban(profileForm.iban);
+      const lenCheck = checkIbanLength(cleaned);
+      const csValid = ibanChecksumValid(cleaned);
+      if (!csValid || !lenCheck.ok) {
+        const reasons: string[] = [];
+        if (!lenCheck.ok) reasons.push(`length is ${lenCheck.actual} but ${cleaned.slice(0, 2)} IBANs are ${lenCheck.expected} chars`);
+        if (!csValid) reasons.push(`fails ISO 13616 checksum`);
+        const proceed = window.confirm(
+          `IBAN "${cleaned}" looks invalid:\n · ${reasons.join('\n · ')}\n\nSaving a bad IBAN causes Convera payments to silently mis-route or be dropped.\n\nSave anyway?`
+        );
+        if (!proceed) return;
+      }
+      if (cleaned !== profileForm.iban) profileForm.iban = cleaned;
     }
     // Use profileEditUserId when set (accountant editing another contractor); fall back to currentUser
     const targetUserId = profileEditUserId || currentUser!.id;
