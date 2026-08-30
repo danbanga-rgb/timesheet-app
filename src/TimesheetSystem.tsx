@@ -676,6 +676,28 @@ function reconcileInvoiceLive(
   return { status: matched ? 'matched' : 'mismatch', delta: matched ? 0 : delta, timesheetHours: tsHours, rows, missingWeeks };
 }
 
+// IBAN is spec-defined as ASCII alphanumerics only. PDF text extraction can inject
+// non-breaking spaces / zero-width joiners that pass visual inspection but corrupt
+// the paste target. Strip aggressively; upper-case for consistency.
+function sanitizeIban(s: string): string {
+  return (s || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+}
+
+// Expected IBAN length by country prefix, limited to the countries our contractors use.
+// If the stored IBAN's length doesn't match, we surface a warning in the Create-Beneficiary
+// panel — the underlying profile is broken and pasting it into Convera will fail silently.
+const IBAN_LENGTH_BY_COUNTRY: Record<string, number> = {
+  HR: 21, BA: 20, RS: 22, SI: 19, MK: 19, ME: 22,
+  GB: 22, IE: 22, DE: 22, FR: 27, NL: 18, ES: 24, IT: 27, PT: 25,
+  CH: 21, AT: 20, BE: 16, PL: 28, RO: 24, BG: 22, HU: 28, CZ: 24, SK: 24,
+};
+function checkIbanLength(iban: string): { ok: boolean; actual: number; expected: number | null } {
+  const clean = sanitizeIban(iban);
+  const cc = clean.slice(0, 2).toUpperCase();
+  const expected = IBAN_LENGTH_BY_COUNTRY[cc] ?? null;
+  return { ok: expected == null || clean.length === expected, actual: clean.length, expected };
+}
+
 // Deterministic vendor code Dan enters in Convera when creating a beneficiary.
 // Shared-IBAN groups (Bimosoft, etc.) share ONE code so Dan only enters one SYN
 // in Convera; on beneficiary import the matcher then SYN-links whichever profile's
@@ -3246,9 +3268,19 @@ const TimesheetSystem = () => {
     // 1. SYN vendor code match — deliberate no-ambiguity primary link. When present,
     // auto-linked silently. IBAN/name matches are downgraded to "suggested" and
     // surfaced as amber rows so the accountant confirms before the FK is written.
+    // Guardrail (Fat Struct incident, 2026-08-30): when the profile has an IBAN AND
+    // the SYN-matched beneficiary has a bank_account, the two must agree. Convera
+    // Vendor IDs can be entered wrong on the Convera side (or reuse a stale SYN
+    // number from a deleted-and-recreated profile), and a silent SYN link would
+    // route a live payment to the wrong contractor. If they disagree, fall through
+    // to IBAN/name matching — the accountant confirms via the amber "suggested" flow.
     if (expectedSynCode) {
       const bySyn = beneficiaries.find(b => (b.vendorId || '').trim().toUpperCase() === expectedSynCode.toUpperCase());
-      if (bySyn) return { beneficiary: bySyn, level: 'syn' };
+      if (bySyn) {
+        const pIban = sanitizeIban(profileIban);
+        const bIban = sanitizeIban(bySyn.bankAccount);
+        if (!pIban || !bIban || pIban === bIban) return { beneficiary: bySyn, level: 'syn' };
+      }
     }
     if (!contractorName) return null;
     // 2. Unique IBAN match
@@ -12682,12 +12714,31 @@ const TimesheetSystem = () => {
                                 // does a substring match on the full contractor name, so
                                 // first-name-only breaks the auto-link on next import.
                                 const suggestedShort = `${(s.contractorName || '').toUpperCase()}${s.companyName ? ' ' + s.companyName.split(/\s+/).slice(0, 2).join(' ').toUpperCase() : ''}`.trim().slice(0, 40);
+                                const cleanIban = sanitizeIban(s.iban || '');
+                                const ibanCheck = cleanIban ? checkIbanLength(cleanIban) : null;
+                                // Copy chip that reuses the copiedIntuitField state — one "copied" indicator
+                                // at a time is fine across the modal. Sanitizes IBAN on copy so any invisible
+                                // chars in the stored value never reach the paste target.
+                                const copyChip = (fieldKey: string, display: string, copyValue?: string) => {
+                                  const copied = copiedIntuitField === fieldKey;
+                                  return (
+                                    <button
+                                      type="button"
+                                      onClick={() => copyIntuitField(fieldKey, copyValue ?? display)}
+                                      title="Click to copy"
+                                      className={`inline-flex items-center gap-1 font-mono text-[11px] px-1.5 py-0.5 rounded border transition-colors align-baseline ${copied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-indigo-200 text-indigo-900 hover:border-emerald-400 hover:bg-emerald-50'}`}
+                                    >
+                                      <Copy className="w-2.5 h-2.5" />
+                                      {copied ? '✓ copied' : display}
+                                    </button>
+                                  );
+                                };
                                 return (
                                   <div className="mt-1.5 p-2 bg-indigo-50 border border-indigo-200 rounded">
                                     <div className="text-indigo-900 mb-1.5"><strong>Create Convera beneficiary with these details:</strong></div>
-                                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-indigo-900 font-mono text-[11px]">
-                                      <div><span className="text-indigo-500 not-italic">Short Name:</span> {suggestedShort || <span className="text-indigo-400 italic">—</span>}</div>
-                                      <div><span className="text-indigo-500 not-italic">Long Name:</span> {s.companyName || <span className="text-indigo-400 italic">—</span>}</div>
+                                    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-indigo-900 font-mono text-[11px] items-baseline">
+                                      <div className="flex items-baseline gap-1.5 flex-wrap"><span className="text-indigo-500 not-italic">Short Name:</span> {suggestedShort ? copyChip(`bene-short-${i}`, suggestedShort) : <span className="text-indigo-400 italic">—</span>}</div>
+                                      <div className="flex items-baseline gap-1.5 flex-wrap"><span className="text-indigo-500 not-italic">Long Name:</span> {s.companyName ? copyChip(`bene-long-${i}`, s.companyName) : <span className="text-indigo-400 italic">—</span>}</div>
                                       <div><span className="text-indigo-500 not-italic">Country:</span> {
                                         s.bankCountry ? (
                                           <>
@@ -12699,25 +12750,39 @@ const TimesheetSystem = () => {
                                           : <span className="text-indigo-400 italic">—</span>
                                       }</div>
                                       <div><span className="text-indigo-500 not-italic">Currency:</span> USD</div>
-                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">Bank:</span> {s.bankName || <span className="text-indigo-400 italic">—</span>}</div>
-                                      {s.bankAddress && <div className="col-span-2"><span className="text-indigo-500 not-italic">Bank Address:</span> {s.bankAddress}</div>}
-                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">IBAN:</span> {s.iban || <span className="text-indigo-400 italic">—</span>}</div>
-                                      {s.swift && <div><span className="text-indigo-500 not-italic">SWIFT:</span> {s.swift}</div>}
-                                      {s.accountNumber && <div><span className="text-indigo-500 not-italic">Acct#:</span> {s.accountNumber}</div>}
-                                      <div className="col-span-2"><span className="text-indigo-500 not-italic">Notification Email:</span> {
-                                        s.paymentEmail ? s.paymentEmail
+                                      <div className="col-span-2 flex items-baseline gap-1.5 flex-wrap"><span className="text-indigo-500 not-italic">Bank:</span> {s.bankName ? copyChip(`bene-bank-${i}`, s.bankName) : <span className="text-indigo-400 italic">—</span>}</div>
+                                      {s.bankAddress && <div className="col-span-2 flex items-baseline gap-1.5 flex-wrap"><span className="text-indigo-500 not-italic">Bank Address:</span> {copyChip(`bene-bankaddr-${i}`, s.bankAddress)}</div>}
+                                      <div className="col-span-2 flex items-baseline gap-1.5 flex-wrap">
+                                        <span className="text-indigo-500 not-italic">IBAN:</span>
+                                        {cleanIban ? copyChip(`bene-iban-${i}`, cleanIban) : <span className="text-indigo-400 italic">—</span>}
+                                        {ibanCheck && !ibanCheck.ok && (
+                                          <span className="text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-0.5">
+                                            ⚠ length {ibanCheck.actual}, expected {ibanCheck.expected} for {cleanIban.slice(0, 2)} — profile IBAN is broken, fix it before pasting
+                                          </span>
+                                        )}
+                                        {cleanIban && cleanIban !== (s.iban || '').trim() && (
+                                          <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">stored value had non-alphanumeric chars — copy cleaned</span>
+                                        )}
+                                      </div>
+                                      {s.swift && <div className="flex items-baseline gap-1.5 flex-wrap"><span className="text-indigo-500 not-italic">SWIFT:</span> {copyChip(`bene-swift-${i}`, s.swift.trim().toUpperCase())}</div>}
+                                      {s.accountNumber && <div className="flex items-baseline gap-1.5 flex-wrap"><span className="text-indigo-500 not-italic">Acct#:</span> {copyChip(`bene-acct-${i}`, s.accountNumber.trim())}</div>}
+                                      <div className="col-span-2 flex items-baseline gap-1.5 flex-wrap">
+                                        <span className="text-indigo-500 not-italic">Notification Email:</span>
+                                        {s.paymentEmail
+                                          ? copyChip(`bene-email-${i}`, s.paymentEmail)
                                           : s.contractorEmail ? (
                                             <>
-                                              {s.contractorEmail}
-                                              <span className="text-indigo-400 not-italic ml-1">(contractor login)</span>
+                                              {copyChip(`bene-email-${i}`, s.contractorEmail)}
+                                              <span className="text-indigo-400 not-italic">(contractor login)</span>
                                             </>
                                           )
-                                          : <span className="text-indigo-400 italic">—</span>
-                                      }</div>
+                                          : <span className="text-indigo-400 italic">—</span>}
+                                      </div>
                                     </div>
-                                    <div className="mt-2 pt-2 border-t border-indigo-200 text-indigo-900">
-                                      <strong>Vendor ID:</strong> <span className="font-mono text-base bg-white px-2 py-0.5 rounded border border-indigo-300">{s.suggestedVendorId ?? 'SYN-XXXX'}</span>
-                                      <div className="text-indigo-700 italic mt-1 text-[11px]">Enter exactly this code in Convera's UI. If two skipped rows share the same IBAN they'll show the same suggested code (same beneficiary). If Convera says the code is taken on submit, increment by one and try again — the collision will be reconciled when we re-import beneficiaries.</div>
+                                    <div className="mt-2 pt-2 border-t border-indigo-200 text-indigo-900 flex items-baseline gap-2 flex-wrap">
+                                      <strong>Vendor ID:</strong>
+                                      {s.suggestedVendorId ? copyChip(`bene-vid-${i}`, s.suggestedVendorId) : <span className="font-mono text-base bg-white px-2 py-0.5 rounded border border-indigo-300">SYN-XXXX</span>}
+                                      <div className="text-indigo-700 italic text-[11px] basis-full">Enter exactly this code in Convera's UI. If two skipped rows share the same IBAN they'll show the same suggested code (same beneficiary). If Convera says the code is taken on submit, increment by one and try again — the collision will be reconciled when we re-import beneficiaries.</div>
                                     </div>
                                   </div>
                                 );
@@ -13409,12 +13474,36 @@ const TimesheetSystem = () => {
                                       <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">Default</span>
                                     )}
                                   </div>
-                                  <div className="font-mono text-xs text-gray-400 mt-0.5">{profile.iban || profile.accountNumber || '—'}</div>
+                                  {(() => {
+                                    const ibanCheck = profile.iban ? checkIbanLength(profile.iban) : null;
+                                    return (
+                                      <div className="flex items-baseline gap-1.5 flex-wrap mt-0.5">
+                                        <span className="font-mono text-xs text-gray-400">{profile.iban || profile.accountNumber || '—'}</span>
+                                        {ibanCheck && !ibanCheck.ok && (
+                                          <span className="text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-1 py-0.5" title="Edit this profile — IBAN length is wrong for its country">
+                                            ⚠ IBAN len {ibanCheck.actual}/{ibanCheck.expected}
+                                          </span>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
                                 </td>
                                 <td className="px-4 py-2.5">
                                   {benef
                                     ? <span className="font-mono text-xs text-gray-700">{benef.shortName}</span>
                                     : <span className="text-amber-600 text-xs font-medium">Not matched</span>}
+                                  {benef && !profile.converaMatchOverride && (() => {
+                                    const pIban = sanitizeIban(profile.iban || '');
+                                    const bIban = sanitizeIban(benef.bankAccount || '');
+                                    if (pIban && bIban && pIban !== bIban) {
+                                      return (
+                                        <div className="mt-0.5 text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-1 py-0.5 inline-block" title="Profile IBAN does not match this beneficiary's bank account. Verify before paying — a wrong link routes payment to the wrong contractor.">
+                                          ⚠ IBAN mismatch — verify
+                                        </div>
+                                      );
+                                    }
+                                    return null;
+                                  })()}
                                 </td>
                                 <td className="px-4 py-2.5 text-xs text-gray-500">{benef?.beneficiaryName || '—'}</td>
                                 <td className="px-4 py-2.5 text-center text-xs text-gray-400">
