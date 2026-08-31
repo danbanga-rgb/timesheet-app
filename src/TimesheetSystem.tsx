@@ -245,7 +245,7 @@ interface UserProfile {
   id: string;
   username: string;
   name: string;
-  role: 'timesheetuser' | 'manager' | 'accountant' | 'admin' | 'vendormanager';
+  role: 'timesheetuser' | 'manager' | 'accountant' | 'admin' | 'vendormanager' | 'contract_admin';
   managerId: string | null;
   email: string;
   country: string;
@@ -7217,6 +7217,35 @@ const TimesheetSystem = () => {
               </div>
             </div>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // ─── CONTRACT ADMIN VIEW ──────────────────────────────────────────────────
+  if (currentUser!.role === 'contract_admin') {
+    return (
+      <div className="min-h-screen bg-gray-50 p-3 sm:p-6">
+        <div className="max-w-7xl mx-auto">
+          <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+              <div>
+                <h1 className="text-2xl font-bold text-gray-800">Contracts</h1>
+                <p className="text-gray-600">Welcome, {currentUser!.name}</p>
+                <p className="text-sm text-indigo-600 font-medium">Role: Contract Admin</p>
+              </div>
+              <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"><LogOut className="w-4 h-4" /> Logout</button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-xl font-semibold mb-2">New Contract</h2>
+            <p className="text-gray-500 text-sm mb-6">Coming in Slice 4 — form for capturing contract variables, generating filled DOCX, and routing to DocuSeal for signatures.</p>
+            <div className="border-2 border-dashed border-gray-200 rounded-lg p-12 text-center text-gray-400">
+              <FileText className="w-12 h-12 mx-auto mb-3 opacity-40" />
+              <p className="text-sm">Placeholder — Contracts UI will land here.</p>
+            </div>
+          </div>
         </div>
       </div>
     );
