@@ -279,29 +279,193 @@ Return JSON:
     'I didn\'t catch that. Reply YES to proceed, NO to cancel, or send corrections (e.g. "role: manager").');
 }
 
-// ─── Executor (STUB for Slice 4 — Slice 6 wires real edge fns) ─────
+// ─── Executor (Slice 6 — real edge fn calls under Option A JWT-forwarded) ─────
 
 async function executeIntent(
   admin: SupabaseClient,
   conv: Conversation,
   spec: IntentSpec,
-  _jwt: string,
+  jwt: string,
 ): Promise<void> {
-  // Log the action attempt (Slice 6 replaces this with a real chat_actions row).
-  await admin.from('chat_actions').insert({
+  const { data: actionRow } = await admin.from('chat_actions').insert({
     conversation_id: conv.id,
     actor_user_id: conv.user_id,
     action_type: spec.name,
     action_input: conv.captured,
-    status: 'success',
+    status: 'pending',
     attempted_at: new Date().toISOString(),
-    completed_at: new Date().toISOString(),
-    action_output: { stubbed: true, note: 'Slice 4 executor stub — Slice 6 wires real edge fns' },
+  }).select('id').single();
+  const actionId = actionRow?.id as string;
+
+  try {
+    if (spec.name === 'user.create') {
+      await execUserCreate(admin, conv, jwt, actionId);
+    } else {
+      throw new Error(`Executor for ${spec.name} not wired yet`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await admin.from('chat_actions').update({
+      status: 'failed', completed_at: new Date().toISOString(),
+      action_output: { error: msg },
+    }).eq('id', actionId);
+    await writeBot(admin, conv.id, `❌ Failed: ${msg}`);
+    await setPhase(admin, conv.id, 'error');
+  }
+}
+
+async function execUserCreate(
+  admin: SupabaseClient,
+  conv: Conversation,
+  jwt: string,
+  actionId: string,
+): Promise<void> {
+  const captured = conv.captured;
+
+  // Resolve project name → project_id (LLM extracted a name; we need the ID)
+  let project_id: number | null = null;
+  if (captured.project) {
+    const tok = String(captured.project).trim().toLowerCase();
+    const { data: projects } = await admin.from('projects').select('id, name, code');
+    const match = (projects ?? []).find((p) =>
+      String(p.name).toLowerCase() === tok || String(p.code).toLowerCase() === tok);
+    if (!match) throw new Error(`Project "${captured.project}" not found`);
+    project_id = match.id as number;
+  }
+
+  // Resolve vendor manager name → user id (if role starts with vendor and value present)
+  let vendor_manager_id: string | null = null;
+  if (captured.vendor_manager) {
+    const tok = String(captured.vendor_manager).trim().toLowerCase();
+    const { data: vms } = await admin.from('profiles').select('id, name').eq('role', 'vendormanager');
+    const match = (vms ?? []).find((v) => String(v.name).toLowerCase() === tok);
+    if (!match) throw new Error(`Vendor manager "${captured.vendor_manager}" not found`);
+    vendor_manager_id = match.id as string;
+  }
+
+  // Region: derive default from country if not provided
+  const region = (captured.region as string | undefined) ?? deriveRegion(captured.country as string | undefined);
+
+  // Random password — user never sees it; invite email lets them set their own
+  const password = generatePassword();
+
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+  const createRes = await fetchWithRetry(`${supabaseUrl}/functions/v1/create-user`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${jwt}`,  // Option A: caller's JWT forwarded
+      'Content-Type': 'application/json',
+      'apikey': Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+    },
+    body: JSON.stringify({
+      email: captured.email,
+      password,
+      name: captured.name,
+      role: captured.role || 'timesheetuser',
+      country: captured.country || 'US',
+      region: region || '',
+      project_id,
+      vendor_manager_id,
+      start_date: captured.start_date || new Date().toISOString().slice(0, 10),
+      end_date: captured.end_date || '',
+      invoice_enabled: captured.invoice_enabled === true,
+      reminders_enabled: true,
+      location_type: captured.location_type || '',
+    }),
   });
 
-  await writeBot(admin, conv.id,
-    `✅ [STUB] Would have executed ${spec.name} with the values above. Slice 6 wires the real create-user call.`);
+  const createBody = await createRes.text();
+  if (!createRes.ok) throw new Error(`create-user ${createRes.status}: ${safeSlice(createBody)}`);
+
+  const createResult = JSON.parse(createBody);
+  const createdUserId = createResult?.user?.id ?? createResult?.id ?? null;
+
+  // Invite send — default YES unless explicitly false in captured
+  const sendInvite = captured.send_invite !== false;
+  let inviteStatus = 'skipped';
+  let inviteError: string | null = null;
+  if (sendInvite) {
+    try {
+      const inviteRes = await fetchWithRetry(`${supabaseUrl}/functions/v1/send-reminder`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+          'Authorization': `Bearer ${jwt}`,
+        },
+        body: JSON.stringify({ action: 'invite', toEmail: captured.email, toName: captured.name }),
+      });
+      if (!inviteRes.ok) {
+        inviteError = `send-reminder ${inviteRes.status}: ${safeSlice(await inviteRes.text())}`;
+        inviteStatus = 'failed';
+      } else {
+        inviteStatus = 'sent';
+      }
+    } catch (e) {
+      inviteError = e instanceof Error ? e.message : String(e);
+      inviteStatus = 'failed';
+    }
+  }
+
+  const overallStatus = inviteError ? 'partial' : 'success';
+  await admin.from('chat_actions').update({
+    status: overallStatus,
+    completed_at: new Date().toISOString(),
+    action_output: {
+      created_user_id: createdUserId,
+      invite_status: inviteStatus,
+      invite_error: inviteError,
+    },
+  }).eq('id', actionId);
+
+  let reply = `✅ Created ${captured.name} (${captured.email}).`;
+  if (sendInvite && inviteStatus === 'sent') reply += ' Invite sent.';
+  if (sendInvite && inviteStatus === 'failed') {
+    reply += `\n⚠️ Invite failed to send: ${inviteError}. Retry via app UI or ask again ("resend invite ${captured.email}") once that intent is wired.`;
+  }
+  if (!sendInvite) reply += ' No invite sent.';
+
+  await writeBot(admin, conv.id, reply);
   await setPhase(admin, conv.id, 'done');
+}
+
+// ─── Executor helpers ──────────────────────────────────────────────
+
+function generatePassword(): string {
+  // 16-char random from url-safe alphabet. User never sees it — invite email
+  // links them to a password-recovery flow where they set their own.
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => chars[b % chars.length]).join('');
+}
+
+function deriveRegion(country: string | undefined): string {
+  if (!country) return '';
+  const defaults: Record<string, string> = {
+    US: 'California', GB: 'England', HR: 'Zagreb County', RS: 'Central Serbia',
+    BA: 'Federation of Bosnia and Herzegovina', MK: 'Skopje', CA: 'Ontario', SI: 'Central Slovenia',
+  };
+  return defaults[country] ?? '';
+}
+
+async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+  // Auto-retry once on transient errors (5xx, network) per Slice 4 spec.
+  try {
+    const res = await fetch(url, init);
+    if (res.status >= 500 && res.status < 600) {
+      await new Promise((r) => setTimeout(r, 500));
+      return await fetch(url, init);
+    }
+    return res;
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 500));
+    return await fetch(url, init);
+  }
+}
+
+function safeSlice(s: string): string {
+  return s.slice(0, 300);
 }
 
 // ─── Field ordering + confirmation summary ─────────────────────────
