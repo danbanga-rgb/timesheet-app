@@ -81,14 +81,16 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
     const content = input.trim();
     setInput('');
     try {
-      await sendUserMessage(conversation.id, content);
+      const row = await sendUserMessage(conversation.id, content);
+      // Optimistically add to state so the user sees their message immediately,
+      // independent of realtime latency (dedupe guards against realtime echo).
+      setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
       // Fire bot processing (best-effort; bot writes back via realtime).
-      triggerBotProcessing(conversation.id).catch(() => {
-        // Non-blocking; bot may not be deployed yet. UI still shows user's msg.
+      triggerBotProcessing(conversation.id).catch((err) => {
+        console.error('[chat] triggerBotProcessing failed:', err);
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      // Restore input so user can retry
       setInput(content);
     } finally {
       setSending(false);
