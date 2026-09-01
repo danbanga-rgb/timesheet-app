@@ -38,21 +38,35 @@ export default function ChatApp() {
 
 function LoginScreen() {
   const [email, setEmail] = useState('');
-  const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
+  const [password, setPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [magicLinkSent, setMagicLinkSent] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handlePasswordLogin(e: React.FormEvent) {
     e.preventDefault();
-    setSending(true);
+    setSubmitting(true);
+    setError(null);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setSubmitting(false);
+    if (error) setError(error.message);
+    else window.location.reload();  // let ChatApp re-check profile + chat_enabled
+  }
+
+  async function handleMagicLink() {
+    if (!email) {
+      setError('Enter your email first, then click Magic Link.');
+      return;
+    }
+    setSubmitting(true);
     setError(null);
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: { emailRedirectTo: `${window.location.origin}/chat` },
     });
-    setSending(false);
+    setSubmitting(false);
     if (error) setError(error.message);
-    else setSent(true);
+    else setMagicLinkSent(true);
   }
 
   return (
@@ -60,12 +74,12 @@ function LoginScreen() {
       <div className="max-w-sm w-full bg-white rounded-xl shadow-md p-8">
         <h1 className="text-xl font-semibold text-gray-900 mb-1">Synergie Chat</h1>
         <p className="text-sm text-gray-500 mb-6">Sign in to continue.</p>
-        {sent ? (
+        {magicLinkSent ? (
           <div className="p-3 bg-green-50 border border-green-200 rounded text-sm text-green-800">
             Magic link sent to <strong>{email}</strong>. Check your inbox.
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handlePasswordLogin} className="space-y-4">
             {error && (
               <div className="p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">{error}</div>
             )}
@@ -77,13 +91,31 @@ function LoginScreen() {
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
             />
+            <input
+              type="password"
+              required
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+            />
             <button
               type="submit"
-              disabled={sending || !email}
+              disabled={submitting || !email || !password}
               className="w-full px-4 py-2 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 disabled:bg-gray-300"
             >
-              {sending ? 'Sending…' : 'Send magic link'}
+              {submitting ? 'Signing in…' : 'Sign in'}
             </button>
+            <div className="text-center">
+              <button
+                type="button"
+                onClick={handleMagicLink}
+                disabled={submitting}
+                className="text-xs text-gray-500 hover:text-indigo-600 underline"
+              >
+                Forgot password? Send magic link instead
+              </button>
+            </div>
           </form>
         )}
       </div>

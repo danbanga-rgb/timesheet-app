@@ -186,7 +186,7 @@ const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { repo
 
 import { useState, useEffect, useRef, Fragment } from 'react';
 import { createPortal } from 'react-dom';
-import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronLeft, ChevronRight, Building2, ArrowUpDown, Copy } from 'lucide-react';
+import { Calendar, Clock, CheckCircle, XCircle, LogOut, LogIn, Users, Mail, FileText, Download, Printer, Plus, Edit2, Trash2, Save, X, Settings, MapPin, DollarSign, Receipt, Paperclip, ExternalLink, UploadCloud, BarChart2, Eye, EyeOff, AlertTriangle, CreditCard, ChevronDown, ChevronLeft, ChevronRight, Building2, ArrowUpDown, Copy, MessageSquare } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabaseClient';
 import { tzMap } from '../supabase/functions/_shared/tz-map';
@@ -6518,7 +6518,12 @@ const TimesheetSystem = () => {
                 <p className="text-gray-600">Welcome, {currentUser!.name}</p>
                 <p className="text-sm text-purple-600 font-medium">Role: Administrator</p>
               </div>
-              <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"><LogOut className="w-4 h-4" /> Logout</button>
+              <div className="flex items-center gap-2">
+                <a href="/chat" className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors" title="Open Synergie Chat">
+                  <MessageSquare className="w-4 h-4" /> Chat
+                </a>
+                <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"><LogOut className="w-4 h-4" /> Logout</button>
+              </div>
             </div>
           </div>
 
