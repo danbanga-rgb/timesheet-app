@@ -8,7 +8,9 @@ import {
   generateContract,
   getSignedUrl,
   downloadFilledDocx,
+  sendForSigning,
   type Counterparty,
+  type SigningUrl,
 } from './api';
 
 interface FormState {
@@ -62,6 +64,9 @@ export default function NewContractForm() {
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [signingUrls, setSigningUrls] = useState<SigningUrl[] | null>(null);
+  const [submissionId, setSubmissionId] = useState<string | null>(null);
 
   useEffect(() => {
     listCounterparties().then(setCounterparties).catch((e) => setError(e.message));
@@ -151,6 +156,28 @@ export default function NewContractForm() {
     window.open(url, '_blank');
   }
 
+  async function handleSend() {
+    if (!previewPath || !form.vendor_signer_email || !form.vendor_signer_name) return;
+    setError(null);
+    setSigningUrls(null);
+    setSubmissionId(null);
+    setSending(true);
+    try {
+      const result = await sendForSigning({
+        preview_path: previewPath,
+        vendor_signer_email: form.vendor_signer_email,
+        vendor_signer_name: form.vendor_signer_name,
+      });
+      setSubmissionId(result.submission_id);
+      setSigningUrls(result.signing_urls);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(`Send failed: ${msg}`);
+    } finally {
+      setSending(false);
+    }
+  }
+
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
       {/* ---- FORM ---- */}
@@ -236,10 +263,34 @@ export default function NewContractForm() {
             {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
             {generating ? 'Generating…' : 'Generate preview'}
           </button>
-          <button disabled title="Coming in Slice 5" className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-500 rounded cursor-not-allowed">
-            <Send className="w-4 h-4" /> Send for signing (Slice 5)
+          <button
+            onClick={handleSend}
+            disabled={sending || !previewPath || !form.vendor_signer_email || !form.vendor_signer_name}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-300"
+            title={!previewPath ? 'Generate preview first' : ''}
+          >
+            {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+            {sending ? 'Sending…' : 'Send for signing'}
           </button>
         </div>
+
+        {signingUrls && (
+          <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded">
+            <div className="text-sm font-semibold text-green-800 mb-2">
+              Submission #{submissionId} — signing URLs (click in order):
+            </div>
+            <ol className="space-y-1 text-sm">
+              {signingUrls.map((s, i) => (
+                <li key={s.url}>
+                  <span className="font-medium">{i + 1}. {s.role}:</span>{' '}
+                  <a href={s.url} target="_blank" rel="noreferrer" className="text-blue-600 underline break-all">
+                    {s.url}
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
       </div>
 
       {/* ---- PREVIEW ---- */}

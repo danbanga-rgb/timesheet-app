@@ -95,3 +95,36 @@ export async function downloadFilledDocx(path: string): Promise<ArrayBuffer> {
   if (error) throw error;
   return await data.arrayBuffer();
 }
+
+// Local demo sender — talks to scripts/one-off/docuseal-sender-server.mjs on :4000.
+// Not for prod. When we host DocuSeal + a real sidecar, this URL moves.
+const LOCAL_DOCUSEAL_SENDER = 'http://localhost:4000/submit';
+
+export interface SendForSigningInput {
+  preview_path: string;
+  vendor_signer_email: string;
+  vendor_signer_name: string;
+}
+
+export interface SigningUrl {
+  role: string;
+  url: string;
+}
+
+export interface SendForSigningResult {
+  submission_id: string;
+  signing_urls: SigningUrl[];
+}
+
+export async function sendForSigning(input: SendForSigningInput): Promise<SendForSigningResult> {
+  const res = await fetch(LOCAL_DOCUSEAL_SENDER, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Sender returned ${res.status}: ${text}`);
+  }
+  return JSON.parse(text);
+}
