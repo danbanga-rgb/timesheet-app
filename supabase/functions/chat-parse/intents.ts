@@ -37,6 +37,28 @@ export interface IntentSpec {
 
 export const INTENTS: IntentSpec[] = [
   {
+    name: 'user.set_start_date',
+    required_permission: 'user.set_start_date',
+    description: 'Set/update the start date of an existing user',
+    extraction_hint:
+      'The user wants to set or update someone\'s start date. Extract the target person\'s name (or email if given) and the new date.',
+    fields: [
+      { name: 'target', prompt: 'Which user? (name or email)', input_type: 'text', required: true },
+      { name: 'start_date', prompt: 'New start date?', input_type: 'date', required: true, validate: 'date' },
+    ],
+  },
+  {
+    name: 'user.set_end_date',
+    required_permission: 'user.set_end_date',
+    description: 'Set/update the end date of an existing user (offboarding)',
+    extraction_hint:
+      'The user wants to set or update someone\'s end date, or is offboarding them. Extract the target person\'s name (or email if given) and the new date.',
+    fields: [
+      { name: 'target', prompt: 'Which user? (name or email)', input_type: 'text', required: true },
+      { name: 'end_date', prompt: 'New end date?', input_type: 'date', required: true, validate: 'date' },
+    ],
+  },
+  {
     name: 'user.create',
     required_permission: 'user.create',
     description: 'Create a new user profile (contractor, staff, manager, etc.)',

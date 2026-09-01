@@ -399,6 +399,8 @@ async function executeIntent(
   try {
     if (spec.name === 'user.create') {
       await execUserCreate(admin, conv, jwt, actionId);
+    } else if (spec.name === 'user.set_start_date' || spec.name === 'user.set_end_date') {
+      await execUserSetDate(admin, conv, actionId, spec.name === 'user.set_start_date' ? 'start_date' : 'end_date');
     } else {
       throw new Error(`Executor for ${spec.name} not wired yet`);
     }
@@ -526,6 +528,79 @@ async function execUserCreate(
 
   await writeBot(admin, conv.id, reply);
   await setPhase(admin, conv.id, 'done');
+}
+
+// ─── Update-date executor (shared by set_start_date + set_end_date) ────────
+
+async function execUserSetDate(
+  admin: SupabaseClient,
+  conv: Conversation,
+  actionId: string,
+  column: 'start_date' | 'end_date',
+): Promise<void> {
+  const target = String(conv.captured.target ?? '').trim();
+  const newDate = String(conv.captured[column] ?? '').trim();
+  if (!target || !newDate) throw new Error(`Missing target or ${column}`);
+
+  const resolved = await resolveUser(admin, target);
+  if (resolved.kind === 'none') throw new Error(`No user found matching "${target}"`);
+  if (resolved.kind === 'multi') {
+    // Ambiguous — bot asks which one. Cancel this execution (user re-issues with more specific target).
+    const list = resolved.candidates.map((c, i) => `  ${i + 1}. ${c.name} (${c.email})`).join('\n');
+    await admin.from('chat_actions').update({
+      status: 'cancelled', completed_at: new Date().toISOString(),
+      action_output: { reason: 'ambiguous_target', candidates: resolved.candidates },
+    }).eq('id', actionId);
+    await writeBot(admin, conv.id,
+      `Multiple matches for "${target}":\n${list}\n\nRe-send with a more specific name or use the email address.`);
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+
+  const user = resolved.user;
+  const { error } = await admin.from('profiles').update({ [column]: newDate }).eq('id', user.id);
+  if (error) throw new Error(`Update failed: ${error.message}`);
+
+  await admin.from('chat_actions').update({
+    status: 'success', completed_at: new Date().toISOString(),
+    action_output: { user_id: user.id, email: user.email, [column]: newDate },
+  }).eq('id', actionId);
+
+  const humanCol = column === 'start_date' ? 'Start date' : 'End date';
+  await writeBot(admin, conv.id, `✅ ${humanCol} for ${user.name} (${user.email}) set to ${newDate}.`);
+  await setPhase(admin, conv.id, 'done');
+}
+
+// Fuzzy-resolve a target string to a profiles row. Accepts:
+//   - exact email match (case-insensitive)
+//   - exact name match (case-insensitive)
+//   - substring match on name (unique or ambiguous)
+type Resolved =
+  | { kind: 'none' }
+  | { kind: 'single'; user: { id: string; name: string; email: string } }
+  | { kind: 'multi'; candidates: Array<{ id: string; name: string; email: string }> };
+
+async function resolveUser(admin: SupabaseClient, target: string): Promise<Resolved> {
+  const t = target.trim().toLowerCase();
+  if (!t) return { kind: 'none' };
+
+  // Exact email match first (highest confidence)
+  if (t.includes('@')) {
+    const { data } = await admin.from('profiles').select('id, name, email').ilike('email', t).limit(1).maybeSingle();
+    if (data) return { kind: 'single', user: data as { id: string; name: string; email: string } };
+    return { kind: 'none' };
+  }
+
+  // Name-based: exact case-insensitive first
+  const { data: exact } = await admin.from('profiles').select('id, name, email').ilike('name', t);
+  if (exact && exact.length === 1) return { kind: 'single', user: exact[0] as { id: string; name: string; email: string } };
+  if (exact && exact.length > 1) return { kind: 'multi', candidates: exact as Array<{ id: string; name: string; email: string }> };
+
+  // Substring match
+  const { data: fuzzy } = await admin.from('profiles').select('id, name, email').ilike('name', `%${t}%`).limit(10);
+  if (!fuzzy || fuzzy.length === 0) return { kind: 'none' };
+  if (fuzzy.length === 1) return { kind: 'single', user: fuzzy[0] as { id: string; name: string; email: string } };
+  return { kind: 'multi', candidates: fuzzy as Array<{ id: string; name: string; email: string }> };
 }
 
 // ─── Executor helpers ──────────────────────────────────────────────
