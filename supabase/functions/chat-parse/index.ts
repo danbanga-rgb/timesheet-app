@@ -161,6 +161,10 @@ async function handleIdle(
 
   const parsePrompt = `You classify the user's intent and extract structured data from their message.
 
+TODAY IS ${todayIso()}. Use this as the reference for any relative dates
+("monday", "tomorrow", "next friday", "in 2 weeks", etc.). Never invent a
+date from an unknown reference year.
+
 Available intents (only pick from these):
 ${allowedIntents.map((i) => `- "${i.name}": ${i.description}`).join('\n')}
 
@@ -176,7 +180,7 @@ vendor_manager, invoice_enabled, send_invite.
 Do NOT invent values. Only extract what's explicitly stated.
 For role: acceptable values are timesheetuser, manager, accountant, vendormanager, admin.
 For location_type: onshore, offshore.
-For dates: normalize to YYYY-MM-DD; interpret "monday", "next monday", "10/31", etc.
+For dates: normalize to YYYY-MM-DD relative to TODAY as noted above.
 
 User's message: """${msg.content}"""`;
 
@@ -233,12 +237,13 @@ async function handleCollecting(
   }
 
   // LLM extraction for the single field
-  const extractPrompt = `The user was asked: "${field.prompt}"
+  const isDateField = field.validate === 'date' || field.input_type === 'date';
+  const extractPrompt = `${isDateField ? `TODAY IS ${todayIso()}. Use this as the reference for any relative dates.\n\n` : ''}The user was asked: "${field.prompt}"
 Field name: ${field.name}
 Field type: ${field.input_type}
 ${field.options ? `Valid options: ${field.options.join(', ')}` : ''}
 ${field.validate === 'email' ? 'Must be a valid email format.' : ''}
-${field.validate === 'date' || field.input_type === 'date' ? 'Return date in YYYY-MM-DD format. Interpret relative dates like "monday", "next friday", "10/31".' : ''}
+${isDateField ? 'Return date in YYYY-MM-DD format relative to TODAY. Interpret "monday", "next friday", "10/31", "in 2 weeks", etc.' : ''}
 
 User's answer: """${msg.content}"""
 
@@ -512,6 +517,14 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
 
 function safeSlice(s: string): string {
   return s.slice(0, 300);
+}
+
+// Groq / LLMs have no notion of "today" — their reference date is
+// baked into training. Inject today's date into every prompt that
+// touches date parsing so relative expressions ("monday", "next
+// friday") normalize correctly.
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 // ─── Field ordering + confirmation summary ─────────────────────────
