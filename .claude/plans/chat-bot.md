@@ -209,6 +209,31 @@ Even though Phase 1 = ops only (CA, Lucien, Dan), architecture must accommodate 
 - **Slice 0: RBAC refactor** — ✅ SHIPPED (commit `8f3b1c5` on `feature/chat-mvp`). `role_permissions` table + `has_permission()` fn + seed + refactored create-user + impersonate-user. contract_admin can now call user.create via API.
 - **Slice 1: chat schema migrations** — ✅ MIGRATION SHIPPED. 4 tables (chat_conversations, chat_messages, chat_actions, chat_allowlist_audit) + profiles.chat_enabled/chat_passkey_id columns. All with RLS.
   - **UI toggle for chat_enabled deferred** — SQL enables users for MVP (5-10 lifetime flips; UI toggle would touch 6-8 sites in TimesheetSystem.tsx for a low-value polish). SQL pattern: `UPDATE profiles SET chat_enabled = true WHERE email = 'x@x.com';`
+
+- **Slice 2 (SPLIT 2026-09-01):**
+  - **2a (MVP demo):** ✅ SHIPPED. `/chat` route in existing app, gated on `Supabase session + chat_enabled=true`. Same-domain, same login as main app. NO passkey, NO subdomain.
+  - **2b (before CA onboards):** ⏸ TODO. Subdomain routing (chat.mysynergie.net) + passkey enrollment via WebAuthn (`@simplewebauthn/server` on Deno edge fn side).
+
+- **Slice 3:** ✅ SHIPPED. ChatShell renders thread + input, realtime subscription on chat_messages picks up bot replies automatically.
+- **Slice 4:** ✅ SHIPPED. `chat-parse` edge fn + declarative intent schema (intents.ts) for `user.create`. Groq Qwen 3.8-27b powers three phase-specific LLM prompts (idle/collecting/awaiting_confirmation). Universal `cancel` shortcut.
+- **Slice 5:** ✅ SHIPPED. `chat_expire_stale_conversations()` + pg_cron jobid 17 (every 5 min) enforces 60min/30min timeouts. State machine + persistence itself is inline in chat-parse.
+- **Slice 6:** ✅ SHIPPED for `user.create`. Real create-user edge fn call with caller's JWT forwarded, resolves project name → id, generates password, sends invite via send-reminder (default YES, overridable in confirmation), auto-retry-once on 5xx, chat_actions row updated with success/partial/failed. Other 4 intents (set_end_date, set_start_date, update_project, update_country_region) not yet wired — user.create is the MVP demo star.
+- **Slice 7 (core):** ✅ SHIPPED. Message rate 10/min + 200/day per user (admin: 10x); executor rate 30/hr per user (admin: 300/hr). Audit review UI deferred (Phase 2 polish).
+
+## Demo instructions (2026-09-01)
+
+1. `git checkout feature/chat-mvp` + `npm install` if needed
+2. `npm run dev` (Vite serves http://localhost:5173)
+3. Visit http://localhost:5173/chat
+4. Sign in with `dbanga@synergietechsolutions.com` (already chat_enabled=true) via Supabase magic link
+5. Try: `Sarah Chen starts Monday as timesheetuser, sarah.chen@example.com, US, APFM, onshore`
+6. Bot will confirm details, wait for YES; real create-user fires under your JWT
+
+**Known limitations for demo:**
+- No passkey / subdomain — Supabase auth on /chat sub-path. See Slice 2b.
+- Only `user.create` intent wired. Other 4 intents will error with "Executor for X not wired yet."
+- No audit review UI. Query `chat_actions` in Supabase for the history.
+- Rate limits are conservative — Dan is admin so 100/min applies.
 - Slice 2: subdomain routing + passkey enrollment page
 - Slice 3: chat UI shell + message send/receive
 - Slice 4: LLM parser + intent schema (declarative, permission-gated) + declarative field engine
