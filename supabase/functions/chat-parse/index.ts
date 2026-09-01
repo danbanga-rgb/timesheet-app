@@ -236,36 +236,78 @@ async function handleCollecting(
     return;
   }
 
-  // LLM extraction for the single field
+  // LLM extraction — user might:
+  //   (a) directly answer the current field
+  //   (b) edit a different field they already provided ("actually change email to X")
+  //   (c) provide both (edit + answer current)
+  // We give the LLM the full field catalog + captured state so it can attribute
+  // the message correctly.
   const isDateField = field.validate === 'date' || field.input_type === 'date';
-  const extractPrompt = `${isDateField ? `TODAY IS ${todayIso()}. Use this as the reference for any relative dates.\n\n` : ''}The user was asked: "${field.prompt}"
-Field name: ${field.name}
-Field type: ${field.input_type}
-${field.options ? `Valid options: ${field.options.join(', ')}` : ''}
-${field.validate === 'email' ? 'Must be a valid email format.' : ''}
-${isDateField ? 'Return date in YYYY-MM-DD format relative to TODAY. Interpret "monday", "next friday", "10/31", "in 2 weeks", etc.' : ''}
+  const fieldCatalog = spec.fields
+    .filter((f) => !f.applies_if || f.applies_if(conv.captured))
+    .map((f) => `- ${f.name} (${f.input_type})${f.options ? ` [${f.options.join('/')}]` : ''}${f.validate === 'email' ? ' [email format]' : ''}`)
+    .join('\n');
 
-User's answer: """${msg.content}"""
+  const extractPrompt = `${isDateField ? `TODAY IS ${todayIso()}. Use this as the reference for any relative dates.\n\n` : ''}The user is being asked: "${field.prompt}" (field: ${field.name})
+
+Full field catalog for the current intent (${spec.name}):
+${fieldCatalog}
+
+Currently captured so far:
+${JSON.stringify(conv.captured, null, 2)}
+
+The user's reply: """${msg.content}"""
+
+Their reply might:
+  (a) answer the current field ${field.name} directly
+  (b) edit a different field they already provided (e.g. "change email to X")
+  (c) do both
 
 Return JSON:
-{"value": <extracted-value-or-null>, "clarify": "<optional-clarifying-question-if-unclear>"}
-Do not guess. If the answer doesn't match a valid option, set value to null and provide a clarify message.`;
+{
+  "answer": <value for ${field.name} or null if not answered>,
+  "edits": { "<field-name>": "<new-value>", ... } | {},
+  "clarify": "<optional clarifying question if you couldn't figure out what they meant>"
+}
+
+Rules:
+- For each edit or answer, do NOT invent values.
+- Validate against the field type. If field is buttons and answer doesn't match, use null and set clarify.
+${field.validate === 'email' || spec.fields.some((f) => f.validate === 'email') ? '- Email fields must contain a valid @ address.\n' : ''}${isDateField || spec.fields.some((f) => f.validate === 'date' || f.input_type === 'date') ? '- Date fields normalize to YYYY-MM-DD relative to TODAY.\n' : ''}- If the user typed something unrelated (e.g. asking a question about you), answer = null and edits = {} and set clarify.`;
 
   const parsed = await callGroq(extractPrompt);
-  const value = parsed?.value ?? null;
+  const answer = parsed?.answer ?? null;
+  const edits = (parsed?.edits as Record<string, unknown> | null) ?? {};
 
-  if (value === null || value === undefined) {
+  // Merge edits + the direct answer (if any) into captured.
+  const nextCaptured = { ...conv.captured };
+  for (const [k, v] of Object.entries(edits)) {
+    if (v !== null && v !== undefined) nextCaptured[k] = v;
+  }
+  if (answer !== null && answer !== undefined) {
+    nextCaptured[fieldName] = answer;
+  }
+
+  const hadEffect = Object.keys(edits).length > 0 || (answer !== null && answer !== undefined);
+  if (!hadEffect) {
     const clarify = (parsed?.clarify as string) ??
       `I didn't catch that. ${field.prompt}${field.options ? ' Options: ' + field.options.join(', ') : ''}`;
     await writeBot(admin, conv.id, clarify);
     return;
   }
 
-  const captured = { ...conv.captured, [fieldName]: value };
+  // If they edited fields but didn't answer the current one, acknowledge briefly
+  // then re-ask (askNextFieldOrConfirm handles the "still-missing" logic).
+  const editedList = Object.keys(edits);
+  if (editedList.length > 0) {
+    const editSummary = editedList.map((k) => `${k} → ${edits[k]}`).join(', ');
+    await writeBot(admin, conv.id, `Updated: ${editSummary}.`);
+  }
+
   await admin.from('chat_conversations').update({
-    captured, missing_field: null, last_activity_at: new Date().toISOString(),
+    captured: nextCaptured, missing_field: null, last_activity_at: new Date().toISOString(),
   }).eq('id', conv.id);
-  await askNextFieldOrConfirm(admin, { ...conv, captured, missing_field: null });
+  await askNextFieldOrConfirm(admin, { ...conv, captured: nextCaptured, missing_field: null });
 }
 
 async function handleConfirmation(
