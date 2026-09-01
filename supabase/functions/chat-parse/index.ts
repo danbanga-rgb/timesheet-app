@@ -95,6 +95,35 @@ serve(async (req) => {
     return json(200, { ok: true, phase: 'cancelled' });
   }
 
+  // Rate limits (Slice 7). Admin gets 10x the base cap.
+  // Message rate: 10/min baseline (100/min admin), 200/day baseline (2000/day admin).
+  // Executor rate: 30/hr baseline (300/hr admin) — checked inside executeIntent.
+  const isAdmin = profile.role === 'admin';
+  const msgCapMin = isAdmin ? 100 : 10;
+  const msgCapDay = isAdmin ? 2000 : 200;
+  const { count: last1m } = await admin
+    .from('chat_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('direction', 'in')
+    .eq('conversation_id', conversation.id)
+    .gte('created_at', new Date(Date.now() - 60 * 1000).toISOString());
+  if ((last1m ?? 0) > msgCapMin) {
+    await writeBot(admin, conversation.id,
+      `Slow down — you've sent more than ${msgCapMin} messages in the last minute. Try again in a moment.`);
+    return json(429, { error: 'rate_limit_min' });
+  }
+  const { count: last24h } = await admin
+    .from('chat_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('direction', 'in')
+    .eq('conversation_id', conversation.id)
+    .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+  if ((last24h ?? 0) > msgCapDay) {
+    await writeBot(admin, conversation.id,
+      `Daily message cap reached (${msgCapDay}). Resets in a rolling 24-hour window.`);
+    return json(429, { error: 'rate_limit_day' });
+  }
+
   // ---- Dispatch by phase ----
   try {
     if (conversation.phase === 'idle' || !conversation.intent) {
@@ -287,6 +316,23 @@ async function executeIntent(
   spec: IntentSpec,
   jwt: string,
 ): Promise<void> {
+  // Executor rate limit: 30/hr baseline (300/hr admin) — protects against
+  // runaway loops or misuse from a compromised session.
+  const { data: profileRow } = await admin.from('profiles').select('role').eq('id', conv.user_id).single();
+  const isAdmin = profileRow?.role === 'admin';
+  const execCap = isAdmin ? 300 : 30;
+  const { count: lastHour } = await admin
+    .from('chat_actions')
+    .select('id', { count: 'exact', head: true })
+    .eq('actor_user_id', conv.user_id)
+    .gte('created_at', new Date(Date.now() - 60 * 60 * 1000).toISOString());
+  if ((lastHour ?? 0) >= execCap) {
+    await writeBot(admin, conv.id,
+      `Executor cap reached (${execCap}/hour). Try again in a bit.`);
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+
   const { data: actionRow } = await admin.from('chat_actions').insert({
     conversation_id: conv.id,
     actor_user_id: conv.user_id,
