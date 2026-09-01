@@ -168,11 +168,17 @@ date from an unknown reference year.
 Available intents (only pick from these):
 ${allowedIntents.map((i) => `- "${i.name}": ${i.description}`).join('\n')}
 
-If the user's intent matches one of these, return JSON:
+STRICT CLASSIFICATION RULES:
+- ONLY classify as user.create if the user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts", "is joining", "new hire", "new user".
+- If the user is **asking a question** ("when does X start?", "what is X's...", "where is X?", "is X still...", "who is on...", "list...", "show...", "how many..."), that is a READ query. Reads are NOT supported yet. Return intent=null with a suggested_reply that says reads aren't wired.
+- Delete / update / remove / disable / archive / assign / re-assign are ALSO not supported yet. Return intent=null with a suggested_reply.
+- If unclear, err on the side of intent=null. Do NOT force a match.
+
+If the user's intent matches one of the available intents, return JSON:
 {"intent": "<intent-name>", "fields": { ...extracted-field-values }}
 
 If unclear or unmatched:
-{"intent": null, "suggested_reply": "Short question to clarify what they want to do"}
+{"intent": null, "suggested_reply": "Short reply telling them what you CAN do — currently only creating new users."}
 
 For user.create specifically, extract only these fields (all optional at this stage):
 name, email, role, location_type, country, project, start_date, end_date,
