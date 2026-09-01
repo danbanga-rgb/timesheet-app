@@ -31,15 +31,14 @@ serve(async (req) => {
     });
   }
 
-  // Verify caller is admin
-  const { data: profile } = await adminClient
-    .from('profiles')
-    .select('role')
-    .eq('id', caller.id)
-    .single();
-
-  if (!profile || profile.role !== 'admin') {
-    return new Response(JSON.stringify({ error: 'Admin access required' }), {
+  // Permission check via has_permission() RPC. Impersonation is admin-only
+  // in practice — only admin has '*' in role_permissions, so this stays gated
+  // as before, but the check is now uniform with the rest of the RBAC surface.
+  const { data: allowed, error: permErr } = await adminClient.rpc('has_permission', {
+    uid: caller.id, perm: 'user.impersonate',
+  });
+  if (permErr || !allowed) {
+    return new Response(JSON.stringify({ error: 'Missing user.impersonate permission' }), {
       status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }

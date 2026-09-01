@@ -28,14 +28,13 @@ serve(async (req) => {
     });
   }
 
-  const { data: callerProfile } = await adminClient
-    .from('profiles')
-    .select('role')
-    .eq('id', caller.id)
-    .single();
-
-  if (!callerProfile || callerProfile.role !== 'admin') {
-    return new Response(JSON.stringify({ error: 'Admin access required' }), {
+  // Permission check via has_permission() RPC (introduced Slice 0 RBAC refactor).
+  // Anyone with user.create can call this — currently admin + contract_admin.
+  const { data: allowed, error: permErr } = await adminClient.rpc('has_permission', {
+    uid: caller.id, perm: 'user.create',
+  });
+  if (permErr || !allowed) {
+    return new Response(JSON.stringify({ error: 'Missing user.create permission' }), {
       status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
