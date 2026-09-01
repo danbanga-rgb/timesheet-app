@@ -15,6 +15,9 @@ import {
   type ChatMessage,
   type ChatProfile,
 } from './api';
+import { supabase as sb } from '../../supabaseClient';
+
+const TERMINAL_PHASES = new Set(['done', 'cancelled', 'error']);
 
 export default function ChatShell({ profile }: { profile: ChatProfile }) {
   const [conversation, setConversation] = useState<ChatConversation | null>(null);
@@ -81,12 +84,27 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
     const content = input.trim();
     setInput('');
     try {
-      const row = await sendUserMessage(conversation.id, content);
-      // Optimistically add to state so the user sees their message immediately,
-      // independent of realtime latency (dedupe guards against realtime echo).
+      // If the current conversation reached a terminal state (done/cancelled/error),
+      // re-bootstrap a fresh one first. Also re-check phase server-side to catch
+      // transitions that happened via realtime after our last snapshot.
+      const { data: latest } = await sb
+        .from('chat_conversations')
+        .select('phase')
+        .eq('id', conversation.id)
+        .single();
+      const phase = latest?.phase ?? conversation.phase;
+
+      let convId = conversation.id;
+      if (TERMINAL_PHASES.has(phase)) {
+        const fresh = await getOrCreateActiveConversation(profile.id);
+        convId = fresh.id;
+        setConversation(fresh);
+        setMessages([]);  // fresh thread visually
+      }
+
+      const row = await sendUserMessage(convId, content);
       setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
-      // Fire bot processing (best-effort; bot writes back via realtime).
-      triggerBotProcessing(conversation.id).catch((err) => {
+      triggerBotProcessing(convId).catch((err) => {
         console.error('[chat] triggerBotProcessing failed:', err);
       });
     } catch (e) {
