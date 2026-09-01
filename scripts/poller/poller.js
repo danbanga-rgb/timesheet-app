@@ -400,7 +400,7 @@ async function groqResolveContractor(subject, forwarderNote, bodyExcerpt) {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'qwen/qwen3.6-27b',
+        model: 'qwen/qwen3.8-27b',
         messages: [
           { role: 'system', content: 'You identify a single contractor (person) being referenced in a forwarded invoice email. The forwarder is an accountant who may explicitly mention the contractor by name because the original email came from a payment platform or company (Native Teams, Bimosoft, Wise, Intuit, etc.) rather than the contractor directly. Return JSON {"contractor_name": "First Last"} when a person is clearly identified. Return {"contractor_name": null} if only a company is mentioned, or if no specific person is named. Do not invent. Do not return company names. Preserve original spelling and diacritics.' },
           { role: 'user', content: userText },
@@ -3171,7 +3171,7 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
       method: 'POST',
       headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'qwen/qwen3.6-27b',
+        model: 'qwen/qwen3.8-27b',
         messages: [
           { role: 'system', content: GROQ_SANITY_SYSTEM },
           { role: 'user', content: userMsg },
@@ -3281,7 +3281,7 @@ async function groqExtractInvoice(preparedText, filename) {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'qwen/qwen3.6-27b',
+        model: 'qwen/qwen3.8-27b',
         messages: [
           { role: 'system', content: GROQ_INVOICE_SYSTEM },
           { role: 'user', content: `Filename: ${filename}\n\n${preparedText}` },
@@ -3350,7 +3350,7 @@ async function groqVisionExtractInvoice(pdfBuffer, filename) {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'qwen/qwen3.6-27b',
+        model: 'qwen/qwen3.8-27b',
         messages: [{
           role: 'user',
           content: [
