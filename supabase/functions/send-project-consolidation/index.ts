@@ -390,6 +390,31 @@ function monthBounds(monthKey: string): { start: string; end: string; label: str
   return { start: formatDate(first), end: formatDate(last), label };
 }
 
+// Rolling N-week window ending on the most recent passed Sunday (PT). Used by
+// weekly mode so start-of-month reports don't render awkward 1-2-week windows.
+function resolveWeeklyRange(nowInPt: Date, weeksN: number): { start: string; end: string; label: string } {
+  // Find last passed Sunday: getDay() is 0=Sun..6=Sat. Days to subtract to reach
+  // the most recent Sunday <= today: if today is Sun, 7 (yesterday's week's Sun);
+  // otherwise getDay(). We want the Sunday that has ALREADY passed, so on a
+  // Wednesday (weekday 3), that's 3 days back to Sunday.
+  const dow = nowInPt.getDay();
+  const daysBackToSun = dow === 0 ? 7 : dow;
+  const lastPassedSun = addDays(nowInPt, -daysBackToSun);
+  // Earliest Monday of the rolling window: (weeksN * 7 - 1) days before lastPassedSun
+  const earliestMon = addDays(lastPassedSun, -(weeksN * 7 - 1));
+  return { start: formatDate(earliestMon), end: formatDate(lastPassedSun), label: formatDateRange(earliestMon, lastPassedSun) };
+}
+
+function formatDateRange(start: Date, end: Date): string {
+  const sMonth = start.toLocaleDateString('en-US', { month: 'short' });
+  const eMonth = end.toLocaleDateString('en-US', { month: 'short' });
+  const sameMonth = start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth();
+  const sameYear = start.getFullYear() === end.getFullYear();
+  if (sameMonth) return `${sMonth} ${start.getDate()} – ${end.getDate()}, ${end.getFullYear()}`;
+  if (sameYear) return `${sMonth} ${start.getDate()} – ${eMonth} ${end.getDate()}, ${end.getFullYear()}`;
+  return `${sMonth} ${start.getDate()}, ${start.getFullYear()} – ${eMonth} ${end.getDate()}, ${end.getFullYear()}`;
+}
+
 // ─── Main handler ────────────────────────────────────────────────────────────
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -414,6 +439,12 @@ serve(async (req) => {
   const expectedHour = Number.isFinite(expectedHourParam) ? expectedHourParam : 12;
   const recipientsParam = url.searchParams.get('to') || DEFAULT_RECIPIENT;
   const recipients = recipientsParam.split(',').map(e => e.trim()).filter(e => e.includes('@'));
+  // client_to: when present, primary To swaps to these addresses and the internal
+  // `to` recipients become Cc. Used for customer-facing report variants.
+  const clientToParam = url.searchParams.get('client_to') || '';
+  const clientRecipients = clientToParam.split(',').map(e => e.trim()).filter(e => e.includes('@'));
+  const weeksParam = parseInt(url.searchParams.get('weeks') || '', 10);
+  const rollingWeeksN = Number.isFinite(weeksParam) && weeksParam > 0 ? weeksParam : 4;
 
   if (!projectsParam) {
     return new Response(JSON.stringify({ ok: false, error: 'missing projects query param' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -440,12 +471,25 @@ serve(async (req) => {
     }
   }
 
-  // Compute month bounds in PT context
+  // Compute date-range bounds in PT context. In weekly mode this is a rolling
+  // N-week window ending at the last passed Sunday. In monthly mode this is a
+  // calendar month (previous month, per resolveMonth). Var names stay
+  // "month*" for minimal diff; they mean "range start/end" in both modes.
   const ptDateStr = nowUtc.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' });
   const [ptM, ptD, ptY] = ptDateStr.split(/\D+/).filter(Boolean).map(Number);
   const nowInPt = new Date(ptY, ptM - 1, ptD);
-  const monthKey = resolveMonth(monthOverride, nowInPt, mode);
-  const { start: monthStart, end: monthEnd, label: monthLabel } = monthBounds(monthKey);
+  let monthKey: string;
+  let monthStart: string, monthEnd: string, monthLabel: string;
+  if (mode === 'monthly') {
+    monthKey = resolveMonth(monthOverride, nowInPt, mode);
+    ({ start: monthStart, end: monthEnd, label: monthLabel } = monthBounds(monthKey));
+  } else {
+    // Weekly = rolling N-week ending at last passed Sunday. monthKey retained
+    // as the range-end YYYY-MM for the response payload only.
+    const range = resolveWeeklyRange(nowInPt, rollingWeeksN);
+    monthStart = range.start; monthEnd = range.end; monthLabel = range.label;
+    monthKey = monthEnd.slice(0, 7);
+  }
 
   const supabase = createClient(SUPABASE_URL, SERVICE_KEY);
 
@@ -507,11 +551,11 @@ serve(async (req) => {
 
   // Compose email
   const asOfLabel = nowUtc.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric' });
-  const subjectPrefix = mode === 'monthly' ? '[Monthly Report]' : '[Consolidated Monthly Report]';
+  const subjectPrefix = mode === 'monthly' ? '[Monthly Report]' : '[Timesheet Summary]';
   const subject = `${subjectPrefix} ${projects.map(p => p.name).join(', ')} — ${monthLabel}`;
   const introBlurb = mode === 'monthly'
     ? `Month-end hours for <strong>${projects.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.code)})`).join(', ')}</strong> — <strong>${escapeHtml(monthLabel)}</strong>. Hours are summed by day within the calendar month; partial weeks show only the days that fall inside the month.`
-    : `Consolidated hours for ${projects.length === 1 ? 'project' : 'projects'} <strong>${projects.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.code)})`).join(', ')}</strong> — <strong>${escapeHtml(monthLabel)}</strong>.`;
+    : `Timesheet hours for ${projects.length === 1 ? 'project' : 'projects'} <strong>${projects.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.code)})`).join(', ')}</strong> — past ${rollingWeeksN} weeks (<strong>${escapeHtml(monthLabel)}</strong>).`;
   const introHtml = `
     <p style="font-family:system-ui,sans-serif;color:#374151;font-size:14px;margin:0 0 20px">${introBlurb}</p>`;
   const perProjectHtml = reports.map(r => {
@@ -533,16 +577,21 @@ serve(async (req) => {
     return `${body}\n${pendText}\n`;
   }).join('\n')}\n\n${new Date().toISOString()} · timesheets@mysynergie.net · mode=${mode}`;
 
-  // Send via Brevo — one Brevo call with multiple `to` addresses
+  // Send via Brevo. When client_to is set, primary To swaps to client
+  // addresses and the internal `to` recipients become Cc.
   if (!BREVO_API_KEY) return errorResponse('BREVO_API_KEY not configured');
+  const brevoTo = clientRecipients.length > 0 ? clientRecipients : recipients;
+  const brevoCc = clientRecipients.length > 0 ? recipients : [];
+  const brevoPayload: Record<string, unknown> = {
+    sender: FROM,
+    to: brevoTo.map(email => ({ email })),
+    subject, textContent: text, htmlContent: html,
+  };
+  if (brevoCc.length > 0) brevoPayload.cc = brevoCc.map(email => ({ email }));
   const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sender: FROM,
-      to: recipients.map(email => ({ email })),
-      subject, textContent: text, htmlContent: html,
-    }),
+    body: JSON.stringify(brevoPayload),
   });
 
   const brevoBody = await brevoRes.text();
@@ -553,6 +602,8 @@ serve(async (req) => {
     mode,
     month: monthKey,
     monthLabel,
+    to: brevoTo,
+    cc: brevoCc,
     recipients,
     unresolvedProjects: unresolved,
     projects: reports.map(r => ({
