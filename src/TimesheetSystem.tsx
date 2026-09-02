@@ -240,6 +240,7 @@ import { pushIntuitInvoiceCreateBill } from './lib/qbWrite/consumers/intuitInvoi
 import { pushConveraInvoiceCreateBill } from './lib/qbWrite/consumers/converaInvoiceCreateBill';
 import { pushConveraBillPmt } from './lib/qbWrite/consumers/converaBillPmt';
 import { pushConveraCreateBillAndPay } from './lib/qbWrite/consumers/converaCreateBillAndPay';
+import { pushConveraCreateBillFromEvent } from './lib/qbWrite/consumers/converaCreateBillFromEvent';
 import { insertConveraShadowEvents, updateConveraShadowMatch, type ConveraShadowInput, type ConveraShadowMatchUpdate } from './lib/qbIngest/converaShadow';
 import VendorDecisionModal from './components/VendorDecisionModal';
 
@@ -3304,7 +3305,11 @@ const TimesheetSystem = () => {
       const { error: upsertErr } = await supabase.from('qb_vendor_mappings').upsert(mappingRow, { onConflict: 'source,counterparty_pattern' });
       if (upsertErr) throw upsertErr;
 
-      // Retroactively apply to all pending events for this counterparty.
+      // Retroactively apply to all pending AND ignored events for this
+      // counterparty. Including 'ignored' powers the Move-from-Ignore self-
+      // serve flow: accountant opens the map widget on an ignored event
+      // (Bhavani-style) and pick Create+Pay — same save path flips the
+      // event(s) back into the appropriate ready bucket.
       // kind='ignore' → status='ignored' (won't appear in push preview)
       // kind='bill_pmt'/'bill_add_and_pmt'/'check' → status='ready'
       const nextStatus = kind === 'ignore' ? 'ignored' : 'ready';
@@ -3317,7 +3322,7 @@ const TimesheetSystem = () => {
         status_updated_at: new Date().toISOString(),
       };
       const { error: updErr } = await supabase.from('qb_ingest_events').update(eventUpdate)
-        .eq('source', source).eq('counterparty_raw', counterparty).eq('status', 'pending');
+        .eq('source', source).eq('counterparty_raw', counterparty).in('status', ['pending', 'ignored']);
       if (updErr) throw updErr;
 
       await loadQbIngestEvents();
@@ -11637,7 +11642,14 @@ const TimesheetSystem = () => {
                         return ids.length > 0 && ids.every(iid => invoices.find(inv => inv.id === iid)?.qbBillTxnId);
                       }).map(e => e.id);
                       const converaMissingBills = converaBillPmtCandidates.filter(e => !converaAllBillsExist.includes(e.id)).map(e => e.id);
-                      const [payRes, createRes, checkRes, g75Res, g76Res, converaPayRes, converaCreatePayRes] = await Promise.all([
+                      // Slice C-4: Convera Create+Pay for no-invoice events (Bhavani-style).
+                      // Filter target='bill_add_and_pmt' AND empty matched_invoice_ids
+                      // (populated matched_invoice_ids are the Intuit-orphan Case F
+                      // pattern which routes via pushIntuitCreateBill).
+                      const converaCreateFromEvent = selectedEvents.filter(e =>
+                        e.source === 'convera' && e.targetQbTxnKind === 'bill_add_and_pmt' && (e.matchedInvoiceIds ?? []).length === 0
+                      ).map(e => e.id);
+                      const [payRes, createRes, checkRes, g75Res, g76Res, converaPayRes, converaCreatePayRes, converaCreateFromEventRes] = await Promise.all([
                         payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
                         createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
                         checkEventIds.length > 0 ? pushIntuitCheck(supabase, checkEventIds) : Promise.resolve(null),
@@ -11645,11 +11657,12 @@ const TimesheetSystem = () => {
                         g76InvoiceIds.length > 0 ? pushConveraInvoiceCreateBill(supabase, g76InvoiceIds) : Promise.resolve(null),
                         converaAllBillsExist.length > 0 ? pushConveraBillPmt(supabase, converaAllBillsExist) : Promise.resolve(null),
                         converaMissingBills.length > 0 ? pushConveraCreateBillAndPay(supabase, converaMissingBills) : Promise.resolve(null),
+                        converaCreateFromEvent.length > 0 ? pushConveraCreateBillFromEvent(supabase, converaCreateFromEvent) : Promise.resolve(null),
                       ]);
                       const r = {
-                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? []), ...(g76Res?.jobIds ?? []), ...(converaPayRes?.jobIds ?? []), ...(converaCreatePayRes?.jobIds ?? [])],
-                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? []), ...(g76Res?.rejected ?? []), ...(converaPayRes?.rejected ?? []), ...(converaCreatePayRes?.rejected ?? [])],
-                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? []), ...(g76Res?.skippedDuplicate ?? []), ...(converaPayRes?.skippedDuplicate ?? []), ...(converaCreatePayRes?.skippedDuplicate ?? [])],
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? []), ...(g76Res?.jobIds ?? []), ...(converaPayRes?.jobIds ?? []), ...(converaCreatePayRes?.jobIds ?? []), ...(converaCreateFromEventRes?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? []), ...(g76Res?.rejected ?? []), ...(converaPayRes?.rejected ?? []), ...(converaCreatePayRes?.rejected ?? []), ...(converaCreateFromEventRes?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? []), ...(g76Res?.skippedDuplicate ?? []), ...(converaPayRes?.skippedDuplicate ?? []), ...(converaCreatePayRes?.skippedDuplicate ?? []), ...(converaCreateFromEventRes?.skippedDuplicate ?? [])],
                         skippedIneligible: [
                           ...(payRes?.skippedIneligible ?? []),
                           ...(createRes?.skippedIneligible ?? []),
@@ -11659,8 +11672,9 @@ const TimesheetSystem = () => {
                           ...((g76Res?.skippedIneligible ?? []).map(s => ({ eventId: -s.invoiceId, reason: s.reason }))),
                           ...(converaPayRes?.skippedIneligible ?? []),
                           ...(converaCreatePayRes?.skippedIneligible ?? []),
+                          ...(converaCreateFromEventRes?.skippedIneligible ?? []),
                         ],
-                        verifyJobIdByPayJobId: { ...(payRes?.verifyJobIdByPayJobId ?? {}), ...(converaPayRes?.verifyJobIdByPayJobId ?? {}), ...(converaCreatePayRes?.verifyJobIdByPayJobId ?? {}) },
+                        verifyJobIdByPayJobId: { ...(payRes?.verifyJobIdByPayJobId ?? {}), ...(converaPayRes?.verifyJobIdByPayJobId ?? {}), ...(converaCreatePayRes?.verifyJobIdByPayJobId ?? {}), ...(converaCreateFromEventRes?.chainedVerifyJobIdByPayJobId ?? {}) },
                       };
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
                       const payJobIds = payRes?.jobIds ?? [];
@@ -12322,6 +12336,7 @@ const TimesheetSystem = () => {
                                   <th className="px-3 py-1.5 text-left" title="Invoice-link strength.">Provenance</th>
                                   {sTh('status', 'Status')}
                                   {g.key === 'already_done' && <th className="px-3 py-1.5 text-left">Actions (our system only)</th>}
+                                  {(g.key === 'ignore' || g.key === 'ignore_backfill') && <th className="px-3 py-1.5 text-left">Actions</th>}
                                 </tr>
                               </thead>
                               <tbody>
@@ -12423,6 +12438,15 @@ const TimesheetSystem = () => {
                                               title="Accept the fuzzy match. Marks event posted + writes qb_bill_txn_id back to our invoice(s)."
                                             >Accept match</button>
                                           </div>
+                                        </td>
+                                      )}
+                                      {(g.key === 'ignore' || g.key === 'ignore_backfill') && (
+                                        <td className="px-3 py-1.5">
+                                          <button
+                                            onClick={() => openMapWidget(e.counterpartyRaw, e.source, 0)}
+                                            className="text-[10px] px-2 py-0.5 border border-indigo-300 rounded text-indigo-700 hover:bg-indigo-50"
+                                            title="Reclassify: pick a new QB action + vendor. Applies to ALL events matching this counterparty (all future events too)."
+                                          >Reclassify</button>
                                         </td>
                                       )}
                                       {g.key === 'posted' && (
