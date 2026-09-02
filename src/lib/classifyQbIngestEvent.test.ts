@@ -202,6 +202,24 @@ describe('classifyOne — Pass 2: profile-chain', () => {
     expect(r.patch.counterparty_qb_vendor_list_id).toBe('VEND-HOVER');
   });
 
+  it('Slice B: Convera event resolves via profile-chain and seeds a source=convera mapping', () => {
+    const invoice: ClassifiableInvoice = { id: 250, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const event = eventOf({
+      source: 'convera',
+      counterpartyRaw: 'HOVERCLOUD LLC BENEFICIARY',
+      matchedInvoiceIds: [250],
+    });
+    const r = classifyOne(event, ctxOf({ invoicesById: new Map([[250, invoice]]) }));
+    expect(r.source).toBe('profile-chain');
+    expect(r.patch.target_qb_txn_kind).toBe('bill_pmt');
+    expect(r.patch.status).toBe('ready');
+    // Seed carries source='convera' so the next wire from this beneficiary
+    // classifies via Pass 1 without needing an invoice match.
+    expect(r.seedMapping?.source).toBe('convera');
+    expect(r.seedMapping?.counterparty_pattern).toBe('HOVERCLOUD LLC BENEFICIARY');
+    expect(r.seedMapping?.qb_vendor_list_id).toBe('VEND-HOVER');
+  });
+
   it('skipReason="no matched invoice" when matchedInvoiceIds is empty', () => {
     const r = classifyOne(eventOf(), ctxOf());
     expect(r.source).toBe(null);

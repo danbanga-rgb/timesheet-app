@@ -5273,6 +5273,19 @@ const TimesheetSystem = () => {
             };
           });
           await insertConveraShadowEvents(supabase, shadowInputs);
+          // Slice B: auto-classify freshly-inserted Convera events. Pass 2
+          // profile-chain resolves any wires whose auto-match already carries
+          // matched_invoice_ids + resolvable qb_vendor_name — same primitive
+          // Intuit uses post-import. Also seeds qb_vendor_mappings rows with
+          // source='convera' so future wires from the same beneficiary hit
+          // Pass 1 (fast path).
+          try {
+            await loadQbVendorMappings();
+            await loadQbVendorsAndAccounts();
+            await applyClassificationPass();
+          } catch (clsErr) {
+            console.warn('[qbIngest] Post-Convera-import classification failed', clsErr);
+          }
         } catch (shadowErr) {
           console.warn('[qbIngest] Convera shadow-write failed', shadowErr);
         }
@@ -5434,6 +5447,14 @@ const TimesheetSystem = () => {
           });
         }
         await updateConveraShadowMatch(supabase, shadowUpdates);
+        // Slice B: re-run the classifier now that matched_invoice_ids are
+        // populated. Newly-matched Convera wires transition pending → ready
+        // and seed a source='convera' mapping row for the beneficiary.
+        try {
+          await applyClassificationPass();
+        } catch (clsErr) {
+          console.warn('[qbIngest] Post-Convera-match classification failed', clsErr);
+        }
       } catch (shadowErr) {
         console.warn('[qbIngest] Convera shadow match update failed', shadowErr);
       }
