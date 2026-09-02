@@ -257,6 +257,14 @@ export function reconcileEvent(
     if (event.targetQbTxnKind === 'bill_add_and_pmt') {
       return { action: 'create_bill_then_pay' };
     }
+    // Convera bill_pmt events with an invoice link: the C-2 consumer will
+    // create the missing bill + pay via depends_on chain. Don't hold —
+    // classify as create_bill_then_pay so it lands in a pushable bucket.
+    // (Intuit bill_pmt events without matched_invoice_ids still hold —
+    // no invoice link means no way for C-2 to know what to pay.)
+    if (event.targetQbTxnKind === 'bill_pmt' && event.matchedInvoiceIds.length > 0) {
+      return { action: 'create_bill_then_pay' };
+    }
     return { action: 'held', reason: 'vendor not synced (no QB state for this vendor)' };
   }
 
