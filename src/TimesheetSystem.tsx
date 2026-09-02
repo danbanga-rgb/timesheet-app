@@ -11087,11 +11087,25 @@ const TimesheetSystem = () => {
               ignore_backfill:  { border: 'border-gray-100',   head: 'bg-gray-50/60', hover: 'hover:bg-gray-100/40',    title: 'text-gray-500' },
               posted:           { border: 'border-emerald-200',head: 'bg-emerald-50', hover: 'hover:bg-emerald-100/60', title: 'text-emerald-900' },
             };
+            // Bucket by reconciler-decided reality (resolvedAction) when set,
+            // else fall back to classifier target. Splits by whether the QB bill
+            // ACTUALLY exists — matches Dan's "check bill exists → route
+            // accordingly" model. Events with matched invoices whose QB bills
+            // haven't been created yet fall into Create Bill + Pay Bill.
+            const routeToBillPmt = (e: QbIngestEvent) =>
+              e.resolvedAction === 'pay_existing_bill' ||
+              (e.resolvedAction == null && e.targetQbTxnKind === 'bill_pmt' && (e.matchedInvoiceIds ?? []).length > 0 && (e.matchedInvoiceIds ?? []).every(iid => invoices.find(inv => inv.id === iid)?.qbBillTxnId));
+            const routeToCreatePay = (e: QbIngestEvent) =>
+              e.resolvedAction === 'create_bill_then_pay' ||
+              (e.resolvedAction == null && e.targetQbTxnKind === 'bill_add_and_pmt') ||
+              // Fallback for target=bill_pmt where any bill is missing → route to create+pay
+              (e.resolvedAction == null && e.targetQbTxnKind === 'bill_pmt' && (e.matchedInvoiceIds ?? []).length > 0 && (e.matchedInvoiceIds ?? []).some(iid => !invoices.find(inv => inv.id === iid)?.qbBillTxnId));
+            const activeGate = (e: QbIngestEvent) => e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e) && e.resolvedAction !== 'already_done' && e.resolvedAction !== 'held';
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
-              { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Slice D will wire vendor mappings.',                       events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
-              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Push BillPmt against a Bill already in QB. Contractors with an invoice + Bill already there.',       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e) && e.resolvedAction !== 'already_done') },
+              { key: 'pending',          title: 'Needs classification',          hint: 'Not yet mapped to a QB vendor or push action. Map each counterparty once — future imports auto-classify.', events: qbIngestEvents.filter(e => e.status === 'pending' && !e.targetQbTxnKind) },
+              { key: 'bill_pmt',         title: 'Pay existing Bill',             hint: 'Bill already exists in QB — push BillPmt to close it.', events: qbIngestEvents.filter(e => activeGate(e) && routeToBillPmt(e)) },
               { key: 'already_done',     title: 'Already done in QB — needs verification', hint: 'QB already has bill+payment; the invoice link is fuzzy. Actions below update OUR tracking only — QB is not touched. Choose per row: mark pre-our-system, orphan (unrelated to us), or accept the fuzzy match (writes back to our invoice).', events: qbIngestEvents.filter(e => e.resolvedAction === 'already_done' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
-              { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
+              { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'No matching Bill in QB yet — chain bill_add + bill_pmt_add at push time. Covers no-invoice contractors (Arpit, Himavath) and invoiced wires whose Bills haven\'t been created yet.', events: qbIngestEvents.filter(e => activeGate(e) && routeToCreatePay(e)) },
               { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'ignore',           title: 'Ignore (deliberate skip)',      hint: 'Deliberately never pushed. Advance-payment cases (US Signature), retired vendors (CLOUDYGON), fee/holding wires.', events: qbIngestEvents.filter(e => (e.targetQbTxnKind === 'ignore' || e.status === 'ignored') && !e.rawData?.__backfill) },
               { key: 'ignore_backfill',  title: 'Pre-our-system backfill',       hint: 'Convera wires paid via IIF pre-cutover (2026-04-28) and matcher_ignore=true legacy. Backfilled to shadow qb_ingest_events for auditability. Never re-push. Collapsed by default.', events: qbIngestEvents.filter(e => (e.targetQbTxnKind === 'ignore' || e.status === 'ignored') && !!e.rawData?.__backfill) },
