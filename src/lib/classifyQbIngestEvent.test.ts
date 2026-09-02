@@ -230,7 +230,7 @@ describe('classifyOne — Pass 2: profile-chain', () => {
   it('skipReason when matched invoice id not in the map', () => {
     const r = classifyOne(eventOf({ matchedInvoiceIds: [999] }), ctxOf());
     expect(r.source).toBe(null);
-    expect(r.skipReason).toBe('matched invoice not found');
+    expect(r.skipReason).toMatch(/matched invoice 999 not found/);
   });
 
   it('skipReason when payment profile has no qbVendorName', () => {
@@ -238,7 +238,7 @@ describe('classifyOne — Pass 2: profile-chain', () => {
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invoice]]) }));
     expect(r.source).toBe(null);
-    expect(r.skipReason).toBe('profile missing qb_vendor_name');
+    expect(r.skipReason).toMatch(/profile missing qb_vendor_name/);
   });
 
   it('skipReason when qbVendorName does not match any qb_vendors row', () => {

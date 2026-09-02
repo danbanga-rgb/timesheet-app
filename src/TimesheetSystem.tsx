@@ -2481,7 +2481,12 @@ const TimesheetSystem = () => {
     const { data: pendingRows } = await supabase
       .from('qb_ingest_events')
       .select('id, source, txn_date, counterparty_raw, amount, matched_invoice_ids, raw_data')
-      .eq('status', 'pending');
+      .eq('status', 'pending')
+      // Only Intuit XLS uses matchEventsToInvoices (needs raw_data.invoice_refs).
+      // Convera events matched via the Payments-tab matcher; their matched_invoice_ids
+      // are authoritative — recomputing here would overwrite [1,2,3] with [] because
+      // Convera raw_data has no invoice_refs.
+      .eq('source', 'intuit_xlsx');
     const events = (pendingRows ?? []) as Array<{ id: number; source: string; txn_date: string; counterparty_raw: string; amount: number; matched_invoice_ids: number[]; raw_data: Record<string, unknown> | null }>;
     if (events.length === 0) return { scanned: 0, updated: 0 };
     const matcherInvoices: MatcherInvoice[] = invoices.map(i => ({

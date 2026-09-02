@@ -152,27 +152,41 @@ function applyProfileChain(
   if (event.matchedInvoiceIds.length === 0) {
     return { patch: {}, source: null, skipReason: 'no matched invoice' };
   }
-  const firstInvoiceId = event.matchedInvoiceIds[0];
-  const invoice = ctx.invoicesById.get(firstInvoiceId);
-  if (!invoice) return { patch: {}, source: null, skipReason: 'matched invoice not found' };
 
-  const qbVendorName = invoice.paymentProfileQbVendorName;
-  if (!qbVendorName) return { patch: {}, source: null, skipReason: 'profile missing qb_vendor_name' };
-
-  const vendor = ctx.vendorsByLowerName.get(qbVendorName.toLowerCase().trim());
-  if (!vendor) return { patch: {}, source: null, skipReason: `qb_vendor "${qbVendorName}" not in qb_vendors` };
-
+  // Resolve vendor for EVERY matched invoice so we can detect multi-vendor
+  // umbrella wires (Bimosoft: one wire → N sub-vendors). Single-vendor:
+  // classify + seed mapping. Multi-vendor: classify but DON'T seed a mapping
+  // (there's no single vendor to map to; consumer fans per invoice at push).
+  const vendorListIds = new Set<string>();
+  let firstVendorListId: string | null = null;
+  let firstMissingReason: string | null = null;
+  for (const invId of event.matchedInvoiceIds) {
+    const inv = ctx.invoicesById.get(invId);
+    if (!inv) { if (!firstMissingReason) firstMissingReason = `matched invoice ${invId} not found`; continue; }
+    const name = inv.paymentProfileQbVendorName?.trim();
+    if (!name) { if (!firstMissingReason) firstMissingReason = `invoice ${invId} profile missing qb_vendor_name`; continue; }
+    const v = ctx.vendorsByLowerName.get(name.toLowerCase());
+    if (!v) { if (!firstMissingReason) firstMissingReason = `qb_vendor "${name}" (invoice ${invId}) not in qb_vendors`; continue; }
+    vendorListIds.add(v.listId);
+    if (firstVendorListId == null) firstVendorListId = v.listId;
+  }
+  if (firstVendorListId == null) return { patch: {}, source: null, skipReason: firstMissingReason ?? 'no vendor resolvable from matched invoices' };
   if (!ctx.bankAccount) return { patch: {}, source: null, skipReason: 'bank account (8220) not found' };
 
   const kind: QbIngestKind = 'bill_pmt';
   const nextStatus: QbIngestStatus = 'ready';
+  const isMultiVendor = vendorListIds.size > 1;
+
   return {
-    patch: buildPatch(event, vendor.listId, kind, ctx.bankAccount.listId, null, nextStatus),
+    patch: buildPatch(event, firstVendorListId, kind, ctx.bankAccount.listId, null, nextStatus),
     source: 'profile-chain',
-    seedMapping: {
+    // Only seed mapping for single-vendor cases. Multi-vendor umbrella wires
+    // (Bimosoft-style) can't be represented as (source, counterparty_pattern)
+    // → single qb_vendor — the consumer fans per invoice at push time.
+    seedMapping: isMultiVendor ? undefined : {
       source: event.source,
       counterparty_pattern: event.counterpartyRaw,
-      qb_vendor_list_id: vendor.listId,
+      qb_vendor_list_id: firstVendorListId,
       default_target_kind: kind,
       default_bank_account_list_id: ctx.bankAccount.listId,
       default_expense_account_list_id: null,
