@@ -388,6 +388,29 @@ async function persistJobResponse(
       await supabase.from('qb_sync_jobs').update({ payload: nextPayload }).eq('id', dep.id);
     }
 
+    // Multi-slot hydration (Convera Slice C-3 same-vendor multi-invoice pay chains).
+    // The single-slot marker above only fills applications[0]. For pay_bills that
+    // have N applications each from a different bill_add parent, we need per-slot
+    // hydration. Query pending jobs whose depends_on contains this job.id (JSONB
+    // array containment) and whose payload carries __hydrate_from_deps — an array
+    // of {depJobId, applicationIndex} entries. On this parent's completion, find
+    // the entry with our job.id and fill that specific application slot.
+    const { data: multiDeps } = await supabase
+      .from('qb_sync_jobs')
+      .select('id, payload, depends_on')
+      .eq('status', 'pending')
+      .contains('depends_on', [job.id]);
+    for (const dep of ((multiDeps ?? []) as Array<{ id: number; payload: Record<string, unknown>; depends_on: number[] }>)) {
+      const dpay = dep.payload as { __hydrate_from_deps?: Array<{ depJobId: number; applicationIndex: number }>; applications?: Array<Record<string, unknown>> };
+      if (!Array.isArray(dpay.__hydrate_from_deps) || !Array.isArray(dpay.applications)) continue;
+      const slotEntry = dpay.__hydrate_from_deps.find(e => Number(e.depJobId) === job.id);
+      if (!slotEntry) continue;
+      const nextApps = dpay.applications.map((a, i) =>
+        i === slotEntry.applicationIndex ? { ...a, billTxnId: parsed.result!.txnId } : a,
+      );
+      await supabase.from('qb_sync_jobs').update({ payload: { ...dep.payload, applications: nextApps } }).eq('id', dep.id);
+    }
+
     // Orphan-create path (G7b): bill_add was triggered by a qb_ingest_event
     // with no matching invoice in our system. Persist the new bill TxnID onto
     // the event row so the follow-up pay step and reconciler can find it.

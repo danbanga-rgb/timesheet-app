@@ -1,10 +1,15 @@
-// converaCreateBillAndPay — Slice C-2 consumer tests.
+// converaCreateBillAndPay — Slice C-2/C-3 consumer tests.
 //
 // Verifies:
-//  - single-invoice event with missing bill → bill_add + chained pay_bill
-//    (with __hydrate_bill_txn_id_from_dep marker) + verify bill_query
-//  - event whose bill ALREADY exists is skipped (that's C-1 territory)
-//  - multi-invoice event skipped with Slice C-3 direction
+//  - single-invoice event, missing bill → bill_add + chained pay_bill
+//    (single-slot __hydrate_bill_txn_id_from_dep marker)
+//  - single-invoice event, bill already exists → direct pay_bill (no chain)
+//  - multi-vendor umbrella (Bimosoft-style) → per-vendor fan into N pay chains
+//  - same-vendor multi-invoice missing bills → single pay_bill with multi-slot
+//    __hydrate_from_deps marker
+//  - mixed sub-group (some existing, some missing) → pay_bill with real TxnIDs
+//    for existing slots + hydration slots for missing
+//  - is_settled defensive guard skips sub-groups with any already-paid bill
 //  - wrong source / status / target skipped
 
 import { describe, it, expect } from 'vitest';
@@ -65,53 +70,101 @@ const singleInvoiceEvent = {
   raw_data: { convera_transaction_id: 800 },
 };
 
-const multiInvoiceEvent = {
-  id: 301,
+// 4 invoices, 4 vendors — Bimosoft-style multi-vendor umbrella.
+const bimosoftUmbrellaEvent = {
+  id: 310,
   source: 'convera',
-  amount: 8000,
-  counterparty_qb_vendor_list_id: 'V-BIMO',
+  amount: 12000,
+  counterparty_qb_vendor_list_id: 'V-BIMO-A',   // classifier's Pass 2 picks first invoice's vendor; consumer refans per invoice
   status: 'ready',
   target_qb_txn_kind: 'bill_pmt',
-  matched_invoice_ids: [600, 601],
-  raw_data: { convera_transaction_id: 801 },
+  matched_invoice_ids: [700, 701, 702, 703],
+  raw_data: { convera_transaction_id: 810 },
+};
+
+// Same-vendor multi-invoice with all bills missing — needs multi-slot hydration.
+const sameVendorMultiEvent = {
+  id: 320,
+  source: 'convera',
+  amount: 10000,
+  counterparty_qb_vendor_list_id: 'V-LIIA',
+  status: 'ready',
+  target_qb_txn_kind: 'bill_pmt',
+  matched_invoice_ids: [520, 521],
+  raw_data: { convera_transaction_id: 820 },
 };
 
 const converaTxns = [
   { id: 800, confirmation_number: 'CNF-A100', date_of_order: '2026-09-01' },
-  { id: 801, confirmation_number: 'CNF-A200', date_of_order: '2026-09-01' },
+  { id: 810, confirmation_number: 'CNF-BIMO', date_of_order: '2026-09-01' },
+  { id: 820, confirmation_number: 'CNF-A320', date_of_order: '2026-09-01' },
 ];
 
-// invoice 500 has NO bill yet (C-2 territory); 501 already has one (C-1 territory)
+// invoice 500 missing bill; 501 has one; 520/521 missing bills (same vendor).
+// 700-703 all missing bills, each a different vendor (Bimosoft).
 const invoices = [
   { id: 500, user_id: 'U-LIIA', qb_bill_txn_id: null, total_amount: 5000, invoice_number: 'INV 58', period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Liia' }, group_key: null },
   { id: 501, user_id: 'U-LIIA', qb_bill_txn_id: 'LIIA-EXISTING-BILL', total_amount: 5000, invoice_number: 'INV 59', period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Liia' }, group_key: null },
+  { id: 520, user_id: 'U-LIIA', qb_bill_txn_id: null, total_amount: 6000, invoice_number: 'INV 60', period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Liia' }, group_key: null },
+  { id: 521, user_id: 'U-LIIA', qb_bill_txn_id: null, total_amount: 4000, invoice_number: 'INV 61', period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Liia' }, group_key: null },
+  { id: 700, user_id: 'U-AMAR',   qb_bill_txn_id: null, total_amount: 3000, invoice_number: 'INV 1',  period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Bimosoft - Amar' },     group_key: null },
+  { id: 701, user_id: 'U-ANELA',  qb_bill_txn_id: null, total_amount: 3000, invoice_number: 'INV 2',  period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Bimosoft - Anela' },    group_key: null },
+  { id: 702, user_id: 'U-FADIL',  qb_bill_txn_id: null, total_amount: 3000, invoice_number: 'INV 3',  period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Bimosoft - Fadil' },    group_key: null },
+  { id: 703, user_id: 'U-NARETENA', qb_bill_txn_id: null, total_amount: 3000, invoice_number: 'INV 4', period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: { qbVendorName: 'Bimosoft - Naretena' }, group_key: null },
 ];
 
 const vendors = [
   { list_id: 'V-LIIA', name: 'Liia' },
-  { list_id: 'V-BIMO', name: 'Bimosoft - Someone' },
+  { list_id: 'V-BIMO-A',    name: 'Bimosoft - Amar' },
+  { list_id: 'V-BIMO-AN',   name: 'Bimosoft - Anela' },
+  { list_id: 'V-BIMO-F',    name: 'Bimosoft - Fadil' },
+  { list_id: 'V-BIMO-N',    name: 'Bimosoft - Naretena' },
 ];
 
 const bankAccounts = [
   { list_id: 'A-WU', full_name: 'BANK/CASH:Western Union Holding', account_type: 'Bank', is_active: true },
-  // Expense account so pushConveraInvoiceCreateBill's qb_accounts lookup resolves.
   { list_id: 'EXP-VENDOR-CONSULTANTS', full_name: 'Vendor Consultants', account_type: 'Expense', is_active: true },
 ];
 
-// Payment profiles for the delegated pushConveraInvoiceCreateBill's vendor resolution.
 const paymentProfiles = [
-  { id: 33, user_id: 'U-LIIA', qb_vendor_name: 'Liia', is_default: true, company_name: 'Liia PE' },
+  { id: 33, user_id: 'U-LIIA',      qb_vendor_name: 'Liia',                 is_default: true, company_name: 'Liia PE' },
+  { id: 34, user_id: 'U-AMAR',      qb_vendor_name: 'Bimosoft - Amar',      is_default: true, company_name: 'Bimosoft A' },
+  { id: 35, user_id: 'U-ANELA',     qb_vendor_name: 'Bimosoft - Anela',     is_default: true, company_name: 'Bimosoft An' },
+  { id: 36, user_id: 'U-FADIL',     qb_vendor_name: 'Bimosoft - Fadil',     is_default: true, company_name: 'Bimosoft F' },
+  { id: 37, user_id: 'U-NARETENA',  qb_vendor_name: 'Bimosoft - Naretena',  is_default: true, company_name: 'Bimosoft N' },
 ];
 
-// qb_vendor_mappings — provides default_expense_account_list_id so
-// pushConveraInvoiceCreateBill doesn't need to fall back to accountant probe.
 const qbVendorMappings = [
-  { qb_vendor_list_id: 'V-LIIA', default_expense_account_list_id: 'EXP-VENDOR-CONSULTANTS' },
+  { qb_vendor_list_id: 'V-LIIA',    default_expense_account_list_id: 'EXP-VENDOR-CONSULTANTS' },
+  { qb_vendor_list_id: 'V-BIMO-A',  default_expense_account_list_id: 'EXP-VENDOR-CONSULTANTS' },
+  { qb_vendor_list_id: 'V-BIMO-AN', default_expense_account_list_id: 'EXP-VENDOR-CONSULTANTS' },
+  { qb_vendor_list_id: 'V-BIMO-F',  default_expense_account_list_id: 'EXP-VENDOR-CONSULTANTS' },
+  { qb_vendor_list_id: 'V-BIMO-N',  default_expense_account_list_id: 'EXP-VENDOR-CONSULTANTS' },
 ];
 
 const profiles = [
   { id: 'U-LIIA', name: 'Liia Khaustova' },
+  { id: 'U-AMAR', name: 'Amar Pljevljak' },
+  { id: 'U-ANELA', name: 'Anela Kaltak' },
+  { id: 'U-FADIL', name: 'Fadil Kalaca' },
+  { id: 'U-NARETENA', name: 'Naretena Arnaut' },
 ];
+
+function baseTables(overrides: Record<string, Row[]> = {}) {
+  return {
+    convera_transactions: converaTxns,
+    invoices,
+    qb_vendors: vendors,
+    qb_accounts: bankAccounts,
+    payment_profiles: paymentProfiles,
+    qb_vendor_mappings: qbVendorMappings,
+    profiles,
+    qb_mirror: [],
+    convera_transaction_billpmts: [],
+    convera_transaction_invoices: [],
+    ...overrides,
+  };
+}
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -120,122 +173,122 @@ describe('pushConveraCreateBillAndPay', () => {
     const { client, inserts } = makeMockSupabase({});
     const r = await pushConveraCreateBillAndPay(client, []);
     expect(r.jobIds).toEqual([]);
-    expect(r.billAddJobIds).toEqual([]);
     expect(r.chainedPayJobIds).toEqual([]);
     expect(inserts).toHaveLength(0);
   });
 
-  it('skips multi-invoice events with Slice C-3 direction', async () => {
-    const { client } = makeMockSupabase({
-      qb_ingest_events: [multiInvoiceEvent],
-      convera_transactions: converaTxns,
-      invoices,
-      qb_vendors: vendors,
-      qb_accounts: bankAccounts,
-    });
-    const r = await pushConveraCreateBillAndPay(client, [301]);
-    expect(r.chainedPayJobIds).toEqual([]);
-    expect(r.skippedIneligible[0].reason).toMatch(/matched_invoice_ids has 2 entries/);
-    expect(r.skippedIneligible[0].reason).toMatch(/Slice C-3/);
-  });
-
-  it('skips events whose bill already exists (routes to C-1 instead)', async () => {
-    const existingBillEvent = { ...singleInvoiceEvent, id: 302, matched_invoice_ids: [501] };
-    const { client } = makeMockSupabase({
-      qb_ingest_events: [existingBillEvent],
-      convera_transactions: converaTxns,
-      invoices,
-      qb_vendors: vendors,
-      qb_accounts: bankAccounts,
-    });
-    const r = await pushConveraCreateBillAndPay(client, [302]);
-    expect(r.chainedPayJobIds).toEqual([]);
-    expect(r.skippedIneligible[0].reason).toMatch(/already has qb_bill_txn_id/);
-    expect(r.skippedIneligible[0].reason).toMatch(/C-1/);
-  });
-
-  it('skips events with wrong source / status / target_qb_txn_kind', async () => {
-    const wrong = { ...singleInvoiceEvent, id: 303, source: 'intuit_xlsx' };
-    const { client } = makeMockSupabase({
-      qb_ingest_events: [wrong], convera_transactions: converaTxns, invoices,
-      qb_vendors: vendors, qb_accounts: bankAccounts,
-    });
-    const r = await pushConveraCreateBillAndPay(client, [303]);
-    expect(r.chainedPayJobIds).toEqual([]);
-    expect(r.skippedIneligible[0].reason).toMatch(/source='intuit_xlsx'/);
-  });
-
-  it('single-invoice event with missing bill → bill_add + chained pay + verify with hydration marker', async () => {
-    const { client, inserts } = makeMockSupabase({
+  it('single-invoice missing bill → bill_add + chained pay_bill with single-slot hydration', async () => {
+    const { client, inserts } = makeMockSupabase(baseTables({
       qb_ingest_events: [singleInvoiceEvent],
-      convera_transactions: converaTxns,
-      invoices,
-      qb_vendors: vendors,
-      qb_accounts: bankAccounts,
-      payment_profiles: paymentProfiles,
-      qb_vendor_mappings: qbVendorMappings,
-      profiles,
-      qb_mirror: [],   // no existing bill in mirror; qbWrite executor uses it for idempotency check
-      convera_transaction_billpmts: [],
-    });
+    }));
     const r = await pushConveraCreateBillAndPay(client, [300], { auditTag: 'c2-test' });
-
-    // Should enqueue: 1 bill_add (via delegated consumer) + 1 chained bill_pmt_add + 1 verify bill_query.
+    expect(r.chainedPayJobIds).toHaveLength(1);
+    expect(r.billAddJobIds).toHaveLength(1);
     const jobInserts = inserts.filter(i => i.table === 'qb_sync_jobs');
-    expect(jobInserts.length).toBeGreaterThanOrEqual(2);   // pay + verify (bill_add also inserts but through the delegated path)
-
-    expect(r.billAddJobIds.length).toBe(1);
-    expect(r.chainedPayJobIds.length).toBe(1);
-    const payJobId = r.chainedPayJobIds[0];
-    expect(r.verifyJobIdByPayJobId[payJobId]).toBeDefined();
-
-    // Find the pay_bill insert and verify shape.
     const payInsert = jobInserts.find(i => (i.rows[0] as { kind: string }).kind === 'bill_pmt_add');
     expect(payInsert).toBeDefined();
-    const payPayload = (payInsert!.rows[0] as { payload: Record<string, unknown> }).payload;
-    expect(payPayload.payeeVendorName).toBe('Liia');
-    expect(payPayload.bankAccountName).toBe('BANK/CASH:Western Union Holding');
-    expect(payPayload.refNumber).toBe('CNF-A100');
-    expect(payPayload.sourceConveraTxnId).toBe(800);
-    expect(payPayload.__hydrate_bill_txn_id_from_dep).toBe(r.billAddJobIds[0]);
-    expect(payPayload.applications).toEqual([{ billTxnId: null, paymentAmount: 5000 }]);
-    expect((payInsert!.rows[0] as { depends_on: number[] }).depends_on).toEqual([r.billAddJobIds[0]]);
-
-    // Verify chain: our C-2 verify (has __verify_for_event_id). The
-    // delegated converaInvoiceCreateBill also emits its own bill_query
-    // verify on the bill_add — we skip that one.
-    const ourVerifyInsert = jobInserts.find(i => {
-      const row = i.rows[0] as { kind: string; payload?: Record<string, unknown> };
-      return row.kind === 'bill_query' && row.payload?.__verify_for_event_id === 300;
-    });
-    expect(ourVerifyInsert).toBeDefined();
-    const verifyPayload = (ourVerifyInsert!.rows[0] as { payload: Record<string, unknown> }).payload;
-    expect(verifyPayload.txnIds).toEqual([null]);
-    expect(verifyPayload.__hydrate_bill_txn_id_from_dep).toBe(r.billAddJobIds[0]);
-    expect((ourVerifyInsert!.rows[0] as { depends_on: number[] }).depends_on).toEqual([payJobId]);
+    const payload = (payInsert!.rows[0] as { payload: Record<string, unknown> }).payload;
+    expect(payload.payeeVendorName).toBe('Liia');
+    expect(payload.bankAccountName).toBe('BANK/CASH:Western Union Holding');
+    expect(payload.refNumber).toBe('CNF-A100');
+    expect(payload.sourceConveraTxnId).toBe(800);
+    // Single-slot: uses legacy __hydrate_bill_txn_id_from_dep marker for backward compat.
+    expect(payload.__hydrate_bill_txn_id_from_dep).toBe(r.billAddJobIds[0]);
+    expect(payload.__hydrate_from_deps).toBeUndefined();
+    expect(payload.applications).toEqual([{ billTxnId: null, paymentAmount: 5000 }]);
   });
 
-  it('propagates skips from delegated bill_add consumer up to eventId keying', async () => {
-    // Force a create_bill skip by providing an invoice with no payment_profile
-    // (converaInvoiceCreateBill will skip: no qb_vendor_name resolvable).
-    const badInvoices = [
-      { id: 500, user_id: 'U-UNKNOWN', qb_bill_txn_id: null, total_amount: 5000, invoice_number: 'INV 58', period_end: '2026-08-31', status: 'approved', payment_method: 'Convera', payment_profile: null, group_key: null },
-    ];
-    const { client } = makeMockSupabase({
-      qb_ingest_events: [singleInvoiceEvent],
-      convera_transactions: converaTxns,
-      invoices: badInvoices,
-      qb_vendors: vendors,
-      qb_accounts: bankAccounts,
-      payment_profiles: [],
-      qb_vendor_mappings: qbVendorMappings,
-      profiles,
-      qb_mirror: [],
-      convera_transaction_billpmts: [],
-    });
-    const r = await pushConveraCreateBillAndPay(client, [300]);
+  it('single-invoice existing bill → direct pay_bill, no bill_add chain, no hydration', async () => {
+    const existingBillEvent = { ...singleInvoiceEvent, id: 302, matched_invoice_ids: [501] };
+    const { client, inserts } = makeMockSupabase(baseTables({
+      qb_ingest_events: [existingBillEvent],
+      qb_mirror: [{ entity_kind: 'bill', entity_ref: 'LIIA-EXISTING-BILL', is_settled: false }],
+    }));
+    const r = await pushConveraCreateBillAndPay(client, [302]);
+    expect(r.chainedPayJobIds).toHaveLength(1);
+    expect(r.billAddJobIds).toHaveLength(0);
+    const jobInserts = inserts.filter(i => i.table === 'qb_sync_jobs');
+    const payInsert = jobInserts.find(i => (i.rows[0] as { kind: string }).kind === 'bill_pmt_add');
+    const payload = (payInsert!.rows[0] as { payload: Record<string, unknown> }).payload;
+    expect(payload.applications).toEqual([{ billTxnId: 'LIIA-EXISTING-BILL', paymentAmount: 5000 }]);
+    expect(payload.__hydrate_bill_txn_id_from_dep).toBeUndefined();
+    expect(payload.__hydrate_from_deps).toBeUndefined();
+    expect((payInsert!.rows[0] as { depends_on: number[] }).depends_on).toEqual([]);
+  });
+
+  it('multi-vendor Bimosoft umbrella → fans per vendor, emits N pay_bill chains sharing sourceConveraTxnId', async () => {
+    const { client, inserts } = makeMockSupabase(baseTables({
+      qb_ingest_events: [bimosoftUmbrellaEvent],
+    }));
+    const r = await pushConveraCreateBillAndPay(client, [310]);
+    expect(r.chainedPayJobIds).toHaveLength(4);   // one pay per vendor
+    expect(r.billAddJobIds).toHaveLength(4);      // one bill_add per invoice
+    const payInserts = inserts.filter(i => i.table === 'qb_sync_jobs' && (i.rows[0] as { kind: string }).kind === 'bill_pmt_add');
+    expect(payInserts).toHaveLength(1);           // one insert call containing 4 rows
+    const rowsInserted = payInserts[0].rows as Array<{ payload: Record<string, unknown> }>;
+    expect(rowsInserted).toHaveLength(4);
+    const payeeNames = rowsInserted.map(r => r.payload.payeeVendorName).sort();
+    expect(payeeNames).toEqual([
+      'Bimosoft - Amar', 'Bimosoft - Anela', 'Bimosoft - Fadil', 'Bimosoft - Naretena',
+    ]);
+    // All 4 pay_bills reference the same wire.
+    for (const row of rowsInserted) {
+      expect(row.payload.sourceConveraTxnId).toBe(810);
+      expect(row.payload.refNumber).toBe('CNF-BIMO');
+      expect(row.payload.applications).toHaveLength(1);
+    }
+  });
+
+  it('same-vendor multi-invoice missing bills → single pay_bill with multi-slot __hydrate_from_deps', async () => {
+    const { client, inserts } = makeMockSupabase(baseTables({
+      qb_ingest_events: [sameVendorMultiEvent],
+    }));
+    const r = await pushConveraCreateBillAndPay(client, [320]);
+    expect(r.chainedPayJobIds).toHaveLength(1);
+    expect(r.billAddJobIds).toHaveLength(2);
+    const jobInserts = inserts.filter(i => i.table === 'qb_sync_jobs');
+    const payInsert = jobInserts.find(i => (i.rows[0] as { kind: string }).kind === 'bill_pmt_add');
+    const payload = (payInsert!.rows[0] as { payload: Record<string, unknown> }).payload;
+    expect(payload.applications).toEqual([
+      { billTxnId: null, paymentAmount: 6000 },
+      { billTxnId: null, paymentAmount: 4000 },
+    ]);
+    // Multi-slot: uses __hydrate_from_deps, NOT the legacy single-slot marker.
+    expect(payload.__hydrate_bill_txn_id_from_dep).toBeUndefined();
+    expect(payload.__hydrate_from_deps).toBeDefined();
+    const hydrateSlots = payload.__hydrate_from_deps as Array<{ depJobId: number; applicationIndex: number }>;
+    expect(hydrateSlots).toHaveLength(2);
+    expect(hydrateSlots.map(s => s.applicationIndex).sort()).toEqual([0, 1]);
+    expect((payInsert!.rows[0] as { depends_on: number[] }).depends_on).toHaveLength(2);
+  });
+
+  it('is_settled guard: skips sub-group when any existing bill is already settled', async () => {
+    const existingBillEvent = { ...singleInvoiceEvent, id: 303, matched_invoice_ids: [501] };
+    const { client } = makeMockSupabase(baseTables({
+      qb_ingest_events: [existingBillEvent],
+      qb_mirror: [{ entity_kind: 'bill', entity_ref: 'LIIA-EXISTING-BILL', is_settled: true }],
+    }));
+    const r = await pushConveraCreateBillAndPay(client, [303]);
     expect(r.chainedPayJobIds).toEqual([]);
-    const skipReasons = r.skippedIneligible.map(s => s.reason).join('\n');
-    expect(skipReasons).toMatch(/bill_add/);
+    expect(r.skippedIneligible[0].reason).toMatch(/already settled/);
+  });
+
+  it('is_settled guard: skips sub-group when existing bill missing from qb_mirror', async () => {
+    const existingBillEvent = { ...singleInvoiceEvent, id: 304, matched_invoice_ids: [501] };
+    const { client } = makeMockSupabase(baseTables({
+      qb_ingest_events: [existingBillEvent],
+      qb_mirror: [],   // no mirror row for LIIA-EXISTING-BILL
+    }));
+    const r = await pushConveraCreateBillAndPay(client, [304]);
+    expect(r.chainedPayJobIds).toEqual([]);
+    expect(r.skippedIneligible[0].reason).toMatch(/not in qb_mirror/);
+  });
+
+  it('skips events with wrong source', async () => {
+    const wrong = { ...singleInvoiceEvent, id: 305, source: 'intuit_xlsx' };
+    const { client } = makeMockSupabase(baseTables({ qb_ingest_events: [wrong] }));
+    const r = await pushConveraCreateBillAndPay(client, [305]);
+    expect(r.chainedPayJobIds).toEqual([]);
+    expect(r.skippedIneligible[0].reason).toMatch(/source='intuit_xlsx'/);
   });
 });
