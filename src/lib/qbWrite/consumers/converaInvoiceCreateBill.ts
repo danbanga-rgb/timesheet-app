@@ -255,7 +255,7 @@ export async function pushConveraInvoiceCreateBill(
     // ── Eligibility: all members must pass ──
     let eligibilityReason: string | null = null;
     for (const m of g.members) {
-      if (m.status !== 'approved') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) status='${m.status}'`; break; }
+      if (m.status !== 'approved' && m.status !== 'paid') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) status='${m.status}' — must be 'approved' or 'paid'`; break; }
       if (m.qb_bill_txn_id) { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) already has qb_bill_txn_id=${m.qb_bill_txn_id}`; break; }
       if (m.payment_method !== 'Convera') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) payment_method='${m.payment_method ?? 'null'}'`; break; }
       if (!m.period_end || m.period_end < CONVERA_PRE_OUR_SYSTEM_CUTOFF) { eligibilityReason = `group blocked: invoice ${m.id} period_end=${m.period_end ?? 'null'} < cutoff ${CONVERA_PRE_OUR_SYSTEM_CUTOFF}`; break; }

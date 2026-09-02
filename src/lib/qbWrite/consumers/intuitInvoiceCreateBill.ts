@@ -128,8 +128,8 @@ export async function pushIntuitInvoiceCreateBill(
   // ─── Eligibility filter ─────────────────────────────────────────────────
   const eligible: InvoiceRow[] = [];
   for (const inv of invoices) {
-    if (inv.status !== 'approved') {
-      skippedIneligible.push({ invoiceId: inv.id, reason: `status='${inv.status}' — must be 'approved'` });
+    if (inv.status !== 'approved' && inv.status !== 'paid') {
+      skippedIneligible.push({ invoiceId: inv.id, reason: `status='${inv.status}' — must be 'approved' or 'paid'` });
       continue;
     }
     if (inv.qb_bill_txn_id) {

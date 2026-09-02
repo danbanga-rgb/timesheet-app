@@ -10843,7 +10843,10 @@ const TimesheetSystem = () => {
             // land here (they auto-resolve at approval time via Slice 1).
             const needsVendorDecisionByInvoiceId = new Map<number, { snapCompany: string | null; conflictNames?: string[]; targetPaymentProfileId: number | null }>();
             for (const inv of invoices) {
-              if (inv.status !== 'approved') continue;
+              // Include paid invoices too — a Convera-matched invoice flips to
+              // 'paid' but its QB Bill may still not exist (only IIF-exported
+              // BillPayments push today). See Missing QB Bills panel below.
+              if (inv.status !== 'approved' && inv.status !== 'paid') continue;
               if (inv.qbBillTxnId) continue;
               const pm = paymentMethod(inv);
               if (!['Intuit', 'Convera'].includes(pm)) continue;
@@ -10904,7 +10907,11 @@ const TimesheetSystem = () => {
               vendorMapped: boolean;
             };
             const missingBills: MissingBill[] = invoices
-              .filter(inv => inv.status === 'approved')
+              // Include 'paid' too: Convera match flips invoice to 'paid' but
+              // the QB Bill may still not exist (Convera BillPayments push via
+              // IIF export today, not qb_ingest_events). Without this, paid-
+              // but-no-Bill-in-QB invoices become invisible.
+              .filter(inv => inv.status === 'approved' || inv.status === 'paid')
               // Cutoff differs by payment path: Intuit June 2026+, Convera April 2026+.
               // Unassigned falls back to Intuit's cutoff (stricter) so unclassified
               // rows aren't over-surfaced.
@@ -11413,7 +11420,9 @@ const TimesheetSystem = () => {
                     const g75Ready: QbIngestEvent[] = [];
                     const g76Ready: QbIngestEvent[] = [];
                     for (const inv of invoices) {
-                      if (inv.status !== 'approved') continue;
+                      // Include 'paid' — Convera-matched invoices need their
+                      // Bill in QB even after our-side reconciliation.
+                      if (inv.status !== 'approved' && inv.status !== 'paid') continue;
                       if (inv.qbBillTxnId) continue;
                       if (!inv.periodEnd) continue;
                       if (!inv.invoiceNumber?.trim()) continue;
@@ -11742,7 +11751,7 @@ const TimesheetSystem = () => {
                         className="w-full flex items-center justify-between px-4 py-3 hover:bg-red-100/40 text-left"
                       >
                         <div>
-                          <span className="font-semibold text-red-900">Needs vendor decision — approved invoices missing QB vendor mapping</span>
+                          <span className="font-semibold text-red-900">Needs vendor decision — approved/paid invoices missing QB vendor mapping</span>
                           <span className="ml-2 text-sm text-red-800">· {rows.length} invoice{rows.length === 1 ? '' : 's'}</span>
                           {rows.length > 0 && <span className="ml-2 text-sm text-red-800">· {fmtMoney(total)}</span>}
                         </div>
@@ -11833,7 +11842,7 @@ const TimesheetSystem = () => {
                         className="w-full flex items-center justify-between px-4 py-3 hover:bg-amber-100/40 text-left"
                       >
                         <div>
-                          <span className="font-semibold text-amber-900">Missing QB bills — approved invoices without a Bill in QB</span>
+                          <span className="font-semibold text-amber-900">Missing QB bills — approved/paid invoices without a Bill in QB</span>
                           <span className="ml-2 text-sm text-amber-800">· {missingBills.length} invoice{missingBills.length === 1 ? '' : 's'}</span>
                           {missingBills.length > 0 && (
                             <span className="ml-2 text-sm text-amber-800">· {fmtMoney(totalAmt)}</span>
