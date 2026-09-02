@@ -7,7 +7,7 @@ import { Loader2, Send, LogOut } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import {
   getOrCreateActiveConversation,
-  listMessages,
+  listRecentMessagesForUser,
   sendUserMessage,
   triggerBotProcessing,
   signOutChat,
@@ -27,7 +27,8 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Bootstrap: get/create active conversation + load its message history.
+  // Bootstrap: get/create active conversation + load user's recent history
+  // across ALL conversations (so past turns survive session/refresh).
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -35,9 +36,9 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
         const conv = await getOrCreateActiveConversation(profile.id);
         if (!mounted) return;
         setConversation(conv);
-        const msgs = await listMessages(conv.id);
+        const history = await listRecentMessagesForUser(profile.id);
         if (!mounted) return;
-        setMessages(msgs);
+        setMessages(history);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -83,6 +84,14 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
     setError(null);
     const content = input.trim();
     setInput('');
+
+    // Slash commands (client-side, don't hit the bot).
+    if (content === '/clear') {
+      setMessages([]);
+      setSending(false);
+      return;
+    }
+
     try {
       // If the current conversation reached a terminal state (done/cancelled/error),
       // re-bootstrap a fresh one first. Also re-check phase server-side to catch
@@ -99,7 +108,8 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
         const fresh = await getOrCreateActiveConversation(profile.id);
         convId = fresh.id;
         setConversation(fresh);
-        setMessages([]);  // fresh thread visually
+        // Keep prior messages visible — user can /clear to wipe view.
+        // New conversation's messages append via realtime + local push.
       }
 
       const row = await sendUserMessage(convId, content);

@@ -208,6 +208,30 @@ User's message: """${msg.content}"""`;
 
   const captured = normalizeCaptured(spec, (parsed?.fields as Record<string, unknown>) ?? {});
 
+  // Guard: if the LLM classified user.create but a user with the extracted
+  // name/email already exists, ask before creating a duplicate. Catches
+  // "set start date for Test Contractor" misclassified as create.
+  if (intent === 'user.create') {
+    const nameCandidate = typeof captured.name === 'string' ? captured.name.trim() : '';
+    const emailCandidate = typeof captured.email === 'string' ? captured.email.trim().toLowerCase() : '';
+    if (nameCandidate || emailCandidate) {
+      let query = admin.from('profiles').select('id, name, email').limit(1);
+      if (emailCandidate) query = query.eq('email', emailCandidate);
+      else query = query.ilike('name', nameCandidate);
+      const { data: existing } = await query;
+      if (existing && existing.length > 0) {
+        const found = existing[0] as { name: string; email: string };
+        await writeBot(admin, conv.id,
+          `"${found.name}" (${found.email}) already exists. Did you mean one of:\n` +
+          `  • Set start date: "set start date for ${found.name} to <date>"\n` +
+          `  • Set end date: "${found.name} ends <date>"\n` +
+          `Or type a different name to create a new user, or "cancel".`);
+        // Stay in idle phase — user re-phrases and we re-classify.
+        return;
+      }
+    }
+  }
+
   await admin.from('chat_conversations').update({
     intent,
     captured,
@@ -719,6 +743,11 @@ function normalizeCaptured(spec: IntentSpec, raw: Record<string, unknown>): Reco
     if (spec.fields.find((f) => f.name === k)) {
       out[k] = v;
     }
+  }
+  // Derive location_type from country when not explicitly set.
+  // US→onshore, any other country→offshore. User can override in confirmation.
+  if (spec.name === 'user.create' && out.country && !out.location_type) {
+    out.location_type = out.country === 'US' ? 'onshore' : 'offshore';
   }
   return out;
 }

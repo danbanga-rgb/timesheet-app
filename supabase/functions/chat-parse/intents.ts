@@ -74,25 +74,28 @@ export const INTENTS: IntentSpec[] = [
         validate: 'email',
       },
       {
+        name: 'country',
+        prompt: 'Country?',
+        input_type: 'buttons+text',
+        options: ['US', 'GB', 'HR', 'RS', 'BA', 'MK', 'CA', 'SI'],
+        required: true,
+      },
+      {
         name: 'role',
         prompt: 'What role?',
         input_type: 'buttons',
         options: ['timesheetuser', 'manager', 'accountant', 'vendormanager', 'admin'],
-        required: true,
+        default: 'timesheetuser',
+        ask_only_if_mentioned: true,
       },
       {
         name: 'location_type',
         prompt: 'Onshore or offshore?',
         input_type: 'buttons',
         options: ['onshore', 'offshore'],
-        required: true,
-      },
-      {
-        name: 'country',
-        prompt: 'Country?',
-        input_type: 'buttons+text',
-        options: ['US', 'GB', 'HR', 'RS', 'BA', 'MK', 'CA', 'SI'],
-        encouraged: true,
+        ask_only_if_mentioned: true,
+        // Auto-derived from country in normalizeCaptured: US→onshore, else→offshore.
+        // User can override in confirmation summary.
       },
       {
         name: 'project',

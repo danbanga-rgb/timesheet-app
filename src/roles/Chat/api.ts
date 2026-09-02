@@ -85,6 +85,30 @@ export async function listMessages(conversationId: string): Promise<ChatMessage[
   return (data ?? []) as ChatMessage[];
 }
 
+// Persistent history: fetch the user's recent messages across ALL conversations
+// so scrolling back shows prior turns after refresh / new-session bootstrap.
+// Cap at 200 (rolling ~week for CA's expected volume). User can /clear to hide.
+export async function listRecentMessagesForUser(userId: string, limit = 200): Promise<ChatMessage[]> {
+  // Fetch conversation ids owned by this user, then messages joined by conv_id.
+  const { data: convs } = await supabase
+    .from('chat_conversations')
+    .select('id')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(50);
+  const convIds = (convs ?? []).map((c: { id: string }) => c.id);
+  if (convIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from('chat_messages')
+    .select('*')
+    .in('conversation_id', convIds)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`Failed to load history: ${error.message}`);
+  // Return ascending for display (oldest → newest).
+  return ((data ?? []) as ChatMessage[]).reverse();
+}
+
 // Send an inbound message from the user. Returns the created row.
 export async function sendUserMessage(conversationId: string, content: string): Promise<ChatMessage> {
   const { data, error } = await supabase
