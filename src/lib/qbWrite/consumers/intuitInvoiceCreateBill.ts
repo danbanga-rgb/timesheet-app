@@ -63,6 +63,7 @@ interface InvoiceRow {
   payment_method: string | null;
   qb_bill_txn_id: string | null;
   payment_profile: Record<string, unknown> | null;
+  matcher_ignore: boolean | null;
 }
 
 interface ProfileRow {
@@ -117,7 +118,7 @@ export async function pushIntuitInvoiceCreateBill(
   // ─── Fetch invoices ─────────────────────────────────────────────────────
   const { data: invoiceData } = await supabase
     .from('invoices')
-    .select('id, user_id, invoice_number, total_amount, period_end, status, payment_method, qb_bill_txn_id, payment_profile')
+    .select('id, user_id, invoice_number, total_amount, period_end, status, payment_method, qb_bill_txn_id, payment_profile, matcher_ignore')
     .in('id', invoiceIds);
   const invoices = (invoiceData ?? []) as InvoiceRow[];
   const foundIds = new Set(invoices.map(i => i.id));
@@ -130,6 +131,10 @@ export async function pushIntuitInvoiceCreateBill(
   for (const inv of invoices) {
     if (inv.status !== 'approved' && inv.status !== 'paid') {
       skippedIneligible.push({ invoiceId: inv.id, reason: `status='${inv.status}' — must be 'approved' or 'paid'` });
+      continue;
+    }
+    if (inv.matcher_ignore === true) {
+      skippedIneligible.push({ invoiceId: inv.id, reason: 'matcher_ignore=true (pre-our-system legacy) — never push to QB pipeline' });
       continue;
     }
     if (inv.qb_bill_txn_id) {

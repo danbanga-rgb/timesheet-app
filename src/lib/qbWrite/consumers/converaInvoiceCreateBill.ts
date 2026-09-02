@@ -91,6 +91,7 @@ interface InvoiceRow {
   qb_bill_txn_id: string | null;
   payment_profile: Record<string, unknown> | null;
   group_key: string | null;
+  matcher_ignore: boolean | null;
 }
 
 interface ProfileRow {
@@ -135,7 +136,7 @@ interface MirrorBillRow {
   ref_number: string;
 }
 
-const INVOICE_COLUMNS = 'id, user_id, invoice_number, total_amount, period_end, status, payment_method, qb_bill_txn_id, payment_profile, group_key';
+const INVOICE_COLUMNS = 'id, user_id, invoice_number, total_amount, period_end, status, payment_method, qb_bill_txn_id, payment_profile, group_key, matcher_ignore';
 
 function fmtMonth(iso: string): string {
   const [y, m] = iso.split('-');
@@ -256,6 +257,7 @@ export async function pushConveraInvoiceCreateBill(
     let eligibilityReason: string | null = null;
     for (const m of g.members) {
       if (m.status !== 'approved' && m.status !== 'paid') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) status='${m.status}' — must be 'approved' or 'paid'`; break; }
+      if (m.matcher_ignore === true) { eligibilityReason = `group blocked: invoice ${m.id} is matcher_ignore=true (pre-our-system legacy) — never push to QB pipeline`; break; }
       if (m.qb_bill_txn_id) { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) already has qb_bill_txn_id=${m.qb_bill_txn_id}`; break; }
       if (m.payment_method !== 'Convera') { eligibilityReason = `group blocked: invoice ${m.id} (${profileByUserId.get(m.user_id)?.name ?? '?'}) payment_method='${m.payment_method ?? 'null'}'`; break; }
       if (!m.period_end || m.period_end < CONVERA_PRE_OUR_SYSTEM_CUTOFF) { eligibilityReason = `group blocked: invoice ${m.id} period_end=${m.period_end ?? 'null'} < cutoff ${CONVERA_PRE_OUR_SYSTEM_CUTOFF}`; break; }

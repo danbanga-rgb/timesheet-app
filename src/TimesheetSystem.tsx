@@ -10937,6 +10937,10 @@ const TimesheetSystem = () => {
               // 'paid' but its QB Bill may still not exist (only IIF-exported
               // BillPayments push today). See Missing QB Bills panel below.
               if (inv.status !== 'approved' && inv.status !== 'paid') continue;
+              // Skip pre-our-system legacy invoices — matcher_ignore=true means
+              // the invoice pre-dates the pipeline (paid via IIF, never in QB
+              // qbXML flow). Surfacing them creates noise.
+              if (inv.matcherIgnore) continue;
               if (inv.qbBillTxnId) continue;
               const pm = paymentMethod(inv);
               if (!['Intuit', 'Convera'].includes(pm)) continue;
@@ -11002,6 +11006,8 @@ const TimesheetSystem = () => {
               // IIF export today, not qb_ingest_events). Without this, paid-
               // but-no-Bill-in-QB invoices become invisible.
               .filter(inv => inv.status === 'approved' || inv.status === 'paid')
+              // Exclude pre-our-system legacy invoices — matcher_ignore=true.
+              .filter(inv => !inv.matcherIgnore)
               // Cutoff differs by payment path: Intuit June 2026+, Convera April 2026+.
               // Unassigned falls back to Intuit's cutoff (stricter) so unclassified
               // rows aren't over-surfaced.
@@ -11068,6 +11074,7 @@ const TimesheetSystem = () => {
               bill_add_and_pmt: { border: 'border-violet-200', head: 'bg-violet-50',  hover: 'hover:bg-violet-100/60',  title: 'text-violet-900' },
               check:            { border: 'border-indigo-200', head: 'bg-indigo-50',  hover: 'hover:bg-indigo-100/60',  title: 'text-indigo-900' },
               ignore:           { border: 'border-gray-200',   head: 'bg-gray-50',    hover: 'hover:bg-gray-100/60',    title: 'text-gray-700' },
+              ignore_backfill:  { border: 'border-gray-100',   head: 'bg-gray-50/60', hover: 'hover:bg-gray-100/40',    title: 'text-gray-500' },
               posted:           { border: 'border-emerald-200',head: 'bg-emerald-50', hover: 'hover:bg-emerald-100/60', title: 'text-emerald-900' },
             };
             const groups: { key: string; title: string; hint: string; events: QbIngestEvent[] }[] = [
@@ -11076,7 +11083,8 @@ const TimesheetSystem = () => {
               { key: 'already_done',     title: 'Already done in QB — needs verification', hint: 'QB already has bill+payment; the invoice link is fuzzy. Actions below update OUR tracking only — QB is not touched. Choose per row: mark pre-our-system, orphan (unrelated to us), or accept the fuzzy match (writes back to our invoice).', events: qbIngestEvents.filter(e => e.resolvedAction === 'already_done' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'bill_add_and_pmt', title: 'Create Bill + Pay Bill',        hint: 'Push bill_add then bill_pmt_add chained. Contractors we pay without an invoice in system (Arpit, Himavath).', events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'bill_add_and_pmt' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
               { key: 'check',            title: 'Check (direct expense)',        hint: 'Push CheckAdd. Direct-expense passthroughs (Lucien → Administration salaries).',                       events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'check' && e.status !== 'posted' && e.status !== 'ignored' && !isPreOur(e)) },
-              { key: 'ignore',           title: 'Ignore (persistent skip)',      hint: `Deliberately never pushed. Includes advance-payment cases (US Signature), retired vendors (CLOUDYGON), and pre-our-system events (predate ${INTUIT_PRE_OUR_SYSTEM_CUTOFF}).`, events: qbIngestEvents.filter(e => e.targetQbTxnKind === 'ignore' || e.status === 'ignored') },
+              { key: 'ignore',           title: 'Ignore (deliberate skip)',      hint: 'Deliberately never pushed. Advance-payment cases (US Signature), retired vendors (CLOUDYGON), fee/holding wires.', events: qbIngestEvents.filter(e => (e.targetQbTxnKind === 'ignore' || e.status === 'ignored') && !e.rawData?.__backfill) },
+              { key: 'ignore_backfill',  title: 'Pre-our-system backfill',       hint: 'Convera wires paid via IIF pre-cutover (2026-04-28) and matcher_ignore=true legacy. Backfilled to shadow qb_ingest_events for auditability. Never re-push. Collapsed by default.', events: qbIngestEvents.filter(e => (e.targetQbTxnKind === 'ignore' || e.status === 'ignored') && !!e.rawData?.__backfill) },
               { key: 'posted',           title: 'Already posted (idempotency)',  hint: 'Previously pushed to QB — surfaced here for audit.',                                                   events: [
                 ...qbIngestEvents.filter(e => e.status === 'posted'),
                 // Slice A: G7.5 invoice-driven pushes rendered as synthetic events
@@ -11513,6 +11521,8 @@ const TimesheetSystem = () => {
                       // Include 'paid' — Convera-matched invoices need their
                       // Bill in QB even after our-side reconciliation.
                       if (inv.status !== 'approved' && inv.status !== 'paid') continue;
+                      // Skip pre-our-system legacy invoices.
+                      if (inv.matcherIgnore) continue;
                       if (inv.qbBillTxnId) continue;
                       if (!inv.periodEnd) continue;
                       if (!inv.invoiceNumber?.trim()) continue;
