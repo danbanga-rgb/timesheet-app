@@ -56,6 +56,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { CONVERA_PRE_OUR_SYSTEM_CUTOFF } from '../../convera/config';
 import { executeIntents } from '../execute';
+import { resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from '../../vendorResolution';
 import type { CreateBillIntent, ExecuteResult } from '../types';
 
 export interface ConveraInvoiceCreateBillResult extends ExecuteResult {
@@ -116,9 +117,11 @@ function toAsciiMemo(s: string): string {
 }
 
 interface PaymentProfileRow {
+  id: number;
   user_id: string;
   qb_vendor_name: string | null;
   is_default: boolean | null;
+  company_name: string | null;
 }
 
 interface VendorRow { list_id: string; name: string }
@@ -208,7 +211,7 @@ export async function pushConveraInvoiceCreateBill(
   // ─── Load supporting tables (once) ──────────────────────────────────────
   const allUserIds = [...new Set(allInvoices.map(i => i.user_id))];
   const [liveProfilesRes, vendorRes, mappingRes, profileRes] = await Promise.all([
-    supabase.from('payment_profiles').select('user_id, qb_vendor_name, is_default').in('user_id', allUserIds),
+    supabase.from('payment_profiles').select('id, user_id, qb_vendor_name, is_default, company_name').in('user_id', allUserIds),
     supabase.from('qb_vendors').select('list_id, name'),
     supabase.from('qb_vendor_mappings').select('qb_vendor_list_id, default_expense_account_list_id'),
     supabase.from('profiles').select('id, name').in('id', allUserIds),
@@ -218,15 +221,17 @@ export async function pushConveraInvoiceCreateBill(
   const mappings = (mappingRes.data ?? []) as MappingRow[];
   const profileByUserId = new Map(((profileRes.data ?? []) as ProfileRow[]).map(p => [p.id, p]));
 
-  // Live vendor name per user_id (default profile wins; else first non-empty).
-  const liveVendorByUser = new Map<string, string>();
-  for (const pp of liveProfiles) {
-    const name = pp.qb_vendor_name?.trim();
-    if (!name) continue;
-    if (!liveVendorByUser.has(pp.user_id) || pp.is_default) {
-      liveVendorByUser.set(pp.user_id, name);
-    }
-  }
+  // Resolver-shaped profile list — pp-scoped vendor lookup via the shared
+  // primitive. Prevents multi-pp contractors from silently rerouting to the
+  // user-default vendor when a specific pp is the intended target (2026-09-02
+  // Branimir TCODE + Tomislav Fat Struct incident).
+  const resolverPps: ResolverPaymentProfile[] = liveProfiles.map(pp => ({
+    id: pp.id,
+    userId: pp.user_id,
+    qbVendorName: pp.qb_vendor_name,
+    companyName: pp.company_name,
+    isDefault: pp.is_default,
+  }));
   const vendorByLowerName = new Map(vendors.map(v => [v.name.toLowerCase().trim(), v]));
   const mappingByVendorListId = new Map(mappings.map(m => [m.qb_vendor_list_id, m]));
 
@@ -259,21 +264,18 @@ export async function pushConveraInvoiceCreateBill(
     if (eligibilityReason) { groupSkip(g, eligibilityReason); continue; }
 
     // ── Vendor resolution across ALL members ──
-    // Collect distinct non-empty candidates from snapshot first, then live.
+    // Per-member pp-scoped lookup via resolveInvoiceQbVendorName. All members
+    // must resolve to the same vendor; disagreement is a data anomaly.
     const candidates = new Set<string>();
     for (const m of g.members) {
-      const snap = ((m.payment_profile ?? {}) as Record<string, unknown>).qbVendorName;
-      const s = typeof snap === 'string' ? snap.trim() : '';
-      if (s) candidates.add(s);
+      const name = resolveInvoiceQbVendorName(
+        { snapPaymentProfileId: extractSnapPpId(m.payment_profile), snapQbVendorName: (m.payment_profile as { qbVendorName?: string | null } | null)?.qbVendorName ?? null, userId: m.user_id },
+        resolverPps,
+      );
+      if (name) candidates.add(name);
     }
     if (candidates.size === 0) {
-      for (const m of g.members) {
-        const live = liveVendorByUser.get(m.user_id);
-        if (live) candidates.add(live);
-      }
-    }
-    if (candidates.size === 0) {
-      groupSkip(g, `group blocked: no qb_vendor_name on any member's payment_profile (snapshot or live). Set qbVendorName on at least one member's profile (Payments tab → Profiles → click "⚠ Not mapped").`);
+      groupSkip(g, `group blocked: no qb_vendor_name on any member's payment_profile (snapshot or live pp). Set qbVendorName on the specific payment profile via Payments tab → Profiles → click "⚠ Not mapped".`);
       continue;
     }
     if (candidates.size > 1) {

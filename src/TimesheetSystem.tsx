@@ -197,7 +197,7 @@ import {
   vendorMapEntry,
   type InvoiceEditEntry,
 } from '../supabase/functions/_shared/edit-history';
-import { resolveNewProfileVendor, type ResolverPaymentProfile } from './lib/vendorResolution';
+import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
 import {
@@ -2555,23 +2555,20 @@ const TimesheetSystem = () => {
 
     // Invoice.paymentProfile is a JSONB SNAPSHOT taken at invoice creation.
     // If qbVendorName was set on the profile AFTER the invoice was created,
-    // the snapshot won't have it. Fall back to the LIVE payment_profiles row
-    // via userId lookup. Fixed 2026-08-20 after Slice G5 seed exposed this
-    // (Mek/Sivakumar/Ravi profiles had qbVendorName set live but invoices
-    // #60/#188/etc had NULL in the snapshot → classifier couldn't classify).
-    const liveVendorNameByUserId = new Map<string, string>();
-    for (const pp of paymentProfiles) {
-      const name = pp.qbVendorName?.trim();
-      if (!name) continue;
-      // Prefer default profile; else first-set-wins
-      if (!liveVendorNameByUserId.has(pp.userId) || pp.isDefault) {
-        liveVendorNameByUserId.set(pp.userId, name);
-      }
-    }
+    // the snapshot won't have it. resolveInvoiceQbVendorName walks:
+    // snap.qbVendorName → live pps[snap_pp_id].qb_vendor_name → user-default
+    // (legacy invoices only). Critical: it does NOT fall through to
+    // user-default when snap_pp_id is set — see [[vendor-resolver-no-auto-inference]].
+    const resolverPps: ResolverPaymentProfile[] = paymentProfiles.map(p => ({
+      id: p.id, userId: p.userId, qbVendorName: p.qbVendorName, companyName: p.companyName, isDefault: p.isDefault,
+    }));
     const invoicesById = new Map<number, ClassifiableInvoice>(
       invoices.map(i => [i.id, {
         id: i.id,
-        paymentProfileQbVendorName: i.paymentProfile?.qbVendorName ?? liveVendorNameByUserId.get(i.userId) ?? null,
+        paymentProfileQbVendorName: resolveInvoiceQbVendorName(
+          { snapPaymentProfileId: extractSnapPpId(i.paymentProfile), snapQbVendorName: i.paymentProfile?.qbVendorName ?? null, userId: i.userId },
+          resolverPps,
+        ),
       }]),
     );
     const vendorsByLowerName = new Map(vendorRows.map(v => [v.name.toLowerCase().trim(), { listId: v.list_id, name: v.name }]));
@@ -10820,9 +10817,15 @@ const TimesheetSystem = () => {
             //
             // The invoice.paymentProfile is a JSONB snapshot at invoice creation, so
             // qbVendorName can be stale if the accountant added it to the profile after
-            // the invoice was created. Fall back to the live payment_profiles row per
-            // userId — same pattern as applyClassificationPass (fix 4e1c7da).
+            // the invoice was created. resolveInvoiceQbVendorName walks the pp-scoped
+            // chain (snap → live pps[snap_pp_id] → user-default only if no snap_pp_id).
+            // liveVendorNameByUserId is retained ONLY for the group-vendor fallback
+            // below (multi-member umbrella groups); the per-invoice fallback uses
+            // the primitive.
             const vendorByName = new Map(qbVendorsList.map(v => [v.name, v]));
+            const resolverPps: ResolverPaymentProfile[] = paymentProfiles.map(p => ({
+              id: p.id, userId: p.userId, qbVendorName: p.qbVendorName, companyName: p.companyName, isDefault: p.isDefault,
+            }));
             const liveVendorNameByUserId = new Map<string, string>();
             for (const pp of paymentProfiles) {
               const name = pp.qbVendorName?.trim();
@@ -10919,10 +10922,12 @@ const TimesheetSystem = () => {
               // render in their own bucket, not as "missing bills".
               .filter(inv => !needsVendorDecisionByInvoiceId.has(inv.id))
               .map((inv): MissingBill | null => {
-                const snapshotName = inv.paymentProfile?.qbVendorName?.trim() || null;
-                const liveName = liveVendorNameByUserId.get(inv.userId) || null;
+                const resolved = resolveInvoiceQbVendorName(
+                  { snapPaymentProfileId: extractSnapPpId(inv.paymentProfile), snapQbVendorName: inv.paymentProfile?.qbVendorName ?? null, userId: inv.userId },
+                  resolverPps,
+                );
                 const groupName = inv.groupKey ? (groupVendorByKey.get(inv.groupKey) ?? null) : null;
-                const qbVendorName = snapshotName ?? liveName ?? groupName;
+                const qbVendorName = resolved ?? groupName;
                 const vendor = qbVendorName ? vendorByName.get(qbVendorName) : undefined;
                 const vendorListId = vendor?.listId ?? null;
                 const invRef = normalizeRef(inv.invoiceNumber);
@@ -11366,6 +11371,10 @@ const TimesheetSystem = () => {
                     const mappingByVendor = new Map(qbVendorMappings.map(m => [m.qbVendorListId, m]));
                     const vendorByName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
                     const bankAcct = qbAccountsList.find(a => a.fullName.toLowerCase().includes('8220'));
+                    const resolverPps: ResolverPaymentProfile[] = paymentProfiles.map(p => ({
+                      id: p.id, userId: p.userId, qbVendorName: p.qbVendorName, companyName: p.companyName, isDefault: p.isDefault,
+                    }));
+                    // Retained for the group-vendor fallback below (multi-member umbrella).
                     const liveVendorNameByUserId = new Map<string, string>();
                     for (const pp of paymentProfiles) {
                       const n = pp.qbVendorName?.trim();
@@ -11418,8 +11427,13 @@ const TimesheetSystem = () => {
                       if (!isIntuit && !isConvera) continue;
                       if (isIntuit && inv.periodEnd < INTUIT_PRE_OUR_SYSTEM_CUTOFF) continue;
                       if (isConvera && inv.periodEnd < CONVERA_PRE_OUR_SYSTEM_CUTOFF) continue;
-                      // Vendor resolution: snapshot → live → group_key sibling.
-                      let vName = inv.paymentProfile?.qbVendorName?.trim() || liveVendorNameByUserId.get(inv.userId);
+                      // Vendor resolution: snapshot → live pps[snap_pp_id] → group_key sibling.
+                      // pp-scoped chain avoids silently rerouting multi-pp contractors' invoices
+                      // to their user-default vendor (2026-09-02 fix).
+                      let vName = resolveInvoiceQbVendorName(
+                        { snapPaymentProfileId: extractSnapPpId(inv.paymentProfile), snapQbVendorName: inv.paymentProfile?.qbVendorName ?? null, userId: inv.userId },
+                        resolverPps,
+                      ) ?? undefined;
                       if (!vName && inv.groupKey) vName = groupVendorByKey.get(inv.groupKey);
                       if (!vName) continue;
                       // No Bimosoft filter here (or in the consumer, as of 2026-08-27).

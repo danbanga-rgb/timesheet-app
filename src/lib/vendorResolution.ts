@@ -119,3 +119,52 @@ export function resolveNewProfileVendor(
     siblingHint,
   };
 }
+
+/**
+ * Resolve the effective QB vendor NAME for an invoice using pp-scoped priority.
+ *
+ * Chain (first hit wins):
+ *   1. snapshot.qbVendorName        — invoice.payment_profile JSONB snapshot
+ *   2. LIVE pps[snap_pp_id].qb_vendor_name — snap was stale but the pp is tagged now
+ *   3. LIVE default pp for the user — ONLY when snap_pp_id is absent (legacy invoices)
+ *   4. LIVE any pp with non-empty qb_vendor_name — last resort for legacy invoices
+ *
+ * Critical: when snap_pp_id IS set but that specific pp has no vendor, this
+ * returns null rather than falling through to the user-default pp. The snap
+ * intentionally points at that pp — silently rerouting to a sibling's vendor
+ * is the class of bug this exists to prevent (2026-09-02: Branimir OKTAXART
+ * default masked TCODE pp; Tomislav Ponny default masked Fat Struct pp).
+ */
+export function resolveInvoiceQbVendorName(
+  inv: ResolverInvoiceSnapshot,
+  pps: ResolverPaymentProfile[],
+): string | null {
+  const snapName = inv.snapQbVendorName?.trim();
+  if (snapName) return snapName;
+
+  if (inv.snapPaymentProfileId != null) {
+    const specific = pps.find(p => p.id === inv.snapPaymentProfileId);
+    const name = specific?.qbVendorName?.trim();
+    return name || null;
+  }
+
+  const userPps = pps.filter(p => p.userId === inv.userId);
+  const defaultPp = userPps.find(p => p.isDefault && p.qbVendorName?.trim());
+  if (defaultPp) return defaultPp.qbVendorName!.trim();
+  const anyPp = userPps.find(p => p.qbVendorName?.trim());
+  return anyPp?.qbVendorName?.trim() ?? null;
+}
+
+/**
+ * Extract the payment_profile snapshot's pp_id from an invoice.payment_profile
+ * JSONB blob. Handles number-typed id and numeric-string id (both observed in
+ * production due to JSONB casting drift). Returns null when absent, zero, or
+ * unparseable.
+ */
+export function extractSnapPpId(paymentProfile: unknown): number | null {
+  if (!paymentProfile || typeof paymentProfile !== 'object') return null;
+  const raw = (paymentProfile as { id?: unknown }).id;
+  if (typeof raw === 'number' && raw > 0) return raw;
+  if (typeof raw === 'string' && /^\d+$/.test(raw) && Number(raw) > 0) return Number(raw);
+  return null;
+}

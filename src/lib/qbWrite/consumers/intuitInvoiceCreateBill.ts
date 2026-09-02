@@ -40,6 +40,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { INTUIT_PRE_OUR_SYSTEM_CUTOFF } from '../../intuit/config';
 import { executeIntents } from '../execute';
+import { resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from '../../vendorResolution';
 import type { CreateBillIntent, ExecuteResult } from '../types';
 
 export interface IntuitInvoiceCreateBillResult extends ExecuteResult {
@@ -79,9 +80,11 @@ function memoRef(invoiceNumber: string): string {
 }
 
 interface PaymentProfileRow {
+  id: number;
   user_id: string;
   qb_vendor_name: string | null;
   is_default: boolean | null;
+  company_name: string | null;
 }
 
 interface VendorRow { list_id: string; name: string }
@@ -149,27 +152,29 @@ export async function pushIntuitInvoiceCreateBill(
   }
   if (eligible.length === 0) return emptyReturn();
 
-  // ─── Vendor resolution: snapshot → live fallback (INVARIANT #22) ────────
+  // ─── Vendor resolution: snapshot → live pps[snap_pp_id] (INVARIANT #22) ─
+  // pp-scoped via the shared primitive. User-default fallback only fires for
+  // legacy invoices lacking snap_pp_id. See resolveInvoiceQbVendorName comment
+  // for why we don't fall through to user-default on multi-pp contractors
+  // (2026-09-02 Branimir TCODE + Tomislav Fat Struct incident).
   const userIds = Array.from(new Set(eligible.map(i => i.user_id)));
   const { data: liveProfilesData } = await supabase
     .from('payment_profiles')
-    .select('user_id, qb_vendor_name, is_default')
+    .select('id, user_id, qb_vendor_name, is_default, company_name')
     .in('user_id', userIds);
   const liveProfiles = (liveProfilesData ?? []) as PaymentProfileRow[];
-  const liveVendorByUser = new Map<string, string>();
-  for (const pp of liveProfiles) {
-    const name = pp.qb_vendor_name?.trim();
-    if (!name) continue;
-    if (!liveVendorByUser.has(pp.user_id) || pp.is_default) {
-      liveVendorByUser.set(pp.user_id, name);
-    }
-  }
-  const resolvedVendorName = (inv: InvoiceRow): string | null => {
-    const snap = ((inv.payment_profile ?? {}) as Record<string, unknown>).qbVendorName;
-    const snapshot = typeof snap === 'string' ? snap.trim() : '';
-    if (snapshot) return snapshot;
-    return liveVendorByUser.get(inv.user_id) ?? null;
-  };
+  const resolverPps: ResolverPaymentProfile[] = liveProfiles.map(pp => ({
+    id: pp.id,
+    userId: pp.user_id,
+    qbVendorName: pp.qb_vendor_name,
+    companyName: pp.company_name,
+    isDefault: pp.is_default,
+  }));
+  const resolvedVendorName = (inv: InvoiceRow): string | null =>
+    resolveInvoiceQbVendorName(
+      { snapPaymentProfileId: extractSnapPpId(inv.payment_profile), snapQbVendorName: (inv.payment_profile as { qbVendorName?: string | null } | null)?.qbVendorName ?? null, userId: inv.user_id },
+      resolverPps,
+    );
 
   // ─── Load supporting tables ─────────────────────────────────────────────
   const { data: vendorData } = await supabase.from('qb_vendors').select('list_id, name');
