@@ -239,6 +239,7 @@ import { pushIntuitCheck } from './lib/qbWrite/consumers/intuitCheck';
 import { pushIntuitInvoiceCreateBill } from './lib/qbWrite/consumers/intuitInvoiceCreateBill';
 import { pushConveraInvoiceCreateBill } from './lib/qbWrite/consumers/converaInvoiceCreateBill';
 import { pushConveraBillPmt } from './lib/qbWrite/consumers/converaBillPmt';
+import { pushConveraCreateBillAndPay } from './lib/qbWrite/consumers/converaCreateBillAndPay';
 import { insertConveraShadowEvents, updateConveraShadowMatch, type ConveraShadowInput, type ConveraShadowMatchUpdate } from './lib/qbIngest/converaShadow';
 import VendorDecisionModal from './components/VendorDecisionModal';
 
@@ -11615,21 +11616,30 @@ const TimesheetSystem = () => {
                       const payEventIds = selectedEvents.filter(e => e.source === 'intuit_xlsx' && e.resolvedAction === 'pay_existing_bill').map(e => e.id);
                       const createEventIds = selectedEvents.filter(e => e.source === 'intuit_xlsx' && e.resolvedAction === 'create_bill_then_pay').map(e => e.id);
                       const checkEventIds = selectedEvents.filter(e => e.source === 'intuit_xlsx' && e.resolvedAction === 'check').map(e => e.id);
-                      // Slice C-1: Convera events route on target_qb_txn_kind (source-agnostic
-                      // classifier output) rather than resolvedAction (Intuit reconciler field).
-                      const converaPayEventIds = selectedEvents.filter(e => e.source === 'convera' && e.targetQbTxnKind === 'bill_pmt').map(e => e.id);
-                      const [payRes, createRes, checkRes, g75Res, g76Res, converaPayRes] = await Promise.all([
+                      // Slice C-1/C-2: split Convera bill_pmt events by whether the
+                      // matched invoice already has qb_bill_txn_id. If yes → straight
+                      // pay via pushConveraBillPmt (C-1). If no → chained create+pay
+                      // via pushConveraCreateBillAndPay (C-2). Multi-invoice events
+                      // hit C-2's skip path with a Slice C-3 direction.
+                      const converaBillPmtCandidates = selectedEvents.filter(e => e.source === 'convera' && e.targetQbTxnKind === 'bill_pmt');
+                      const converaAllBillsExist = converaBillPmtCandidates.filter(e => {
+                        const ids = e.matchedInvoiceIds ?? [];
+                        return ids.length > 0 && ids.every(iid => invoices.find(inv => inv.id === iid)?.qbBillTxnId);
+                      }).map(e => e.id);
+                      const converaMissingBills = converaBillPmtCandidates.filter(e => !converaAllBillsExist.includes(e.id)).map(e => e.id);
+                      const [payRes, createRes, checkRes, g75Res, g76Res, converaPayRes, converaCreatePayRes] = await Promise.all([
                         payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),
                         createEventIds.length > 0 ? pushIntuitCreateBill(supabase, createEventIds) : Promise.resolve(null),
                         checkEventIds.length > 0 ? pushIntuitCheck(supabase, checkEventIds) : Promise.resolve(null),
                         g75InvoiceIds.length > 0 ? pushIntuitInvoiceCreateBill(supabase, g75InvoiceIds) : Promise.resolve(null),
                         g76InvoiceIds.length > 0 ? pushConveraInvoiceCreateBill(supabase, g76InvoiceIds) : Promise.resolve(null),
-                        converaPayEventIds.length > 0 ? pushConveraBillPmt(supabase, converaPayEventIds) : Promise.resolve(null),
+                        converaAllBillsExist.length > 0 ? pushConveraBillPmt(supabase, converaAllBillsExist) : Promise.resolve(null),
+                        converaMissingBills.length > 0 ? pushConveraCreateBillAndPay(supabase, converaMissingBills) : Promise.resolve(null),
                       ]);
                       const r = {
-                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? []), ...(g76Res?.jobIds ?? []), ...(converaPayRes?.jobIds ?? [])],
-                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? []), ...(g76Res?.rejected ?? []), ...(converaPayRes?.rejected ?? [])],
-                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? []), ...(g76Res?.skippedDuplicate ?? []), ...(converaPayRes?.skippedDuplicate ?? [])],
+                        jobIds: [...(payRes?.jobIds ?? []), ...(createRes?.jobIds ?? []), ...(checkRes?.jobIds ?? []), ...(g75Res?.jobIds ?? []), ...(g76Res?.jobIds ?? []), ...(converaPayRes?.jobIds ?? []), ...(converaCreatePayRes?.jobIds ?? [])],
+                        rejected: [...(payRes?.rejected ?? []), ...(createRes?.rejected ?? []), ...(checkRes?.rejected ?? []), ...(g75Res?.rejected ?? []), ...(g76Res?.rejected ?? []), ...(converaPayRes?.rejected ?? []), ...(converaCreatePayRes?.rejected ?? [])],
+                        skippedDuplicate: [...(payRes?.skippedDuplicate ?? []), ...(createRes?.skippedDuplicate ?? []), ...(checkRes?.skippedDuplicate ?? []), ...(g75Res?.skippedDuplicate ?? []), ...(g76Res?.skippedDuplicate ?? []), ...(converaPayRes?.skippedDuplicate ?? []), ...(converaCreatePayRes?.skippedDuplicate ?? [])],
                         skippedIneligible: [
                           ...(payRes?.skippedIneligible ?? []),
                           ...(createRes?.skippedIneligible ?? []),
@@ -11638,8 +11648,9 @@ const TimesheetSystem = () => {
                           ...((g75Res?.skippedIneligible ?? []).map(s => ({ eventId: -s.invoiceId, reason: s.reason }))),
                           ...((g76Res?.skippedIneligible ?? []).map(s => ({ eventId: -s.invoiceId, reason: s.reason }))),
                           ...(converaPayRes?.skippedIneligible ?? []),
+                          ...(converaCreatePayRes?.skippedIneligible ?? []),
                         ],
-                        verifyJobIdByPayJobId: { ...(payRes?.verifyJobIdByPayJobId ?? {}), ...(converaPayRes?.verifyJobIdByPayJobId ?? {}) },
+                        verifyJobIdByPayJobId: { ...(payRes?.verifyJobIdByPayJobId ?? {}), ...(converaPayRes?.verifyJobIdByPayJobId ?? {}), ...(converaCreatePayRes?.verifyJobIdByPayJobId ?? {}) },
                       };
                       const enqueued = r.jobIds.filter((id): id is number => id != null).length;
                       const payJobIds = payRes?.jobIds ?? [];
