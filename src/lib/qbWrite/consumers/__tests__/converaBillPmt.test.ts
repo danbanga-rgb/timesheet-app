@@ -256,6 +256,43 @@ describe('pushConveraBillPmt', () => {
     expect(r.skippedIneligible[0].reason).toMatch(/amount-mismatch/);
   });
 
+  it('refuses events when any matched bill is already settled in qb_mirror (duplicate-push guard)', async () => {
+    const mirrorSettled = [
+      { entity_kind: 'bill', entity_ref: 'FS-BILL-A', vendor_list_id: 'V-FATSTRUCT',
+        amount: 3520, is_settled: true, data: { vendor_name: 'Fat Struct - Tomislav' } },
+    ];
+    const { client, inserts } = makeMockSupabase({
+      qb_ingest_events: [readyEvent],
+      convera_transactions: converaTxns,
+      invoices,
+      convera_transaction_invoices: umbrellaLinks,
+      qb_vendors: vendors,
+      qb_accounts: bankAccounts,
+      qb_mirror: mirrorSettled,
+    });
+    const r = await pushConveraBillPmt(client, [42]);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible[0].reason).toMatch(/already settled/);
+    expect(r.skippedIneligible[0].reason).toMatch(/FS-BILL-A/);
+    expect(inserts.filter(i => i.table === 'qb_sync_jobs')).toHaveLength(0);
+  });
+
+  it('refuses events when a matched bill TxnID is not in qb_mirror (unknown settled state)', async () => {
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [readyEvent],
+      convera_transactions: converaTxns,
+      invoices,
+      convera_transaction_invoices: umbrellaLinks,
+      qb_vendors: vendors,
+      qb_accounts: bankAccounts,
+      qb_mirror: [],   // empty mirror — TxnID not found
+    });
+    const r = await pushConveraBillPmt(client, [42]);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible[0].reason).toMatch(/qb_mirror missing bill/);
+    expect(r.skippedIneligible[0].reason).toMatch(/Sync QB state/);
+  });
+
   it('skips events when the WU Holding bank account is missing', async () => {
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent],

@@ -68,6 +68,7 @@ interface UmbrellaLinkRow {
 
 interface VendorRow { list_id: string; name: string }
 interface AccountRow { list_id: string; full_name: string }
+interface MirrorBillRow { entity_ref: string; is_settled: boolean | null }
 
 const CONVERA_BANK_PATTERN = 'western union holding';
 
@@ -165,6 +166,27 @@ export async function pushConveraBillPmt(
   const vendorNameById = new Map(((vendorsRes.data ?? []) as VendorRow[]).map(v => [v.list_id, v.name]));
   const bank = findConveraBank((accountsRes.data ?? []) as AccountRow[]);
 
+  // Defensive: cross-check every candidate bill's is_settled state in qb_mirror
+  // before push. If ANY bill was already paid (via IIF or manual QB entry), we
+  // refuse the entire event — duplicating a BillPmt in QB is worse than
+  // holding the wire for accountant triage. Mirror intuitPush.ts:222 pattern.
+  const billTxnIds = Array.from(new Set(
+    (invoicesRes.data ?? [])
+      .map((i: InvoiceRow) => i.qb_bill_txn_id)
+      .filter((x): x is string => !!x),
+  ));
+  const mirrorSettledByTxnId = new Map<string, boolean | null>();
+  if (billTxnIds.length > 0) {
+    const { data: mirrorRows } = await supabase
+      .from('qb_mirror')
+      .select('entity_ref, is_settled')
+      .eq('entity_kind', 'bill')
+      .in('entity_ref', billTxnIds);
+    for (const m of (mirrorRows ?? []) as MirrorBillRow[]) {
+      mirrorSettledByTxnId.set(m.entity_ref, m.is_settled);
+    }
+  }
+
   // ─── Second-pass: build intents ─────────────────────────────────────────
   const intents: PayBillIntent[] = [];
   const eventIdByIntentIndex: number[] = [];
@@ -194,6 +216,8 @@ export async function pushConveraBillPmt(
     // partial-bill events; C-2 will auto-chain bill_add for the missing ones.
     const matched = e.matched_invoice_ids ?? [];
     const missing: number[] = [];
+    const alreadySettled: string[] = [];
+    const notInMirror: string[] = [];
     const applications: PayBillIntent['applications'] = [];
     let applicationsTotal = 0;
     let breakSkip = false;
@@ -205,6 +229,11 @@ export async function pushConveraBillPmt(
         break;
       }
       if (!inv.qb_bill_txn_id) { missing.push(invId); continue; }
+      // is_settled defensive guard — refuse if bill already paid in QB.
+      // Prevents duplicate BillPmt when a wire's bills were IIF-paid pre-cutover.
+      const settled = mirrorSettledByTxnId.get(inv.qb_bill_txn_id);
+      if (settled === true) { alreadySettled.push(inv.qb_bill_txn_id); continue; }
+      if (settled === undefined) { notInMirror.push(inv.qb_bill_txn_id); continue; }
       // Umbrella allocation first; fall back to invoice total for single-match.
       const share = umbrellaByKey.get(`${converaTxn.id}::${invId}`);
       const paymentAmount = share ?? Number(inv.total_amount);
@@ -216,6 +245,20 @@ export async function pushConveraBillPmt(
       skippedIneligible.push({
         eventId: e.id,
         reason: `Slice C-1 requires ALL matched invoices to have a QB Bill. Missing bills for invoice ids [${missing.join(', ')}]. Run Convera Create Bills (Push to QB → Invoice → Bill (Convera)) for these invoices first, then re-push. C-2 will automate this.`,
+      });
+      continue;
+    }
+    if (alreadySettled.length > 0) {
+      skippedIneligible.push({
+        eventId: e.id,
+        reason: `qb_mirror shows bill TxnID(s) [${alreadySettled.join(', ')}] already settled (IsPaid=true) — pushing would create a duplicate BillPmt. If this is legitimate (partial pay etc.), override manually.`,
+      });
+      continue;
+    }
+    if (notInMirror.length > 0) {
+      skippedIneligible.push({
+        eventId: e.id,
+        reason: `qb_mirror missing bill TxnID(s) [${notInMirror.join(', ')}] — can't confirm settled state. Run Sync QB state (qb-delta-bills) then retry.`,
       });
       continue;
     }
