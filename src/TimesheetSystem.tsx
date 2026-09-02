@@ -11636,18 +11636,25 @@ const TimesheetSystem = () => {
                       // pay via pushConveraBillPmt (C-1). If no → chained create+pay
                       // via pushConveraCreateBillAndPay (C-2). Multi-invoice events
                       // hit C-2's skip path with a Slice C-3 direction.
-                      const converaBillPmtCandidates = selectedEvents.filter(e => e.source === 'convera' && e.targetQbTxnKind === 'bill_pmt');
+                      // Convera routing for bill_pmt / bill_add_and_pmt targets:
+                      //   Has invoice link + all bills exist       → pushConveraBillPmt (C-1)
+                      //   Has invoice link + some bills missing    → pushConveraCreateBillAndPay (C-2/C-3)
+                      //   NO invoice link (orphan)                 → pushConveraCreateBillFromEvent (C-4).
+                      //     Consumer decides Case D (pay existing bill from qb_mirror lookup)
+                      //     vs Case C (create+pay) at push time. Widget kind is advisory.
+                      const converaBillPmtCandidates = selectedEvents.filter(e => e.source === 'convera' && e.targetQbTxnKind === 'bill_pmt' && (e.matchedInvoiceIds ?? []).length > 0);
                       const converaAllBillsExist = converaBillPmtCandidates.filter(e => {
                         const ids = e.matchedInvoiceIds ?? [];
                         return ids.length > 0 && ids.every(iid => invoices.find(inv => inv.id === iid)?.qbBillTxnId);
                       }).map(e => e.id);
                       const converaMissingBills = converaBillPmtCandidates.filter(e => !converaAllBillsExist.includes(e.id)).map(e => e.id);
-                      // Slice C-4: Convera Create+Pay for no-invoice events (Bhavani-style).
-                      // Filter target='bill_add_and_pmt' AND empty matched_invoice_ids
-                      // (populated matched_invoice_ids are the Intuit-orphan Case F
-                      // pattern which routes via pushIntuitCreateBill).
+                      // Orphan events (no matched invoice): both bill_pmt and
+                      // bill_add_and_pmt targets flow through C-4. Consumer
+                      // check-then-act: existing bill in qb_mirror → pay, else create+pay.
                       const converaCreateFromEvent = selectedEvents.filter(e =>
-                        e.source === 'convera' && e.targetQbTxnKind === 'bill_add_and_pmt' && (e.matchedInvoiceIds ?? []).length === 0
+                        e.source === 'convera'
+                        && (e.targetQbTxnKind === 'bill_add_and_pmt' || e.targetQbTxnKind === 'bill_pmt')
+                        && (e.matchedInvoiceIds ?? []).length === 0
                       ).map(e => e.id);
                       const [payRes, createRes, checkRes, g75Res, g76Res, converaPayRes, converaCreatePayRes, converaCreateFromEventRes] = await Promise.all([
                         payEventIds.length > 0 ? pushIntuitPayBill(supabase, payEventIds) : Promise.resolve(null),

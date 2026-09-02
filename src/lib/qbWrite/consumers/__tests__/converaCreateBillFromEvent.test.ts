@@ -138,8 +138,8 @@ describe('pushConveraCreateBillFromEvent', () => {
     expect(r.skippedIneligible[0].reason).toMatch(/source='intuit_xlsx'/);
   });
 
-  it('skips events with wrong target_qb_txn_kind', async () => {
-    const wrong = { ...bhavaniEvent, id: 403, target_qb_txn_kind: 'bill_pmt' };
+  it('skips events with target that is neither bill_add_and_pmt nor bill_pmt', async () => {
+    const wrong = { ...bhavaniEvent, id: 403, target_qb_txn_kind: 'check' };
     const { client } = makeMockSupabase({
       qb_ingest_events: [wrong], qb_vendors: vendors,
       qb_accounts: [...bankAccounts, ...expenseAccounts],
@@ -147,10 +147,10 @@ describe('pushConveraCreateBillFromEvent', () => {
     });
     const r = await pushConveraCreateBillFromEvent(client, [403]);
     expect(r.jobIds).toEqual([]);
-    expect(r.skippedIneligible[0].reason).toMatch(/handles bill_add_and_pmt only/);
+    expect(r.skippedIneligible[0].reason).toMatch(/handles bill_add_and_pmt \(Case C\) or bill_pmt \(Case D\)/);
   });
 
-  it('skips events missing expense account', async () => {
+  it('Case C requires expense account: skips with actionable reason when none set + no open bill', async () => {
     const noExp = { ...bhavaniEvent, id: 404, qb_expense_account_list_id: null };
     const { client } = makeMockSupabase({
       qb_ingest_events: [noExp], qb_vendors: vendors,
@@ -159,6 +159,64 @@ describe('pushConveraCreateBillFromEvent', () => {
     });
     const r = await pushConveraCreateBillFromEvent(client, [404]);
     expect(r.jobIds).toEqual([]);
-    expect(r.skippedIneligible[0].reason).toMatch(/qb_expense_account_list_id missing/);
+    // Now: gate 2 finds no open bill → falls to Case C → expense account required.
+    expect(r.skippedIneligible[0].reason).toMatch(/no open bill in QB.*Case C.*qb_expense_account_list_id/);
+  });
+
+  it('Case D: single open bill for vendor in qb_mirror → direct pay (no create chain)', async () => {
+    // target=bill_pmt widget hint, but consumer's real decision is qb_mirror lookup.
+    const caseDEvent = { ...bhavaniEvent, id: 410, target_qb_txn_kind: 'bill_pmt', amount: 4393 };
+    const openBill = { entity_kind: 'bill', entity_ref: 'BHAVANI-EXISTING-BILL', vendor_list_id: 'V-BHAVANI', amount: 4393, is_settled: false, data: { vendor_name: 'Bhavani Enugala' } };
+    const { client, inserts } = makeMockSupabase({
+      qb_ingest_events: [caseDEvent], qb_vendors: vendors,
+      qb_accounts: [...bankAccounts, ...expenseAccounts],
+      qb_mirror: [openBill], convera_transaction_billpmts: [],
+    });
+    const r = await pushConveraCreateBillFromEvent(client, [410]);
+    expect(r.skippedIneligible).toEqual([]);
+    // Case D direct pay: no create chain, just a pay_bill against the existing TxnID.
+    const jobInserts = inserts.filter(i => i.table === 'qb_sync_jobs');
+    const payInsert = jobInserts.find(i => (i.rows[0] as { kind: string }).kind === 'bill_pmt_add');
+    expect(payInsert).toBeDefined();
+    const payload = (payInsert!.rows[0] as { payload: Record<string, unknown> }).payload;
+    expect(payload.applications).toEqual([{ billTxnId: 'BHAVANI-EXISTING-BILL', paymentAmount: 4393 }]);
+    expect(payload.sourceConveraTxnId).toBe(990);
+    // No create_bill emitted for this event.
+    const billAddInserts = jobInserts.filter(i => (i.rows[0] as { kind: string }).kind === 'bill_add');
+    expect(billAddInserts).toHaveLength(0);
+  });
+
+  it('Case D: multiple open bills, one amount-matches wire → pays the amount-matched bill', async () => {
+    const caseDEvent = { ...bhavaniEvent, id: 411, target_qb_txn_kind: 'bill_pmt', amount: 4393 };
+    const openBills = [
+      { entity_kind: 'bill', entity_ref: 'BILL-A', vendor_list_id: 'V-BHAVANI', amount: 4393, is_settled: false, data: { vendor_name: 'Bhavani Enugala' } },
+      { entity_kind: 'bill', entity_ref: 'BILL-B', vendor_list_id: 'V-BHAVANI', amount: 9999, is_settled: false, data: { vendor_name: 'Bhavani Enugala' } },
+    ];
+    const { client, inserts } = makeMockSupabase({
+      qb_ingest_events: [caseDEvent], qb_vendors: vendors,
+      qb_accounts: [...bankAccounts, ...expenseAccounts],
+      qb_mirror: openBills, convera_transaction_billpmts: [],
+    });
+    const r = await pushConveraCreateBillFromEvent(client, [411]);
+    expect(r.skippedIneligible).toEqual([]);
+    const payInsert = inserts.filter(i => i.table === 'qb_sync_jobs').find(i => (i.rows[0] as { kind: string }).kind === 'bill_pmt_add')!;
+    const payload = (payInsert.rows[0] as { payload: Record<string, unknown> }).payload;
+    expect(payload.applications).toEqual([{ billTxnId: 'BILL-A', paymentAmount: 4393 }]);
+  });
+
+  it('Case D ambiguous: multiple open bills + no amount match → skip with disambiguation reason', async () => {
+    const caseDEvent = { ...bhavaniEvent, id: 412, target_qb_txn_kind: 'bill_pmt', amount: 4393 };
+    const openBills = [
+      { entity_kind: 'bill', entity_ref: 'BILL-X', vendor_list_id: 'V-BHAVANI', amount: 1000, is_settled: false, data: {} },
+      { entity_kind: 'bill', entity_ref: 'BILL-Y', vendor_list_id: 'V-BHAVANI', amount: 2000, is_settled: false, data: {} },
+    ];
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [caseDEvent], qb_vendors: vendors,
+      qb_accounts: [...bankAccounts, ...expenseAccounts],
+      qb_mirror: openBills, convera_transaction_billpmts: [],
+    });
+    const r = await pushConveraCreateBillFromEvent(client, [412]);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible[0].reason).toMatch(/2 open bills.*none amount-matches/);
   });
 });
