@@ -212,7 +212,7 @@ import {
   type ClassifiableInvoice,
   type ClassifiableMapping,
 } from './lib/classifyQbIngestEvent';
-import { enqueueBillQueryForVendors } from './lib/qbStateSync/enqueue';
+import { enqueueBillQueryForVendors, enqueueVendorQuery } from './lib/qbStateSync/enqueue';
 import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
 import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
 import type { QbOpenBillRow } from './lib/qbStateSync/types';
@@ -1332,6 +1332,8 @@ const TimesheetSystem = () => {
   // Polled every 30s while the QB Automation tab is open + > 0 pending. Falls
   // to 0 when QBWC finishes draining; UI auto-refreshes snapshot at that point.
   const [qbBillQueryPending, setQbBillQueryPending] = useState(0);
+  const [qbSyncingVendors, setQbSyncingVendors] = useState(false);
+  const [qbVendorQueryPending, setQbVendorQueryPending] = useState(0);
   // Slice D — vendor mapping widget state
   const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
@@ -2943,6 +2945,58 @@ const TimesheetSystem = () => {
       console.warn('loadQbBillQueryPending failed', e);
     }
   };
+  // Force-refresh qb_vendors from Supabase, bypassing the "only if empty" guard
+  // in loadQbVendorsAndAccounts. Called after a vendor_query drain so newly-
+  // added QB vendors surface immediately in pickers.
+  const refreshQbVendors = async () => {
+    const { data } = await supabase.from('qb_vendors').select('list_id, name, is_active').eq('is_active', true).order('name').range(0, 4999);
+    setQbVendorsList((data ?? []).map((r: Record<string, unknown>) => ({
+      listId: (r.list_id as string) ?? '', name: (r.name as string) ?? '', isActive: Boolean(r.is_active),
+    })));
+  };
+  // Count in-flight vendor_query jobs. Same pattern as loadQbBillQueryPending:
+  // polled every 30s; when the count drops from >0 to 0 (QBWC just drained),
+  // force-refresh the vendors list so newly-added QB vendors appear in pickers.
+  const loadQbVendorQueryPending = async () => {
+    try {
+      const { data } = await supabase
+        .from('qb_sync_jobs')
+        .select('id')
+        .eq('kind', 'vendor_query')
+        .in('status', ['pending', 'in_flight']);
+      const prev = qbVendorQueryPending;
+      const next = (data ?? []).length;
+      setQbVendorQueryPending(next);
+      if (prev > 0 && next === 0) {
+        await refreshQbVendors();
+      }
+    } catch (e) {
+      console.warn('loadQbVendorQueryPending failed', e);
+    }
+  };
+  // Sync Vendors button handler. Enqueues one vendor_query job (dedup lives in
+  // enqueueVendorQuery — at most one pending/in-flight at a time). QBWC drains
+  // on next poll; refreshQbVendors runs on drain-to-zero.
+  const runSyncQbVendors = async () => {
+    setQbSyncingVendors(true);
+    try {
+      const result = await enqueueVendorQuery(supabase, 'manual-sync-vendors');
+      await loadQbVendorQueryPending();
+      if (result.jobIds.length === 0) {
+        alert('A vendor_query is already pending/in-flight. Wait for it to drain (~15 min).');
+      } else {
+        alert('Enqueued vendor_query. QBWC drains on next poll (~15 min). Vendors list refreshes automatically when complete.');
+      }
+    } catch (e) {
+      const err = e as { message?: string; details?: string; hint?: string; code?: string };
+      const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
+        .filter((s): s is string => !!s);
+      const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
+      alert('Sync Vendors failed: ' + msg);
+    } finally {
+      setQbSyncingVendors(false);
+    }
+  };
   // Slice G1 — Sync button handler. Broad seed strategy per Dan's ask:
   // enqueue iterator-mode bill_query for EVERY QB vendor we care about, not
   // just event-classified ones. "Care about" =
@@ -3110,6 +3164,7 @@ const TimesheetSystem = () => {
       await loadQbOpenBills();
       await loadQbWcLastSeen();
       await loadQbBillQueryPending();
+      await loadQbVendorQueryPending();
       await loadInflightPushRecords();
       // Auto-recompute matches for pending events using current invoices.
       // Guarded — skips silently if invoices state is empty (see the guard in
@@ -3142,7 +3197,7 @@ const TimesheetSystem = () => {
     // Poll every 30s regardless of current count. Background inserts (pg_cron
     // qb-delta-bills, manual probes) can appear at any time; a 0→N transition
     // needs to be visible in the UI without the accountant having to refresh.
-    const iv = setInterval(() => { loadQbBillQueryPending(); }, 30_000);
+    const iv = setInterval(() => { loadQbBillQueryPending(); loadQbVendorQueryPending(); }, 30_000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountantTab, currentUser?.role]);
@@ -11048,6 +11103,13 @@ const TimesheetSystem = () => {
                         : syncPending
                           ? `Syncing… ${qbBillQueryPending} pending`
                           : 'Sync QB state';
+                      const vendorSyncPending = qbVendorQueryPending > 0;
+                      const vendorSyncDisabled = qbSyncingVendors || vendorSyncPending;
+                      const vendorSyncLabel = qbSyncingVendors
+                        ? 'Enqueuing…'
+                        : vendorSyncPending
+                          ? 'Syncing vendors…'
+                          : 'Sync vendors';
                       return (
                         <div className="flex flex-col items-end gap-0.5 text-xs">
                           <div className="flex items-center gap-2">
@@ -11065,6 +11127,19 @@ const TimesheetSystem = () => {
                                 : 'Enqueue bill_query jobs for all mapped vendors that need refresh. QBWC drains on next poll (~15 min).'}
                             >
                               {syncLabel}
+                            </button>
+                            <span className="text-gray-300">·</span>
+                            <button
+                              onClick={runSyncQbVendors}
+                              disabled={vendorSyncDisabled}
+                              className={vendorSyncDisabled
+                                ? 'text-gray-400 cursor-not-allowed'
+                                : 'text-indigo-600 hover:underline'}
+                              title={vendorSyncPending
+                                ? 'vendor_query still draining via QBWC (~15 min).'
+                                : 'Enqueue a vendor_query to refresh the QB vendor list. QBWC drains on next poll (~15 min). Auto-runs every 2h.'}
+                            >
+                              {vendorSyncLabel}
                             </button>
                           </div>
                           <div className={qbwcColor}>
