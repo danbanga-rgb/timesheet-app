@@ -75,9 +75,9 @@ export const INTENTS: IntentSpec[] = [
       },
       {
         name: 'country',
-        prompt: 'Country?',
+        prompt: 'US (onshore) — or type a country name (offshore)?',
         input_type: 'buttons+text',
-        options: ['US', 'GB', 'HR', 'RS', 'BA', 'MK', 'CA', 'SI'],
+        options: ['US'],
         required: true,
       },
       {
