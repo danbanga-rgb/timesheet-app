@@ -238,6 +238,7 @@ import { pushIntuitCreateBill } from './lib/qbWrite/consumers/intuitCreateBill';
 import { pushIntuitCheck } from './lib/qbWrite/consumers/intuitCheck';
 import { pushIntuitInvoiceCreateBill } from './lib/qbWrite/consumers/intuitInvoiceCreateBill';
 import { pushConveraInvoiceCreateBill } from './lib/qbWrite/consumers/converaInvoiceCreateBill';
+import { insertConveraShadowEvents, updateConveraShadowMatch, type ConveraShadowInput, type ConveraShadowMatchUpdate } from './lib/qbIngest/converaShadow';
 import VendorDecisionModal from './components/VendorDecisionModal';
 
 // ─── TypeScript interfaces ────────────────────────────────────────────────────
@@ -5245,6 +5246,36 @@ const TimesheetSystem = () => {
           const { error: linkErr } = await supabase.from('convera_transaction_invoices').insert(umbrellaLinks);
           if (linkErr) { setPaymentsImportError(`Umbrella link insert failed: ${linkErr.message}`); return; }
         }
+
+        // Phase 2 shadow-write: mirror the new Convera rows into qb_ingest_events
+        // so the QB Automation Inbox surfaces Convera activity. Failure here
+        // does NOT abort the import — shadow write is additive, and the
+        // primary convera_transactions rows are already committed.
+        try {
+          const shadowInputs: ConveraShadowInput[] = (insertedRows ?? []).map(inserted => {
+            const key = `${inserted.confirmation_number}::${inserted.line_item}`;
+            const inc = newRows.find(r => `${r.confirmation_number}::${r.line_item}` === key)!;
+            const umbrella = inc.umbrellaGroup ?? [];
+            const matchedIds = umbrella.length > 0
+              ? umbrella.map(inv => inv.id)
+              : (inc.matched_invoice_id != null ? [inc.matched_invoice_id] : []);
+            return {
+              converaTransactionId: inserted.id,
+              confirmationNumber: inc.confirmation_number,
+              lineItem: inc.line_item,
+              txnDate: inc.date_of_order ?? '',
+              amount: inc.foreign_amount ?? 0,
+              beneficiaryName: inc.beneficiary_name,
+              ref1: inc.ref1,
+              matchedInvoiceIds: matchedIds,
+              matchState: 'unreviewed',
+              matcherIgnore: false,
+            };
+          });
+          await insertConveraShadowEvents(supabase, shadowInputs);
+        } catch (shadowErr) {
+          console.warn('[qbIngest] Convera shadow-write failed', shadowErr);
+        }
       }
 
       // ── Refresh existing unreviewed rows in place (keep their original batch_id) ──
@@ -5374,6 +5405,37 @@ const TimesheetSystem = () => {
       if (umbrellaLinksToWrite.length) {
         const { error } = await supabase.from('convera_transaction_invoices').insert(umbrellaLinksToWrite);
         if (error) { alert(`Failed to write umbrella links: ${error.message}`); return; }
+      }
+
+      // Phase 2 shadow-write: propagate match transitions to qb_ingest_events.
+      // Non-fatal — shadow lag doesn't corrupt the primary write.
+      try {
+        const shadowUpdates: ConveraShadowMatchUpdate[] = [];
+        for (const upd of matchedUpdates) {
+          const t = converaTransactions.find(x => x.id === upd.id);
+          if (!t) continue;
+          const staged = stagedMatches[upd.id];
+          const ids = Array.isArray(staged) ? staged : [];
+          shadowUpdates.push({
+            confirmationNumber: t.confirmationNumber,
+            lineItem: t.lineItem,
+            matchedInvoiceIds: ids,
+            matchState: 'matched',
+          });
+        }
+        for (const noId of noInvoiceIds) {
+          const t = converaTransactions.find(x => x.id === noId);
+          if (!t) continue;
+          shadowUpdates.push({
+            confirmationNumber: t.confirmationNumber,
+            lineItem: t.lineItem,
+            matchedInvoiceIds: [],
+            matchState: 'no_invoice',
+          });
+        }
+        await updateConveraShadowMatch(supabase, shadowUpdates);
+      } catch (shadowErr) {
+        console.warn('[qbIngest] Convera shadow match update failed', shadowErr);
       }
 
       // 3. Mark invoices paid
