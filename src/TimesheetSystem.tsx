@@ -10311,6 +10311,13 @@ const TimesheetSystem = () => {
                         onChange={e => setPaymentsImportFile(e.target.files?.[0] ?? null)}
                       />
                     </label>
+                    <button
+                      onClick={() => { setConveraTab('intuitXlsx'); setShowConveraModal(true); }}
+                      className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm"
+                    >
+                      <UploadCloud className="w-4 h-4" />
+                      Import Intuit Payments XLS
+                    </button>
                   </div>
                 </div>
 
@@ -12559,6 +12566,13 @@ const TimesheetSystem = () => {
                   </label>
                   <button onClick={() => setExpandedProfileUsers(new Set(allManagedUsers.map(u => u.id)))} className="text-xs text-indigo-600 hover:underline">Expand all</button>
                   <button onClick={() => setExpandedProfileUsers(new Set())} className="text-xs text-gray-500 hover:underline">Collapse all</button>
+                  <button
+                    onClick={() => { setConveraTab('beneficiaries'); setShowConveraModal(true); loadConveraBeneficiaries(); }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    Import Beneficiaries
+                  </button>
                 </div>
                 <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 280px)' }}>
                   <table className="w-full text-sm">
