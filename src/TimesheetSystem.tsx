@@ -1326,6 +1326,10 @@ const TimesheetSystem = () => {
   // Polled every 30s while the QB Automation tab is open + > 0 pending. Falls
   // to 0 when QBWC finishes draining; UI auto-refreshes snapshot at that point.
   const [qbBillQueryPending, setQbBillQueryPending] = useState(0);
+  // All pending qb_sync_jobs (any kind) for the "N pending" click-to-inspect
+  // popup. Loaded alongside the bill_query count on the same poll interval.
+  const [qbPendingJobDetails, setQbPendingJobDetails] = useState<Array<{ id: number; kind: string; created_at: string; payload: Record<string, unknown> | null }>>([]);
+  const [showPendingJobsPopup, setShowPendingJobsPopup] = useState(false);
   const [qbSyncingVendors, setQbSyncingVendors] = useState(false);
   const [qbVendorQueryPending, setQbVendorQueryPending] = useState(0);
   // Slice D — vendor mapping widget state
@@ -2970,13 +2974,18 @@ const TimesheetSystem = () => {
   // and show live progress. Called by the polling effect below.
   const loadQbBillQueryPending = async () => {
     try {
+      // Fetch ALL pending/in-flight jobs (any kind) so the "N pending" chip
+      // can expand into a detail popup. Bill_query count is derived from
+      // this list — one fetch, one poll interval.
       const { data } = await supabase
         .from('qb_sync_jobs')
-        .select('id')
-        .eq('kind', 'bill_query')
-        .in('status', ['pending', 'in_flight']);
+        .select('id, kind, created_at, payload')
+        .in('status', ['pending', 'in_flight'])
+        .order('created_at', { ascending: true });
+      const all = (data ?? []) as Array<{ id: number; kind: string; created_at: string; payload: Record<string, unknown> | null }>;
+      setQbPendingJobDetails(all);
       const prev = qbBillQueryPending;
-      const next = (data ?? []).length;
+      const next = all.filter(j => j.kind === 'bill_query').length;
       setQbBillQueryPending(next);
       // Transition from >0 → 0 = QBWC just finished draining; refresh snapshot,
       // heartbeat, and re-reconcile since mirror is now fresher.
@@ -11102,7 +11111,6 @@ const TimesheetSystem = () => {
                       const qbwcColor = qbwcDown ? 'text-red-700' : (qbwcAlive ? 'text-green-700' : 'text-amber-700');
 
                       const syncPending = qbBillQueryPending > 0;
-                      const syncDisabled = qbSyncingBills || syncPending;
                       const syncLabel = qbSyncingBills
                         ? 'Enqueuing…'
                         : syncPending
@@ -11122,13 +11130,15 @@ const TimesheetSystem = () => {
                               {snapshotStale && '⚠ '}{snapshotLabel}
                             </span>
                             <button
-                              onClick={runSyncQbBills}
-                              disabled={syncDisabled}
-                              className={syncDisabled
+                              onClick={syncPending ? () => setShowPendingJobsPopup(true) : runSyncQbBills}
+                              disabled={qbSyncingBills}
+                              className={qbSyncingBills
                                 ? 'text-gray-400 cursor-not-allowed'
-                                : 'text-indigo-600 hover:underline'}
+                                : syncPending
+                                  ? 'text-amber-700 hover:underline cursor-pointer'
+                                  : 'text-indigo-600 hover:underline'}
                               title={syncPending
-                                ? `${qbBillQueryPending} bill_query job${qbBillQueryPending === 1 ? '' : 's'} still draining via QBWC. Wait for them to complete before enqueueing more.`
+                                ? `Click to see what's pending (${qbBillQueryPending} bill_query job${qbBillQueryPending === 1 ? '' : 's'} + ${qbPendingJobDetails.length - qbBillQueryPending} other job${qbPendingJobDetails.length - qbBillQueryPending === 1 ? '' : 's'} draining via QBWC).`
                                 : 'Enqueue bill_query jobs for all mapped vendors that need refresh. QBWC drains on next poll (~15 min).'}
                             >
                               {syncLabel}
@@ -11797,6 +11807,66 @@ const TimesheetSystem = () => {
                       </div>
                       <div className="p-4 border-t border-gray-200 flex justify-end">
                         <button onClick={() => setPushResult(null)} className="px-4 py-2 text-sm text-indigo-700 hover:text-indigo-900 font-medium">Close</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Pending jobs popup — click-to-inspect for "N pending" chip.
+                    Every unexplained "Syncing... N pending" trains distrust;
+                    this exposes what's actually queued so the accountant knows
+                    whether to wait, cancel, or ignore. */}
+                {showPendingJobsPopup && (
+                  <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowPendingJobsPopup(false)}>
+                    <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                      <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+                        <div>
+                          <h3 className="text-lg font-semibold text-gray-800">Pending QBWC jobs</h3>
+                          <p className="text-sm text-gray-600 mt-1">{qbPendingJobDetails.length} job{qbPendingJobDetails.length === 1 ? '' : 's'} waiting for QBWC to pick up (polls every ~15 min).</p>
+                        </div>
+                        <button onClick={() => setShowPendingJobsPopup(false)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+                      </div>
+                      <div className="p-4 overflow-auto flex-1">
+                        {qbPendingJobDetails.length === 0 ? (
+                          <p className="text-sm text-gray-500 italic text-center py-6">Nothing pending — all drained.</p>
+                        ) : (
+                          <table className="w-full text-xs">
+                            <thead className="text-gray-500 border-b border-gray-200">
+                              <tr>
+                                <th className="px-2 py-1.5 text-left">Job</th>
+                                <th className="px-2 py-1.5 text-left">Kind</th>
+                                <th className="px-2 py-1.5 text-left">Source / audit tag</th>
+                                <th className="px-2 py-1.5 text-left">Target</th>
+                                <th className="px-2 py-1.5 text-right">Age</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {qbPendingJobDetails.map(j => {
+                                const p = j.payload ?? {};
+                                const source = (p.__source as string | undefined) ?? (p.__audit_tag as string | undefined) ?? '—';
+                                const vendor = (p.entityVendorName as string | undefined) ?? (p.vendorName as string | undefined) ?? (p.payeeVendorName as string | undefined) ?? '';
+                                const ref = (p.refNumber as string | undefined) ?? '';
+                                const target = vendor || ref || (p.__source === 'pg_cron_delta_bills' ? '(all modified bills)' : '—');
+                                const ageMs = Date.now() - new Date(j.created_at).getTime();
+                                const ageMin = Math.floor(ageMs / 60000);
+                                const ageLabel = ageMin < 1 ? '<1 min' : ageMin < 60 ? `${ageMin} min` : `${Math.floor(ageMin/60)}h ${ageMin%60}m`;
+                                return (
+                                  <tr key={j.id} className="border-t border-gray-100">
+                                    <td className="px-2 py-1 font-mono text-gray-500">{j.id}</td>
+                                    <td className="px-2 py-1 font-mono text-gray-700">{j.kind}</td>
+                                    <td className="px-2 py-1 text-gray-600">{source}</td>
+                                    <td className="px-2 py-1 text-gray-700 truncate max-w-xs" title={target}>{target}</td>
+                                    <td className="px-2 py-1 text-right text-gray-500">{ageLabel}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                      <div className="p-4 border-t border-gray-200 flex justify-between items-center">
+                        <span className="text-xs text-gray-500">Refresh cadence: polled every 30s while this tab is open.</span>
+                        <button onClick={() => setShowPendingJobsPopup(false)} className="px-4 py-2 text-sm text-indigo-700 hover:text-indigo-900 font-medium">Close</button>
                       </div>
                     </div>
                   </div>
