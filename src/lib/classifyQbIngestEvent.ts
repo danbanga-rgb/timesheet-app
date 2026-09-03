@@ -177,6 +177,12 @@ function applyProfileChain(
   const nextStatus: QbIngestStatus = 'ready';
   const isMultiVendor = vendorListIds.size > 1;
 
+  // Seed default expense account for Convera-source so G7.6 create_bill has an
+  // expense to attach without needing a separate bulk migration. Vendor Consultants
+  // (600000-1142369998) per [[qb-expense-account-conventions]]. Intuit-source stays
+  // null — its consumer resolves expense from invoice metadata.
+  const seedExpenseAccountListId = event.source === 'convera' ? '600000-1142369998' : null;
+
   return {
     patch: buildPatch(event, firstVendorListId, kind, ctx.bankAccount.listId, null, nextStatus),
     source: 'profile-chain',
@@ -189,7 +195,7 @@ function applyProfileChain(
       qb_vendor_list_id: firstVendorListId,
       default_target_kind: kind,
       default_bank_account_list_id: ctx.bankAccount.listId,
-      default_expense_account_list_id: null,
+      default_expense_account_list_id: seedExpenseAccountListId,
     },
   };
 }

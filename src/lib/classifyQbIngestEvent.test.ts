@@ -177,6 +177,8 @@ describe('classifyOne — Pass 2: profile-chain', () => {
     expect(r.seedMapping?.source).toBe('intuit_xlsx');
     expect(r.seedMapping?.counterparty_pattern).toBe('Hover cloud technologies LLC');
     expect(r.seedMapping?.qb_vendor_list_id).toBe('VEND-HOVER');
+    // Intuit-source seeds NULL expense — its consumer resolves expense from invoice metadata.
+    expect(r.seedMapping?.default_expense_account_list_id).toBeNull();
   });
 
   it('case-insensitive vendor match ("hovercloud" ↔ "HOVERCLOUD")', () => {
@@ -218,6 +220,9 @@ describe('classifyOne — Pass 2: profile-chain', () => {
     expect(r.seedMapping?.source).toBe('convera');
     expect(r.seedMapping?.counterparty_pattern).toBe('HOVERCLOUD LLC BENEFICIARY');
     expect(r.seedMapping?.qb_vendor_list_id).toBe('VEND-HOVER');
+    // Convera-source seeds default_expense_account_list_id so G7.6 create_bill
+    // has an expense to attach without needing a separate bulk migration.
+    expect(r.seedMapping?.default_expense_account_list_id).toBe('600000-1142369998');
   });
 
   it('skipReason="no matched invoice" when matchedInvoiceIds is empty', () => {
