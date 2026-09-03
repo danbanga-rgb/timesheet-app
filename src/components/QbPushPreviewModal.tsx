@@ -396,8 +396,18 @@ export default function QbPushPreviewModal({
           {readyGroups.map(g => {
             const total = g.events.reduce((n, e) => n + e.amount, 0);
             const jobs = g.events.reduce((n, e) => n + jobsForEvent(e), 0);
+            // Bank display: Convera-source events always debit Western Union
+            // Holding at push time (converaCreateBillAndPay/converaBillPmt look
+            // it up by pattern match, ignoring event.qbBankAccountListId which
+            // may be a stale mapping-seed value pointing at Key Point Checking).
+            // Prefer the WU account when the group is pure Convera so the UI
+            // matches what actually posts to QB.
+            const allConvera = g.events.length > 0 && g.events.every(e => e.source === 'convera');
+            const wuAccount = allConvera
+              ? qbAccounts.find(a => a.fullName.toLowerCase().includes('western union holding'))
+              : null;
             const bankId = g.events.find(e => e.qbBankAccountListId)?.qbBankAccountListId;
-            const bank = bankId ? accountById.get(bankId) : null;
+            const bank = wuAccount ?? (bankId ? accountById.get(bankId) : null);
             const isExpanded = expanded[g.action];
             const groupPushable = PUSHABLE_ACTIONS.includes(g.action);
             const groupSelectedCount = groupPushable ? g.events.filter(e => selected.has(e.id)).length : 0;

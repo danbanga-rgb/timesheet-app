@@ -301,7 +301,20 @@ export async function pushConveraCreateBillAndPay(
       }
       const billAddJobId = billAddJobIdByInvoiceId.get(invoice.id);
       if (billAddJobId == null) {
-        anySubGroupSkipReason = `no bill_add job enqueued for missing invoice ${invoice.id} — see delegated skip/reject reasons`;
+        // Look up the specific delegated reason so the accountant sees what
+        // actually blocked bill_add — instead of a generic "see delegated
+        // reasons" pointer they have to hunt through the modal for.
+        const delegatedSkip = createResult?.skippedIneligible.find(s => s.invoiceId === invoice.id)?.reason;
+        const delegatedReject = createResult?.rejected.find(r => {
+          const inv = (r.intent as { sourceInvoiceIds?: number[] } | undefined);
+          return inv?.sourceInvoiceIds?.includes(invoice.id);
+        });
+        const detail = delegatedSkip
+          ? `skipped: ${delegatedSkip}`
+          : delegatedReject
+            ? `rejected (${delegatedReject.invariant}): ${delegatedReject.reason}`
+            : `bill likely created by another push path (e.g. G7.6 invoice-driven). Run Sync QB state → Recompute matches → Push again to emit the BillPmt against the fresh bill.`;
+        anySubGroupSkipReason = `invoice ${invoice.id} bill_add ${detail}`;
         break;
       }
       applications.push({ billTxnId: null, paymentAmount });

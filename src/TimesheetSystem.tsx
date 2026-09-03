@@ -1308,6 +1308,15 @@ const TimesheetSystem = () => {
   // Slice F — push preview modal
   const [showQbPushPreview, setShowQbPushPreview] = useState(false);
   const [qbPushRecords, setQbPushRecords] = useState<PushRecord[]>([]);
+  // Push-result modal state (replaces the huge browser alert). Sections
+  // (ineligible / duplicate / rejected) are each collapsible so a 20+
+  // Convera-wire batch doesn't dump an unreadable static wall of text.
+  const [pushResult, setPushResult] = useState<{
+    summary: string;
+    ineligible: string[];
+    duplicate: string[];
+    rejected: string[];
+  } | null>(null);
   // Slice G1 — qbStateSync mirror of QB open bills
   const [qbOpenBills, setQbOpenBills] = useState<QbOpenBillRow[]>([]);
   const [qbSyncingBills, setQbSyncingBills] = useState(false);
@@ -11465,15 +11474,19 @@ const TimesheetSystem = () => {
                       // via pushConveraCreateBillAndPay (C-2). Multi-invoice events
                       // hit C-2's skip path with a Slice C-3 direction.
                       // Convera routing for bill_pmt / bill_add_and_pmt targets:
-                      //   Has invoice link + all bills exist       → pushConveraBillPmt (C-1)
-                      //   Has invoice link + some bills missing    → pushConveraCreateBillAndPay (C-2/C-3)
-                      //   NO invoice link (orphan)                 → pushConveraCreateBillFromEvent (C-4).
-                      //     Consumer decides Case D (pay existing bill from qb_mirror lookup)
-                      //     vs Case C (create+pay) at push time. Widget kind is advisory.
+                      //   1 invoice + bill exists                  → pushConveraBillPmt (C-1: single-vendor)
+                      //   >1 invoice OR some bills missing         → pushConveraCreateBillAndPay (C-2/C-3: per-invoice vendor resolution)
+                      //   NO invoice link (orphan)                 → pushConveraCreateBillFromEvent (C-4)
+                      //
+                      // Why multi-invoice always goes to C-2: umbrella wires (Bimosoft) match
+                      // N invoices spanning N sub-vendors. C-1 uses one payee per event
+                      // (event.counterparty_qb_vendor_list_id) and would lump all bills
+                      // under one payee → INVARIANT #11 vendor-mismatch reject. C-2
+                      // resolves vendor per invoice and emits one pay_bill per sub-vendor.
                       const converaBillPmtCandidates = selectedEvents.filter(e => e.source === 'convera' && e.targetQbTxnKind === 'bill_pmt' && (e.matchedInvoiceIds ?? []).length > 0);
                       const converaAllBillsExist = converaBillPmtCandidates.filter(e => {
                         const ids = e.matchedInvoiceIds ?? [];
-                        return ids.length > 0 && ids.every(iid => invoices.find(inv => inv.id === iid)?.qbBillTxnId);
+                        return ids.length === 1 && ids.every(iid => invoices.find(inv => inv.id === iid)?.qbBillTxnId);
                       }).map(e => e.id);
                       const converaMissingBills = converaBillPmtCandidates.filter(e => !converaAllBillsExist.includes(e.id)).map(e => e.id);
                       // Orphan events (no matched invoice): both bill_pmt and
@@ -11671,16 +11684,16 @@ const TimesheetSystem = () => {
                       if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
                       if (r.skippedDuplicate.length > 0) parts.push(`${r.skippedDuplicate.length} skipped (already done or in-flight).`);
                       if (r.rejected.length > 0) parts.push(`${r.rejected.length} rejected by invariants.`);
-                      const detail = [
-                        ...r.skippedIneligible.map(s => `• event ${s.eventId}: ${s.reason}`),
-                        ...r.skippedDuplicate.map(s => `• ${s.reason}`),
-                        ...r.rejected.map(rj => `• ${rj.invariant}: ${rj.reason}`),
-                      ].slice(0, 12).join('\n');
-                      alert(`Pushed to QuickBooks queue.\n\n${parts.join(' ')}${detail ? '\n\n' + detail : ''}`);
+                      setPushResult({
+                        summary: parts.join(' '),
+                        ineligible: r.skippedIneligible.map(s => `event ${s.eventId}: ${s.reason}`),
+                        duplicate: r.skippedDuplicate.map(s => s.reason),
+                        rejected: r.rejected.map(rj => `${rj.invariant}: ${rj.reason}`),
+                      });
                       void loadQbIngestEvents();
                     } catch (e) {
                       console.error('[G7a] pushIntuitPayBill failed', e);
-                      alert(`Push failed: ${(e as Error).message}`);
+                      setPushResult({ summary: `Push failed: ${(e as Error).message}`, ineligible: [], duplicate: [], rejected: [] });
                     }
                   }}
                   onFixMapping={(counterparty, source) => {
@@ -11688,6 +11701,44 @@ const TimesheetSystem = () => {
                     openMapWidget(counterparty, source);
                   }}
                 />
+
+                {/* Push-result modal: replaces the legacy browser alert.
+                    Sections collapse independently so a 20+ event batch
+                    doesn't blast a static wall of text. */}
+                {pushResult && (
+                  <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setPushResult(null)}>
+                    <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                      <div className="p-5 border-b border-gray-200">
+                        <h3 className="text-lg font-semibold text-gray-800">Pushed to QuickBooks queue</h3>
+                        <p className="text-sm text-gray-700 mt-1.5">{pushResult.summary}</p>
+                      </div>
+                      <div className="p-4 overflow-auto flex-1 space-y-2">
+                        {[
+                          { key: 'rejected',   label: 'Rejected by invariants', color: 'red',    items: pushResult.rejected },
+                          { key: 'ineligible', label: 'Skipped (ineligible)',   color: 'amber',  items: pushResult.ineligible },
+                          { key: 'duplicate',  label: 'Skipped (already done or in-flight)', color: 'gray', items: pushResult.duplicate },
+                        ].map(sec => sec.items.length === 0 ? null : (
+                          <details key={sec.key} className={`border border-${sec.color}-200 rounded-lg overflow-hidden bg-${sec.color}-50`} open={sec.key === 'rejected'}>
+                            <summary className={`cursor-pointer px-4 py-2.5 text-sm font-medium text-${sec.color}-900 hover:bg-${sec.color}-100/60 select-none`}>
+                              {sec.label} · <span className="font-mono">{sec.items.length}</span>
+                            </summary>
+                            <ul className="px-4 pb-3 pt-1 space-y-1 max-h-64 overflow-y-auto">
+                              {sec.items.map((line, i) => (
+                                <li key={i} className="text-xs text-gray-700 leading-snug"><span className="text-gray-400 mr-1">•</span>{line}</li>
+                              ))}
+                            </ul>
+                          </details>
+                        ))}
+                        {pushResult.rejected.length + pushResult.ineligible.length + pushResult.duplicate.length === 0 && (
+                          <p className="text-sm text-gray-500 italic text-center py-6">No details.</p>
+                        )}
+                      </div>
+                      <div className="p-4 border-t border-gray-200 flex justify-end">
+                        <button onClick={() => setPushResult(null)} className="px-4 py-2 text-sm text-indigo-700 hover:text-indigo-900 font-medium">Close</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Slice 3: Needs vendor decision — approved invoices whose
                     payment profile isn't mapped to a QB vendor AND the
