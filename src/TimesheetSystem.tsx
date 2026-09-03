@@ -2715,10 +2715,63 @@ const TimesheetSystem = () => {
     // future retrofit) will pass their own cutoff. For now pass Intuit's
     // — safe because our only current source IS intuit_xlsx, and reconciler
     // uses cutoff only as a per-event compare (skips it if not applicable).
-    const results = reconcileBatch(events, {
+    const rawResults = reconcileBatch(events, {
       billsByVendor,
       paymentsByVendor,
       preOurSystemCutoff: INTUIT_PRE_OUR_SYSTEM_CUTOFF,
+    });
+
+    // Convera umbrella-aware post-pass. The core reconciler is single-vendor
+    // (looks up bills by event.counterpartyQbVendorListId). For Convera
+    // umbrella wires (Bimosoft, Teal) that match N invoices spanning N
+    // sub-vendors, it misses N-1 sub-vendors and keeps events at
+    // create_bill_then_pay even when every sub-vendor's bill is settled.
+    // See [[convera-push-routing]] "Reconciler is single-vendor only".
+    //
+    // Cure: for events with matched_invoice_ids.length > 1 that came out of
+    // reconcileBatch as create_bill_then_pay OR held, look up each matched
+    // invoice's bill via its qb_bill_txn_id (already loaded above into
+    // invoicesById). Aggregate the settled state:
+    //   all bills exist + all settled → already_done (posted)
+    //   all bills exist + some settled → held (partial)
+    //   all bills exist + none settled → pay_existing_bill (bills ready to pay)
+    //   some bills missing → keep original (create_bill_then_pay is right)
+    const billsByTxnId = new Map<string, MirrorBill>();
+    for (const arr of billsByVendor.values()) {
+      for (const b of arr) billsByTxnId.set(b.txnId, b);
+    }
+    const results = rawResults.map(({ event, result }) => {
+      if (event.matchedInvoiceIds.length <= 1) return { event, result };
+      if (result.action !== 'create_bill_then_pay' && result.action !== 'held') return { event, result };
+      const perInvoice = event.matchedInvoiceIds.map(invId => {
+        const inv = invoicesById.get(invId);
+        const billTxnId = inv?.qbBillTxnId ?? null;
+        const bill = billTxnId ? billsByTxnId.get(billTxnId) : null;
+        return { invId, billTxnId, isPaid: bill?.isPaid ?? null };
+      });
+      const anyMissing = perInvoice.some(p => !p.billTxnId || !billsByTxnId.has(p.billTxnId!));
+      if (anyMissing) return { event, result };
+      const settledCount = perInvoice.filter(p => p.isPaid === true).length;
+      const total = perInvoice.length;
+      const firstBillTxnId = perInvoice[0].billTxnId ?? undefined;
+      if (settledCount === total) {
+        return { event, result: {
+          action: 'already_done' as const,
+          billTxnId: firstBillTxnId,
+          reason: `Convera umbrella: all ${total} sub-vendor bills settled in QB`,
+        }};
+      }
+      if (settledCount > 0) {
+        return { event, result: {
+          action: 'held' as const,
+          reason: `Convera umbrella: ${settledCount}/${total} sub-vendor bills settled — partial. Sync QB state + Recompute after next push.`,
+        }};
+      }
+      return { event, result: {
+        action: 'pay_existing_bill' as const,
+        billTxnId: firstBillTxnId,
+        reason: `Convera umbrella: all ${total} sub-vendor bills exist in QB, none settled — ready for BillPmt push`,
+      }};
     });
     const nowIso = new Date().toISOString();
     let reconciled = 0;
