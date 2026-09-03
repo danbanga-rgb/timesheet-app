@@ -649,35 +649,48 @@ export default function QbPushPreviewModal({
             </div>
           )}
 
-          {/* Ignored */}
-          {parts.ignored.length > 0 && (
-            <div className="border border-gray-200 rounded-lg overflow-hidden">
-              <button onClick={() => toggle('ignored')} className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 hover:bg-gray-100 text-left text-sm">
-                <div className="text-gray-600">
-                  <span className="font-medium">Ignored:</span>{' '}
-                  <span className="text-xs">
-                    {(() => {
-                      const grp = groupByCounterparty(parts.ignored, e => ({
-                        source: e.source, counterparty: e.counterpartyRaw, amount: e.amount,
-                      }));
-                      return grp.map(g => `${g.counterparty} × ${g.items.length}`).join(', ');
-                    })()}
-                  </span>
-                </div>
-                <span className="text-xs text-gray-400">{expanded.ignored ? '▼' : '▶'}</span>
-              </button>
-              {expanded.ignored && (
-                <ul className="px-4 py-2 text-xs text-gray-600 space-y-0.5">
-                  {parts.ignored.map(e => (
-                    <li key={e.id} className="flex justify-between">
-                      <span>{e.txnDate} · {e.counterpartyRaw}</span>
-                      <span className="font-mono">{money(e.amount)}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
+          {/* Ignored — condensed header (was a 100+ counterparty wall of text
+              that hid the rest of the modal). Header now shows only count +
+              total; expand to see the per-counterparty breakdown and events. */}
+          {parts.ignored.length > 0 && (() => {
+            const ignoredTotal = parts.ignored.reduce((n, e) => n + e.amount, 0);
+            const grp = groupByCounterparty(parts.ignored, e => ({
+              source: e.source, counterparty: e.counterpartyRaw, amount: e.amount,
+            }));
+            return (
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <button onClick={() => toggle('ignored')} className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 hover:bg-gray-100 text-left text-sm">
+                  <div className="text-gray-600 flex items-center gap-2">
+                    <span className="font-medium">Ignored</span>
+                    <span className="text-xs">· {parts.ignored.length} event{parts.ignored.length === 1 ? '' : 's'} across {grp.length} counterpart{grp.length === 1 ? 'y' : 'ies'} · {money(ignoredTotal)}</span>
+                  </div>
+                  <span className="text-xs text-gray-400">{expanded.ignored ? '▼' : '▶'}</span>
+                </button>
+                {expanded.ignored && (
+                  <div className="px-4 py-2 max-h-96 overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="text-gray-500 border-b border-gray-200">
+                        <tr>
+                          <th className="px-2 py-1 text-left">Counterparty</th>
+                          <th className="px-2 py-1 text-right">Events</th>
+                          <th className="px-2 py-1 text-right">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {grp.map(g => (
+                          <tr key={`${g.source}||${g.counterparty}`} className="border-t border-gray-100">
+                            <td className="px-2 py-1 text-gray-700">{g.counterparty}</td>
+                            <td className="px-2 py-1 text-right font-mono">{g.items.length}</td>
+                            <td className="px-2 py-1 text-right font-mono">{money(g.total)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Previously pushed (by us — distinct from auto-closed). Month filter
               slices the potentially-large all-time list to a manageable window. */}

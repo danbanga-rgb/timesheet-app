@@ -11673,12 +11673,21 @@ const TimesheetSystem = () => {
                       const checkEnqueued = checkJobIds.filter((id): id is number => id != null).length;
                       const g75Enqueued = (g75Res?.jobIds ?? []).filter((id): id is number => id != null).length;
                       const g76Enqueued = (g76Res?.jobIds ?? []).filter((id): id is number => id != null).length;
+                      // Convera event-driven counters were previously missing from the
+                      // summary, so a successful Convera push (e.g. Bimosoft C-2 → 3
+                      // pay_bill jobs) showed "0 jobs enqueued." Fixed 2026-09-03.
+                      const converaPayEnqueued = (converaPayRes?.jobIds ?? []).filter((id): id is number => id != null).length;
+                      const converaCreatePayEnqueued = (converaCreatePayRes?.jobIds ?? []).filter((id): id is number => id != null).length;
+                      const converaCreateFromEventEnqueued = (converaCreateFromEventRes?.jobIds ?? []).filter((id): id is number => id != null).length;
                       const parts: string[] = [];
-                      if (payEnqueued > 0) parts.push(`${payEnqueued} pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
-                      if (createEnqueued > 0) parts.push(`${createEnqueued} bill_add job${createEnqueued === 1 ? '' : 's'} enqueued — wait for QuickBooks drain, then Recompute, then push payment step.`);
+                      if (payEnqueued > 0) parts.push(`${payEnqueued} Intuit pay_bill job${payEnqueued === 1 ? '' : 's'} enqueued.`);
+                      if (createEnqueued > 0) parts.push(`${createEnqueued} Intuit bill_add job${createEnqueued === 1 ? '' : 's'} enqueued — wait for QuickBooks drain, then Recompute, then push payment step.`);
                       if (checkEnqueued > 0) parts.push(`${checkEnqueued} check_add job${checkEnqueued === 1 ? '' : 's'} enqueued (direct expense — verify in QB after drain).`);
                       if (g75Enqueued > 0) parts.push(`${g75Enqueued} Intuit invoice bill_add job${g75Enqueued === 1 ? '' : 's'} enqueued (created from approved Intuit invoice).`);
                       if (g76Enqueued > 0) parts.push(`${g76Enqueued} Convera invoice bill_add job${g76Enqueued === 1 ? '' : 's'} enqueued (created from approved Convera invoice — payment handled separately).`);
+                      if (converaPayEnqueued > 0) parts.push(`${converaPayEnqueued} Convera pay_bill job${converaPayEnqueued === 1 ? '' : 's'} enqueued (bill already existed).`);
+                      if (converaCreatePayEnqueued > 0) parts.push(`${converaCreatePayEnqueued} Convera chained pay_bill job${converaCreatePayEnqueued === 1 ? '' : 's'} enqueued (per sub-vendor for umbrella wires + bill_add chain where needed).`);
+                      if (converaCreateFromEventEnqueued > 0) parts.push(`${converaCreateFromEventEnqueued} Convera orphan job${converaCreateFromEventEnqueued === 1 ? '' : 's'} enqueued (no invoice link — create+pay or pay-existing decided at push time).`);
                       if (parts.length === 0) parts.push(`0 jobs enqueued.`);
                       void enqueued;
                       if (r.skippedIneligible.length > 0) parts.push(`${r.skippedIneligible.length} skipped (ineligible).`);
