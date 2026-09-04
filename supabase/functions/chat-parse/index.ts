@@ -843,24 +843,37 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   // Vendor-manager filter: scope resolution to role=vendormanager so we don't
   // ambiguously match same-name profiles with other roles. On multi within
-  // vendormanagers, pick the first + state the assumption (read-safe; user can
-  // correct in a follow-up message).
+  // vendormanagers, pick the first + state the assumption (read-safe; user
+  // can correct in a follow-up). On no-match-as-VM but match-as-user, offer
+  // a fallback suggestion so the user isn't dead-ended.
   let vmAssumption = '';
+  let resolvedVm: ResolvedUser | null = null;
   if (c.vendor_manager) {
     const resolved = await resolveUser(admin, String(c.vendor_manager), 'vendormanager');
     if (resolved.kind === 'none') {
-      await writeBot(admin, conv.id, `No vendor manager matching "${c.vendor_manager}".`);
+      // Check if the name matches ANY user — if yes, suggest the profile
+      // lookup as an alternative (common correction path).
+      const anyMatch = await resolveUser(admin, String(c.vendor_manager));
+      if (anyMatch.kind === 'single') {
+        await writeBot(admin, conv.id,
+          `No vendor manager matching "${c.vendor_manager}". But ${anyMatch.user.name} (${anyMatch.user.email}) is a ${anyMatch.user.role || 'user'} — try "show ${anyMatch.user.name}" for their profile.`);
+      } else if (anyMatch.kind === 'multi') {
+        const list = anyMatch.candidates.slice(0, 5).map((u) => `${u.name} (${u.email})`).join(', ');
+        await writeBot(admin, conv.id,
+          `No vendor manager matching "${c.vendor_manager}". Found other users with that name — try "show <full name or email>" for a profile: ${list}.`);
+      } else {
+        await writeBot(admin, conv.id, `No user found matching "${c.vendor_manager}".`);
+      }
       return;
     }
-    let vm: ResolvedUser;
     if (resolved.kind === 'single') {
-      vm = resolved.user;
+      resolvedVm = resolved.user;
     } else {
-      vm = resolved.candidates[0];
+      resolvedVm = resolved.candidates[0];
       const others = resolved.candidates.slice(1).map((o) => ({ name: o.name, email: o.email, role: 'vendormanager' }));
-      vmAssumption = formatAssumption({ name: vm.name, email: vm.email, role: 'vendormanager' }, others);
+      vmAssumption = formatAssumption({ name: resolvedVm.name, email: resolvedVm.email, role: 'vendormanager' }, others);
     }
-    q = q.eq('vendor_manager_id', vm.id);
+    q = q.eq('vendor_manager_id', resolvedVm.id);
   }
 
   // Get one extra to detect "there are more" and cap fetched rows.
@@ -890,7 +903,12 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
   if (c.project) filterParts.push(`project=${c.project}`);
   if (c.country) filterParts.push(`country=${String(c.country).toUpperCase()}`);
   if (c.location_type) filterParts.push(String(c.location_type));
-  if (c.vendor_manager) filterParts.push(`reports to ${c.vendor_manager}`);
+  if (c.vendor_manager) {
+    // Prefer the resolved VM's canonical identity so it's clear WHICH one
+    // the bot picked (e.g. multiple Aleksandars).
+    const label = resolvedVm ? `${resolvedVm.name} (${resolvedVm.email})` : String(c.vendor_manager);
+    filterParts.push(`reports to ${label}`);
+  }
   if (c.active === true) filterParts.push('active');
   if (c.active === false) filterParts.push('terminated');
   if (c.missing_start_date === true) filterParts.push('missing start_date');
