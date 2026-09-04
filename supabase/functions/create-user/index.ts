@@ -53,7 +53,7 @@ serve(async (req) => {
     country, region, manager_id, project_id,
     start_date, end_date, phone,
     email_approvals_enabled, invoice_enabled,
-    reminders_enabled, chat_enabled, vendor_manager_id,
+    reminders_enabled, vendor_manager_id,
     payment_terms, location_type,
   } = body;
 
@@ -106,7 +106,6 @@ serve(async (req) => {
     email_approvals_enabled: email_approvals_enabled ?? false,
     invoice_enabled:         invoice_enabled ?? false,
     reminders_enabled:       reminders_enabled ?? true,
-    chat_enabled:            chat_enabled === true,
     vendor_manager_id:       vendor_manager_id || null,
     payment_terms:           payment_terms || null,
     location_type:           location_type || null,

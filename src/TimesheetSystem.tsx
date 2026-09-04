@@ -262,7 +262,6 @@ interface UserProfile {
   emailApprovalsEnabled: boolean;
   invoiceEnabled: boolean;
   remindersEnabled: boolean;
-  chatEnabled: boolean;
   vendorManagerId: string | null;
   lastLogin: string | null;
   paymentTerms: string | null;
@@ -466,7 +465,6 @@ interface UserForm {
   email_approvals_enabled: boolean;
   invoice_enabled: boolean;
   reminders_enabled: boolean;
-  chat_enabled: boolean;
   vendor_manager_id: string | null;
   payment_terms: string;
   location_type: string;
@@ -1189,7 +1187,7 @@ const TimesheetSystem = () => {
   const [showQuickAddModal, setShowQuickAddModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>({
-    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: false, reminders_enabled: true, chat_enabled: false, vendor_manager_id: null, payment_terms: '', location_type: ''
+    email: '', password: '', name: '', role: 'timesheetuser', manager_id: null, country: 'US', region: '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: false, reminders_enabled: true, vendor_manager_id: null, payment_terms: '', location_type: ''
   });
   const [projectForm, setProjectForm] = useState<ProjectForm>({
     name: '', code: '', status: 'active', description: ''
@@ -1752,7 +1750,6 @@ const TimesheetSystem = () => {
       emailApprovalsEnabled: !!(p.email_approvals_enabled as boolean),
       invoiceEnabled: p.invoice_enabled === undefined ? true : !!(p.invoice_enabled as boolean),
       remindersEnabled: p.reminders_enabled === undefined ? true : !!(p.reminders_enabled as boolean),
-      chatEnabled: !!(p.chat_enabled as boolean),
       vendorManagerId: (p.vendor_manager_id as string) || null,
       lastLogin: null,
       paymentTerms: (p.payment_terms as string) || null,
@@ -2139,18 +2136,18 @@ const TimesheetSystem = () => {
   const openUserModal = (user?: UserProfile) => {
     if (user) {
       setEditingUser(user ?? null);
-      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, reminders_enabled: user.remindersEnabled !== false, chat_enabled: user.chatEnabled === true, vendor_manager_id: user.vendorManagerId || null, payment_terms: user.paymentTerms || '', location_type: user.locationType || '' });
+      setUserForm({ email: user.email, password: '', name: user.name, role: user.role, manager_id: user.managerId, country: user.country, region: user.region, project_id: user.projectId, start_date: user.startDate || '', end_date: user.endDate || '', phone: user.phone || '', email_approvals_enabled: user.emailApprovalsEnabled || false, invoice_enabled: user.invoiceEnabled !== false, reminders_enabled: user.remindersEnabled !== false, vendor_manager_id: user.vendorManagerId || null, payment_terms: user.paymentTerms || '', location_type: user.locationType || '' });
     } else {
       setEditingUser(null);
       const autoPassword = generatePassword();
-      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: false, reminders_enabled: true, chat_enabled: false, vendor_manager_id: null, payment_terms: '', location_type: '' });
+      setUserForm({ email: '', password: autoPassword, name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: false, reminders_enabled: true, vendor_manager_id: null, payment_terms: '', location_type: '' });
     }
     setShowUserModal(true);
   };
 
   const openQuickAddModal = () => {
     setEditingUser(null);
-    setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: false, reminders_enabled: true, chat_enabled: false, vendor_manager_id: null, payment_terms: '', location_type: '' });
+    setUserForm({ email: '', password: generatePassword(), name: '', role: 'timesheetuser', manager_id: null, country: detectedLocation?.country || 'US', region: detectedLocation?.region || '', project_id: null, start_date: new Date().toISOString().split('T')[0], end_date: '', phone: '', email_approvals_enabled: false, invoice_enabled: false, reminders_enabled: true, vendor_manager_id: null, payment_terms: '', location_type: '' });
     setShowQuickAddModal(true);
   };
 
@@ -2177,7 +2174,6 @@ const TimesheetSystem = () => {
         email_approvals_enabled: userForm.email_approvals_enabled,
         invoice_enabled: userForm.invoice_enabled,
         reminders_enabled: userForm.reminders_enabled,
-        chat_enabled: userForm.chat_enabled,
         vendor_manager_id: userForm.vendor_manager_id || null,
         payment_terms: userForm.payment_terms || null,
         location_type: userForm.role === 'timesheetuser' ? (userForm.location_type || null) : null,
@@ -2217,7 +2213,6 @@ const TimesheetSystem = () => {
           email_approvals_enabled: userForm.email_approvals_enabled,
           invoice_enabled: userForm.invoice_enabled,
           reminders_enabled: userForm.reminders_enabled,
-          chat_enabled: userForm.chat_enabled,
           vendor_manager_id: userForm.vendor_manager_id || null,
           payment_terms: userForm.payment_terms || null,
           location_type: userForm.role === 'timesheetuser' ? (userForm.location_type || null) : null,
@@ -7147,20 +7142,6 @@ const TimesheetSystem = () => {
                         className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.reminders_enabled ? 'bg-green-500' : 'bg-gray-300'}`}
                       >
                         <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${userForm.reminders_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
-                      </button>
-                    </div>
-                    <div className="flex items-center justify-between p-4 bg-indigo-50 border-2 border-indigo-200 rounded-lg">
-                      <div>
-                        <p className="text-sm font-semibold text-gray-800">Synergie Chat Access</p>
-                        <p className="text-xs text-gray-500 mt-0.5">Allow this user to use the chat assistant at /chat</p>
-                        <p className="text-xs font-semibold mt-1 text-indigo-700">{userForm.chat_enabled ? '✓ Enabled' : '✗ Disabled'}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setUserForm({...userForm, chat_enabled: !userForm.chat_enabled})}
-                        className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${userForm.chat_enabled ? 'bg-indigo-600' : 'bg-gray-300'}`}
-                      >
-                        <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${userForm.chat_enabled ? 'translate-x-8' : 'translate-x-1'}`} />
                       </button>
                     </div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>
