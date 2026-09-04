@@ -125,6 +125,51 @@ export async function sendUserMessage(conversationId: string, content: string): 
   return data as ChatMessage;
 }
 
+// List of a user's prior conversations for the history drawer. Each row
+// includes the conversation id, when it started, the first user message
+// (preview), and the total message count. Ordered newest-first.
+export interface ConversationSummary {
+  id: string;
+  created_at: string;
+  preview: string;
+  message_count: number;
+}
+
+export async function listConversationsForUser(userId: string, limit = 50): Promise<ConversationSummary[]> {
+  const { data: convs } = await supabase
+    .from('chat_conversations')
+    .select('id, created_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (!convs || convs.length === 0) return [];
+
+  const convIds = convs.map((c: { id: string }) => c.id);
+  const { data: msgs } = await supabase
+    .from('chat_messages')
+    .select('conversation_id, direction, content, created_at')
+    .in('conversation_id', convIds)
+    .order('created_at', { ascending: true });
+
+  const byConv = new Map<string, { first_user: string; count: number }>();
+  for (const m of (msgs ?? []) as Array<{ conversation_id: string; direction: 'in' | 'out'; content: string }>) {
+    const existing = byConv.get(m.conversation_id) ?? { first_user: '', count: 0 };
+    existing.count += 1;
+    if (!existing.first_user && m.direction === 'in') existing.first_user = m.content;
+    byConv.set(m.conversation_id, existing);
+  }
+
+  return (convs as Array<{ id: string; created_at: string }>)
+    .map((c) => {
+      const summary = byConv.get(c.id);
+      const preview = summary?.first_user
+        ? (summary.first_user.length > 60 ? summary.first_user.slice(0, 60).trim() + '…' : summary.first_user)
+        : '(no messages)';
+      return { id: c.id, created_at: c.created_at, preview, message_count: summary?.count ?? 0 };
+    })
+    .filter((c) => c.message_count > 0);  // hide empty conversations (from bootstrap-then-cleared)
+}
+
 // Invoke the chat-parse edge fn to trigger bot processing of the latest message.
 // Fire-and-forget from the UI's perspective — the bot response arrives via
 // realtime subscription on chat_messages.

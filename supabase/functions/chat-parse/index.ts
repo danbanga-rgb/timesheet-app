@@ -197,6 +197,7 @@ If the user's latest message is a correction or refinement of a previous read/qu
 STRICT CLASSIFICATION RULES:
 - user.create: user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts as", "is joining", "new hire".
 - user.set_start_date / user.set_end_date: user is **setting a date on an EXISTING person** (verbs: "set", "update", "change", "ends", "starts on"). If the person doesn't exist yet, fall back to user.create.
+- user.update_country_region: user is **changing an existing user's country** (verbs: "update country", "change country", "move to <country>", "<name> is now in <country>", "<name>'s country is <country>").
 - user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details").
 - user.list: user is **asking for MULTIPLE users matching a filter** — signals include: "who is on <project>?", "list <role>", "show users with <property>", "how many <role>?", "which <role> ended...?", "who reports to <name>?", "contractors for <name>", "team for <manager name>", "everyone in <country>". When you see "reports to <X>" or "contractors for <X>", extract that person as vendor_manager.
 - Delete / archive / reassign are NOT supported yet — return intent=null with a suggested_reply.
@@ -211,6 +212,7 @@ If unclear or unmatched:
 Extract initial field values from the message for the classified intent:
 - user.create: name, email, role, location_type, country, project, start_date, end_date, vendor_manager, invoice_enabled, send_invite
 - user.set_start_date / user.set_end_date: target (name or email), start_date / end_date
+- user.update_country_region: target (name or email), country (ISO code preferred, else full name), optional region
 - user.get: target (name or email)
 - user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), limit (number)
 
@@ -525,6 +527,8 @@ async function executeIntent(
       await execUserCreate(admin, conv, jwt, actionId);
     } else if (spec.name === 'user.set_start_date' || spec.name === 'user.set_end_date') {
       await execUserSetDate(admin, conv, actionId, spec.name === 'user.set_start_date' ? 'start_date' : 'end_date');
+    } else if (spec.name === 'user.update_country_region') {
+      await execUserUpdateCountry(admin, conv, actionId);
     } else {
       throw new Error(`Executor for ${spec.name} not wired yet`);
     }
@@ -697,6 +701,80 @@ async function execUserSetDate(
   const humanCol = column === 'start_date' ? 'Start date' : 'End date';
   await writeBot(admin, conv.id, `✅ ${humanCol} for ${user.name} (${user.email}) set to ${newDate}.`);
   await resetAfterSuccess(admin, conv.id);
+}
+
+// ─── Country update executor ───────────────────────────────────────
+
+async function execUserUpdateCountry(
+  admin: SupabaseClient,
+  conv: Conversation,
+  actionId: string,
+): Promise<void> {
+  const target = String(conv.captured.target ?? '').trim();
+  const countryRaw = String(conv.captured.country ?? '').trim();
+  const regionInput = conv.captured.region ? String(conv.captured.region).trim() : '';
+  if (!target || !countryRaw) throw new Error('Missing target or country');
+
+  const country = normalizeCountry(countryRaw);
+  if (!country) throw new Error(`Country "${countryRaw}" not recognized. Use an ISO 2-letter code or a known country name.`);
+
+  const resolved = await resolveUser(admin, target);
+  if (resolved.kind === 'none') throw new Error(`No user found matching "${target}"`);
+  if (resolved.kind === 'multi') {
+    const list = resolved.candidates.map((c, i) => `  ${i + 1}. ${c.name} (${c.email})`).join('\n');
+    await admin.from('chat_actions').update({
+      status: 'cancelled', completed_at: new Date().toISOString(),
+      action_output: { reason: 'ambiguous_target', candidates: resolved.candidates },
+    }).eq('id', actionId);
+    await writeBot(admin, conv.id,
+      `Multiple matches for "${target}":\n${list}\n\nRe-send with a more specific name or use the email address.`);
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+
+  const user = resolved.user;
+  const region = regionInput || deriveRegion(country);
+  // location_type flows from country per [[country-location-type-derivation]].
+  const location_type: 'onshore' | 'offshore' = country === 'US' ? 'onshore' : 'offshore';
+
+  const { error } = await admin.from('profiles').update({
+    country,
+    region,
+    location_type,
+  }).eq('id', user.id);
+  if (error) throw new Error(`Update failed: ${error.message}`);
+
+  await admin.from('chat_actions').update({
+    status: 'success', completed_at: new Date().toISOString(),
+    action_output: { user_id: user.id, email: user.email, country, region, location_type },
+  }).eq('id', actionId);
+
+  await writeBot(admin, conv.id,
+    `✅ ${user.name} (${user.email}) — country set to ${country}${region ? `, region ${region}` : ''} (${location_type}).`);
+  await resetAfterSuccess(admin, conv.id);
+}
+
+// Normalize a country string to a 2-letter ISO code. Accepts already-ISO
+// input and a small set of common full names covering our current profile
+// countries. Returns null when the input is unrecognized (caller surfaces
+// an error asking the user to be more specific).
+function normalizeCountry(input: string): string | null {
+  const s = input.trim();
+  if (/^[A-Za-z]{2}$/.test(s)) return s.toUpperCase();
+  const map: Record<string, string> = {
+    'united states': 'US', 'united states of america': 'US', 'usa': 'US', 'u.s.a.': 'US', 'u.s.': 'US', 'america': 'US',
+    'united kingdom': 'GB', 'great britain': 'GB', 'britain': 'GB', 'england': 'GB', 'u.k.': 'GB',
+    'canada': 'CA',
+    'croatia': 'HR', 'hrvatska': 'HR',
+    'bosnia': 'BA', 'bosnia and herzegovina': 'BA', 'bosnia-herzegovina': 'BA', 'herzegovina': 'BA',
+    'serbia': 'RS', 'srbija': 'RS',
+    'macedonia': 'MK', 'north macedonia': 'MK', 'republic of macedonia': 'MK',
+    'slovenia': 'SI', 'slovenija': 'SI',
+    'india': 'IN', 'bharat': 'IN',
+    'armenia': 'AM',
+    'ukraine': 'UA',
+  };
+  return map[s.toLowerCase()] ?? null;
 }
 
 // ─── Read executors ────────────────────────────────────────────────
@@ -1167,7 +1245,9 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
 }
 
 function needsTargetResolution(intentName: string): boolean {
-  return intentName === 'user.set_start_date' || intentName === 'user.set_end_date';
+  return intentName === 'user.set_start_date'
+    || intentName === 'user.set_end_date'
+    || intentName === 'user.update_country_region';
 }
 
 function targetAlreadyResolved(captured: Record<string, unknown>): boolean {

@@ -93,6 +93,18 @@ export const INTENTS: IntentSpec[] = [
     ],
   },
   {
+    name: 'user.update_country_region',
+    required_permission: 'user.update_country_region',
+    description: "Update an existing user's country (and optionally region)",
+    extraction_hint:
+      "The user wants to change/update someone's country of residence. Extract target (name or email), country (2-letter ISO if user gave one, else the full country name — server normalizes), and optionally region if named.",
+    fields: [
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'country', input_type: 'text', required: true, hint: 'ISO 2-letter code (US, HR, BA, RS, MK, SI, CA, GB, IN, AM, ...) or full country name — server normalizes' },
+      { name: 'region', input_type: 'text', hint: 'optional; if omitted, server picks the default region for that country' },
+    ],
+  },
+  {
     name: 'user.set_start_date',
     required_permission: 'user.set_start_date',
     description: 'Set/update the start date of an existing user',

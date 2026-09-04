@@ -3,7 +3,7 @@
 // so bot responses land in the thread.
 
 import { useEffect, useRef, useState } from 'react';
-import { Loader2, Send, LogOut } from 'lucide-react';
+import { Loader2, Send, LogOut, History } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import {
   getOrCreateActiveConversation,
@@ -16,6 +16,7 @@ import {
   type ChatProfile,
 } from './api';
 import { supabase as sb } from '../../supabaseClient';
+import HistoryDrawer from './HistoryDrawer';
 
 const TERMINAL_PHASES = new Set(['done', 'cancelled', 'error']);
 
@@ -30,6 +31,7 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Bootstrap: get/create active conversation + load user's recent history
@@ -157,15 +159,33 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
           <h1 className="text-base font-semibold text-gray-900">Synergie Chat</h1>
           <p className="text-xs text-gray-500">{profile.name} · {profile.role}</p>
         </div>
-        <button
-          onClick={signOutChat}
-          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
-          title="Sign out"
-        >
-          <LogOut className="w-3.5 h-3.5" />
-          Sign out
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setHistoryOpen(true)}
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
+            title="Session history"
+          >
+            <History className="w-3.5 h-3.5" />
+            History
+          </button>
+          <button
+            onClick={signOutChat}
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
+            title="Sign out"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            Sign out
+          </button>
+        </div>
       </header>
+
+      {historyOpen && (
+        <HistoryDrawer
+          userId={profile.id}
+          currentConversationId={conversation?.id ?? null}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
 
       <main className="flex-1 flex flex-col max-w-3xl w-full mx-auto p-4 min-h-0">
         <div
@@ -212,9 +232,16 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center h-full text-gray-400 text-sm">
-      <p>Say hi to get started.</p>
-      <p className="text-xs mt-1">Try: "Sarah Chen starts Monday as timesheetuser, sarah@example.com, US, APFM"</p>
+    <div className="flex flex-col items-center justify-center h-full text-gray-500 text-sm px-4">
+      <p className="mb-3 font-medium">What I can do</p>
+      <ul className="text-xs space-y-1.5 text-left w-full max-w-sm">
+        <li>· <span className="text-gray-400">Add users</span> — <span className="font-mono text-gray-600">add Sarah Chen sarah@example.com US APFM</span></li>
+        <li>· <span className="text-gray-400">Set dates</span> — <span className="font-mono text-gray-600">harun ends today</span></li>
+        <li>· <span className="text-gray-400">Update country</span> — <span className="font-mono text-gray-600">update sarah's country to Croatia</span></li>
+        <li>· <span className="text-gray-400">Look up one</span> — <span className="font-mono text-gray-600">show harun</span></li>
+        <li>· <span className="text-gray-400">List users</span> — <span className="font-mono text-gray-600">who is on APFM?</span></li>
+      </ul>
+      <p className="text-xs mt-3 text-gray-400"><span className="font-mono">/clear</span> resets · <span className="font-mono">cancel</span> aborts a step</p>
     </div>
   );
 }
