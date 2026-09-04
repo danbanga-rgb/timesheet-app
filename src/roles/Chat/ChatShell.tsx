@@ -96,8 +96,22 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
 
     // Slash commands (client-side, don't hit the bot).
     if (content === '/clear') {
-      // Mark the boundary so a refresh doesn't re-surface prior messages.
+      // Boundary for the visible view (survives refresh).
       localStorage.setItem(CLEARED_BEFORE_KEY(profile.id), new Date().toISOString());
+      // Cancel the current conversation server-side so the classifier's
+      // recent-history context truly resets. Next message will bootstrap a
+      // fresh conversation via getOrCreateActiveConversation.
+      if (conversation) {
+        await sb.from('chat_conversations').update({ phase: 'cancelled' }).eq('id', conversation.id);
+        setConversation(null);
+        // Re-bootstrap immediately so the input is ready.
+        try {
+          const fresh = await getOrCreateActiveConversation(profile.id);
+          setConversation(fresh);
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
       setMessages([]);
       setSending(false);
       return;

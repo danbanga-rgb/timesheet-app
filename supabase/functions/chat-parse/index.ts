@@ -173,6 +173,12 @@ async function handleIdle(
   const allowedNames = new Set(permChecks.filter((p) => p.allowed).map((p) => p.name));
   const allowedIntents = catalog.filter((i) => allowedNames.has(i.name));
 
+  // Fetch recent conversation history so the classifier can interpret
+  // corrections and follow-ups ("no, I meant the regular Aleksandar", "show
+  // just the offshore ones", etc.). Multi-turn context flows because we
+  // reuse the same conversation after each success (see resetAfterSuccess).
+  const history = await fetchRecentHistory(admin, conv.id, 6);
+
   const parsePrompt = `You classify the user's intent and extract structured data from their message.
 
 TODAY IS ${todayIso()}. Use this as the reference for any relative dates
@@ -182,11 +188,17 @@ date from an unknown reference year.
 Available intents (only pick from these):
 ${allowedIntents.map((i) => `- "${i.name}": ${i.description}`).join('\n')}
 
+${history.length > 0 ? `RECENT CONVERSATION (context for follow-ups and corrections):
+${history.map((m) => `${m.direction === 'in' ? 'User' : 'Bot'}: ${m.content}`).join('\n')}
+
+If the user's latest message is a correction or refinement of a previous read/query (e.g. "no I meant X", "the other one", "just the offshore ones"), pick the SAME intent as that previous query and extract the corrected filters/target. Prior extracted values do NOT carry over automatically — the corrected message should re-supply what changes.
+` : ''}
+
 STRICT CLASSIFICATION RULES:
 - user.create: user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts as", "is joining", "new hire".
 - user.set_start_date / user.set_end_date: user is **setting a date on an EXISTING person** (verbs: "set", "update", "change", "ends", "starts on"). If the person doesn't exist yet, fall back to user.create.
 - user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details").
-- user.list: user is **asking for MULTIPLE users matching a filter** ("who is on APFM?", "list offshore contractors", "show users with no start date", "how many managers do we have?", "which timesheetusers ended last week?").
+- user.list: user is **asking for MULTIPLE users matching a filter** — signals include: "who is on <project>?", "list <role>", "show users with <property>", "how many <role>?", "which <role> ended...?", "who reports to <name>?", "contractors for <name>", "team for <manager name>", "everyone in <country>". When you see "reports to <X>" or "contractors for <X>", extract that person as vendor_manager.
 - Delete / archive / reassign are NOT supported yet — return intent=null with a suggested_reply.
 - If unclear, err on the side of intent=null. Do NOT force a match.
 
@@ -643,7 +655,7 @@ async function execUserCreate(
   if (!sendInvite) reply += ' No invite sent.';
 
   await writeBot(admin, conv.id, reply);
-  await setPhase(admin, conv.id, 'done');
+  await resetAfterSuccess(admin, conv.id);
 }
 
 // ─── Update-date executor (shared by set_start_date + set_end_date) ────────
@@ -684,7 +696,7 @@ async function execUserSetDate(
 
   const humanCol = column === 'start_date' ? 'Start date' : 'End date';
   await writeBot(admin, conv.id, `✅ ${humanCol} for ${user.name} (${user.email}) set to ${newDate}.`);
-  await setPhase(admin, conv.id, 'done');
+  await resetAfterSuccess(admin, conv.id);
 }
 
 // ─── Read executors ────────────────────────────────────────────────
@@ -705,7 +717,7 @@ async function executeReadIntent(
     } else {
       throw new Error(`Read executor for ${spec.name} not wired`);
     }
-    await setPhase(admin, conv.id, 'done');
+    await resetAfterSuccess(admin, conv.id);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await writeBot(admin, conv.id, `❌ Read failed: ${msg}`);
@@ -721,27 +733,34 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
   const t = target.toLowerCase();
   const cols = 'id, name, email, role, country, region, project_id, start_date, end_date, invoice_enabled, reminders_enabled, location_type, vendor_manager_id';
   let user: Record<string, unknown> | null = null;
+  let assumptionNote = '';
+
   if (t.includes('@')) {
     const { data } = await admin.from('profiles').select(cols).ilike('email', t).limit(1).maybeSingle();
     user = data as Record<string, unknown> | null;
   } else {
-    const { data: exact } = await admin.from('profiles').select(cols).ilike('name', target).limit(2);
-    if (exact && exact.length === 1) user = exact[0] as Record<string, unknown>;
-    else if (exact && exact.length > 1) {
-      const list = (exact as Array<{ name: string; email: string }>).map((u, i) => `  ${i + 1}. ${u.name} (${u.email})`).join('\n');
-      await writeBot(admin, conv.id, `Multiple exact-name matches for "${target}":\n${list}\n\nAsk again with the email.`);
-      return;
+    const { data: exact } = await admin.from('profiles').select(cols).ilike('name', target).limit(10);
+    if (exact && exact.length === 1) {
+      user = exact[0] as Record<string, unknown>;
+    } else if (exact && exact.length > 1) {
+      // Multiple exact-name matches: pick the first (alphabetical by fetch order),
+      // state the assumption, list the alternatives so user can correct.
+      user = exact[0] as Record<string, unknown>;
+      const others = (exact as Array<{ name: string; email: string; role: string }>).slice(1);
+      assumptionNote = formatAssumption((user as { name: string; email: string; role: string }), others);
     } else {
       const { data: fuzzy } = await admin.from('profiles').select(cols).ilike('name', `%${target}%`).limit(10);
       if (!fuzzy || fuzzy.length === 0) {
         await writeBot(admin, conv.id, `No user found matching "${target}".`);
         return;
       }
-      if (fuzzy.length === 1) user = fuzzy[0] as Record<string, unknown>;
-      else {
-        const list = (fuzzy as Array<{ name: string; email: string }>).map((u, i) => `  ${i + 1}. ${u.name} (${u.email})`).join('\n');
-        await writeBot(admin, conv.id, `Multiple matches for "${target}":\n${list}\n\nAsk again with a more specific name or the email.`);
-        return;
+      if (fuzzy.length === 1) {
+        user = fuzzy[0] as Record<string, unknown>;
+      } else {
+        // Multi fuzzy match: pick the first + state assumption.
+        user = fuzzy[0] as Record<string, unknown>;
+        const others = (fuzzy as Array<{ name: string; email: string; role: string }>).slice(1);
+        assumptionNote = formatAssumption((user as { name: string; email: string; role: string }), others);
       }
     }
   }
@@ -762,6 +781,7 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
   const status = !endDate ? 'ACTIVE (no end date)' : endDate > today ? `ACTIVE (ends ${endDate})` : `ENDED ${endDate}`;
 
   const lines = [
+    ...(assumptionNote ? [assumptionNote, ''] : []),
     `${user.name} (${user.email})`,
     `  Status: ${status}`,
     `  Role: ${user.role}`,
@@ -772,6 +792,19 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
     `  Reminders: ${user.reminders_enabled === false ? 'DISABLED' : 'enabled'}`,
   ];
   await writeBot(admin, conv.id, lines.join('\n'));
+}
+
+// Formats a "here's my assumption" preamble when reads had to pick between
+// multiple candidate matches. Lists the alternatives so the user can correct.
+function formatAssumption(
+  picked: { name: string; email: string; role?: string },
+  others: Array<{ name: string; email: string; role?: string }>,
+): string {
+  if (others.length === 0) return '';
+  const pickedRole = picked.role ? ` the ${picked.role}` : '';
+  const alt = others.slice(0, 3).map((o) => `${o.name}${o.role ? ` (${o.role})` : ''} — ${o.email}`).join('; ');
+  const more = others.length > 3 ? ` (+${others.length - 3} more)` : '';
+  return `Assuming you meant ${picked.name}${pickedRole} (${picked.email}). Say the full email to switch to: ${alt}${more}.`;
 }
 
 async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<void> {
@@ -808,19 +841,26 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
     q = q.eq('project_id', match.id);
   }
 
-  // Vendor-manager filter: resolve name/email → user id, then filter by vendor_manager_id
+  // Vendor-manager filter: scope resolution to role=vendormanager so we don't
+  // ambiguously match same-name profiles with other roles. On multi within
+  // vendormanagers, pick the first + state the assumption (read-safe; user can
+  // correct in a follow-up message).
+  let vmAssumption = '';
   if (c.vendor_manager) {
-    const resolved = await resolveUser(admin, String(c.vendor_manager));
+    const resolved = await resolveUser(admin, String(c.vendor_manager), 'vendormanager');
     if (resolved.kind === 'none') {
-      await writeBot(admin, conv.id, `No user matching vendor manager "${c.vendor_manager}".`);
+      await writeBot(admin, conv.id, `No vendor manager matching "${c.vendor_manager}".`);
       return;
     }
-    if (resolved.kind === 'multi') {
-      const list = resolved.candidates.map((u, i) => `  ${i + 1}. ${u.name} (${u.email})`).join('\n');
-      await writeBot(admin, conv.id, `Multiple matches for "${c.vendor_manager}":\n${list}\n\nAsk again with a more specific name or the email.`);
-      return;
+    let vm: ResolvedUser;
+    if (resolved.kind === 'single') {
+      vm = resolved.user;
+    } else {
+      vm = resolved.candidates[0];
+      const others = resolved.candidates.slice(1).map((o) => ({ name: o.name, email: o.email, role: 'vendormanager' }));
+      vmAssumption = formatAssumption({ name: vm.name, email: vm.email, role: 'vendormanager' }, others);
     }
-    q = q.eq('vendor_manager_id', resolved.user.id);
+    q = q.eq('vendor_manager_id', vm.id);
   }
 
   // Get one extra to detect "there are more" and cap fetched rows.
@@ -871,7 +911,8 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
     return `  ${i + 1}. ${r.name} (${r.email})${bits.length > 0 ? ' — ' + bits.join(', ') : ''}`;
   });
 
-  await writeBot(admin, conv.id, [header, ...lines].join('\n'));
+  const preamble = vmAssumption ? [vmAssumption, ''] : [];
+  await writeBot(admin, conv.id, [...preamble, header, ...lines].join('\n'));
 }
 
 // Fuzzy-resolve a target string to a profiles row. Accepts:
@@ -888,24 +929,26 @@ type Resolved =
 
 const RESOLVE_COLS = 'id, name, email, start_date, end_date';
 
-async function resolveUser(admin: SupabaseClient, target: string): Promise<Resolved> {
+async function resolveUser(admin: SupabaseClient, target: string, roleFilter?: string): Promise<Resolved> {
   const t = target.trim().toLowerCase();
   if (!t) return { kind: 'none' };
 
+  const withRole = <T>(q: T): T => (roleFilter ? (q as unknown as { eq: (c: string, v: string) => T }).eq('role', roleFilter) : q);
+
   // Exact email match first (highest confidence)
   if (t.includes('@')) {
-    const { data } = await admin.from('profiles').select(RESOLVE_COLS).ilike('email', t).limit(1).maybeSingle();
+    const { data } = await withRole(admin.from('profiles').select(RESOLVE_COLS).ilike('email', t)).limit(1).maybeSingle();
     if (data) return { kind: 'single', user: data as ResolvedUser };
     return { kind: 'none' };
   }
 
   // Name-based: exact case-insensitive first
-  const { data: exact } = await admin.from('profiles').select(RESOLVE_COLS).ilike('name', t);
+  const { data: exact } = await withRole(admin.from('profiles').select(RESOLVE_COLS).ilike('name', t));
   if (exact && exact.length === 1) return { kind: 'single', user: exact[0] as ResolvedUser };
   if (exact && exact.length > 1) return { kind: 'multi', candidates: exact as ResolvedUser[] };
 
   // Substring match
-  const { data: fuzzy } = await admin.from('profiles').select(RESOLVE_COLS).ilike('name', `%${t}%`).limit(10);
+  const { data: fuzzy } = await withRole(admin.from('profiles').select(RESOLVE_COLS).ilike('name', `%${t}%`)).limit(10);
   if (!fuzzy || fuzzy.length === 0) return { kind: 'none' };
   if (fuzzy.length === 1) return { kind: 'single', user: fuzzy[0] as ResolvedUser };
   return { kind: 'multi', candidates: fuzzy as ResolvedUser[] };
@@ -1221,6 +1264,22 @@ async function writeBot(admin: SupabaseClient, conversationId: string, content: 
 async function setPhase(admin: SupabaseClient, conversationId: string, phase: string): Promise<void> {
   await admin.from('chat_conversations').update({
     phase,
+    last_activity_at: new Date().toISOString(),
+  }).eq('id', conversationId);
+}
+
+// Called after a successful executor run. Resets the conversation to 'idle'
+// with cleared intent/captured so the SAME conversation can absorb the next
+// message with full history context (assumption corrections, follow-up reads,
+// etc.). chat_actions row is the audit source of truth; conversation state
+// doesn't need to preserve the completed intent. 'cancelled' and 'error'
+// phases stay terminal — user cancelled explicitly, or execution failed.
+async function resetAfterSuccess(admin: SupabaseClient, conversationId: string): Promise<void> {
+  await admin.from('chat_conversations').update({
+    phase: 'idle',
+    intent: null,
+    captured: {},
+    missing_field: null,
     last_activity_at: new Date().toISOString(),
   }).eq('id', conversationId);
 }
