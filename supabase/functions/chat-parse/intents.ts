@@ -33,9 +33,65 @@ export interface IntentSpec {
   description: string;
   fields: FieldSpec[];
   extraction_hint: string;  // hint for LLM on what to look for
+  read_only?: boolean;      // if true, skip confirmation phase and execute directly
 }
 
 export const INTENTS: IntentSpec[] = [
+  {
+    name: 'user.get',
+    required_permission: 'user.get',
+    description: 'Look up a single user by name or email and show their details',
+    read_only: true,
+    extraction_hint:
+      'The user is asking about a specific person by name or email (e.g. "when does Sarah start?", "what is X\'s project?", "is Y still active?"). Extract the target as name or email. Do NOT match on generic pronouns.',
+    fields: [
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the user to look up' },
+    ],
+  },
+  {
+    name: 'user.list',
+    required_permission: 'user.list',
+    description: 'List users matching filters (role, project, status, etc.)',
+    read_only: true,
+    extraction_hint:
+      'The user wants a list of users matching some criteria (e.g. "who is on APFM?", "list offshore contractors", "show users with no start date", "who ended in the last week?"). Extract any filters mentioned. No fields are strictly required — an empty query lists everyone up to the limit.',
+    fields: [
+      {
+        name: 'role',
+        input_type: 'buttons',
+        options: ['timesheetuser', 'manager', 'accountant', 'vendormanager', 'admin', 'contract_admin'],
+        hint: 'filter by role',
+      },
+      {
+        name: 'project',
+        input_type: 'buttons',
+        options_from: 'projects',
+        hint: 'filter by project (name or code)',
+      },
+      { name: 'country', input_type: 'text', hint: 'ISO country code (US, GB, HR, BA, etc.) or full country name' },
+      {
+        name: 'location_type',
+        input_type: 'buttons',
+        options: ['onshore', 'offshore'],
+      },
+      {
+        name: 'vendor_manager',
+        input_type: 'text',
+        hint: 'name or email of a vendor manager — lists contractors that report to them',
+      },
+      {
+        name: 'active',
+        input_type: 'yes_no',
+        hint: 'YES = currently active (no end_date, or end_date in the future). NO = terminated (end_date in the past)',
+      },
+      {
+        name: 'missing_start_date',
+        input_type: 'yes_no',
+        hint: 'YES = only users with a null start_date (i.e. never-set); useful to audit silent users that never got reminders',
+      },
+      { name: 'limit', input_type: 'text', default: 20, hint: 'max results (default 20, hard cap 50)' },
+    ],
+  },
   {
     name: 'user.set_start_date',
     required_permission: 'user.set_start_date',

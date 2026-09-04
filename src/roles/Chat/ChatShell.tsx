@@ -19,6 +19,11 @@ import { supabase as sb } from '../../supabaseClient';
 
 const TERMINAL_PHASES = new Set(['done', 'cancelled', 'error']);
 
+// Per-user localStorage key holding an ISO timestamp. Messages created ≤ this
+// timestamp are hidden from the main view (a /clear boundary). Older sessions
+// stay in the DB for a future history modal / audit view.
+const CLEARED_BEFORE_KEY = (userId: string) => `chat_cleared_before:${userId}`;
+
 export default function ChatShell({ profile }: { profile: ChatProfile }) {
   const [conversation, setConversation] = useState<ChatConversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -28,7 +33,7 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Bootstrap: get/create active conversation + load user's recent history
-  // across ALL conversations (so past turns survive session/refresh).
+  // across ALL conversations, filtered by any /clear boundary.
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -38,7 +43,11 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
         setConversation(conv);
         const history = await listRecentMessagesForUser(profile.id);
         if (!mounted) return;
-        setMessages(history);
+        const clearedBefore = localStorage.getItem(CLEARED_BEFORE_KEY(profile.id));
+        const visible = clearedBefore
+          ? history.filter((m) => m.created_at > clearedBefore)
+          : history;
+        setMessages(visible);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -87,6 +96,8 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
 
     // Slash commands (client-side, don't hit the bot).
     if (content === '/clear') {
+      // Mark the boundary so a refresh doesn't re-surface prior messages.
+      localStorage.setItem(CLEARED_BEFORE_KEY(profile.id), new Date().toISOString());
       setMessages([]);
       setSending(false);
       return;

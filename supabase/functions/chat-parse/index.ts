@@ -160,11 +160,18 @@ async function handleIdle(
   msg: Message,
   callerId: string,
 ): Promise<void> {
-  // Classify intent + extract fields in a single LLM pass.
+  // Classify intent + extract fields in a single LLM pass. Filter the catalog
+  // by the caller's permissions so the LLM never picks an intent they can't run.
   const catalog = intentCatalog();
-  const permsRes = await admin.rpc('has_permission', { uid: callerId, perm: 'user.create' });
-  const canCreate = permsRes.data === true;
-  const allowedIntents = catalog.filter((i) => i.name !== 'user.create' || canCreate);
+  const permChecks = await Promise.all(
+    catalog.map(async (i) => {
+      const spec = findIntent(i.name)!;
+      const { data } = await admin.rpc('has_permission', { uid: callerId, perm: spec.required_permission });
+      return { name: i.name, allowed: data === true };
+    }),
+  );
+  const allowedNames = new Set(permChecks.filter((p) => p.allowed).map((p) => p.name));
+  const allowedIntents = catalog.filter((i) => allowedNames.has(i.name));
 
   const parsePrompt = `You classify the user's intent and extract structured data from their message.
 
@@ -176,22 +183,27 @@ Available intents (only pick from these):
 ${allowedIntents.map((i) => `- "${i.name}": ${i.description}`).join('\n')}
 
 STRICT CLASSIFICATION RULES:
-- ONLY classify as user.create if the user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts", "is joining", "new hire", "new user".
-- If the user is **asking a question** ("when does X start?", "what is X's...", "where is X?", "is X still...", "who is on...", "list...", "show...", "how many..."), that is a READ query. Reads are NOT supported yet. Return intent=null with a suggested_reply that says reads aren't wired.
-- Delete / update / remove / disable / archive / assign / re-assign are ALSO not supported yet. Return intent=null with a suggested_reply.
+- user.create: user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts as", "is joining", "new hire".
+- user.set_start_date / user.set_end_date: user is **setting a date on an EXISTING person** (verbs: "set", "update", "change", "ends", "starts on"). If the person doesn't exist yet, fall back to user.create.
+- user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details").
+- user.list: user is **asking for MULTIPLE users matching a filter** ("who is on APFM?", "list offshore contractors", "show users with no start date", "how many managers do we have?", "which timesheetusers ended last week?").
+- Delete / archive / reassign are NOT supported yet — return intent=null with a suggested_reply.
 - If unclear, err on the side of intent=null. Do NOT force a match.
 
 If the user's intent matches one of the available intents, return JSON:
 {"intent": "<intent-name>", "fields": { ...extracted-field-values }}
 
 If unclear or unmatched:
-{"intent": null, "suggested_reply": "Short reply telling them what you CAN do — currently only creating new users."}
+{"intent": null, "suggested_reply": "Short reply describing what you CAN do — create users, set/update start or end dates, look up a single user's details, or list users matching filters."}
 
-For user.create specifically, extract only these fields (all optional at this stage):
-name, email, role, location_type, country, project, start_date, end_date,
-vendor_manager, invoice_enabled, send_invite.
+Extract initial field values from the message for the classified intent:
+- user.create: name, email, role, location_type, country, project, start_date, end_date, vendor_manager, invoice_enabled, send_invite
+- user.set_start_date / user.set_end_date: target (name or email), start_date / end_date
+- user.get: target (name or email)
+- user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), limit (number)
+
 Do NOT invent values. Only extract what's explicitly stated.
-For role: acceptable values are timesheetuser, manager, accountant, vendormanager, admin.
+For role: timesheetuser, manager, accountant, vendormanager, admin, contract_admin.
 For location_type: onshore, offshore.
 For dates: normalize to YYYY-MM-DD relative to TODAY as noted above.
 
@@ -369,8 +381,18 @@ Return JSON:
   const stillMissingRequired = computeMissingRequired(spec, merged);
 
   if (stillMissingRequired.length === 0) {
-    // All required captured → move to confirmation. Deterministic summary
-    // (the plan keeps this deterministic so structure matches executor input).
+    // All required captured. Read intents skip confirmation and execute
+    // immediately (safe, no side effects). Write intents go to confirmation.
+    if (spec.read_only) {
+      await admin.from('chat_conversations').update({
+        captured: merged,
+        missing_field: null,
+        phase: 'executing',
+        last_activity_at: new Date().toISOString(),
+      }).eq('id', conv.id);
+      await executeReadIntent(admin, { ...conv, captured: merged }, spec);
+      return;
+    }
     await admin.from('chat_conversations').update({
       captured: merged,
       missing_field: null,
@@ -663,6 +685,193 @@ async function execUserSetDate(
   const humanCol = column === 'start_date' ? 'Start date' : 'End date';
   await writeBot(admin, conv.id, `✅ ${humanCol} for ${user.name} (${user.email}) set to ${newDate}.`);
   await setPhase(admin, conv.id, 'done');
+}
+
+// ─── Read executors ────────────────────────────────────────────────
+
+// Read intents skip the awaiting_confirmation phase and execute directly
+// from driveCollecting once all required fields are captured. No chat_actions
+// row is written (reads have no side effects worth auditing yet).
+async function executeReadIntent(
+  admin: SupabaseClient,
+  conv: Conversation,
+  spec: IntentSpec,
+): Promise<void> {
+  try {
+    if (spec.name === 'user.get') {
+      await execUserGet(admin, conv);
+    } else if (spec.name === 'user.list') {
+      await execUserList(admin, conv);
+    } else {
+      throw new Error(`Read executor for ${spec.name} not wired`);
+    }
+    await setPhase(admin, conv.id, 'done');
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await writeBot(admin, conv.id, `❌ Read failed: ${msg}`);
+    await setPhase(admin, conv.id, 'error');
+  }
+}
+
+async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<void> {
+  const target = String(conv.captured.target ?? '').trim();
+  if (!target) throw new Error('missing target');
+
+  // Fetch the full profile in one shot so we can show a rich card.
+  const t = target.toLowerCase();
+  const cols = 'id, name, email, role, country, region, project_id, start_date, end_date, invoice_enabled, reminders_enabled, location_type, vendor_manager_id';
+  let user: Record<string, unknown> | null = null;
+  if (t.includes('@')) {
+    const { data } = await admin.from('profiles').select(cols).ilike('email', t).limit(1).maybeSingle();
+    user = data as Record<string, unknown> | null;
+  } else {
+    const { data: exact } = await admin.from('profiles').select(cols).ilike('name', target).limit(2);
+    if (exact && exact.length === 1) user = exact[0] as Record<string, unknown>;
+    else if (exact && exact.length > 1) {
+      const list = (exact as Array<{ name: string; email: string }>).map((u, i) => `  ${i + 1}. ${u.name} (${u.email})`).join('\n');
+      await writeBot(admin, conv.id, `Multiple exact-name matches for "${target}":\n${list}\n\nAsk again with the email.`);
+      return;
+    } else {
+      const { data: fuzzy } = await admin.from('profiles').select(cols).ilike('name', `%${target}%`).limit(10);
+      if (!fuzzy || fuzzy.length === 0) {
+        await writeBot(admin, conv.id, `No user found matching "${target}".`);
+        return;
+      }
+      if (fuzzy.length === 1) user = fuzzy[0] as Record<string, unknown>;
+      else {
+        const list = (fuzzy as Array<{ name: string; email: string }>).map((u, i) => `  ${i + 1}. ${u.name} (${u.email})`).join('\n');
+        await writeBot(admin, conv.id, `Multiple matches for "${target}":\n${list}\n\nAsk again with a more specific name or the email.`);
+        return;
+      }
+    }
+  }
+  if (!user) {
+    await writeBot(admin, conv.id, `No user found matching "${target}".`);
+    return;
+  }
+
+  // Resolve project name if project_id set
+  let projectName = '(none)';
+  if (user.project_id) {
+    const { data: proj } = await admin.from('projects').select('name, code').eq('id', user.project_id).maybeSingle();
+    if (proj) projectName = `${proj.name} (${proj.code})`;
+  }
+
+  const today = todayIso();
+  const endDate = (user.end_date as string | null) ?? null;
+  const status = !endDate ? 'ACTIVE (no end date)' : endDate > today ? `ACTIVE (ends ${endDate})` : `ENDED ${endDate}`;
+
+  const lines = [
+    `${user.name} (${user.email})`,
+    `  Status: ${status}`,
+    `  Role: ${user.role}`,
+    `  Country: ${user.country ?? '(none)'}${user.location_type ? ` (${user.location_type})` : ''}`,
+    `  Project: ${projectName}`,
+    `  Started: ${user.start_date ?? '(not set — no reminders)'}`,
+    `  Invoicing: ${user.invoice_enabled ? 'YES' : 'NO'}`,
+    `  Reminders: ${user.reminders_enabled === false ? 'DISABLED' : 'enabled'}`,
+  ];
+  await writeBot(admin, conv.id, lines.join('\n'));
+}
+
+async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<void> {
+  const c = conv.captured;
+  const HARD_CAP = 50;
+  const requestedLimit = Number(c.limit) || 20;
+  const limit = Math.min(HARD_CAP, Math.max(1, requestedLimit));
+
+  let q = admin.from('profiles').select('id, name, email, role, country, project_id, start_date, end_date, location_type');
+
+  if (c.role) q = q.eq('role', String(c.role));
+  if (c.country) q = q.eq('country', String(c.country).toUpperCase());
+  if (c.location_type) q = q.eq('location_type', String(c.location_type));
+  if (c.missing_start_date === true) q = q.is('start_date', null);
+  if (c.active === true) {
+    // active = no end_date OR end_date in future
+    q = q.or(`end_date.is.null,end_date.gt.${todayIso()}`);
+  }
+  if (c.active === false) {
+    // terminated = end_date in the past
+    q = q.lte('end_date', todayIso());
+  }
+
+  // Project filter: resolve project name/code → id first
+  if (c.project) {
+    const tok = String(c.project).trim().toLowerCase();
+    const { data: projects } = await admin.from('projects').select('id, name, code');
+    const match = (projects ?? []).find((p) =>
+      String(p.name).toLowerCase() === tok || String(p.code).toLowerCase() === tok);
+    if (!match) {
+      await writeBot(admin, conv.id, `Project "${c.project}" not found. Try one of the exact project names.`);
+      return;
+    }
+    q = q.eq('project_id', match.id);
+  }
+
+  // Vendor-manager filter: resolve name/email → user id, then filter by vendor_manager_id
+  if (c.vendor_manager) {
+    const resolved = await resolveUser(admin, String(c.vendor_manager));
+    if (resolved.kind === 'none') {
+      await writeBot(admin, conv.id, `No user matching vendor manager "${c.vendor_manager}".`);
+      return;
+    }
+    if (resolved.kind === 'multi') {
+      const list = resolved.candidates.map((u, i) => `  ${i + 1}. ${u.name} (${u.email})`).join('\n');
+      await writeBot(admin, conv.id, `Multiple matches for "${c.vendor_manager}":\n${list}\n\nAsk again with a more specific name or the email.`);
+      return;
+    }
+    q = q.eq('vendor_manager_id', resolved.user.id);
+  }
+
+  // Get one extra to detect "there are more" and cap fetched rows.
+  q = q.order('name', { ascending: true }).limit(limit + 1);
+
+  const { data, error } = await q;
+  if (error) throw new Error(`Query failed: ${error.message}`);
+
+  const rows = (data ?? []) as Array<{ id: string; name: string; email: string; role: string; country: string; project_id: number | null; start_date: string | null; end_date: string | null }>;
+  if (rows.length === 0) {
+    await writeBot(admin, conv.id, `No users match those filters.`);
+    return;
+  }
+
+  // Resolve project ids to names (single query for all)
+  const projIds = Array.from(new Set(rows.map((r) => r.project_id).filter((x): x is number => x != null)));
+  const projMap = new Map<number, string>();
+  if (projIds.length > 0) {
+    const { data: projs } = await admin.from('projects').select('id, name').in('id', projIds);
+    for (const p of (projs ?? []) as Array<{ id: number; name: string }>) projMap.set(p.id, p.name);
+  }
+
+  const truncated = rows.length > limit;
+  const shown = truncated ? rows.slice(0, limit) : rows;
+  const filterParts: string[] = [];
+  if (c.role) filterParts.push(String(c.role));
+  if (c.project) filterParts.push(`project=${c.project}`);
+  if (c.country) filterParts.push(`country=${String(c.country).toUpperCase()}`);
+  if (c.location_type) filterParts.push(String(c.location_type));
+  if (c.vendor_manager) filterParts.push(`reports to ${c.vendor_manager}`);
+  if (c.active === true) filterParts.push('active');
+  if (c.active === false) filterParts.push('terminated');
+  if (c.missing_start_date === true) filterParts.push('missing start_date');
+  const filterDesc = filterParts.length > 0 ? ` matching ${filterParts.join(', ')}` : '';
+
+  const header = truncated
+    ? `Found more than ${limit} users${filterDesc}. Showing first ${limit}:`
+    : `Found ${shown.length} user${shown.length === 1 ? '' : 's'}${filterDesc}:`;
+
+  const lines = shown.map((r, i) => {
+    const project = r.project_id ? (projMap.get(r.project_id) ?? '') : '';
+    const bits: string[] = [];
+    if (project) bits.push(project);
+    if (r.country) bits.push(r.country);
+    if (r.start_date) bits.push(`started ${r.start_date}`);
+    else bits.push('(no start_date)');
+    if (r.end_date) bits.push(`ended ${r.end_date}`);
+    return `  ${i + 1}. ${r.name} (${r.email})${bits.length > 0 ? ' — ' + bits.join(', ') : ''}`;
+  });
+
+  await writeBot(admin, conv.id, [header, ...lines].join('\n'));
 }
 
 // Fuzzy-resolve a target string to a profiles row. Accepts:
