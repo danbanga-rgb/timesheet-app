@@ -1,30 +1,30 @@
 // Declarative intent schemas. Each intent defines its required_permission
 // (checked via has_permission on the caller) and its ordered field list.
 //
-// Field ordering matters: bot asks fields in listed order, skipping ones
-// already captured. `required=true` fields must be present before confirmation.
-// `encouraged=true` fields are asked once; user can say "skip" to defer.
-// `applies_if` short-circuits (e.g. vendor_manager only if role starts with "vendor").
-// `ask_only_if_mentioned`: never ask, only extract if user brings it up
-// (used for invoice_enabled — default off unless explicit).
-//
-// Slice 4 delivers user.create only. Additional intents (set_end_date,
-// set_start_date, update_project, update_country_region) land in Slice 6.
+// LLM-driven flow (2026-09-04 refactor): field specs describe *what* the bot
+// needs, NOT *how* to ask for it. The LLM writes all natural-language prompts,
+// grouping / phrasing as feels natural given the conversation. Server enforces:
+//   - required fields present before confirmation
+//   - options-restricted values valid
+//   - email / date formats parseable
+//   - applies_if gating (e.g. vendor_manager only if role starts with "vendor")
+//   - defaults filled at confirmation time
+//   - derivations applied in normalizeCaptured (e.g. location_type ← country)
 
 export type InputType = 'text' | 'buttons' | 'buttons+text' | 'date' | 'yes_no';
 
 export interface FieldSpec {
   name: string;
-  prompt: string;
   input_type: InputType;
   options?: string[];                          // static list for buttons
   options_from?: 'projects' | 'vendor_managers'; // dynamic list from DB
   required?: boolean;
-  encouraged?: boolean;                        // ask once, allow skip
-  ask_only_if_mentioned?: boolean;             // never ask, only extract
+  encouraged?: boolean;                        // nice-to-have; LLM can skip if user demurs
+  ask_only_if_mentioned?: boolean;             // never asked, only extracted (e.g. invoice_enabled off by default)
   applies_if?: (captured: Record<string, unknown>) => boolean;
   default?: unknown;
   validate?: 'email' | 'date';
+  hint?: string;                               // optional context for the LLM (why/when to ask)
 }
 
 export interface IntentSpec {
@@ -43,8 +43,8 @@ export const INTENTS: IntentSpec[] = [
     extraction_hint:
       'The user wants to set or update someone\'s start date. Extract the target person\'s name (or email if given) and the new date.',
     fields: [
-      { name: 'target', prompt: 'Which user? (name or email)', input_type: 'text', required: true },
-      { name: 'start_date', prompt: 'New start date?', input_type: 'date', required: true, validate: 'date' },
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'start_date', input_type: 'date', required: true, validate: 'date' },
     ],
   },
   {
@@ -54,8 +54,8 @@ export const INTENTS: IntentSpec[] = [
     extraction_hint:
       'The user wants to set or update someone\'s end date, or is offboarding them. Extract the target person\'s name (or email if given) and the new date.',
     fields: [
-      { name: 'target', prompt: 'Which user? (name or email)', input_type: 'text', required: true },
-      { name: 'end_date', prompt: 'New end date?', input_type: 'date', required: true, validate: 'date' },
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'end_date', input_type: 'date', required: true, validate: 'date' },
     ],
   },
   {
@@ -65,70 +65,57 @@ export const INTENTS: IntentSpec[] = [
     extraction_hint:
       'The user wants to create/add/onboard a new person. Extract as many fields as they mention. Do NOT invent values.',
     fields: [
-      { name: 'name', prompt: "What's the full name?", input_type: 'text', required: true },
-      {
-        name: 'email',
-        prompt: "What's the email address?",
-        input_type: 'text',
-        required: true,
-        validate: 'email',
-      },
+      { name: 'name', input_type: 'text', required: true, hint: 'full name' },
+      { name: 'email', input_type: 'text', required: true, validate: 'email' },
       {
         name: 'country',
-        prompt: 'US (onshore) — or type a country name (offshore)?',
         input_type: 'buttons+text',
         options: ['US'],
         required: true,
+        hint: 'country of residence; US is onshore, anything else is offshore',
       },
       {
         name: 'role',
-        prompt: 'What role?',
         input_type: 'buttons',
         options: ['timesheetuser', 'manager', 'accountant', 'vendormanager', 'admin'],
         default: 'timesheetuser',
         ask_only_if_mentioned: true,
+        hint: 'defaults to timesheetuser; ask only if user hints at a different role',
       },
       {
         name: 'location_type',
-        prompt: 'Onshore or offshore?',
         input_type: 'buttons',
         options: ['onshore', 'offshore'],
         ask_only_if_mentioned: true,
-        // Auto-derived from country in normalizeCaptured: US→onshore, else→offshore.
-        // User can override in confirmation summary.
+        hint: 'auto-derived from country (US=onshore, else offshore); do not ask separately',
       },
       {
         name: 'project',
-        prompt: 'Which project?',
         input_type: 'buttons',
         options_from: 'projects',
         encouraged: true,
+        hint: 'which project/client they will work on',
       },
-      {
-        name: 'start_date',
-        prompt: 'Start date?',
-        input_type: 'date',
-        encouraged: true,
-      },
+      { name: 'start_date', input_type: 'date', encouraged: true, validate: 'date' },
       {
         name: 'vendor_manager',
-        prompt: 'Which vendor manager approves them?',
         input_type: 'buttons',
         options_from: 'vendor_managers',
         applies_if: (c) => typeof c.role === 'string' && c.role.startsWith('vendor'),
+        hint: 'only relevant when role is vendormanager or vendor-related',
       },
       {
         name: 'invoice_enabled',
-        prompt: 'Enable invoicing?',
         input_type: 'yes_no',
         default: false,
         ask_only_if_mentioned: true,
+        hint: 'off by default; only enable if user says so',
       },
       {
         name: 'send_invite',
-        prompt: 'Send invite email now?',
         input_type: 'yes_no',
         default: true,
+        hint: 'default YES; auto-fires after create unless user opts out',
       },
     ],
   },

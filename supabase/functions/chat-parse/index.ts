@@ -5,18 +5,20 @@
 //   1. Verifies caller is authenticated + chat_enabled
 //   2. Loads conversation state + latest inbound message
 //   3. Dispatches by phase:
-//        idle                  → LLM classifies intent + extracts fields
-//        collecting            → LLM extracts value for the missing_field
+//        idle                  → LLM classifies intent, then hands off to driveCollecting
+//        collecting            → driveCollecting: single LLM pass extracts fields + writes reply
 //        awaiting_confirmation → LLM interprets yes/no/edit
 //   4. Writes bot response into chat_messages (frontend picks up via realtime)
 //   5. Updates chat_conversations state
 //
-// Executor invocation (Slice 6) uses caller's JWT (Option A locked); for
-// Slice 4 the executor is stubbed and returns a fake success.
+// LLM-driven refactor (2026-09-04, chat-improvements.md Pri 0):
+//   Server owns intent schema, validation, phase progression, executor.
+//   LLM owns understanding intent, phrasing, grouping questions, handling
+//   edits mid-conversation. No more hard-coded per-field prompts.
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { findIntent, intentCatalog, type IntentSpec, type FieldSpec } from './intents.ts';
+import { findIntent, intentCatalog, type IntentSpec } from './intents.ts';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -24,7 +26,12 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GROQ_MODEL = 'qwen/qwen3.8-27b';
+// Groq production-tier model with 250k TPM cap (vs the ~1k OTPM on the
+// deprecated preview qwen3.8-27b). Groq's own recommended migration target
+// for llama-3.1-8b-instant (retired Aug 2026). Cheap, fast, JSON-friendly.
+// TODO: migrate to Vercel AI Gateway for provider-agnostic routing —
+// see MEMORY.md project_ai_gateway_migration.
+const GROQ_MODEL = 'openai/gpt-oss-20b';
 
 interface Conversation {
   id: string;
@@ -129,7 +136,7 @@ serve(async (req) => {
     if (conversation.phase === 'idle' || !conversation.intent) {
       await handleIdle(admin, conversation, latest, profile.id);
     } else if (conversation.phase === 'collecting') {
-      await handleCollecting(admin, conversation, latest);
+      await driveCollecting(admin, conversation, latest);
     } else if (conversation.phase === 'awaiting_confirmation') {
       await handleConfirmation(admin, conversation, latest, jwt);
     } else {
@@ -235,109 +242,154 @@ User's message: """${msg.content}"""`;
   await admin.from('chat_conversations').update({
     intent,
     captured,
+    missing_field: null,
     phase: 'collecting',
     started_at: new Date().toISOString(),
     last_activity_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
   }).eq('id', conv.id);
 
-  await askNextFieldOrConfirm(admin, { ...conv, intent, captured, phase: 'collecting' });
+  // Hand off to the LLM-driven collecting loop. It uses the same latest message
+  // (redundant with classifier extraction, but idempotent + catches anything the
+  // classifier missed) and generates the first natural reply.
+  await driveCollecting(admin, { ...conv, intent, captured, phase: 'collecting' }, msg);
 }
 
-async function handleCollecting(
+// LLM-driven collecting phase (2026-09-04 refactor):
+// Single LLM call extracts any new field values from the user's latest message
+// AND writes the next reply (grouped questions, natural phrasing). Server
+// validates extracted fields (drops invented, enforces types/options), then
+// decides phase: if all required fields captured → confirmation; else write
+// LLM's reply and stay in collecting.
+async function driveCollecting(
   admin: SupabaseClient,
   conv: Conversation,
   msg: Message,
 ): Promise<void> {
   const spec = findIntent(conv.intent!)!;
-  const fieldName = conv.missing_field;
-  if (!fieldName) {
-    await askNextFieldOrConfirm(admin, conv);
-    return;
+  const captured = { ...conv.captured };
+
+  // Skip shortcut still supported explicitly for encouraged-field UX.
+  // (LLM would eventually skip too, but explicit "skip" from user is a strong signal.)
+  if (/^\s*skip\s*$/i.test(msg.content)) {
+    // Mark the *next* encouraged field as skipped (null), if any.
+    for (const f of spec.fields) {
+      if (!f.encouraged) continue;
+      if (f.applies_if && !f.applies_if(captured)) continue;
+      if (captured[f.name] !== undefined) continue;
+      captured[f.name] = null;
+      break;
+    }
+    // Fall through to normal drive with the message stripped of "skip" semantics.
   }
-  const field = spec.fields.find((f) => f.name === fieldName);
-  if (!field) throw new Error(`Field ${fieldName} not in intent spec`);
 
-  // "skip" shortcut for encouraged fields
-  if (field.encouraged && /^\s*skip\s*$/i.test(msg.content)) {
-    const captured = { ...conv.captured, [fieldName]: null };
-    await admin.from('chat_conversations').update({ captured, missing_field: null }).eq('id', conv.id);
-    await askNextFieldOrConfirm(admin, { ...conv, captured, missing_field: null });
-    return;
-  }
+  const history = await fetchRecentHistory(admin, conv.id, 8);
+  const schemaDesc = describeFieldSchema(spec, captured);
+  const missingRequired = computeMissingRequired(spec, captured);
+  const missingEncouraged = computeMissingEncouraged(spec, captured);
 
-  // LLM extraction — user might:
-  //   (a) directly answer the current field
-  //   (b) edit a different field they already provided ("actually change email to X")
-  //   (c) provide both (edit + answer current)
-  // We give the LLM the full field catalog + captured state so it can attribute
-  // the message correctly.
-  const isDateField = field.validate === 'date' || field.input_type === 'date';
-  const fieldCatalog = spec.fields
-    .filter((f) => !f.applies_if || f.applies_if(conv.captured))
-    .map((f) => `- ${f.name} (${f.input_type})${f.options ? ` [${f.options.join('/')}]` : ''}${f.validate === 'email' ? ' [email format]' : ''}`)
-    .join('\n');
+  const drivePrompt = `You are a helpful ops assistant for a timesheet management system. Your job right now: ${spec.description.toLowerCase()}.
 
-  const extractPrompt = `${isDateField ? `TODAY IS ${todayIso()}. Use this as the reference for any relative dates.\n\n` : ''}The user is being asked: "${field.prompt}" (field: ${field.name})
+TODAY IS ${todayIso()}. Use this for any relative dates ("monday", "next friday", "in 2 weeks").
 
-Full field catalog for the current intent (${spec.name}):
-${fieldCatalog}
+FIELD SCHEMA (what you need to collect):
+${schemaDesc}
 
-Currently captured so far:
-${JSON.stringify(conv.captured, null, 2)}
+ALREADY CAPTURED:
+${Object.keys(captured).length === 0 ? '(nothing yet)' : JSON.stringify(captured, null, 2)}
 
-The user's reply: """${msg.content}"""
+STILL MISSING (required): ${missingRequired.length === 0 ? '(none — ready to confirm)' : missingRequired.join(', ')}
+NICE-TO-HAVE (encouraged): ${missingEncouraged.length === 0 ? '(none)' : missingEncouraged.join(', ')}
 
-Their reply might:
-  (a) answer the current field ${field.name} directly
-  (b) edit a different field they already provided (e.g. "change email to X")
-  (c) do both
+RECENT CONVERSATION:
+${history.length === 0 ? '(no prior turns)' : history.map((m) => `${m.direction === 'in' ? 'User' : 'Bot'}: ${m.content}`).join('\n')}
+User (latest): """${msg.content}"""
+
+YOUR TASK:
+1. Extract any NEW field values the user just provided. Only fields from the schema. Do NOT invent, do NOT repeat values already captured, do NOT extract for ask_only_if_mentioned fields unless the user explicitly mentions them.
+2. Write a natural reply. Guidelines:
+   - If required fields are still missing, ask for them. Group naturally — don't ask one at a time unless it feels awkward otherwise.
+   - Encouraged fields: mention them briefly ("optional: project, start date — say skip to move on") but don't nag if user ignores.
+   - If required is captured but encouraged aren't, ask once about encouraged then move on.
+   - If everything required is captured, write a brief acknowledgment (e.g. "Got it, let me summarize"). Server will show a confirmation summary.
+   - If the user asked a clarifying question about the process, answer it briefly then re-ask.
+   - If the user's message is off-topic or unclear, gently redirect.
+   - Keep it conversational and concise. No bullet-point walls unless truly needed.
+   - Do NOT mention field internals like "ask_only_if_mentioned" or "encouraged".
 
 Return JSON:
 {
-  "answer": <value for ${field.name} or null if not answered>,
-  "edits": { "<field-name>": "<new-value>", ... } | {},
-  "clarify": "<optional clarifying question if you couldn't figure out what they meant>"
-}
+  "extracted": { "<field-name>": <value>, ... },
+  "reply": "<your next reply to the user>"
+}`;
 
-Rules:
-- For each edit or answer, do NOT invent values.
-- Validate against the field type. If field is buttons and answer doesn't match, use null and set clarify.
-${field.validate === 'email' || spec.fields.some((f) => f.validate === 'email') ? '- Email fields must contain a valid @ address.\n' : ''}${isDateField || spec.fields.some((f) => f.validate === 'date' || f.input_type === 'date') ? '- Date fields normalize to YYYY-MM-DD relative to TODAY.\n' : ''}- If the user typed something unrelated (e.g. asking a question about you), answer = null and edits = {} and set clarify.`;
+  const parsed = await callGroq(drivePrompt);
+  const rawExtracted = (parsed?.extracted as Record<string, unknown> | null) ?? {};
+  const llmReply = ((parsed?.reply as string) ?? '').trim();
 
-  const parsed = await callGroq(extractPrompt);
-  const answer = parsed?.answer ?? null;
-  const edits = (parsed?.edits as Record<string, unknown> | null) ?? {};
+  // Server-side validation: drop invented, enforce types, coerce.
+  const validated = validateExtracted(spec, rawExtracted);
+  const merged = normalizeCaptured(spec, { ...captured, ...validated });
 
-  // Merge edits + the direct answer (if any) into captured.
-  const nextCaptured = { ...conv.captured };
-  for (const [k, v] of Object.entries(edits)) {
-    if (v !== null && v !== undefined) nextCaptured[k] = v;
+  // For intents that address an existing user, resolve the target NOW so the
+  // confirmation summary shows the actual user + current values (not just a
+  // fuzzy string). If none/multi, we ask before advancing.
+  if (needsTargetResolution(spec.name) && merged.target && !targetAlreadyResolved(merged)) {
+    const targetStr = String(merged.target).trim();
+    const resolved = await resolveUser(admin, targetStr);
+    if (resolved.kind === 'none') {
+      delete merged.target;
+      await admin.from('chat_conversations').update({
+        captured: merged, last_activity_at: new Date().toISOString(),
+      }).eq('id', conv.id);
+      await writeBot(admin, conv.id,
+        `No user found matching "${targetStr}". Try a different name, or use the email address.`);
+      return;
+    }
+    if (resolved.kind === 'multi') {
+      delete merged.target;
+      const list = resolved.candidates.map((c, i) => `  ${i + 1}. ${c.name} (${c.email})`).join('\n');
+      await admin.from('chat_conversations').update({
+        captured: merged, last_activity_at: new Date().toISOString(),
+      }).eq('id', conv.id);
+      await writeBot(admin, conv.id,
+        `Multiple matches for "${targetStr}":\n${list}\n\nWhich one? (send the email or a more specific name)`);
+      return;
+    }
+    // Single match — canonicalize target to the email + attach resolved info
+    // for the confirmation summary. Executor re-resolves so identity is safe.
+    const u = resolved.user;
+    merged.target = u.email;
+    (merged as Record<string, unknown>)._target_resolved = {
+      id: u.id, name: u.name, email: u.email,
+      start_date: u.start_date, end_date: u.end_date,
+    };
   }
-  if (answer !== null && answer !== undefined) {
-    nextCaptured[fieldName] = answer;
-  }
 
-  const hadEffect = Object.keys(edits).length > 0 || (answer !== null && answer !== undefined);
-  if (!hadEffect) {
-    const clarify = (parsed?.clarify as string) ??
-      `I didn't catch that. ${field.prompt}${field.options ? ' Options: ' + field.options.join(', ') : ''}`;
-    await writeBot(admin, conv.id, clarify);
+  const stillMissingRequired = computeMissingRequired(spec, merged);
+
+  if (stillMissingRequired.length === 0) {
+    // All required captured → move to confirmation. Deterministic summary
+    // (the plan keeps this deterministic so structure matches executor input).
+    await admin.from('chat_conversations').update({
+      captured: merged,
+      missing_field: null,
+      phase: 'awaiting_confirmation',
+      expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      last_activity_at: new Date().toISOString(),
+    }).eq('id', conv.id);
+    await writeBot(admin, conv.id, formatConfirmationSummary(spec, merged));
     return;
   }
 
-  // If they edited fields but didn't answer the current one, acknowledge briefly
-  // then re-ask (askNextFieldOrConfirm handles the "still-missing" logic).
-  const editedList = Object.keys(edits);
-  if (editedList.length > 0) {
-    const editSummary = editedList.map((k) => `${k} → ${edits[k]}`).join(', ');
-    await writeBot(admin, conv.id, `Updated: ${editSummary}.`);
-  }
-
+  // Still collecting → write LLM's reply, or fall back to a deterministic ask.
+  const finalReply = llmReply || fallbackAsk(stillMissingRequired);
   await admin.from('chat_conversations').update({
-    captured: nextCaptured, missing_field: null, last_activity_at: new Date().toISOString(),
+    captured: merged,
+    missing_field: null,
+    last_activity_at: new Date().toISOString(),
   }).eq('id', conv.id);
-  await askNextFieldOrConfirm(admin, { ...conv, captured: nextCaptured, missing_field: null });
+  await writeBot(admin, conv.id, finalReply);
 }
 
 async function handleConfirmation(
@@ -373,12 +425,26 @@ Return JSON:
     return;
   }
   if (action === 'edit' && parsed?.edits && typeof parsed.edits === 'object') {
-    const edits = parsed.edits as Record<string, unknown>;
-    const captured = { ...conv.captured, ...edits };
+    // Validate the LLM's edits, merge, re-derive, then re-check completeness.
+    // If still complete → re-show confirmation summary with the corrections.
+    // If corrections nulled a required field → back to collecting.
+    const validated = validateExtracted(spec, parsed.edits as Record<string, unknown>);
+    const captured = normalizeCaptured(spec, { ...conv.captured, ...validated });
+    const stillMissing = computeMissingRequired(spec, captured);
+    if (stillMissing.length === 0) {
+      await admin.from('chat_conversations').update({
+        captured,
+        last_activity_at: new Date().toISOString(),
+      }).eq('id', conv.id);
+      await writeBot(admin, conv.id, formatConfirmationSummary(spec, captured));
+      return;
+    }
     await admin.from('chat_conversations').update({
-      captured, last_activity_at: new Date().toISOString(),
+      captured,
+      phase: 'collecting',
+      last_activity_at: new Date().toISOString(),
     }).eq('id', conv.id);
-    await askNextFieldOrConfirm(admin, { ...conv, captured });
+    await driveCollecting(admin, { ...conv, captured, phase: 'collecting' }, msg);
     return;
   }
   await writeBot(admin, conv.id,
@@ -491,8 +557,12 @@ async function execUserCreate(
       region: region || '',
       project_id,
       vendor_manager_id,
-      start_date: captured.start_date || new Date().toISOString().slice(0, 10),
-      end_date: captured.end_date || '',
+      // Match admin UI: null when unset. send-reminder skips users without a
+      // start_date, so a null-until-set user won't get spurious reminders for
+      // weeks before their real start. Admin or chat user.set_start_date can
+      // fill it in later.
+      start_date: captured.start_date || null,
+      end_date: captured.end_date || null,
       invoice_enabled: captured.invoice_enabled === true,
       reminders_enabled: true,
       location_type: captured.location_type || '',
@@ -599,10 +669,15 @@ async function execUserSetDate(
 //   - exact email match (case-insensitive)
 //   - exact name match (case-insensitive)
 //   - substring match on name (unique or ambiguous)
+// Returns start_date/end_date so callers can show current values before
+// confirming a change.
+type ResolvedUser = { id: string; name: string; email: string; start_date: string | null; end_date: string | null };
 type Resolved =
   | { kind: 'none' }
-  | { kind: 'single'; user: { id: string; name: string; email: string } }
-  | { kind: 'multi'; candidates: Array<{ id: string; name: string; email: string }> };
+  | { kind: 'single'; user: ResolvedUser }
+  | { kind: 'multi'; candidates: ResolvedUser[] };
+
+const RESOLVE_COLS = 'id, name, email, start_date, end_date';
 
 async function resolveUser(admin: SupabaseClient, target: string): Promise<Resolved> {
   const t = target.trim().toLowerCase();
@@ -610,21 +685,21 @@ async function resolveUser(admin: SupabaseClient, target: string): Promise<Resol
 
   // Exact email match first (highest confidence)
   if (t.includes('@')) {
-    const { data } = await admin.from('profiles').select('id, name, email').ilike('email', t).limit(1).maybeSingle();
-    if (data) return { kind: 'single', user: data as { id: string; name: string; email: string } };
+    const { data } = await admin.from('profiles').select(RESOLVE_COLS).ilike('email', t).limit(1).maybeSingle();
+    if (data) return { kind: 'single', user: data as ResolvedUser };
     return { kind: 'none' };
   }
 
   // Name-based: exact case-insensitive first
-  const { data: exact } = await admin.from('profiles').select('id, name, email').ilike('name', t);
-  if (exact && exact.length === 1) return { kind: 'single', user: exact[0] as { id: string; name: string; email: string } };
-  if (exact && exact.length > 1) return { kind: 'multi', candidates: exact as Array<{ id: string; name: string; email: string }> };
+  const { data: exact } = await admin.from('profiles').select(RESOLVE_COLS).ilike('name', t);
+  if (exact && exact.length === 1) return { kind: 'single', user: exact[0] as ResolvedUser };
+  if (exact && exact.length > 1) return { kind: 'multi', candidates: exact as ResolvedUser[] };
 
   // Substring match
-  const { data: fuzzy } = await admin.from('profiles').select('id, name, email').ilike('name', `%${t}%`).limit(10);
+  const { data: fuzzy } = await admin.from('profiles').select(RESOLVE_COLS).ilike('name', `%${t}%`).limit(10);
   if (!fuzzy || fuzzy.length === 0) return { kind: 'none' };
-  if (fuzzy.length === 1) return { kind: 'single', user: fuzzy[0] as { id: string; name: string; email: string } };
-  return { kind: 'multi', candidates: fuzzy as Array<{ id: string; name: string; email: string }> };
+  if (fuzzy.length === 1) return { kind: 'single', user: fuzzy[0] as ResolvedUser };
+  return { kind: 'multi', candidates: fuzzy as ResolvedUser[] };
 }
 
 // ─── Executor helpers ──────────────────────────────────────────────
@@ -674,43 +749,98 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-// ─── Field ordering + confirmation summary ─────────────────────────
+// ─── Field schema + missing-field helpers ──────────────────────────
 
-async function askNextFieldOrConfirm(
-  admin: SupabaseClient,
-  conv: Conversation,
-): Promise<void> {
-  const spec = findIntent(conv.intent!)!;
-  const captured = conv.captured;
-
-  // Find the next un-captured field that applies.
-  for (const field of spec.fields) {
-    if (field.ask_only_if_mentioned) continue;  // never asked, only extracted
-    if (field.applies_if && !field.applies_if(captured)) continue;
-    if (captured[field.name] !== undefined) continue;  // already set (including null from skip)
-    if (!field.required && !field.encouraged) continue;  // truly optional, don't ask
-
-    // Ask for this field
-    await admin.from('chat_conversations').update({
-      missing_field: field.name, last_activity_at: new Date().toISOString(),
-    }).eq('id', conv.id);
-    await writeBot(admin, conv.id, formatFieldPrompt(field));
-    return;
-  }
-
-  // All fields captured (or skipped/defaulted). Move to confirmation.
-  await admin.from('chat_conversations').update({
-    phase: 'awaiting_confirmation',
-    missing_field: null,
-    expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-  }).eq('id', conv.id);
-  await writeBot(admin, conv.id, formatConfirmationSummary(spec, captured));
+// Render the field schema for the LLM. Each line is: name, requiredness,
+// input type / options / validation, plus an optional hint from the spec.
+// Skipped fields (captured as null) are marked so the LLM knows not to re-ask.
+function describeFieldSchema(spec: IntentSpec, captured: Record<string, unknown>): string {
+  return spec.fields
+    .filter((f) => !f.applies_if || f.applies_if(captured))
+    .map((f) => {
+      const req = f.required ? '(required)' : f.encouraged ? '(encouraged)' : f.ask_only_if_mentioned ? '(only if user mentions)' : '(optional)';
+      const opts = f.options ? ` [options: ${f.options.join(', ')}]` : '';
+      const dyn = f.options_from === 'projects' ? ' [any active project name]' : f.options_from === 'vendor_managers' ? ' [any vendor manager name]' : '';
+      const validate = f.validate === 'email' ? ' [email]' : f.validate === 'date' ? ' [date YYYY-MM-DD]' : '';
+      const dflt = f.default !== undefined ? ` [default: ${JSON.stringify(f.default)}]` : '';
+      const hint = f.hint ? ` — ${f.hint}` : '';
+      const state = captured[f.name] === null ? ' [SKIPPED]' : captured[f.name] !== undefined ? ' [CAPTURED]' : '';
+      return `- ${f.name} ${req}${opts}${dyn}${validate}${dflt}${state}${hint}`;
+    })
+    .join('\n');
 }
 
-function formatFieldPrompt(field: FieldSpec): string {
-  const options = field.options ? `\n\nOptions: ${field.options.join(' / ')}` : '';
-  const skipHint = field.encouraged ? ' (or type "skip" if unknown)' : '';
-  return `${field.prompt}${options}${skipHint}`;
+function computeMissingRequired(spec: IntentSpec, captured: Record<string, unknown>): string[] {
+  return spec.fields
+    .filter((f) => f.required && (!f.applies_if || f.applies_if(captured)))
+    .filter((f) => {
+      const v = captured[f.name];
+      return v === undefined || v === null || v === '';
+    })
+    .map((f) => f.name);
+}
+
+function computeMissingEncouraged(spec: IntentSpec, captured: Record<string, unknown>): string[] {
+  return spec.fields
+    .filter((f) => f.encouraged && (!f.applies_if || f.applies_if(captured)))
+    .filter((f) => captured[f.name] === undefined)  // null = explicitly skipped
+    .map((f) => f.name);
+}
+
+// Server-side validation of LLM-extracted values. Drops invented fields,
+// enforces email/date format, filters options (except buttons+text like
+// country which accepts free text for non-listed values).
+function validateExtracted(spec: IntentSpec, raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v === null || v === undefined) continue;
+    const field = spec.fields.find((f) => f.name === k);
+    if (!field) continue;  // drop invented
+    if (typeof v === 'string' && v.trim() === '') continue;
+
+    if (field.validate === 'email' && !isValidEmail(String(v))) continue;
+    if (field.validate === 'date' && !isValidDate(String(v))) continue;
+
+    // For strict-options fields (buttons only), require match. For buttons+text,
+    // allow free-text values that aren't in the options list (e.g. country=GB).
+    if (field.options && field.input_type === 'buttons' && !field.options.includes(String(v))) continue;
+
+    out[k] = v;
+  }
+  return out;
+}
+
+function isValidEmail(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
+}
+function isValidDate(s: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s.trim());
+}
+
+// Deterministic fallback when the LLM's reply is empty/unparseable.
+function fallbackAsk(missing: string[]): string {
+  if (missing.length === 1) return `Still need: ${missing[0]}. Can you provide?`;
+  return `Still need: ${missing.join(', ')}. Can you provide?`;
+}
+
+// Fetch the last N messages in the conversation (excluding the current inbound
+// message, which is passed separately to the LLM prompt). Returned in
+// chronological order (oldest → newest).
+async function fetchRecentHistory(
+  admin: SupabaseClient,
+  convId: string,
+  limit: number,
+): Promise<Array<{ direction: string; content: string }>> {
+  const { data } = await admin
+    .from('chat_messages')
+    .select('direction, content, created_at')
+    .eq('conversation_id', convId)
+    .order('created_at', { ascending: false })
+    .limit(limit + 1);
+  if (!data || data.length === 0) return [];
+  // Drop the newest (latest inbound msg — passed separately), reverse to chrono.
+  const trimmed = data.slice(1).reverse();
+  return trimmed as Array<{ direction: string; content: string }>;
 }
 
 function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, unknown>): string {
@@ -721,19 +851,58 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
       enriched[field.name] = field.default;
     }
   }
+  const resolved = enriched._target_resolved as
+    | { name: string; email: string; start_date: string | null; end_date: string | null }
+    | undefined;
+
   const lines = spec.fields
     .filter((f) => f.applies_if ? f.applies_if(enriched) : true)
     .map((f) => {
       const v = enriched[f.name];
-      const displayValue = v === null || v === undefined
-        ? '(not set)'
-        : typeof v === 'boolean' ? (v ? 'YES' : 'NO')
-        : String(v);
+      let displayValue: string;
+
+      // For set_start_date / set_end_date, show the resolved user + the
+      // current value → new value so the confirmer sees exactly what changes.
+      if (resolved && f.name === 'target') {
+        return `  User: ${resolved.name} (${resolved.email})`;
+      }
+      if (resolved && f.name === 'start_date' && spec.name === 'user.set_start_date') {
+        const cur = resolved.start_date ?? '(not set)';
+        return `  Start Date: ${cur} → ${String(v)}`;
+      }
+      if (resolved && f.name === 'end_date' && spec.name === 'user.set_end_date') {
+        const cur = resolved.end_date ?? '(not set)';
+        return `  End Date: ${cur} → ${String(v)}`;
+      }
+
+      if (v === null || v === undefined) {
+        // Special case: start_date null gates the user out of reminders
+        // (send-reminder skips users without a start_date). Flag it so the
+        // confirmer sees the downstream consequence before hitting YES.
+        if (spec.name === 'user.create' && f.name === 'start_date') {
+          displayValue = '(not set — no reminders will fire until set)';
+        } else {
+          displayValue = '(not set)';
+        }
+      } else if (typeof v === 'boolean') {
+        displayValue = v ? 'YES' : 'NO';
+      } else {
+        displayValue = String(v);
+      }
       const humanLabel = f.name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
       return `  ${humanLabel}: ${displayValue}`;
     })
     .join('\n');
   return `Confirm — I'll ${spec.description.toLowerCase()} with these details:\n\n${lines}\n\nReply YES to proceed, NO to cancel, or send corrections.`;
+}
+
+function needsTargetResolution(intentName: string): boolean {
+  return intentName === 'user.set_start_date' || intentName === 'user.set_end_date';
+}
+
+function targetAlreadyResolved(captured: Record<string, unknown>): boolean {
+  const r = captured._target_resolved as { email?: string } | undefined;
+  return Boolean(r && r.email && r.email === captured.target);
 }
 
 function normalizeCaptured(spec: IntentSpec, raw: Record<string, unknown>): Record<string, unknown> {
@@ -744,10 +913,23 @@ function normalizeCaptured(spec: IntentSpec, raw: Record<string, unknown>): Reco
       out[k] = v;
     }
   }
-  // Derive location_type from country when not explicitly set.
-  // US→onshore, any other country→offshore. User can override in confirmation.
-  if (spec.name === 'user.create' && out.country && !out.location_type) {
-    out.location_type = out.country === 'US' ? 'onshore' : 'offshore';
+  // Preserve internal (underscore-prefixed) fields like _target_resolved so
+  // they survive normalize cycles.
+  for (const [k, v] of Object.entries(raw)) {
+    if (k.startsWith('_')) out[k] = v;
+  }
+  if (spec.name === 'user.create') {
+    // 'onshore' unambiguously implies US — infer country when user said onshore
+    // without naming one. 'offshore' does NOT imply a specific country; still ask.
+    if (out.location_type === 'onshore' && !out.country) {
+      out.country = 'US';
+    }
+    // Country is authoritative for location_type (US=onshore, else=offshore).
+    // Always re-derive — if user said "onshore croatia", we trust the country
+    // and set location_type=offshore. User can override in confirmation.
+    if (out.country) {
+      out.location_type = out.country === 'US' ? 'onshore' : 'offshore';
+    }
   }
   return out;
 }
@@ -758,30 +940,62 @@ async function callGroq(prompt: string): Promise<Record<string, unknown> | null>
   const apiKey = Deno.env.get('GROQ_API_KEY');
   if (!apiKey) throw new Error('GROQ_API_KEY not configured');
 
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  // Two-attempt call. First attempt uses json_object mode; if Groq rejects
+  // with json_validate_failed (some gpt-oss outputs wrap in code fences the
+  // validator refuses), retry without json_object and clean the response
+  // ourselves.
+  const baseBody = {
+    model: GROQ_MODEL,
+    messages: [
+      { role: 'system', content: 'You extract structured data and write natural replies. Reply ONLY with a single valid JSON object — no prose, no code fences, no thinking tags. Keep the "reply" field concise (1-3 sentences).' },
+      { role: 'user', content: prompt },
+    ],
+    temperature: 0,
+    max_tokens: 1500,
+  };
+
+  let res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [
-        { role: 'system', content: 'You extract structured data. Reply ONLY with valid JSON. No prose, no code blocks, no thinking tags outside the JSON.' },
-        { role: 'user', content: prompt },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0,
-    }),
+    body: JSON.stringify({ ...baseBody, response_format: { type: 'json_object' } }),
   });
+
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Groq ${res.status}: ${errText.slice(0, 300)}`);
+    if (res.status === 400 && errText.includes('json_validate_failed')) {
+      // Retry without response_format and clean the output manually.
+      res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(baseBody),
+      });
+      if (!res.ok) throw new Error(`Groq ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    } else {
+      throw new Error(`Groq ${res.status}: ${errText.slice(0, 300)}`);
+    }
   }
+
   const data = await res.json();
   const raw = data?.choices?.[0]?.message?.content;
   if (!raw) return null;
-  // Strip Qwen thinking-mode tags if present
-  const cleaned = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  return parseLLMJson(raw);
+}
+
+// Robust JSON extraction from an LLM response. Strips thinking-mode tags,
+// markdown code fences, and any prose before/after the JSON object.
+function parseLLMJson(raw: string): Record<string, unknown> | null {
+  let s = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  // Strip ```json ... ``` or ``` ... ``` fences
+  s = s.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  // If there's still surrounding prose, grab the first {...} block
+  if (!s.startsWith('{')) {
+    const start = s.indexOf('{');
+    const end = s.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) return null;
+    s = s.slice(start, end + 1);
+  }
   try {
-    return JSON.parse(cleaned);
+    return JSON.parse(s);
   } catch {
     return null;
   }

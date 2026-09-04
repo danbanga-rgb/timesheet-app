@@ -177,6 +177,9 @@ export default function ChatShell({ profile }: { profile: ChatProfile }) {
             {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           </button>
         </form>
+        <p className="mt-2 text-xs text-gray-400">
+          Type <span className="font-mono">/clear</span> to wipe the chat, or <span className="font-mono">cancel</span> to reset the current step.
+        </p>
       </main>
     </div>
   );
