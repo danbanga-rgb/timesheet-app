@@ -199,6 +199,7 @@ import {
 } from '../supabase/functions/_shared/edit-history';
 import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
 import ContractAdminDashboard from './roles/ContractAdmin';
+import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
 import {
@@ -6570,6 +6571,9 @@ const TimesheetSystem = () => {
               <button onClick={() => setAdminView('qbsync')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'qbsync' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
                 <Download className="w-5 h-5" /> QB Sync
               </button>
+              <button onClick={() => setAdminView('chatactivity')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'chatactivity' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
+                <MessageSquare className="w-5 h-5" /> Chat Activity
+              </button>
 
             </div>
           </div>
@@ -7076,6 +7080,10 @@ const TimesheetSystem = () => {
                 </div>
               </div>
             </div>
+          )}
+
+          {adminView === 'chatactivity' && (
+            <AdminChatActivity />
           )}
 
           {/* User Modal */}
