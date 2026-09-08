@@ -35,12 +35,62 @@ function formatWhen(iso: string | null): string {
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
 }
 
-function durationSec(job: QbSyncJobRow): string {
-  if (!job.started_at || !job.completed_at) return '—';
-  const ms = Date.parse(job.completed_at) - Date.parse(job.started_at);
+function durationMs(job: QbSyncJobRow): number | null {
+  if (!job.started_at || !job.completed_at) return null;
+  return Date.parse(job.completed_at) - Date.parse(job.started_at);
+}
+
+function formatMs(ms: number | null): string {
+  if (ms == null) return '—';
   if (ms < 1000) return '<1s';
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
   return `${(ms / 60_000).toFixed(1)}m`;
+}
+
+// A group is a bag of jobs sharing (created-minute, kind, status).
+// A group of size 1 renders identically to the previous single-row shape.
+interface JobGroup {
+  key: string;              // stable id for expand toggle
+  minuteIso: string;        // the shared created_at truncated to minute
+  kind: string;
+  status: QbSyncJobRow['status'];
+  jobs: QbSyncJobRow[];     // ordered newest → oldest, matching input order
+  errorCount: number;
+  minDurationMs: number | null;
+  maxDurationMs: number | null;
+}
+
+// Truncate to minute for grouping. Uses raw ISO (before locale formatting).
+function truncateToMinute(iso: string): string {
+  const d = new Date(iso);
+  d.setSeconds(0, 0);
+  return d.toISOString();
+}
+
+function groupJobs(rows: QbSyncJobRow[]): JobGroup[] {
+  const map = new Map<string, JobGroup>();
+  for (const j of rows) {
+    const minuteIso = truncateToMinute(j.created_at);
+    const key = `${minuteIso}|${j.kind}|${j.status}`;
+    let g = map.get(key);
+    if (!g) {
+      g = {
+        key, minuteIso, kind: j.kind, status: j.status,
+        jobs: [], errorCount: 0,
+        minDurationMs: null, maxDurationMs: null,
+      };
+      map.set(key, g);
+    }
+    g.jobs.push(j);
+    if (j.error_msg) g.errorCount++;
+    const d = durationMs(j);
+    if (d != null) {
+      g.minDurationMs = g.minDurationMs == null ? d : Math.min(g.minDurationMs, d);
+      g.maxDurationMs = g.maxDurationMs == null ? d : Math.max(g.maxDurationMs, d);
+    }
+  }
+  // Preserve original ordering (newest first) — sort by minuteIso desc.
+  return Array.from(map.values()).sort((a, b) => b.minuteIso.localeCompare(a.minuteIso));
 }
 
 function QbwcHealth({ session }: { session: QbWcSession | null }) {
@@ -83,7 +133,7 @@ export default function QbSyncPanel() {
   const [jobs, setJobs] = useState<QbSyncJobRow[] | null>(null);
   const [session, setSession] = useState<QbWcSession | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<QbSyncJobRow['status'] | 'all'>('all');
   const [refreshTick, setRefreshTick] = useState(0);
   const [page, setPage] = useState(0);
@@ -99,9 +149,10 @@ export default function QbSyncPanel() {
 
   const filtered = (jobs ?? []).filter((j) => statusFilter === 'all' || j.status === statusFilter);
   const stats = jobs ? summarizeJobs(jobs) : null;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const grouped = groupJobs(filtered);
+  const totalPages = Math.max(1, Math.ceil(grouped.length / PAGE_SIZE));
   const clampedPage = Math.min(page, totalPages - 1);
-  const pageRows = filtered.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE);
+  const pageRows = grouped.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE);
 
   return (
     <div className="space-y-6">
@@ -147,9 +198,9 @@ export default function QbSyncPanel() {
         )}
 
         {!jobs && !error && <div className="mt-4 text-sm text-gray-500 py-6 text-center">Loading…</div>}
-        {jobs && filtered.length === 0 && <div className="mt-4 text-sm text-gray-500 py-6 text-center">No jobs in the last 24h.</div>}
+        {jobs && grouped.length === 0 && <div className="mt-4 text-sm text-gray-500 py-6 text-center">No jobs in the last 24h.</div>}
 
-        {filtered.length > 0 && (
+        {grouped.length > 0 && (
           <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden">
             <table className="min-w-full divide-y divide-gray-200 text-sm">
               <thead className="bg-gray-50">
@@ -158,41 +209,90 @@ export default function QbSyncPanel() {
                   <th className="px-3 py-2 text-left font-medium text-gray-600">Created</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-600">Kind</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-600">Status</th>
+                  <th className="px-3 py-2 text-right font-medium text-gray-600">Jobs</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-600">Duration</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-600">Error</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {pageRows.map((j) => {
-                  const isOpen = expandedId === j.id;
+                {pageRows.map((g) => {
+                  const isOpen = expandedKey === g.key;
+                  const n = g.jobs.length;
+                  const durationLabel = g.minDurationMs == null
+                    ? '—'
+                    : g.minDurationMs === g.maxDurationMs
+                      ? formatMs(g.minDurationMs)
+                      : `${formatMs(g.minDurationMs)}–${formatMs(g.maxDurationMs)}`;
+                  const errorLabel = g.errorCount === 0
+                    ? ''
+                    : n === 1
+                      ? (g.jobs[0].error_msg ?? '')
+                      : `${g.errorCount} of ${n} failed`;
                   return (
                     <>
-                      <tr key={j.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setExpandedId(isOpen ? null : j.id)}>
+                      <tr key={g.key} className="hover:bg-gray-50 cursor-pointer" onClick={() => setExpandedKey(isOpen ? null : g.key)}>
                         <td className="px-2">
                           {isOpen ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
                         </td>
-                        <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{formatWhen(j.created_at)}</td>
-                        <td className="px-3 py-2 font-mono text-xs text-gray-800">{j.kind}</td>
+                        <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{formatWhen(g.minuteIso)}</td>
+                        <td className="px-3 py-2 font-mono text-xs text-gray-800">{g.kind}</td>
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-1.5">
-                            {STATUS_ICON[j.status]}
-                            <span className="text-xs text-gray-700">{j.status}</span>
+                            {STATUS_ICON[g.status]}
+                            <span className="text-xs text-gray-700">{g.status}</span>
                           </div>
                         </td>
-                        <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{durationSec(j)}</td>
-                        <td className="px-3 py-2 text-red-700 text-xs truncate max-w-md">{j.error_msg ?? ''}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-700">
+                          {n === 1 ? '1' : <span className="font-medium">× {n}</span>}
+                        </td>
+                        <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{durationLabel}</td>
+                        <td className="px-3 py-2 text-red-700 text-xs truncate max-w-md">{errorLabel}</td>
                       </tr>
                       {isOpen && (
-                        <tr key={j.id + '-x'} className="bg-gray-50">
-                          <td colSpan={6} className="px-4 py-4">
-                            <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Payload</div>
-                            <pre className="text-xs bg-white border border-gray-200 rounded p-2 overflow-x-auto max-h-64">
-{JSON.stringify(j.payload, null, 2)}
-                            </pre>
-                            {j.error_msg && (
+                        <tr key={g.key + '-x'} className="bg-gray-50">
+                          <td colSpan={7} className="px-4 py-4">
+                            {n === 1 ? (
                               <>
-                                <div className="text-xs uppercase tracking-wide text-gray-500 mt-3 mb-1">Error</div>
-                                <pre className="text-xs bg-red-50 border border-red-200 rounded p-2 overflow-x-auto text-red-900">{j.error_msg}</pre>
+                                <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Payload</div>
+                                <pre className="text-xs bg-white border border-gray-200 rounded p-2 overflow-x-auto max-h-64">
+{JSON.stringify(g.jobs[0].payload, null, 2)}
+                                </pre>
+                                {g.jobs[0].error_msg && (
+                                  <>
+                                    <div className="text-xs uppercase tracking-wide text-gray-500 mt-3 mb-1">Error</div>
+                                    <pre className="text-xs bg-red-50 border border-red-200 rounded p-2 overflow-x-auto text-red-900">{g.jobs[0].error_msg}</pre>
+                                  </>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">{n} jobs in this minute</div>
+                                <div className="max-h-64 overflow-y-auto bg-white border border-gray-200 rounded">
+                                  <table className="min-w-full text-xs">
+                                    <thead className="bg-gray-100 sticky top-0">
+                                      <tr>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-600">Job #</th>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-600">Duration</th>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-600">Payload summary</th>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-600">Error</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-200">
+                                      {g.jobs.map((j) => {
+                                        const p = j.payload as Record<string, unknown> | null;
+                                        const summary = p ? (typeof p.vendorName === 'string' ? p.vendorName : typeof p.name === 'string' ? p.name : Object.keys(p).slice(0, 2).join(', ')) : '';
+                                        return (
+                                          <tr key={j.id}>
+                                            <td className="px-2 py-1 tabular-nums text-gray-700">{j.id}</td>
+                                            <td className="px-2 py-1 tabular-nums text-gray-700">{formatMs(durationMs(j))}</td>
+                                            <td className="px-2 py-1 text-gray-700 truncate max-w-xs">{summary}</td>
+                                            <td className="px-2 py-1 text-red-700 truncate max-w-xs">{j.error_msg ?? ''}</td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
                               </>
                             )}
                           </td>
@@ -206,7 +306,7 @@ export default function QbSyncPanel() {
             {totalPages > 1 && (
               <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-t border-gray-200 text-sm">
                 <div className="text-gray-600">
-                  Showing {clampedPage * PAGE_SIZE + 1}–{Math.min((clampedPage + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}
+                  Showing {clampedPage * PAGE_SIZE + 1}–{Math.min((clampedPage + 1) * PAGE_SIZE, grouped.length)} of {grouped.length} groups
                 </div>
                 <div className="flex items-center gap-2">
                   <button
