@@ -40,12 +40,29 @@ export const INTENTS: IntentSpec[] = [
   {
     name: 'user.get',
     required_permission: 'user.get',
-    description: 'Look up a single user by name or email and show their details',
+    description: 'Look up a single user by name or email and show their details (project, dates, pay rate, bill rate, status)',
     read_only: true,
     extraction_hint:
-      'The user is asking about a specific person by name or email (e.g. "when does Sarah start?", "what is X\'s project?", "is Y still active?"). Extract the target as name or email. Do NOT match on generic pronouns.',
+      'The user is asking about a specific person by name or email (e.g. "when does Sarah start?", "what is X\'s project?", "is Y still active?", "what is X\'s pay rate?", "what does X bill?", "X\'s payrate", "X\'s billrate", "X\'s hourly", "X\'s rate"). Rates, dates, project, invoicing status — all live on the user profile card and route to this intent. Extract the target as name or email. Do NOT match on generic pronouns.',
     fields: [
       { name: 'target', input_type: 'text', required: true, hint: 'name or email of the user to look up' },
+    ],
+  },
+  {
+    name: 'user.count',
+    required_permission: 'user.list',
+    description: 'Count users matching filters — for "how many" / "total number of" / "count" questions. Returns a number + a small breakdown by location_type and active status, no row list.',
+    read_only: true,
+    extraction_hint:
+      'The user wants an aggregate COUNT, not a list. Signals: "how many X?", "count of Y", "total number of Z", "just the counts", "how many onshore + offshore". Extract the same filter fields as user.list. If they explicitly said "just count" or "no names" after a prior list, this is the intent.',
+    fields: [
+      { name: 'role', input_type: 'buttons', options: ['timesheetuser', 'manager', 'accountant', 'vendormanager', 'admin', 'contract_admin'], hint: 'filter by role' },
+      { name: 'project', input_type: 'buttons', options_from: 'projects', hint: 'filter by project (name or code)' },
+      { name: 'country', input_type: 'text', hint: 'ISO country code or full country name' },
+      { name: 'location_type', input_type: 'buttons', options: ['onshore', 'offshore'] },
+      { name: 'vendor_manager', input_type: 'text', hint: 'name or email of a vendor manager' },
+      { name: 'active', input_type: 'yes_no', hint: 'YES = currently active, NO = terminated' },
+      { name: 'missing_start_date', input_type: 'yes_no', hint: 'YES = never-set start_date' },
     ],
   },
   {
@@ -54,13 +71,13 @@ export const INTENTS: IntentSpec[] = [
     description: 'List users matching filters (role, project, status, etc.)',
     read_only: true,
     extraction_hint:
-      'The user wants a list of users matching some criteria (e.g. "who is on APFM?", "list offshore contractors", "show users with no start date", "who ended in the last week?"). Extract any filters mentioned. No fields are strictly required — an empty query lists everyone up to the limit.',
+      'The user wants a list of users matching some criteria (e.g. "who is on APFM?", "list offshore contractors", "show users with no start date", "who ended in the last week?"). Synonyms: "contractors" / "consultants" / "people" → role=timesheetuser. "vendor managers" / "VMs" → role=vendormanager. Extract any filters mentioned. No fields are strictly required — an empty query lists everyone up to the limit.',
     fields: [
       {
         name: 'role',
         input_type: 'buttons',
         options: ['timesheetuser', 'manager', 'accountant', 'vendormanager', 'admin', 'contract_admin'],
-        hint: 'filter by role',
+        hint: 'filter by role; contractors/consultants/people = timesheetuser',
       },
       {
         name: 'project',
