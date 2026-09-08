@@ -19,19 +19,13 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { findIntent, intentCatalog, type IntentSpec } from './intents.ts';
+import { callClaude } from '../_shared/llm.ts';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
-
-// Groq production-tier model with 250k TPM cap (vs the ~1k OTPM on the
-// deprecated preview qwen3.8-27b). Groq's own recommended migration target
-// for llama-3.1-8b-instant (retired Aug 2026). Cheap, fast, JSON-friendly.
-// TODO: migrate to Vercel AI Gateway for provider-agnostic routing —
-// see MEMORY.md project_ai_gateway_migration.
-const GROQ_MODEL = 'openai/gpt-oss-20b';
 
 interface Conversation {
   id: string;
@@ -223,7 +217,7 @@ For dates: normalize to YYYY-MM-DD relative to TODAY as noted above.
 
 User's message: """${msg.content}"""`;
 
-  const parsed = await callGroq(parsePrompt);
+  const parsed = await callClaude(parsePrompt);
   const intent = (parsed?.intent as string | null) ?? null;
 
   if (!intent) {
@@ -349,7 +343,7 @@ Return JSON:
   "reply": "<your next reply to the user>"
 }`;
 
-  const parsed = await callGroq(drivePrompt);
+  const parsed = await callClaude(drivePrompt);
   const rawExtracted = (parsed?.extracted as Record<string, unknown> | null) ?? {};
   const llmReply = ((parsed?.reply as string) ?? '').trim();
 
@@ -447,7 +441,7 @@ Return JSON:
 - "edit": user is correcting one or more field values (list them in "edits")
 - "unknown": can't tell — bot will re-ask`;
 
-  const parsed = await callGroq(confirmPrompt);
+  const parsed = await callClaude(confirmPrompt);
   const action = parsed?.action as string;
 
   if (action === 'yes') {
@@ -1285,71 +1279,6 @@ function normalizeCaptured(spec: IntentSpec, raw: Record<string, unknown>): Reco
 }
 
 // ─── LLM + helpers ──────────────────────────────────────────────────
-
-async function callGroq(prompt: string): Promise<Record<string, unknown> | null> {
-  const apiKey = Deno.env.get('GROQ_API_KEY');
-  if (!apiKey) throw new Error('GROQ_API_KEY not configured');
-
-  // Two-attempt call. First attempt uses json_object mode; if Groq rejects
-  // with json_validate_failed (some gpt-oss outputs wrap in code fences the
-  // validator refuses), retry without json_object and clean the response
-  // ourselves.
-  const baseBody = {
-    model: GROQ_MODEL,
-    messages: [
-      { role: 'system', content: 'You extract structured data and write natural replies. Reply ONLY with a single valid JSON object — no prose, no code fences, no thinking tags. Keep the "reply" field concise (1-3 sentences).' },
-      { role: 'user', content: prompt },
-    ],
-    temperature: 0,
-    max_tokens: 1500,
-  };
-
-  let res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...baseBody, response_format: { type: 'json_object' } }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    if (res.status === 400 && errText.includes('json_validate_failed')) {
-      // Retry without response_format and clean the output manually.
-      res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(baseBody),
-      });
-      if (!res.ok) throw new Error(`Groq ${res.status}: ${(await res.text()).slice(0, 300)}`);
-    } else {
-      throw new Error(`Groq ${res.status}: ${errText.slice(0, 300)}`);
-    }
-  }
-
-  const data = await res.json();
-  const raw = data?.choices?.[0]?.message?.content;
-  if (!raw) return null;
-  return parseLLMJson(raw);
-}
-
-// Robust JSON extraction from an LLM response. Strips thinking-mode tags,
-// markdown code fences, and any prose before/after the JSON object.
-function parseLLMJson(raw: string): Record<string, unknown> | null {
-  let s = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-  // Strip ```json ... ``` or ``` ... ``` fences
-  s = s.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  // If there's still surrounding prose, grab the first {...} block
-  if (!s.startsWith('{')) {
-    const start = s.indexOf('{');
-    const end = s.lastIndexOf('}');
-    if (start === -1 || end === -1 || end <= start) return null;
-    s = s.slice(start, end + 1);
-  }
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-}
 
 async function writeBot(admin: SupabaseClient, conversationId: string, content: string): Promise<void> {
   await admin.from('chat_messages').insert({
