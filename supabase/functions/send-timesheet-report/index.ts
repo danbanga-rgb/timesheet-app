@@ -743,8 +743,13 @@ serve(async (req) => {
     const newStarters = profiles.filter(p =>
       p.start_date && p.start_date >= weekStart && p.start_date <= weekSunday
     );
+    // Include people who ended DURING the reporting week (e.g. Harun end_date
+    // 2026-09-04 falls inside Aug 31–Sep 6 — surface him on that card so the
+    // accountant knows the absence is offboarding, not a missing timesheet).
+    // Also keeps the previous-week window: people who ended just before the
+    // reporting week still get one final "Inactive: ..." note.
     const newlyInactive = profiles.filter(p =>
-      p.end_date && p.end_date >= addDays(weekStart, -7) && p.end_date < weekStart
+      p.end_date && p.end_date >= addDays(weekStart, -7) && p.end_date <= weekSunday
     );
     let changesNote = '';
     if (newStarters.length > 0 || newlyInactive.length > 0) {
