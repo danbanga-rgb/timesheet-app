@@ -11089,7 +11089,7 @@ const TimesheetSystem = () => {
                   <div className="flex flex-col items-end gap-1">
                     <div className="flex gap-2">
                       <button onClick={runRecomputeButton} disabled={recomputeBusy || qbIngestLoading} className="text-sm px-3 py-1.5 border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-50 disabled:opacity-50" title="Re-run the invoice matcher for all pending events. Use after creating/importing invoices, or after a matcher upgrade ships.">{recomputeBusy ? 'Recomputing…' : 'Recompute matches'}</button>
-                      <button onClick={() => { loadQbIngestEvents(); loadQbOpenBills(); }} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
+                      <button onClick={() => { loadQbIngestEvents(); loadQbOpenBills(); loadQbWcLastSeen(); }} disabled={qbIngestLoading} className="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">{qbIngestLoading ? 'Loading…' : 'Refresh'}</button>
                       <button
                         onClick={() => setShowQbPushPreview(true)}
                         disabled={qbIngestLoading || qbIngestEvents.length === 0}
@@ -11114,9 +11114,12 @@ const TimesheetSystem = () => {
                       const qbwcAlive = qbwcAgeMs < 20 * 60_000;
                       const qbwcDown = qbwcAgeMs > 30 * 60_000;
                       const nextPollMs = qbWcLastSeen ? Date.parse(qbWcLastSeen) + 15 * 60_000 - Date.now() : 0;
+                      // "next poll due" is non-alarming when we're past the 15-min mark
+                      // but QBWC is still classified alive (<20m). Only the qbwcDown/delayed
+                      // branches signal a real fault — see qbwcLabel below.
                       const nextPollLabel = nextPollMs > 0
                         ? `next poll in ~${Math.max(1, Math.round(nextPollMs / 60_000))}m`
-                        : `overdue ~${Math.abs(Math.round(nextPollMs / 60_000))}m`;
+                        : 'next poll due';
                       const qbwcLabel = !qbWcLastSeen
                         ? 'QBWC · never seen'
                         : qbwcDown
