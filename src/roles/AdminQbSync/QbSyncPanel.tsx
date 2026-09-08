@@ -4,7 +4,7 @@
 // inline here but was moved to the docs file.
 
 import { useEffect, useState, type ReactElement } from 'react';
-import { Download, RefreshCw, CheckCircle, XCircle, Clock, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { Download, RefreshCw, CheckCircle, XCircle, Clock, AlertTriangle, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react';
 import {
   getLatestQbWcSession,
   listRecentQbSyncJobs,
@@ -12,6 +12,8 @@ import {
   type QbSyncJobRow,
   type QbWcSession,
 } from './api';
+
+const PAGE_SIZE = 25;
 
 const STATUS_ICON: Record<QbSyncJobRow['status'], ReactElement> = {
   pending: <Clock className="w-4 h-4 text-amber-600" />,
@@ -84,6 +86,7 @@ export default function QbSyncPanel() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<QbSyncJobRow['status'] | 'all'>('all');
   const [refreshTick, setRefreshTick] = useState(0);
+  const [page, setPage] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -96,6 +99,9 @@ export default function QbSyncPanel() {
 
   const filtered = (jobs ?? []).filter((j) => statusFilter === 'all' || j.status === statusFilter);
   const stats = jobs ? summarizeJobs(jobs) : null;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const clampedPage = Math.min(page, totalPages - 1);
+  const pageRows = filtered.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE);
 
   return (
     <div className="space-y-6">
@@ -126,7 +132,7 @@ export default function QbSyncPanel() {
               return (
                 <button
                   key={s}
-                  onClick={() => setStatusFilter(s)}
+                  onClick={() => { setStatusFilter(s); setPage(0); }}
                   className={`px-3 py-1 rounded-full font-medium ${active ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
                 >
                   {s === 'all' ? `All (${count})` : `${s} (${count})`}
@@ -157,7 +163,7 @@ export default function QbSyncPanel() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {filtered.map((j) => {
+                {pageRows.map((j) => {
                   const isOpen = expandedId === j.id;
                   return (
                     <>
@@ -197,6 +203,30 @@ export default function QbSyncPanel() {
                 })}
               </tbody>
             </table>
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-t border-gray-200 text-sm">
+                <div className="text-gray-600">
+                  Showing {clampedPage * PAGE_SIZE + 1}–{Math.min((clampedPage + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                    disabled={clampedPage === 0}
+                    className="flex items-center gap-1 px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeft className="w-4 h-4" /> Prev
+                  </button>
+                  <span className="text-gray-700 tabular-nums">Page {clampedPage + 1} of {totalPages}</span>
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                    disabled={clampedPage >= totalPages - 1}
+                    className="flex items-center gap-1 px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
