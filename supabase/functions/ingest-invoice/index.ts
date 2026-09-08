@@ -615,6 +615,12 @@ serve(async (req) => {
   let finalPeriodEnd   = parsedPeriodEnd;
   let detectorFixes: unknown[] = [];
   let detectorFlags: unknown[] = [];
+  // Hoisted so the response construction outside the try (line ~1390) can
+  // reference it. Live in-scope since 2026-08-30 caused every successful
+  // ingest to throw ReferenceError at response time → HTTP 500 → false-alarm
+  // "FAILED" entries in the accountant invoice report while the DB write
+  // had already committed. Fix 2026-09-08.
+  let beneGuardrailEvents: Array<{ stage: string; original: number; resolved: number | null; note?: string }> = [];
 
   try {
     const parsedRate     = rate != null ? Number(rate) : null;
@@ -686,7 +692,7 @@ serve(async (req) => {
     // when the guardrail intervened. Declared at outer scope so both correction-update
     // and new-insert response paths can log them.
     const depMap = await loadDeprecatedBeneMap(supabase);
-    const beneGuardrailEvents: Array<{ stage: string; original: number; resolved: number | null; note?: string }> = [];
+    // beneGuardrailEvents hoisted to outer scope — see comment above the try.
 
     // Build payment profile snapshot from parsed bank details (if any).
     // When identity_mismatch fires, we keep the snapshot null — the parsed bank details
