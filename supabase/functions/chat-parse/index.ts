@@ -807,7 +807,7 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
 
   // Fetch the full profile in one shot so we can show a rich card.
   const t = target.toLowerCase();
-  const cols = 'id, name, email, role, country, region, project_id, start_date, end_date, invoice_enabled, reminders_enabled, location_type, vendor_manager_id';
+  const cols = 'id, name, email, role, country, region, project_id, start_date, end_date, invoice_enabled, reminders_enabled, location_type, manager_id, vendor_manager_id';
   let user: Record<string, unknown> | null = null;
   let assumptionNote = '';
 
@@ -856,9 +856,12 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
   const endDate = (user.end_date as string | null) ?? null;
   const status = !endDate ? 'ACTIVE (no end date)' : endDate > today ? `ACTIVE (ends ${endDate})` : `ENDED ${endDate}`;
 
+  // Rate + reporting-line lookups fired in parallel to keep the card snappy.
   // Pay rate = most recent invoice rate. Bill rate = current client_engagement bill_rate.
-  // Both queried in parallel to keep response snappy.
-  const [{ data: lastInv }, { data: eng }] = await Promise.all([
+  // Manager and vendor manager names are resolved from their respective foreign keys.
+  const managerId = (user.manager_id as string | null) ?? null;
+  const vmId = (user.vendor_manager_id as string | null) ?? null;
+  const [{ data: lastInv }, { data: eng }, { data: mgr }, { data: vm }] = await Promise.all([
     admin.from('invoices')
       .select('rate, period_start, invoice_number')
       .eq('user_id', user.id)
@@ -871,11 +874,19 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
       .or(`effective_to.is.null,effective_to.gte.${today}`)
       .order('effective_from', { ascending: false })
       .limit(1),
+    managerId
+      ? admin.from('profiles').select('name, email').eq('id', managerId).maybeSingle()
+      : Promise.resolve({ data: null }),
+    vmId
+      ? admin.from('profiles').select('name, email').eq('id', vmId).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
   const payRate = lastInv?.[0]?.rate as number | null | undefined;
   const payRateNote = lastInv?.[0] ? ` (last invoice ${lastInv[0].invoice_number}, ${(lastInv[0].period_start as string).slice(0, 7)})` : '';
   const billRate = eng?.[0]?.bill_rate as number | null | undefined;
   const billRateNote = eng?.[0]?.role_title ? ` (${eng[0].role_title})` : '';
+  const managerName = mgr ? `${(mgr as { name: string }).name} (${(mgr as { email: string }).email})` : null;
+  const vmName = vm ? `${(vm as { name: string }).name} (${(vm as { email: string }).email})` : null;
 
   const lines = [
     ...(assumptionNote ? [assumptionNote, ''] : []),
@@ -887,6 +898,8 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
     `  Started: ${user.start_date ?? '(not set — no reminders)'}`,
     `  Pay rate: ${payRate != null ? `$${payRate}/hr${payRateNote}` : '(not on file — no invoices yet)'}`,
     `  Bill rate: ${billRate != null ? `$${billRate}/hr${billRateNote}` : '(not on file — no client engagement)'}`,
+    ...(managerName ? [`  Manager: ${managerName}`] : []),
+    ...(vmName ? [`  Vendor manager: ${vmName}`] : []),
     `  Invoicing: ${user.invoice_enabled ? 'YES' : 'NO'}`,
     `  Reminders: ${user.reminders_enabled === false ? 'DISABLED' : 'enabled'}`,
   ];
