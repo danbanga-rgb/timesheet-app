@@ -36,7 +36,6 @@ const CONFIG = {
   fromEmail:     process.env.FROM_EMAIL || 'timesheets@mysynergie.net',
   fromName:      process.env.FROM_NAME || 'Synergie Timesheet System',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
-  groqApiKey: process.env.GROQ_API_KEY || null,
   supabaseUrl:        process.env.SUPABASE_URL || 'https://mimlatvdwxqtgxrgcins.supabase.co',
   supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY || null,
   timesheetReportUrl: process.env.TIMESHEET_REPORT_URL || 'https://mimlatvdwxqtgxrgcins.supabase.co/functions/v1/send-timesheet-report',
@@ -382,45 +381,28 @@ function capitalizeForNameMatch(text) {
   return text.split(/(\s+)/).map(w => /^[a-zà-ÿšžčćđ]/.test(w) ? w[0].toUpperCase() + w.slice(1) : w).join('');
 }
 
-// Groq fallback for contractor identification. Used after regex-based subject +
-// forwarder-note extraction fails. Groq reads natural language ("this is for
+// Claude fallback for contractor identification. Used after regex-based subject +
+// forwarder-note extraction fails. Claude reads natural language ("this is for
 // Marta Susek", "for marta", "Marta only sent her TS") and returns the contractor's
 // name, which we then resolve via the existing findProfileByName RPC.
 // Returns { name } on success, null otherwise.
-async function groqResolveContractor(subject, forwarderNote, bodyExcerpt) {
-  if (!CONFIG.groqApiKey) return null;
+async function claudeResolveContractor(subject, forwarderNote, bodyExcerpt) {
+  if (!CONFIG.anthropicApiKey) return null;
   const userText = [
     subject ? `Subject: ${subject}` : '',
     forwarderNote ? `Forwarder note (text the accountant added above the forwarded message):\n${forwarderNote.slice(0, 800)}` : '',
     bodyExcerpt ? `Email body excerpt (may contain platform invoice details with contractor name):\n${bodyExcerpt.slice(0, 1500)}` : '',
   ].filter(Boolean).join('\n\n');
   if (!userText.trim()) return null;
+  const SYSTEM = 'You identify a single contractor (person) being referenced in a forwarded invoice email. The forwarder is an accountant who may explicitly mention the contractor by name because the original email came from a payment platform or company (Native Teams, Bimosoft, Wise, Intuit, etc.) rather than the contractor directly. Return JSON {"contractor_name": "First Last"} when a person is clearly identified. Return {"contractor_name": null} if only a company is mentioned, or if no specific person is named. Do not invent. Do not return company names. Preserve original spelling and diacritics.';
   try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b',
-        messages: [
-          { role: 'system', content: 'You identify a single contractor (person) being referenced in a forwarded invoice email. The forwarder is an accountant who may explicitly mention the contractor by name because the original email came from a payment platform or company (Native Teams, Bimosoft, Wise, Intuit, etc.) rather than the contractor directly. Return JSON {"contractor_name": "First Last"} when a person is clearly identified. Return {"contractor_name": null} if only a company is mentioned, or if no specific person is named. Do not invent. Do not return company names. Preserve original spelling and diacritics.' },
-          { role: 'user', content: userText },
-        ],
-        max_tokens: 60,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-      }),
-    });
-    if (!res.ok) {
-      console.warn(`  ⚠️  Groq resolveContractor HTTP ${res.status}`);
-      return null;
-    }
-    const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = JSON.parse(raw);
-    const name = parsed.contractor_name;
+    const { callClaude, parseLLMJson } = require('./lib/llm.js');
+    const { text } = await callClaude({ prompt: userText, system: SYSTEM, maxTokens: 80, apiKey: CONFIG.anthropicApiKey });
+    const parsed = parseLLMJson(text);
+    const name = parsed?.contractor_name;
     return (name && typeof name === 'string') ? { name } : null;
   } catch (e) {
-    console.warn(`  ⚠️  Groq resolveContractor exception: ${e.message}`);
+    console.warn(`  ⚠️  Claude resolveContractor exception: ${e.message}`);
     return null;
   }
 }
@@ -2124,148 +2106,30 @@ function applyHistoricalRateHint(parsed, hist) {
   };
 }
 
-// Verification pass: runs Groq vision INDEPENDENTLY of the primary parse and compares field-by-field.
-// Zero production impact — only writes into email_invoice_log.groq_vision_verification for later
-// analysis. Enables phased migration to Groq-primary once we have data on agreement rate.
-// Returns null on any error (Groq HTTP failure, Qwen exception, etc.) — errors are logged as "no vote".
-async function runGroqVisionVerification(primary, pdfBuffer, filename) {
-  if (!CONFIG.groqApiKey || !pdfBuffer) return null;
-  let gv;
-  try { gv = await groqVisionExtractInvoice(pdfBuffer, filename); }
-  catch (e) {
-    return { ok: false, error: `groq_vision_exception: ${e.message}`, groq: null, primary: null, agreement: null };
-  }
-  if (!gv) return { ok: false, error: 'groq_vision_returned_null', groq: null, primary: null, agreement: null };
-
-  const p = primary || {};
-  const cmp = (a, b) => {
-    if (a == null && b == null) return 'both_null';
-    if (a == null) return 'primary_null_groq_has_value';
-    if (b == null) return 'primary_has_value_groq_null';
-    // Numeric equality within 0.5% tolerance
-    if (typeof a === 'number' && typeof b === 'number') {
-      return Math.abs(a - b) / Math.max(1, Math.abs(a)) < 0.005 ? 'agree' : 'disagree';
-    }
-    return String(a) === String(b) ? 'agree' : 'disagree';
-  };
-  const agreement = {
-    periodStart: cmp(p.periodStart, gv.periodStart),
-    periodEnd:   cmp(p.periodEnd,   gv.periodEnd),
-    totalHours:  cmp(p.totalHours,  gv.totalHours),
-    rate:        cmp(p.rate,        gv.rate),
-    totalAmount: cmp(p.totalAmount, gv.totalAmount),
-  };
-  return {
-    ok: true,
-    primary: {
-      periodStart: p.periodStart ?? null,
-      periodEnd:   p.periodEnd   ?? null,
-      totalHours:  p.totalHours  ?? null,
-      rate:        p.rate        ?? null,
-      totalAmount: p.totalAmount ?? null,
-      parseMethod: p.parseMethod ?? null,
-    },
-    groq: {
-      periodStart: gv.periodStart ?? null,
-      periodEnd:   gv.periodEnd   ?? null,
-      totalHours:  gv.totalHours  ?? null,
-      rate:        gv.rate        ?? null,
-      totalAmount: gv.totalAmount ?? null,
-    },
-    agreement,
-    verified_at: new Date().toISOString(),
-  };
-}
-
-// Gap-filler using Groq vision (free tier). Runs after any successful parse that came back
-// with missing period/hours/rate/total. Since Groq vision is zero-cost, we always try it as
-// a verification layer when the primary parse was incomplete. Only fills MISSING fields —
-// never overrides values the primary parse already found.
-async function fillGapsWithGroqVision(result, pdfBuffer, filename) {
-  if (!result || !CONFIG.groqApiKey || !pdfBuffer) return result;
-  const missingPeriod = !result.periodStart || !result.periodEnd;
-  const missingHours  = result.totalHours == null;
-  const missingRate   = result.rate == null;
-  const missingTotal  = result.totalAmount == null;
-  if (!(missingPeriod || missingHours || missingRate || missingTotal)) return result;
-
-  console.log(`  🔍 Gap-fill: running Groq vision to fill ${[missingPeriod && 'period', missingHours && 'hours', missingRate && 'rate', missingTotal && 'total'].filter(Boolean).join('+')} for ${filename}`);
-  let gv;
-  try { gv = await groqVisionExtractInvoice(pdfBuffer, filename); }
-  catch (e) { console.warn(`  ⚠️  Gap-fill Groq vision error: ${e.message}`); return result; }
-  if (!gv) return result;
-
-  // Validate date strings before accepting from any LLM. Groq occasionally hallucinates
-  // impossible dates like "2026-06-39" (Enis Basic #298 case) that then crash the ingest
-  // with a Postgres "date/time field value out of range" error. Reject anything that
-  // isn't a real calendar date.
-  const isRealDate = (s) => {
-    if (!s || typeof s !== 'string') return false;
-    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!m) return false;
-    const [, y, mo, d] = m.map(Number);
-    if (mo < 1 || mo > 12) return false;
-    if (d < 1 || d > 31) return false;
-    const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
-    return d <= lastDay;
-  };
-
-  const filled = [];
-  if (missingPeriod && isRealDate(gv.periodStart) && isRealDate(gv.periodEnd)) {
-    result.periodStart = gv.periodStart; result.periodEnd = gv.periodEnd;
-    filled.push('period');
-  } else if (missingPeriod && (gv.periodStart || gv.periodEnd)) {
-    console.warn(`  ⚠️  Groq vision returned invalid date(s) — rejected: ${gv.periodStart} → ${gv.periodEnd}`);
-  }
-  if (missingHours && gv.totalHours != null) { result.totalHours = gv.totalHours; filled.push('hours'); }
-  if (missingRate && gv.rate != null) { result.rate = gv.rate; filled.push('rate'); }
-  if (missingTotal && gv.totalAmount != null) { result.totalAmount = gv.totalAmount; filled.push('total'); }
-
-  if (filled.length) {
-    result.parseMethod = (result.parseMethod || 'unknown') + '+gv';
-    result.parseNotes  = [result.parseNotes, `Groq vision filled: ${filled.join(', ')}`].filter(Boolean).join(' | ');
-    console.log(`  🔍 Gap-fill: filled ${filled.join(', ')}`);
-  }
-  return result;
-}
-
 // ─── Main invoice orchestrator ────────────────────────────────────────────────
 // 1. Regex (free, always runs on text PDFs) via parser.js
 // 2a. Regex has period + hours + payment → done, zero Claude calls
 // 2b. Regex has period + hours, missing payment → Claude for payment details only
 // 2c. Regex missing period or hours → full Claude extract, merge regex on top
-// FINAL. If ANY primary result is missing period/hours/rate/total, run Groq vision as
-//        a free gap-filler (never overrides fields the primary parse found).
 async function extractInvoice(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null) {
   // DOCX invoices route through text-only pipeline: extractDocxText upstream has
   // already populated pdfText from word/document.xml. Skip every vision path —
   // vision APIs are PDF-only and DOCX buffers throw "Invalid PDF structure"
-  // (Slaven Konforta 8-1-1.docx on 2026-08-10, both Groq vision and Claude vision).
+  // (Slaven Konforta 8-1-1.docx on 2026-08-10).
   const isDocx = /\.docx$/i.test(filename || '');
-  const primary = await extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText, knownTemplate, isDocx);
-  if (isDocx) return primary;  // no vision-based gap fill for DOCX
-  return fillGapsWithGroqVision(primary, pdfBuffer, filename);
+  return await extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText, knownTemplate, isDocx);
 }
 
 async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, emailBodyText = '', knownTemplate = null, isDocx = false) {
-  // DOCX invoices skip the vision fast-path — the stored `groq_vision` template
+  // DOCX invoices skip the vision fast-path — the stored vision template
   // was set based on a historical image-PDF submission that has since switched
-  // to DOCX (Slaven Konforta). Force the regex → Groq-text → Claude-text pipeline.
+  // to DOCX (Slaven Konforta). Force the regex → Claude-text pipeline.
+  // Legacy 'groq_vision' template values are treated identically to 'claude_vision'.
   if (isDocx && (knownTemplate === 'claude_vision' || knownTemplate === 'groq_vision')) {
     knownTemplate = null;
   }
-  // Fast-path: skip regex for known vision-only invoices — try Groq vision first, Claude fallback
+  // Fast-path: skip regex for known vision-only invoices — go straight to Claude vision.
   if (knownTemplate === 'claude_vision' || knownTemplate === 'groq_vision') {
-    if (CONFIG.groqApiKey) {
-      const groqResult = await groqVisionExtractInvoice(pdfBuffer, filename);
-      if (groqResult?.periodStart && groqResult?.periodEnd) {
-        const r = postProcessInvoice(applyFilenamePeriodFallback(groqResult, filename), pdfText);
-        if (r) r.parseMethod = 'groq_vision';
-        console.log(`  👁️  Groq vision: ${filename}`);
-        return r;
-      }
-      console.log(`  👁️  Groq vision insufficient — falling back to Claude vision: ${filename}`);
-    }
     if (CONFIG.anthropicApiKey) {
       console.log(`  🤖 Claude vision (known template): ${filename}`);
       const claudeResult = await claudeFullExtractInvoice(null, pdfBuffer, true, filename, emailBodyText);
@@ -2276,10 +2140,9 @@ async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, ema
       }
       console.warn(`  ⚠️  Claude vision returned null (API drop or unsupported PDF) — trying filename fallback for ${filename}`);
     }
-    // Vision fully failed. Skeleton with filename-derived period (if any) — gap-filler
-    // then runs Groq vision one more time to fill hours/rate/total. This rescues cases
-    // like Ahmet's Native Teams PDFs where Claude vision drops the connection but
-    // the filename ("Inv# NT-83e086 - Jun'26.pdf") carries a parseable period.
+    // Vision failed. Skeleton with filename-derived period (if any) rescues cases
+    // like Ahmet's Native Teams PDFs where Claude drops but the filename
+    // ("Inv# NT-83e086 - Jun'26.pdf") carries a parseable period.
     const skeleton = applyFilenamePeriodFallback({}, filename);
     if (skeleton?.periodStart && skeleton?.periodEnd) {
       skeleton.parseMethod = 'filename_fallback';
@@ -2347,33 +2210,7 @@ async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, ema
     return r2b;
   }
 
-  // ── Step 2c: regex insufficient — try Groq first, fall back to Claude ──────
-  if (CONFIG.groqApiKey && pdfText && pdfText.length > 30) {
-    const groqResult = await groqExtractInvoice(prepareInvoiceText(pdfText), filename);
-    if (groqResult?.periodStart && groqResult?.periodEnd) {
-      const merged = mergeInvoiceResults(regexResult, groqResult);
-      const r = postProcessInvoice(applyFilenamePeriodFallback(merged, filename), pdfText);
-      if (r) r.parseMethod = 'groq';
-      console.log(`  ⚡ Groq: ${filename}`);
-      return r;
-    }
-    console.log(`  ⚡ Groq insufficient — falling back to Claude: ${filename}`);
-  }
-
-  // ── Step 2d: image PDF with no extractable text — try Groq vision before Claude ──
-  // Skip for DOCX — DOCX has no image-PDF form and the buffer isn't a PDF.
-  if (CONFIG.groqApiKey && isImagePdf && !pdfText && !isDocx) {
-    const groqResult = await groqVisionExtractInvoice(pdfBuffer, filename);
-    if (groqResult?.periodStart && groqResult?.periodEnd) {
-      const merged = mergeInvoiceResults(regexResult, groqResult);
-      const r = postProcessInvoice(applyFilenamePeriodFallback(merged, filename), pdfText);
-      if (r) r.parseMethod = 'groq_vision';
-      console.log(`  👁️  Groq vision: ${filename}`);
-      return r;
-    }
-    console.log(`  👁️  Groq vision insufficient — falling back to Claude: ${filename}`);
-  }
-
+  // ── Step 2c: regex insufficient — go to Claude (full text or vision) ──────
   if (!CONFIG.anthropicApiKey) {
     const r = regexResult ? postProcessInvoice(regexResult, pdfText) : null;
     if (r) r.parseMethod = 'regex_partial';
@@ -2705,10 +2542,10 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     const filenameWeek = weekFromFilename(ts.attachmentName || '');
     let weekCandidates = [...new Set([ts.weekStart, weekFromSubject, filenameWeek].filter(Boolean))];
 
-    // Pre-ingest Groq check 1: filename week ≠ content week (stale template pattern).
-    // Ask Groq which week was intended before we file.
-    const filenameGroqFired = filenameWeek && filenameWeek !== ts.weekStart && !correctionHint && CONFIG.groqApiKey;
-    if (filenameGroqFired) {
+    // Pre-ingest sanity check 1: filename week ≠ content week (stale template pattern).
+    // Ask Claude which week was intended before we file.
+    const filenameSanityFired = filenameWeek && filenameWeek !== ts.weekStart && !correctionHint && CONFIG.anthropicApiKey;
+    if (filenameSanityFired) {
       const sanity = await checkCorrectionSanity({
         contractorEmail,
         subject,
@@ -2718,17 +2555,17 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         total:          ts.total,
       });
       const flag = sanity.assessment === 'likely_new_submission' ? '🚨' : '🔍';
-      console.log(`  ${flag} GROQ_PRE | ${contractorEmail} | content=${ts.weekStart} filename=${filenameWeek} | ${sanity.assessment} | ${sanity.reason}`);
+      console.log(`  ${flag} SANITY_PRE | ${contractorEmail} | content=${ts.weekStart} filename=${filenameWeek} | ${sanity.assessment} | ${sanity.reason}`);
       if (sanity.assessment === 'likely_new_submission' && sanity.suggested_week && sanity.suggested_week !== ts.weekStart) {
         weekCandidates = [...new Set([ts.weekStart, sanity.suggested_week, weekFromSubject, filenameWeek].filter(Boolean))];
-        console.log(`  🤖 GROQ_PRE | candidates → ${weekCandidates.join(', ')}`);
+        console.log(`  🤖 SANITY_PRE | candidates → ${weekCandidates.join(', ')}`);
       }
     }
 
-    // Pre-ingest Groq check 2: content week already occupied in DB (no filename hint).
+    // Pre-ingest sanity check 2: content week already occupied in DB (no filename hint).
     // Catches stale templates where the filename gives no date clue (e.g. "timesheet.xlsx").
-    // Only fires when check 1 didn't already call Groq.
-    if (!filenameGroqFired && !correctionHint && CONFIG.groqApiKey) {
+    // Only fires when check 1 didn't already call the LLM.
+    if (!filenameSanityFired && !correctionHint && CONFIG.anthropicApiKey) {
       const occupied = await isWeekOccupied(contractorEmail, ts.weekStart);
       if (occupied) {
         const sanity = await checkCorrectionSanity({
@@ -2741,10 +2578,10 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           weekOccupied:   true,
         });
         const flag = sanity.assessment === 'likely_new_submission' ? '🚨' : '🔍';
-        console.log(`  ${flag} GROQ_OCC | ${contractorEmail} | ${ts.weekStart} occupied | ${sanity.assessment} | ${sanity.reason}`);
+        console.log(`  ${flag} SANITY_OCC | ${contractorEmail} | ${ts.weekStart} occupied | ${sanity.assessment} | ${sanity.reason}`);
         if (sanity.assessment === 'likely_new_submission' && sanity.suggested_week && sanity.suggested_week !== ts.weekStart) {
           weekCandidates = [...new Set([sanity.suggested_week, ...weekCandidates].filter(Boolean))];
-          console.log(`  🤖 GROQ_OCC | candidates → ${weekCandidates.join(', ')}`);
+          console.log(`  🤖 SANITY_OCC | candidates → ${weekCandidates.join(', ')}`);
         }
       }
     }
@@ -2826,18 +2663,6 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
     if (parsed && parsed.rate != null) {
       const hist = await fetchContractorHistoricalRate(contractorEmail);
       if (hist) parsed = applyHistoricalRateHint(parsed, hist);
-    }
-    // Shadow verification (Phase 1): run Groq vision alongside, compare, log — does NOT affect
-    // the primary parse or what goes into the DB. Enables data-driven decision on flipping
-    // Groq to primary in a future phase. See project-parser-verification memo.
-    const groqVerification = await runGroqVisionVerification(parsed, att.buffer, att.name);
-    if (groqVerification?.agreement) {
-      const disagreements = Object.entries(groqVerification.agreement).filter(([, v]) => v === 'disagree');
-      if (disagreements.length > 0) {
-        console.log(`  🔍 Groq verification: DISAGREES on ${disagreements.map(([k]) => k).join(', ')} for ${att.name}`);
-      } else {
-        console.log(`  🔍 Groq verification: agrees with primary for ${att.name}`);
-      }
     }
     // Supplement/extend from email body:
     // - fills missing fields (totalHours, rate, totalAmount)
@@ -2951,7 +2776,6 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
             forwardedBy:     forwardedBy || null,
             groupKey,
             attachmentHash:  attHash,
-            groqVisionVerification: groqVerification,
           }, CONFIG.invoiceIngestUrl);
           const action = res.body?.action || res.body?.error || String(res.status);
           console.log(`    [${ci+1}] ${profile.name} → ${action}`);
@@ -3040,7 +2864,6 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           forwardedBy:     forwardedBy || null,
           groupKey:        null,
           attachmentHash:  attHash,
-          groqVisionVerification: groqVerification,
         }, CONFIG.invoiceIngestUrl);
         const action = res.body?.action || res.body?.error || String(res.status);
         console.log(`     ✅ Ingested → ${action}`);
@@ -3133,13 +2956,13 @@ async function classifyReply(bodyText, _contractorName) {
     : { intent: 'OTHER', hours: null, notes: null };
 }
 
-// ─── Groq week resolver (pre-ingest) ──────────────────────────────────────────
+// ─── Week resolver (pre-ingest) ───────────────────────────────────────────────
 // Called before postToIngest() when the attachment filename date range disagrees
-// with the dates embedded in the file. Groq determines which week the contractor
+// with the dates embedded in the file. Claude determines which week the contractor
 // actually intended and returns a suggested_week to add to weekCandidates.
 // resolveWeek() in the edge function then does the final DB-aware decision.
 
-const GROQ_SANITY_SYSTEM = `You are resolving week ambiguity in a contractor timesheet system.
+const SANITY_SYSTEM_PROMPT = `You are resolving week ambiguity in a contractor timesheet system.
 A timesheet may have been filed for the wrong week. Determine which week the contractor actually intended to submit for.
 
 Respond with EXACTLY one JSON object on a single line, no other text:
@@ -3156,7 +2979,7 @@ Rules:
 - If no clear signal → unclear`;
 
 async function checkCorrectionSanity({ contractorEmail, subject, attachmentName, contentWeek, filenameWeek, total, weekOccupied = false }) {
-  if (!CONFIG.groqApiKey) return { assessment: 'unclear', suggested_week: null, reason: 'no groq key' };
+  if (!CONFIG.anthropicApiKey) return { assessment: 'unclear', suggested_week: null, reason: 'no anthropic key' };
   const userMsg = [
     `Contractor: ${contractorEmail}`,
     `Subject: ${subject || '(none)'}`,
@@ -3167,24 +2990,9 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
     weekOccupied ? `DB status: contractor already has an approved timesheet for ${contentWeek}` : '',
   ].filter(Boolean).join('\n');
   try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b',
-        messages: [
-          { role: 'system', content: GROQ_SANITY_SYSTEM },
-          { role: 'user', content: userMsg },
-        ],
-        max_tokens: 500,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-      }),
-    });
-    if (!res.ok) return { assessment: 'unclear', suggested_week: null, reason: `groq_error_${res.status}` };
-    const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = parseQwenJson(raw);
+    const { callClaude, parseLLMJson } = require('./lib/llm.js');
+    const { text } = await callClaude({ prompt: userMsg, system: SANITY_SYSTEM_PROMPT, maxTokens: 500, apiKey: CONFIG.anthropicApiKey });
+    const parsed = parseLLMJson(text) || {};
     // Validate suggested_week: must be a plausible Monday within last 6 months
     let suggestedWeek = parsed.suggested_week || null;
     if (suggestedWeek) {
@@ -3196,189 +3004,7 @@ async function checkCorrectionSanity({ contractorEmail, subject, attachmentName,
     }
     return { assessment: parsed.assessment || 'unclear', suggested_week: suggestedWeek, reason: parsed.reason || '' };
   } catch (e) {
-    return { assessment: 'unclear', suggested_week: null, reason: `groq_exception: ${e.message}` };
-  }
-}
-
-// ─── Groq invoice extractor (mid-tier between regex and Claude) ───────────────
-
-// Prompt v2 (2026-07-08) — encodes the 7 prod safeguards from docs/invoice-pipeline.md
-// so shadow output is apples-to-apples with prod's post-safeguard result.
-// Also fixes the "invoice date confused with billing period" pattern found in the
-// 2026-07-08 retrospective (~90% of critical shadow disagreements were this).
-const GROQ_INVOICE_SYSTEM = `You are an invoice field extractor. Read the invoice text and return ONLY a JSON object — no explanation, no markdown.
-
-{
-  "periodStart": "YYYY-MM-DD",
-  "periodEnd": "YYYY-MM-DD",
-  "totalHours": <number or null>,
-  "rate": <hourly rate or null>,
-  "totalAmount": <final amount due or null>,
-  "currency": "<USD/EUR/GBP/etc or null>",
-  "invoiceNumber": "<string or null>",
-  "paymentDetails": {
-    "iban": null,
-    "swift": null,
-    "accountNumber": null,
-    "routingNumber": null,
-    "sortCode": null,
-    "bankName": null,
-    "accountHolder": null
-  }
-}
-
-CRITICAL RULES:
-
-1a. INVOICE DATE ≠ BILLING PERIOD.
-    The date at the top of the invoice (labeled "Invoice Date", "Date of Issue", "Date") is WHEN the invoice was issued — NOT the services period. Contractors typically invoice in month N+1 for services rendered in month N.
-    Look for explicit "Period", "Billing Period", "Service Period", "Timesheet for [month]", or column headers with dates — THAT is the billing period.
-    Only fall back to (invoice date − 1 month) if no explicit period is stated on the doc.
-
-1b. NEVER INVENT A YEAR.
-    If a year isn't clearly stated on the invoice or in the filename, use the year context from other dates you see. Never output a year that has no textual basis on the document.
-
-2. FILENAME AS SECONDARY SIGNAL.
-   If the filename contains an unambiguous month/year (e.g. "05_2026", "Invoice_June_2026"), use it when invoice content is ambiguous.
-   BUT be careful with digits: "INV 4/1/1" or "INV 7-1-1" are usually sequence numbers, NOT month indicators. Only treat digits as month when paired with a valid year ("07/2026") OR the filename has an unambiguous month name.
-
-3. CURRENCY: EUR shown ≠ EUR billing.
-   Croatian/Bosnian templates often show EUR prominently but bill in USD. If "USD per hour," "TOTAL USD," "$" prefix, or a clean whole-number rate appears, currency=USD.
-
-4. CLEAN RATE + AMOUNT SANITY.
-   Rates are almost always whole dollars (20, 25, 30, 35, 45, 50, 55, 65, 75, 100). If total/hours gives 24.997, use rate=25.
-   Sanity: rate × hours ≈ total (within 2%). If not, one of the three is wrong.
-
-5. DATE FORMAT DD/MM vs MM/DD.
-   European contractors use DD/MM/YYYY. If a date's day > 12, it's DD/MM. Be consistent across the whole document.
-
-6. VALID DATES ONLY. Return null for invalid dates like "2026-06-39".
-
-7. FULL-MONTH BILLING IS THE DEFAULT.
-   Most contractor invoices bill for a full calendar month. If invoice covers a full month, periodStart = first day, periodEnd = last day.
-   DO NOT use single-day periods (e.g. "2026-07-06 to 2026-07-06") unless the invoice explicitly bills one day.
-
-- periodStart/periodEnd = billing period, NOT the invoice date
-- totalAmount = final amount due/payable (after any deductions)
-- Set unknown fields to null
-- Dates in YYYY-MM-DD format only`;
-
-// Qwen thinking-mode strip: models emit <think>...</think> reasoning tokens before
-// the actual JSON. Strip them and any code fences before parsing.
-function parseQwenJson(raw) {
-  if (!raw) throw new Error('empty response');
-  const cleaned = raw
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```\s*$/i, '')
-    .trim();
-  return JSON.parse(cleaned);
-}
-
-async function groqExtractInvoice(preparedText, filename) {
-  if (!CONFIG.groqApiKey || !preparedText) return null;
-  try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b',
-        messages: [
-          { role: 'system', content: GROQ_INVOICE_SYSTEM },
-          { role: 'user', content: `Filename: ${filename}\n\n${preparedText}` },
-        ],
-        max_tokens: 1500,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-      }),
-    });
-    if (!res.ok) { console.warn(`  ⚠️  Groq invoice error ${res.status}`); return null; }
-    const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = parseQwenJson(raw);
-    // Normalise to camelCase (matches mergeInvoiceResults expectations)
-    return {
-      periodStart:    parsed.periodStart    || null,
-      periodEnd:      parsed.periodEnd      || null,
-      totalHours:     parsed.totalHours     ?? null,
-      rate:           parsed.rate           ?? null,
-      totalAmount:    parsed.totalAmount    ?? null,
-      currency:       parsed.currency       || null,
-      invoiceNumber:  parsed.invoiceNumber  || null,
-      paymentDetails: parsed.paymentDetails || {},
-    };
-  } catch (e) {
-    console.warn(`  ⚠️  Groq invoice exception: ${e.message}`);
-    return null;
-  }
-}
-
-// ─── Groq vision (image PDFs) ─────────────────────────────────────────────────
-// pdfjs-dist v5 is ESM-only; dynamic import is cached so it runs at most once per session.
-let _pdfjsLib = null;
-async function _getPdfjsLib() {
-  if (_pdfjsLib) return _pdfjsLib;
-  const { Image } = require('@napi-rs/canvas');
-  globalThis.Image = Image; // pdfjs inline image decoder needs Image in globalThis
-  _pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  return _pdfjsLib;
-}
-
-async function pdfToJpegBase64(pdfBuffer) {
-  const { createCanvas } = require('@napi-rs/canvas');
-  const pdfjsLib = await _getPdfjsLib();
-
-  class NapiCanvasFactory {
-    create(w, h) { const c = createCanvas(w, h); return { canvas: c, context: c.getContext('2d') }; }
-    reset(cc, w, h) { cc.canvas.width = w; cc.canvas.height = h; }
-    destroy(cc) {}
-  }
-
-  const factory = new NapiCanvasFactory();
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(pdfBuffer), canvasFactory: factory }).promise;
-  const page = await pdf.getPage(1);
-  const viewport = page.getViewport({ scale: 2.0 });
-  const { canvas, context } = factory.create(viewport.width, viewport.height);
-  await page.render({ canvasContext: context, viewport, canvasFactory: factory }).promise;
-  return (await canvas.encode('jpeg', 85)).toString('base64');
-}
-
-async function groqVisionExtractInvoice(pdfBuffer, filename) {
-  if (!CONFIG.groqApiKey || !pdfBuffer) return null;
-  try {
-    const b64 = await pdfToJpegBase64(pdfBuffer);
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${CONFIG.groqApiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b',
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } },
-            { type: 'text', text: `Filename: ${filename}\n\n${GROQ_INVOICE_SYSTEM}` },
-          ],
-        }],
-        max_tokens: 400,
-        temperature: 0,
-      }),
-    });
-    if (!res.ok) { console.warn(`  ⚠️  Groq vision error ${res.status}`); return null; }
-    const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = JSON.parse(raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, ''));
-    return {
-      periodStart:    parsed.periodStart    || null,
-      periodEnd:      parsed.periodEnd      || null,
-      totalHours:     parsed.totalHours     ?? null,
-      rate:           parsed.rate           ?? null,
-      totalAmount:    parsed.totalAmount    ?? null,
-      currency:       parsed.currency       || null,
-      invoiceNumber:  parsed.invoiceNumber  || null,
-      paymentDetails: parsed.paymentDetails || {},
-    };
-  } catch (e) {
-    console.warn(`  ⚠️  Groq vision exception: ${e.message}`);
-    return null;
+    return { assessment: 'unclear', suggested_week: null, reason: `claude_exception: ${e.message}` };
   }
 }
 
@@ -3800,34 +3426,34 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
         contractorName = profile.name;
         console.log(`  📝 Contractor resolved from subject/note: ${contractorName} (${contractor})`);
       } else {
-        // Layer 2: Groq fallback — handles natural-language phrasings, lowercase notes,
+        // Layer 2: Claude fallback — handles natural-language phrasings, lowercase notes,
         // and single-name references the regex can't catch.
-        let groqResolvedName = null;
-        if (CONFIG.groqApiKey) {
-          const groqRes = await groqResolveContractor(subject, forwarderNote);
-          if (groqRes?.name) {
-            const groqProfile = await findProfileByName(groqRes.name);
-            if (groqProfile) {
-              contractor = groqProfile.email;
-              contractorName = groqProfile.name;
-              groqResolvedName = groqRes.name;
-              console.log(`  🤖 Contractor resolved via Groq: ${contractorName} (${contractor})`);
+        let claudeResolvedName = null;
+        if (CONFIG.anthropicApiKey) {
+          const claudeRes = await claudeResolveContractor(subject, forwarderNote);
+          if (claudeRes?.name) {
+            const claudeProfile = await findProfileByName(claudeRes.name);
+            if (claudeProfile) {
+              contractor = claudeProfile.email;
+              contractorName = claudeProfile.name;
+              claudeResolvedName = claudeRes.name;
+              console.log(`  🤖 Contractor resolved via Claude: ${contractorName} (${contractor})`);
             } else {
-              console.warn(`  🤖 Groq suggested "${groqRes.name}" but no profile matched`);
+              console.warn(`  🤖 Claude suggested "${claudeRes.name}" but no profile matched`);
             }
           }
         }
-        // Layer 3: retry Groq with full body when first call only returned an ambiguous
+        // Layer 3: retry Claude with full body when first call only returned an ambiguous
         // first name. Platform invoices (Native Teams, Bimosoft) embed the contractor's
         // full name in the body after the forwarded divider — the first call misses it.
-        if (!contractor && ambiguous && candidates?.length && CONFIG.groqApiKey) {
-          const groqRes2 = await groqResolveContractor(subject, forwarderNote, bodyText);
-          if (groqRes2?.name) {
-            const groqProfile2 = await findProfileByName(groqRes2.name);
-            if (groqProfile2) {
-              contractor = groqProfile2.email;
-              contractorName = groqProfile2.name;
-              console.log(`  🤖 Contractor resolved via Groq (body): ${contractorName} (${contractor})`);
+        if (!contractor && ambiguous && candidates?.length && CONFIG.anthropicApiKey) {
+          const claudeRes2 = await claudeResolveContractor(subject, forwarderNote, bodyText);
+          if (claudeRes2?.name) {
+            const claudeProfile2 = await findProfileByName(claudeRes2.name);
+            if (claudeProfile2) {
+              contractor = claudeProfile2.email;
+              contractorName = claudeProfile2.name;
+              console.log(`  🤖 Contractor resolved via Claude (body): ${contractorName} (${contractor})`);
             }
           }
         }
@@ -3869,10 +3495,10 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
         }
         if (!contractor) {
           const bodyNote = extracted ? `body From ${extracted.email} not a known contractor` : 'no sender in body';
-          const groqNote = groqResolvedName ? `; Groq suggested "${groqResolvedName}" but no profile match` : '';
+          const claudeNote = claudeResolvedName ? `; Claude suggested "${claudeResolvedName}" but no profile match` : '';
           const msg = ambiguous
-            ? `Ambiguous contractor in forwarded subject — ${reason}${groqNote}`
-            : `Cannot identify contractor (${bodyNote}; ${reason}${groqNote})`;
+            ? `Ambiguous contractor in forwarded subject — ${reason}${claudeNote}`
+            : `Cannot identify contractor (${bodyNote}; ${reason}${claudeNote})`;
           console.warn(`  ⚠️  ${msg}: ${subject}`);
           results.push({ type: 'forward', subject, action: 'skipped_unidentified' });
           await forwardToHelpdesk(subject, bodyText, fromEmail, msg);
@@ -4834,7 +4460,7 @@ async function main() {
     if (!hasTimesheetContent) {
       const isReply = /^re:/i.test(subject);
       const weekStart = isReply ? parseWeekFromSubject(subject) : null;
-      if (isReply && weekStart && CONFIG.groqApiKey && !isInternal(fromEmail)) {
+      if (isReply && weekStart && CONFIG.anthropicApiKey && !isInternal(fromEmail)) {
         const allowlisted = await isKnownContractor(fromEmail);
         if (allowlisted) {
           const fromName = fromAddr?.name || null;
@@ -4998,7 +4624,7 @@ async function main() {
     const timesheetCreated = emailResults.some(r =>
       r.action === 'created' || r.action === 'duplicate' || r.action === 'correction_imported'
     );
-    if (!timesheetCreated && !isInternal(fromEmail) && CONFIG.groqApiKey) {
+    if (!timesheetCreated && !isInternal(fromEmail) && CONFIG.anthropicApiKey) {
       const isReply = /^re:/i.test(subject);
       const weekStart = isReply ? parseWeekFromSubject(subject) : null;
       if (isReply && weekStart) {
