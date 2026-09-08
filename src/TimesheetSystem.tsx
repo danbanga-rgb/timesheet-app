@@ -200,6 +200,7 @@ import {
 import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
 import ContractAdminDashboard from './roles/ContractAdmin';
 import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
+import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
 import {
@@ -6948,53 +6949,7 @@ const TimesheetSystem = () => {
           })()}
 
           {adminView === 'qbsync' && (
-            <div className="bg-white rounded-lg shadow-md p-6 space-y-6">
-              <div>
-                <h2 className="text-xl font-bold text-gray-800 mb-2">QuickBooks Web Connector Setup</h2>
-                <p className="text-sm text-gray-600">
-                  One-time setup for the accountant's Windows machine. Download the config file below and follow the setup guide.
-                </p>
-              </div>
-
-              <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                <h3 className="font-semibold text-gray-800 mb-3">Step 1 — Get the config file</h3>
-                <a
-                  href={`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/qb-web-connector/qwc`}
-                  download="synergie-timesheet.qwc"
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
-                >
-                  <Download className="w-4 h-4" /> Download synergie-timesheet.qwc
-                </a>
-                <p className="text-xs text-gray-500 mt-2">
-                  Hand this file to the accountant along with the Web Connector password (stored separately in your password manager).
-                </p>
-              </div>
-
-              <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                <h3 className="font-semibold text-gray-800 mb-3">Step 2 — Accountant setup</h3>
-                <ol className="list-decimal list-inside space-y-2 text-sm text-gray-700">
-                  <li>
-                    Install the free QuickBooks Web Connector:
-                    {' '}<a href="https://developer.intuit.com/app/developer/qbdesktop/docs/develop/tutorials/install-web-connector" target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">Intuit's install page</a>
-                  </li>
-                  <li>Open QuickBooks Web Connector on the Windows machine.</li>
-                  <li>Click <strong>Add an Application</strong> and select the <code>synergie-timesheet.qwc</code> file.</li>
-                  <li>When prompted, enter the password from your password manager.</li>
-                  <li>In QuickBooks, click <strong>Yes, always allow</strong> on the SDK permission prompt.</li>
-                  <li>The Web Connector will now poll every 15 minutes, or click <strong>Update Selected</strong> for an on-demand sync.</li>
-                </ol>
-              </div>
-
-              <div className="border border-amber-200 rounded-lg p-4 bg-amber-50">
-                <h3 className="font-semibold text-amber-900 mb-2">Before the first live run</h3>
-                <p className="text-sm text-amber-900">
-                  Test against a <strong>copy</strong> of the QuickBooks company file, not the real one. In File Explorer: right-click the <code>.QBW</code> file → Copy → Paste → rename to include <code>TEST</code>. Then <em>File → Open or Restore Company</em> in QuickBooks and open the TEST copy. Only switch to the real file after a clean test run.
-                </p>
-                <p className="text-sm text-amber-900 mt-2">
-                  Full step-by-step guide for the accountant: <code>docs/qb-web-connector-setup.md</code> in the repo.
-                </p>
-              </div>
-            </div>
+            <QbSyncPanel />
           )}
 
 
