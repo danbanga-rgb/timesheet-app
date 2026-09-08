@@ -192,8 +192,9 @@ STRICT CLASSIFICATION RULES:
 - user.create: user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts as", "is joining", "new hire".
 - user.set_start_date / user.set_end_date: user is **setting a date on an EXISTING person** (verbs: "set", "update", "change", "ends", "starts on"). If the person doesn't exist yet, fall back to user.create.
 - user.update_country_region: user is **changing an existing user's country** (verbs: "update country", "change country", "move to <country>", "<name> is now in <country>", "<name>'s country is <country>").
-- user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details").
-- user.list: user is **asking for MULTIPLE users matching a filter** — signals include: "who is on <project>?", "list <role>", "show users with <property>", "how many <role>?", "which <role> ended...?", "who reports to <name>?", "contractors for <name>", "team for <manager name>", "everyone in <country>". When you see "reports to <X>" or "contractors for <X>", extract that person as vendor_manager.
+- user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details", "what is X's pay rate?", "X's payrate", "X's bill rate", "X's billrate", "how much does X make/bill", "X's hourly rate"). Rates + dates + project all live on this single profile card.
+- user.list: user is **asking for MULTIPLE users matching a filter** — signals include: "who is on <project>?", "list <role>", "show users with <property>", "which <role> ended...?", "who reports to <name>?", "contractors for <name>", "team for <manager name>", "everyone in <country>". When you see "reports to <X>" or "contractors for <X>", extract that person as vendor_manager.
+- user.count: user is **asking for an aggregate NUMBER, not a list of names** — signals: "how many <role>?", "count of <X>", "total number of <Y>", "just the counts", "just counts not names", "how many onshore + offshore". Uses the same filter fields as user.list. If a prior turn returned a long list and the user follows up with "just count" or "how many", classify as user.count.
 - Delete / archive / reassign are NOT supported yet — return intent=null with a suggested_reply.
 - If unclear, err on the side of intent=null. Do NOT force a match.
 
@@ -209,9 +210,10 @@ Extract initial field values from the message for the classified intent:
 - user.update_country_region: target (name or email), country (ISO code preferred, else full name), optional region
 - user.get: target (name or email)
 - user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), limit (number)
+- user.count: same fields as user.list except no limit
 
 Do NOT invent values. Only extract what's explicitly stated.
-For role: timesheetuser, manager, accountant, vendormanager, admin, contract_admin.
+For role: timesheetuser, manager, accountant, vendormanager, admin, contract_admin. Synonyms: "contractors"/"consultants"/"people"=timesheetuser; "VMs"/"vendor managers"=vendormanager; "accountants"=accountant.
 For location_type: onshore, offshore.
 For dates: normalize to YYYY-MM-DD relative to TODAY as noted above.
 
@@ -786,6 +788,8 @@ async function executeReadIntent(
       await execUserGet(admin, conv);
     } else if (spec.name === 'user.list') {
       await execUserList(admin, conv);
+    } else if (spec.name === 'user.count') {
+      await execUserCount(admin, conv);
     } else {
       throw new Error(`Read executor for ${spec.name} not wired`);
     }
@@ -852,6 +856,27 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
   const endDate = (user.end_date as string | null) ?? null;
   const status = !endDate ? 'ACTIVE (no end date)' : endDate > today ? `ACTIVE (ends ${endDate})` : `ENDED ${endDate}`;
 
+  // Pay rate = most recent invoice rate. Bill rate = current client_engagement bill_rate.
+  // Both queried in parallel to keep response snappy.
+  const [{ data: lastInv }, { data: eng }] = await Promise.all([
+    admin.from('invoices')
+      .select('rate, period_start, invoice_number')
+      .eq('user_id', user.id)
+      .not('rate', 'is', null)
+      .order('period_start', { ascending: false })
+      .limit(1),
+    admin.from('client_engagements')
+      .select('bill_rate, role_title, effective_from, effective_to')
+      .eq('user_id', user.id)
+      .or(`effective_to.is.null,effective_to.gte.${today}`)
+      .order('effective_from', { ascending: false })
+      .limit(1),
+  ]);
+  const payRate = lastInv?.[0]?.rate as number | null | undefined;
+  const payRateNote = lastInv?.[0] ? ` (last invoice ${lastInv[0].invoice_number}, ${(lastInv[0].period_start as string).slice(0, 7)})` : '';
+  const billRate = eng?.[0]?.bill_rate as number | null | undefined;
+  const billRateNote = eng?.[0]?.role_title ? ` (${eng[0].role_title})` : '';
+
   const lines = [
     ...(assumptionNote ? [assumptionNote, ''] : []),
     `${user.name} (${user.email})`,
@@ -860,6 +885,8 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
     `  Country: ${user.country ?? '(none)'}${user.location_type ? ` (${user.location_type})` : ''}`,
     `  Project: ${projectName}`,
     `  Started: ${user.start_date ?? '(not set — no reminders)'}`,
+    `  Pay rate: ${payRate != null ? `$${payRate}/hr${payRateNote}` : '(not on file — no invoices yet)'}`,
+    `  Bill rate: ${billRate != null ? `$${billRate}/hr${billRateNote}` : '(not on file — no client engagement)'}`,
     `  Invoicing: ${user.invoice_enabled ? 'YES' : 'NO'}`,
     `  Reminders: ${user.reminders_enabled === false ? 'DISABLED' : 'enabled'}`,
   ];
@@ -1003,6 +1030,91 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   const preamble = vmAssumption ? [vmAssumption, ''] : [];
   await writeBot(admin, conv.id, [...preamble, header, ...lines].join('\n'));
+}
+
+// Count executor — returns matching total + small breakdown by location_type and active status.
+// Reuses user.list's filter shape so the classifier can pick either intent from the same fields.
+async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise<void> {
+  const c = conv.captured;
+
+  // Build the same filter chain as execUserList so counts are consistent with lists.
+  const applyFilters = (q: ReturnType<SupabaseClient['from']>) => {
+    let out = q;
+    if (c.role) out = out.eq('role', String(c.role));
+    if (c.country) out = out.eq('country', String(c.country).toUpperCase());
+    if (c.location_type) out = out.eq('location_type', String(c.location_type));
+    if (c.missing_start_date === true) out = out.is('start_date', null);
+    if (c.active === true) out = out.or(`end_date.is.null,end_date.gt.${todayIso()}`);
+    if (c.active === false) out = out.lte('end_date', todayIso());
+    return out;
+  };
+
+  // Project filter (resolve name/code → id)
+  let projectId: number | null = null;
+  if (c.project) {
+    const tok = String(c.project).trim().toLowerCase();
+    const { data: projects } = await admin.from('projects').select('id, name, code');
+    const match = (projects ?? []).find((p) =>
+      String(p.name).toLowerCase() === tok || String(p.code).toLowerCase() === tok);
+    if (!match) {
+      await writeBot(admin, conv.id, `Project "${c.project}" not found.`);
+      return;
+    }
+    projectId = match.id as number;
+  }
+
+  // Vendor manager filter (resolve name/email → id, single-only for count — no picker preamble)
+  let vmId: string | null = null;
+  if (c.vendor_manager) {
+    const resolved = await resolveUser(admin, String(c.vendor_manager), 'vendormanager');
+    if (resolved.kind !== 'single') {
+      await writeBot(admin, conv.id, `Vendor manager "${c.vendor_manager}" not uniquely resolvable. Try the full email.`);
+      return;
+    }
+    vmId = resolved.user.id;
+  }
+
+  const baseQuery = () => {
+    let q = admin.from('profiles').select('*', { count: 'exact', head: true });
+    q = applyFilters(q);
+    if (projectId != null) q = q.eq('project_id', projectId);
+    if (vmId != null) q = q.eq('vendor_manager_id', vmId);
+    return q;
+  };
+
+  // Only compute breakdowns when the user did NOT already pin those dimensions.
+  const wantLoc = !c.location_type;
+  const wantActive = c.active === undefined;
+
+  const [{ count: total }, onshoreRes, offshoreRes, activeRes, endedRes] = await Promise.all([
+    baseQuery(),
+    wantLoc ? baseQuery().eq('location_type', 'onshore') : Promise.resolve({ count: null }),
+    wantLoc ? baseQuery().eq('location_type', 'offshore') : Promise.resolve({ count: null }),
+    wantActive ? baseQuery().or(`end_date.is.null,end_date.gt.${todayIso()}`) : Promise.resolve({ count: null }),
+    wantActive ? baseQuery().lte('end_date', todayIso()) : Promise.resolve({ count: null }),
+  ]);
+
+  const filterParts: string[] = [];
+  if (c.role) filterParts.push(String(c.role));
+  if (c.project) filterParts.push(`project=${c.project}`);
+  if (c.country) filterParts.push(`country=${String(c.country).toUpperCase()}`);
+  if (c.location_type) filterParts.push(String(c.location_type));
+  if (c.vendor_manager) filterParts.push(`reports to ${c.vendor_manager}`);
+  if (c.active === true) filterParts.push('active');
+  if (c.active === false) filterParts.push('terminated');
+  if (c.missing_start_date === true) filterParts.push('missing start_date');
+  const filterDesc = filterParts.length > 0 ? ` matching ${filterParts.join(', ')}` : '';
+
+  const lines = [`Total${filterDesc}: ${total ?? 0}`];
+  if (wantLoc && (onshoreRes.count != null || offshoreRes.count != null)) {
+    lines.push(`  Onshore: ${onshoreRes.count ?? 0}`);
+    lines.push(`  Offshore: ${offshoreRes.count ?? 0}`);
+  }
+  if (wantActive && (activeRes.count != null || endedRes.count != null)) {
+    lines.push(`  Active: ${activeRes.count ?? 0}`);
+    lines.push(`  Ended: ${endedRes.count ?? 0}`);
+  }
+  await writeBot(admin, conv.id, lines.join('\n'));
 }
 
 // Fuzzy-resolve a target string to a profiles row. Accepts:
