@@ -2867,6 +2867,15 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
         }, CONFIG.invoiceIngestUrl);
         const action = res.body?.action || res.body?.error || String(res.status);
         console.log(`     ✅ Ingested → ${action}`);
+        // Prefer post-correction totals from the edge fn response. Raw parser
+        // output (parsed.*) can be off by 1000x on European decimal formats
+        // that get rescued by the anomaly detector in ingest-invoice.
+        const corrected = {
+          totalHours:  res.body?.totalHours  ?? parsed?.totalHours  ?? null,
+          rate:        res.body?.rate        ?? parsed?.rate        ?? null,
+          totalAmount: res.body?.totalAmount ?? parsed?.totalAmount ?? null,
+          currency:    res.body?.currency    ?? parsed?.currency    ?? null,
+        };
         results.push({
           contractor:          contractorEmail,
           userName:            displayName,
@@ -2878,6 +2887,7 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
           reconciliationDelta:  res.body?.reconciliationDelta ?? null,
           ingestNotes:         res.body?.notes || null,
           parsed,
+          corrected,
         });
         if (res.body?.ok === true && parsed?.parseMethod) {
           await storeInvoiceTemplate(contractorEmail, parsed.parseMethod);
@@ -4113,15 +4123,23 @@ async function sendInvoiceAccountingEmail(invoiceReports) {
   let body = `Invoice Report — ${now} ET\n${'='.repeat(52)}\n`;
 
   function formatInvoiceBlock(inv, label) {
+    // Prefer post-correction totals from the ingest response; fall back to
+    // raw parser output when the response didn't surface them (older code
+    // paths, partial parses).
     const p = inv.parsed || {};
-    const sym = p.currency === 'USD' ? '$' : (p.currency || '');
+    const c = inv.corrected || {};
+    const hours    = c.totalHours  ?? p.totalHours;
+    const rate     = c.rate        ?? p.rate;
+    const total    = c.totalAmount ?? p.totalAmount;
+    const currency = c.currency    ?? p.currency;
+    const sym = currency === 'USD' ? '$' : (currency || '');
     let s = `\n${inv.email}${label ? '  ✎ ' + label : ''}\n`;
     s += `  Invoice  : ${inv.invoiceNumber || '—'}\n`;
     s += `  File     : ${inv.filename}\n`;
     s += `  Period   : ${formatPeriod(p.periodStart, p.periodEnd)}\n`;
-    s += `  Hours    : ${p.totalHours != null ? p.totalHours + 'h' : '—'}`;
-    if (p.rate)        s += `  |  Rate: ${sym}${p.rate}`;
-    if (p.totalAmount) s += `  |  Total: ${sym}${p.totalAmount} ${p.currency || 'USD'}`;
+    s += `  Hours    : ${hours != null ? hours + 'h' : '—'}`;
+    if (rate)  s += `  |  Rate: ${sym}${rate}`;
+    if (total) s += `  |  Total: ${sym}${total} ${currency || 'USD'}`;
     s += '\n';
     return s;
   }

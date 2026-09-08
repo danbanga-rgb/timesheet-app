@@ -621,6 +621,14 @@ serve(async (req) => {
   // "FAILED" entries in the accountant invoice report while the DB write
   // had already committed. Fix 2026-09-08.
   let beneGuardrailEvents: Array<{ stage: string; original: number; resolved: number | null; note?: string }> = [];
+  // Hoisted for the response body so the accountant email report can show
+  // the CORRECTED money fields (after historical-rate rescue, anomaly detector,
+  // and clean-rate nudge) instead of the raw parser snapshot. See poller.js
+  // formatInvoiceBlock.
+  let finalHoursOut: number | null = null;
+  let finalRateOut: number | null = null;
+  let finalAmountOut: number | null = null;
+  let finalCurrencyOut: string | null = null;
 
   try {
     const parsedRate     = rate != null ? Number(rate) : null;
@@ -683,6 +691,12 @@ serve(async (req) => {
     const finalHours       = detectorResult.corrected.hours;
     const finalRate        = detectorResult.corrected.rate;
     const computedAmount   = detectorResult.corrected.amount ?? 0;
+    // Mirror to outer-scope vars so the response body can surface the
+    // post-correction totals to the accountant report.
+    finalHoursOut    = finalHours as number | null;
+    finalRateOut     = finalRate as number | null;
+    finalAmountOut   = computedAmount;
+    finalCurrencyOut = parsedCurrency;
     const lines            = detectorResult.corrected.lines;
     detectorFixes          = detectorResult.fixes;
     detectorFlags          = detectorResult.flags;
@@ -1387,6 +1401,10 @@ serve(async (req) => {
     invoiceNumber:       resolvedInvoiceNumber,
     periodStart:         finalPeriodStart,
     periodEnd:           finalPeriodEnd,
+    totalHours:          finalHoursOut,
+    rate:                finalRateOut,
+    totalAmount:         finalAmountOut,
+    currency:            finalCurrencyOut,
     forwardedBy:         forwardedBy || null,
     reconciliationStatus: reconStatus,
     reconciliationDelta:  reconDelta,

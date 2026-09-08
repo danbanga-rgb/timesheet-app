@@ -780,11 +780,44 @@ function parseCroatianHrvatskiTemplate(text) {
 
   // Rate, hours, total from "35 USD per h x 168 = 5,880.00 USD" or
   // "-35 USD per h x 168 = 5,880.00 USD" (the dash is a bullet artifact from extractDocxText)
-  const line = text.match(/-?(\d+(?:\.\d+)?)\s*USD per h(?:our)?\s*x\s*(\d+(?:\.\d+)?)\s*h?\s*=\s*([\d,]+\.?\d*)\s*USD/i);
+  const line = text.match(/-?(\d+(?:\.\d+)?)\s*USD per h(?:our)?\s*x\s*(\d+(?:\.\d+)?)\s*h?\s*=\s*([\d.,]+)\s*USD/i);
   if (line) {
     out.rate       = parseFloat(line[1]);
     out.totalHours = parseFloat(line[2]);
-    out.totalAmount = parseFloat(line[3].replace(/,/g, ''));
+    const totalRaw = line[3];
+    // European (Croatian/Bosnian) invoices use "." as thousands separator and "," as
+    // decimal — e.g. "6.720,00 USD" is $6,720.00 not $6.72. Detect and normalize.
+    // 1) Both `.` and `,` present → last separator is decimal.
+    // 2) Only `.` present → could be decimal ("6.72") OR thousands ("6.720"). Cross-check
+    //    the naive parse against rate*hours: if factor-of-1000 off AND the "×1000" version
+    //    matches within 1%, treat the period as thousands.
+    // 3) Only `,` present → assume decimal.
+    let totalNum;
+    if (totalRaw.includes('.') && totalRaw.includes(',')) {
+      const lastPeriod = totalRaw.lastIndexOf('.');
+      const lastComma  = totalRaw.lastIndexOf(',');
+      if (lastComma > lastPeriod) {
+        // European: strip periods (thousands), swap comma to period (decimal)
+        totalNum = parseFloat(totalRaw.replace(/\./g, '').replace(',', '.'));
+      } else {
+        // US: strip commas (thousands), keep period (decimal)
+        totalNum = parseFloat(totalRaw.replace(/,/g, ''));
+      }
+    } else if (totalRaw.includes(',')) {
+      // Only comma — European decimal
+      totalNum = parseFloat(totalRaw.replace(',', '.'));
+    } else {
+      // Only period — naive parse first, then sanity check against rate*hours
+      const naive = parseFloat(totalRaw);
+      const product = out.rate * out.totalHours;
+      const naiveOff = Math.abs(naive - product) / Math.max(1, product);
+      const thousands = parseFloat(totalRaw.replace(/\./g, ''));
+      const thousandsOff = Math.abs(thousands - product) / Math.max(1, product);
+      // If naive is way off (>10%) but "×1000" interpretation matches within 1%, use it.
+      // Handles "6.720" → 6720 for European format where only period appears.
+      totalNum = (naiveOff > 0.10 && thousandsOff < 0.01) ? thousands : naive;
+    }
+    out.totalAmount = totalNum;
   }
 
   // Period: FIX-IT has an explicit range in the description that the generic extractor finds.
