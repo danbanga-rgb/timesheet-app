@@ -9342,8 +9342,18 @@ const TimesheetSystem = () => {
                     <div className="text-2xl font-bold text-indigo-600">${totalFilteredUsd.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
                     <div className="text-xs text-gray-400 mt-1">{nonUsdFiltered.length > 0 ? `excl. ${nonUsdFiltered.length} non-USD` : 'USD only'}</div>
                     {(() => {
+                      // Count distinct WIRE BENEFICIARIES, not user rows. Umbrella accounts
+                      // (Teal: 6 users share one IBAN → one wire) must collapse to one
+                      // "contractor" — user_id count would inflate. Fallback chain when the
+                      // invoice snapshot has no IBAN: user's default payment_profile IBAN,
+                      // then user_id as the bucket key.
                       const invCount = filtered.length;
-                      const contractorCount = new Set(filtered.map(i => i.userId)).size;
+                      const contractorCount = new Set(filtered.map(i => {
+                        const snapIban = i.paymentProfile?.iban;
+                        if (snapIban) return snapIban;
+                        const defaultIban = paymentProfiles.find(p => p.userId === i.userId && p.isDefault)?.iban;
+                        return defaultIban || `no-pp:${i.userId}`;
+                      })).size;
                       return (
                         <div className="text-xs text-gray-500 mt-0.5">
                           {invCount} invoice{invCount === 1 ? '' : 's'} · {contractorCount} contractor{contractorCount === 1 ? '' : 's'}
