@@ -9209,6 +9209,20 @@ const TimesheetSystem = () => {
                           </button>
                         );
                       })}
+                      {(() => {
+                        const unassignedCount = preStatusFiltered.filter(i => (accountantInvoiceFilter.size === 0 || accountantInvoiceFilter.has(i.status)) && paymentMethod(i) === '').length;
+                        if (unassignedCount === 0) return null;
+                        const active = invoicePaymentMethodPreset.has('');
+                        const activeColor = 'bg-amber-600 border-amber-600 text-white';
+                        const inactiveColor = 'bg-amber-50 text-amber-700 border-amber-300 hover:border-amber-500';
+                        return (
+                          <button key="unassigned" onClick={() => setInvoicePaymentMethodPreset(prev => { const n = new Set(prev); active ? n.delete('') : n.add(''); return n; })}
+                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? activeColor : inactiveColor}`}
+                            title="Invoices without a Payment Method — click to review and assign">
+                            Unassigned <span className="opacity-70">({unassignedCount})</span>
+                          </button>
+                        );
+                      })()}
                     </div>
                     {/* Contractor picker */}
                     <div className="relative">
@@ -9327,6 +9341,15 @@ const TimesheetSystem = () => {
                     <div className="text-sm text-gray-500 mb-1">{totalLabel}</div>
                     <div className="text-2xl font-bold text-indigo-600">${totalFilteredUsd.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
                     <div className="text-xs text-gray-400 mt-1">{nonUsdFiltered.length > 0 ? `excl. ${nonUsdFiltered.length} non-USD` : 'USD only'}</div>
+                    {(() => {
+                      const invCount = filtered.length;
+                      const contractorCount = new Set(filtered.map(i => i.userId)).size;
+                      return (
+                        <div className="text-xs text-gray-500 mt-0.5">
+                          {invCount} invoice{invCount === 1 ? '' : 's'} · {contractorCount} contractor{contractorCount === 1 ? '' : 's'}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div className="bg-white rounded-lg shadow-md p-4">
                     <div className="text-sm text-gray-500 mb-1">Pending Review</div>

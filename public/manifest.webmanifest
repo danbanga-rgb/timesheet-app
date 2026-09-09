@@ -1,8 +1,8 @@
 {
-  "name": "Synergie Chat",
+  "name": "Synergie Timesheet",
   "short_name": "Synergie",
-  "description": "Synergie ops assistant — create users, look up profiles, set dates, and more.",
-  "start_url": "/chat",
+  "description": "Contractor timesheet and invoice management for Synergie Tech Solutions.",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
