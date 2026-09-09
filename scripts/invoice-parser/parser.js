@@ -916,6 +916,78 @@ function tryTemplateParsers(text) {
     || null;
 }
 
+// Multi-contractor (umbrella) table detector — Teal Crossroads and similar.
+// Trusts the regex only when both signals agree:
+//   1) each row's hours × rate ≈ amount (5% tolerance)
+//   2) an explicit "Total" summary row is present AND its hours and amount match
+//      the sum of individual rows within 1%
+// If either fails, return null so the poller falls back to Claude.
+function detectMultiContractorTable(text) {
+  if (!text || typeof text !== 'string') return null;
+
+  // pdf-parse frequently breaks numbers onto their own lines; collapse whitespace.
+  const norm = text.replace(/\s+/g, ' ').trim();
+
+  const hdr = norm.match(/\bName\s+Hours\s+Rate\b/i);
+  if (!hdr) return null;
+  const body = norm.slice(hdr.index + hdr[0].length);
+
+  // Row: 2–4 capitalised words (allowing common diacritics/hyphen/apostrophe),
+  // then hours, rate, amount.
+  const rowRe = /([A-ZÁÉÍÓÚÇŇĎŤŘŠŽČĆĐŁŐŰÖÜÄÅŃŚŹŻĘĄ][\p{L}'.\-]+(?:\s+[A-ZÁÉÍÓÚÇŇĎŤŘŠŽČĆĐŁŐŰÖÜÄÅŃŚŹŻĘĄ][\p{L}'.\-]+){1,3})\s+(\d+(?:\.\d+)?)\s+(\d+(?:[.,]\d+)?)\s+(\d[\d,.]{1,})/gu;
+
+  function parseAmount(str, product) {
+    // Prefer the interpretation whose value is closest to hours × rate.
+    if (str.includes('.') && str.includes(',')) {
+      const lastP = str.lastIndexOf('.'), lastC = str.lastIndexOf(',');
+      return lastC > lastP
+        ? parseFloat(str.replace(/\./g, '').replace(',', '.'))
+        : parseFloat(str.replace(/,/g, ''));
+    }
+    if (str.includes(',')) {
+      const dec = parseFloat(str.replace(',', '.'));
+      const thou = parseFloat(str.replace(/,/g, ''));
+      return Math.abs(thou - product) < Math.abs(dec - product) ? thou : dec;
+    }
+    return parseFloat(str);
+  }
+
+  const contractors = [];
+  let m;
+  while ((m = rowRe.exec(body)) !== null) {
+    const [, rawName, hStr, rStr, aStr] = m;
+    const name = rawName.trim();
+    if (/^(total|ukupno|sum)$/i.test(name.split(/\s+/)[0])) continue;
+
+    const hours = parseFloat(hStr);
+    const rate  = parseFloat(rStr.replace(',', '.'));
+    if (!Number.isFinite(hours) || !Number.isFinite(rate)) continue;
+    if (hours <= 0 || hours > 800 || rate <= 0 || rate > 500) continue;
+    const amount = parseAmount(aStr, hours * rate);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+
+    if (Math.abs(hours * rate - amount) / amount > 0.05) continue;
+
+    contractors.push({ name, hours, rate, amount });
+  }
+
+  if (contractors.length < 2) return null;
+
+  const sumHours  = contractors.reduce((s, c) => s + c.hours,  0);
+  const sumAmount = contractors.reduce((s, c) => s + c.amount, 0);
+
+  // Require Total summary row and cross-check both hours and amount.
+  const totalRe = /\bTotal\s+(\d+(?:\.\d+)?)\s+\d+(?:[.,]\d+)?\s+(\d[\d,.]{1,})/i;
+  const tm = body.match(totalRe);
+  if (!tm) return null;
+  const totalRowHours  = parseFloat(tm[1]);
+  const totalRowAmount = parseAmount(tm[2], sumAmount);
+  if (Math.abs(totalRowHours  - sumHours ) / sumHours  > 0.01) return null;
+  if (Math.abs(totalRowAmount - sumAmount) / sumAmount > 0.01) return null;
+
+  return { isMultiContractor: true, contractors, totalHours: sumHours, totalAmount: sumAmount };
+}
+
 function parseInvoice(text, filename) {
   const found   = [];
   const missing = [];
@@ -953,6 +1025,31 @@ function parseInvoice(text, filename) {
   track('periodStart', periodStart);
   track('periodEnd',   periodEnd);
 
+  // Multi-contractor umbrella (Teal Crossroads and similar). When the table
+  // detector confirms both per-row arithmetic and a Total summary row, return
+  // the umbrella shape directly so the poller can split into per-contractor
+  // ingests. Aggregate totalHours/rate would blend across rates and mislead
+  // downstream consumers, so `rate` is left null.
+  const multi = detectMultiContractorTable(text);
+  if (multi) {
+    const currency = tpl?.currency ?? extractCurrency(text);
+    const paymentDetails = extractPaymentDetails(text);
+    const pdFields = ['iban', 'swift', 'accountNumber', 'sortCode', 'routingNumber', 'bankName', 'companyName'];
+    pdFields.forEach(f => track(`payment.${f}`, paymentDetails[f]));
+    track('multiContractor', multi.contractors.length);
+    return {
+      invoiceNumber, periodStart, periodEnd,
+      totalHours: multi.totalHours, rate: null, totalAmount: multi.totalAmount,
+      currency, paymentDetails,
+      isMultiContractor: true, contractors: multi.contractors,
+      parseNotes: [
+        found.length ? `Found: ${found.join(', ')}` : null,
+        missing.length ? `Missing: ${missing.join(', ')}` : null,
+        `Multi-contractor: ${multi.contractors.length} rows, sum $${multi.totalAmount}`,
+      ].filter(Boolean).join(' | '),
+    };
+  }
+
   let totalHours  = tpl?.totalHours  ?? extractHours(text);
   let rate        = tpl?.rate        ?? extractRate(text);
   let totalAmount = tpl?.totalAmount ?? extractTotal(text);
@@ -966,17 +1063,6 @@ function parseInvoice(text, filename) {
       if (totalHours == null) totalHours = derived.hours;
       if (rate == null)       rate       = derived.rate;
     }
-  }
-
-  // Multi-contractor detection: if the text contains 3+ distinct person+hours patterns
-  // (e.g. "Sancanin 160h $35"), the invoice covers multiple contractors. Hours extracted
-  // from the first matching line do not correspond to the aggregate total, so derivation
-  // would produce a meaningless blended rate. Clear both fields in this case.
-  const contractorLines = (text.match(/\b[A-Z][a-z]+\s+\d+h\b/g) || []);
-  const isMultiContractor = contractorLines.length >= 3;
-  if (isMultiContractor) {
-    totalHours = null;
-    rate       = null;
   }
 
   // Mathematical derivation: if any 2 of {hours, rate, total} are known, compute the 3rd.

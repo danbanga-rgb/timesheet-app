@@ -192,6 +192,46 @@ async function findProfileByName(name) {
   }
 }
 
+// Levenshtein distance between two strings, case-insensitive. Small helper for
+// resolving Claude-suggested contractor names that are off by 1–2 characters
+// (e.g. accountant-typed "Amar Pljevljk" for "Amar Pljevljak"). O(n*m) DP —
+// fine for candidate lists of a handful of names.
+function levenshtein(a, b) {
+  const s = (a || '').toLowerCase();
+  const t = (b || '').toLowerCase();
+  if (s === t) return 0;
+  if (!s.length) return t.length;
+  if (!t.length) return s.length;
+  const dp = Array.from({ length: t.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= s.length; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= t.length; j++) {
+      const tmp = dp[j];
+      dp[j] = s[i - 1] === t[j - 1] ? prev : Math.min(prev + 1, dp[j] + 1, dp[j - 1] + 1);
+      prev = tmp;
+    }
+  }
+  return dp[t.length];
+}
+
+// Pick the single closest candidate to `name` by Levenshtein distance, but only
+// when the winner is unambiguous:
+//   - best distance ≤ 2 (short typo)
+//   - gap to second-best ≥ 2 (no "either could be right")
+// Returns null if there is no clear winner.
+function resolveByFuzzy(name, candidates) {
+  if (!name || !Array.isArray(candidates) || candidates.length === 0) return null;
+  const scored = candidates
+    .map(c => ({ c, dist: levenshtein(name, c.name) }))
+    .sort((x, y) => x.dist - y.dist);
+  const best = scored[0];
+  const second = scored[1];
+  if (best.dist > 2) return null;
+  if (second && (second.dist - best.dist) < 2) return null;
+  return best.c;
+}
+
 // Returns true for QuickBooks / Intuit automated notification senders.
 // These emails carry real attachments (timesheets + invoices) but are sent by
 // Intuit's notification infrastructure, not by the contractor directly. We
@@ -2164,7 +2204,10 @@ async function extractInvoiceInner(pdfText, isImagePdf, pdfBuffer, filename, ema
 
   const regexHasPeriod  = !!(regexResult?.periodStart && regexResult?.periodEnd);
   const regexHasHours   = regexResult?.totalHours != null;
-  const regexSufficient = regexHasPeriod && regexHasHours;
+  const regexIsMulti    = regexResult?.isMultiContractor === true
+                          && Array.isArray(regexResult?.contractors)
+                          && regexResult.contractors.length > 0;
+  const regexSufficient = regexHasPeriod && (regexHasHours || regexIsMulti);
 
   // Fast-path: known regex contractor — trust regex, skip Claude payment check
   if (regexSufficient && (knownTemplate === 'regex' || knownTemplate === 'regex_no_payment')) {
@@ -2743,7 +2786,15 @@ async function ingestContractor(contractorEmail, displayName, subject, bodyText,
       console.log(`  🔀 Multi-contractor (${parsed.contractors.length} lines): splitting`);
       for (let ci = 0; ci < parsed.contractors.length; ci++) {
         const line = parsed.contractors[ci];
-        const profile = await findProfileByName(line.name);
+        let profile = await findProfileByName(line.name);
+        // Claude / OCR occasionally returns just the first name (e.g. "Ajdin"
+        // instead of "Ajdin Jajcanin") when the invoice PDF renders names
+        // truncated. Fall back to first-name lookup only when the extracted
+        // name is a single token — refuses to guess for multi-word misses.
+        if (!profile && /^\S+$/.test((line.name || '').trim())) {
+          profile = await findProfileByFirstName(line.name.trim());
+          if (profile) console.log(`    ↳ first-name fallback: "${line.name}" → ${profile.name}`);
+        }
         if (!profile) {
           console.warn(`    ⚠️  No profile for "${line.name}" — skipping`);
           results.push({
@@ -3442,7 +3493,17 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
         if (CONFIG.anthropicApiKey) {
           const claudeRes = await claudeResolveContractor(subject, forwarderNote);
           if (claudeRes?.name) {
-            const claudeProfile = await findProfileByName(claudeRes.name);
+            let claudeProfile = await findProfileByName(claudeRes.name);
+            // Fuzzy tie-break: when subject-name lookup left an ambiguous set
+            // and Claude's suggestion is a 1–2 char typo of exactly one of
+            // those candidates, use it. Blocks "either could match" cases.
+            if (!claudeProfile && ambiguous && candidates?.length) {
+              const fuzz = resolveByFuzzy(claudeRes.name, candidates);
+              if (fuzz) {
+                claudeProfile = fuzz;
+                console.log(`  🔎 Fuzzy tie-break: "${claudeRes.name}" → ${fuzz.name} (Levenshtein clear winner over ${candidates.length - 1} sibling(s))`);
+              }
+            }
             if (claudeProfile) {
               contractor = claudeProfile.email;
               contractorName = claudeProfile.name;
@@ -3459,7 +3520,14 @@ async function processEmail(parsed, messageId, results, failedAtts, summary, run
         if (!contractor && ambiguous && candidates?.length && CONFIG.anthropicApiKey) {
           const claudeRes2 = await claudeResolveContractor(subject, forwarderNote, bodyText);
           if (claudeRes2?.name) {
-            const claudeProfile2 = await findProfileByName(claudeRes2.name);
+            let claudeProfile2 = await findProfileByName(claudeRes2.name);
+            if (!claudeProfile2) {
+              const fuzz2 = resolveByFuzzy(claudeRes2.name, candidates);
+              if (fuzz2) {
+                claudeProfile2 = fuzz2;
+                console.log(`  🔎 Fuzzy tie-break (body): "${claudeRes2.name}" → ${fuzz2.name}`);
+              }
+            }
             if (claudeProfile2) {
               contractor = claudeProfile2.email;
               contractorName = claudeProfile2.name;
