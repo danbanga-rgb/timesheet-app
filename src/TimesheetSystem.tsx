@@ -9345,22 +9345,18 @@ const TimesheetSystem = () => {
 
                 {/* KPI cards — reflect current filters */}
                 {(() => {
-                  // Contractor rows vs distinct wire beneficiaries. Beneficiary key hierarchy
-                  // (robust to empty-IBAN US/ACH profiles per [[umbrella-payment-patterns]]):
-                  //   snapshot.iban → snapshot.pp.id → default.iban → default.pp.id → user_id
-                  const beneficiaryKey = (i: Invoice): string => {
-                    const snap = i.paymentProfile;
-                    if (snap?.iban) return `iban:${snap.iban}`;
-                    if (snap?.id != null) return `pp:${snap.id}`;
-                    const d = paymentProfiles.find(p => p.userId === i.userId && p.isDefault);
-                    if (d?.iban) return `iban:${d.iban}`;
-                    if (d?.id != null) return `pp:${d.id}`;
-                    return `no-pp:${i.userId}`;
-                  };
+                  // Contractor rows vs distinct invoice documents. Match the table footer's
+                  // grouping semantic (line ~9767 displayGroups): rows collapse by group_key
+                  // when set (single umbrella PDF ingested as multi-contractor, e.g. Teal),
+                  // else count per-invoice. Bimosoft/HSBC/D-Kode contractors who submit
+                  // SEPARATE PDFs that happen to share a destination IBAN each stay as their
+                  // own invoice document — they are distinct source PDFs, not one umbrella.
+                  const invoiceKey = (i: Invoice): string =>
+                    i.groupKey ? `grp:${i.groupKey}` : `solo:${i.id}`;
                   const countCaption = (rows: Invoice[]) => {
                     const c = rows.length;
                     if (c === 0) return null;
-                    const inv = new Set(rows.map(beneficiaryKey)).size;
+                    const inv = new Set(rows.map(invoiceKey)).size;
                     return `${c} contractor${c === 1 ? '' : 's'} · ${inv} invoice${inv === 1 ? '' : 's'}`;
                   };
                   const submitted = filtered.filter(i => i.status === 'submitted');
