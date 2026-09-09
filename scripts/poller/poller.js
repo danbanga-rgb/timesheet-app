@@ -1723,19 +1723,30 @@ function postProcessInvoice(result, pdfText) {
   }
 
   // Sanity cap on any rate value (derived or explicit) — $120/hr is the ceiling.
-  // Before nulling, try hours↔rate swap: if the hours value would be a valid rate and the
-  // math still balances, the parser likely read the columns in the wrong order.
+  // Before nulling, try hours↔rate swap: if the hours value would be a valid rate AND
+  // the swapped-in hours are physically plausible for a monthly invoice (40–220h) AND
+  // the math balances, the parser likely read the columns in the wrong order.
+  //
+  // Urbano #260 (2026-08): Claude read rate=$392, hours=15, total=$5,880. Naive swap
+  // gave $15/hr × 392h = $5,880 — arithmetically valid but 392h/month is impossible
+  // (~13h/day). The hours cap rejects the swap so historical-rate rescue can recover
+  // the real values ($35 × 168h) downstream.
   if (result.rate != null && result.rate > 120) {
     const swapRate  = result.totalHours;
     const swapHours = result.rate;
-    if (swapRate != null && swapRate >= 1 && swapRate <= 120 &&
+    const swapPlausible = swapRate != null && swapRate >= 1 && swapRate <= 120 &&
+        swapHours >= 40 && swapHours <= 220 &&
         result.totalAmount != null &&
-        Math.abs(swapHours * swapRate - result.totalAmount) <= 1) {
+        Math.abs(swapHours * swapRate - result.totalAmount) <= 1;
+    if (swapPlausible) {
       const swapNote = `hours/rate swapped (parsed rate $${result.rate}/hr > $120 cap; $${swapRate}/hr × ${swapHours}h = $${result.totalAmount} ✓)`;
       console.warn(`  🔄 ${swapNote}`);
       result = { ...result, totalHours: swapHours, rate: swapRate, parseNotes: [swapNote, result.parseNotes].filter(Boolean).join(' | ') };
     } else {
-      const capNote = `Rate $${result.rate}/hr exceeded $120 cap — likely parse error`;
+      const reason = swapRate != null && (swapHours < 40 || swapHours > 220)
+        ? `swap would produce ${swapHours}h — implausible for a monthly invoice`
+        : 'no valid swap candidate';
+      const capNote = `Rate $${result.rate}/hr exceeded $120 cap (${reason}) — nulling rate for historical-rate rescue`;
       result = { ...result, rate: null, parseNotes: [capNote, result.parseNotes].filter(Boolean).join(' | ') };
     }
   }
@@ -2135,7 +2146,15 @@ function applyHistoricalRateHint(parsed, hist) {
   const cleanHours = Math.round(impliedHours);
   if (cleanHours < 1 || cleanHours > 500) return parsed;
   // Sanity: implied hours should be within ±40 of parsed hours (a work week's wiggle room)
-  if (parsed.totalHours != null && Math.abs(cleanHours - parsed.totalHours) > 40) return parsed;
+  // — but SKIP that guard when parsed.totalHours is implausible for a monthly invoice
+  // (<40 or >220). In those cases the parsed hours are almost certainly a misread (QTY
+  // column mistaken for hours, unit count read as hours, etc.) and the historical rate
+  // is far more trustworthy. Urbano #260 hit this: parsed 15h vs historical-implied 168h,
+  // delta 153 — the ±40 guard would reject the rescue. Bypass it.
+  const parsedHoursImplausible = parsed.totalHours != null &&
+    (parsed.totalHours < 40 || parsed.totalHours > 220);
+  if (!parsedHoursImplausible && parsed.totalHours != null
+      && Math.abs(cleanHours - parsed.totalHours) > 40) return parsed;
   const note = `Historical rate hint (last invoice #${hist.invoiceId}: $${histRate}/hr): reconciled ${parsed.totalHours}h × $${parsed.rate}/hr → ${cleanHours}h × $${histRate}/hr = $${parsed.totalAmount}.`;
   console.warn(`  📜 ${note}`);
   return {
