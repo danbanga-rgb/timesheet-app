@@ -1013,14 +1013,15 @@ const TimesheetSystem = () => {
       .filter(i => i.userId === inv.userId && i.id !== inv.id && i.paymentMethodOverride)
       .sort((a, b) => b.id - a.id)[0];
     if (prior) return canonicalise(prior.paymentMethodOverride);
-    // Country-based invariant (last resort): US → Intuit, everything else → Convera.
-    // Per project rule [[offshore-100-convera]] — offshore is 100% Convera, not a
-    // configurable default. First-invoice contractors with no history yet get the
-    // right chip immediately so the Unassigned pill only holds genuinely-ambiguous
-    // rows (unknown country, or newly-created profiles without a country set).
+    // Location-type invariant (last resort): offshore → Convera, onshore → Intuit.
+    // MUST key on location_type, not country: profiles.country is auto-prefilled
+    // from the admin's browser timezone at user-create time, so US-based admins
+    // create every profile with country='US' regardless of the contractor's real
+    // location. location_type is admin-curated and correct. See [[offshore-100-convera]]
+    // — 18 profiles today have country='US' but location_type='offshore'.
     const contractor = users.find(u => u.id === inv.userId);
-    if (contractor?.country === 'US') return 'Intuit';
-    if (contractor?.country) return 'Convera';
+    if (contractor?.locationType === 'offshore') return 'Convera';
+    if (contractor?.locationType === 'onshore')  return 'Intuit';
     return '';
   };
   // Colour classes for the payment-method chip. '' → gray (Unassigned).
@@ -9511,9 +9512,10 @@ const TimesheetSystem = () => {
                                         : <span className="text-gray-300 text-xs">—</span>}
                                     </td>
                                     <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
-                                      {(inv.paymentProfile || inv.paymentMethodOverride)
-                                        ? <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethodChipClass(inv)}`}>{paymentMethodLabel(inv)}</span>
-                                        : <span className="text-gray-300 text-xs">—</span>}
+                                      {/* Always show the chip. paymentMethodLabel resolves via
+                                          override → prior history → location_type invariant,
+                                          falling to "Unassigned" (gray) only when nothing works. */}
+                                      <span className={`px-2 py-1 rounded text-xs font-medium ${paymentMethodChipClass(inv)}`}>{paymentMethodLabel(inv)}</span>
                                     </td>
                                     <td className="border border-gray-200 px-4 py-3 text-center whitespace-nowrap">
                                       {inv.paidDate
