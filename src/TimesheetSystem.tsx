@@ -1013,7 +1013,14 @@ const TimesheetSystem = () => {
       .filter(i => i.userId === inv.userId && i.id !== inv.id && i.paymentMethodOverride)
       .sort((a, b) => b.id - a.id)[0];
     if (prior) return canonicalise(prior.paymentMethodOverride);
-    // No prior signal — accountant must pick on first approval. Empty renders as "Unassigned".
+    // Country-based invariant (last resort): US → Intuit, everything else → Convera.
+    // Per project rule [[offshore-100-convera]] — offshore is 100% Convera, not a
+    // configurable default. First-invoice contractors with no history yet get the
+    // right chip immediately so the Unassigned pill only holds genuinely-ambiguous
+    // rows (unknown country, or newly-created profiles without a country set).
+    const contractor = users.find(u => u.id === inv.userId);
+    if (contractor?.country === 'US') return 'Intuit';
+    if (contractor?.country) return 'Convera';
     return '';
   };
   // Colour classes for the payment-method chip. '' → gray (Unassigned).
@@ -9342,21 +9349,29 @@ const TimesheetSystem = () => {
                     <div className="text-2xl font-bold text-indigo-600">${totalFilteredUsd.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
                     <div className="text-xs text-gray-400 mt-1">{nonUsdFiltered.length > 0 ? `excl. ${nonUsdFiltered.length} non-USD` : 'USD only'}</div>
                     {(() => {
-                      // Count distinct WIRE BENEFICIARIES, not user rows. Umbrella accounts
-                      // (Teal: 6 users share one IBAN → one wire) must collapse to one
-                      // "contractor" — user_id count would inflate. Fallback chain when the
-                      // invoice snapshot has no IBAN: user's default payment_profile IBAN,
-                      // then user_id as the bucket key.
-                      const invCount = filtered.length;
-                      const contractorCount = new Set(filtered.map(i => {
-                        const snapIban = i.paymentProfile?.iban;
-                        if (snapIban) return snapIban;
-                        const defaultIban = paymentProfiles.find(p => p.userId === i.userId && p.isDefault)?.iban;
-                        return defaultIban || `no-pp:${i.userId}`;
+                      // Primary count = ROWS = distinct contractors covered (people paid).
+                      // Aligns with the pills/badge/table below.
+                      // Secondary count = distinct WIRE BENEFICIARIES (payments to process).
+                      // Umbrella accounts (Teal: 6 users → 1 IBAN → 1 wire) collapse.
+                      // Grouping key hierarchy, robust to empty-IBAN US/ACH cases:
+                      //   1) snapshot payment_profile.iban
+                      //   2) snapshot payment_profile.id
+                      //   3) live-default payment_profile.iban
+                      //   4) live-default payment_profile.id
+                      //   5) user_id (last resort — no PP row at all)
+                      const contractorCount = filtered.length;
+                      const invoiceCount = new Set(filtered.map(i => {
+                        const snap = i.paymentProfile;
+                        if (snap?.iban) return `iban:${snap.iban}`;
+                        if (snap?.id != null) return `pp:${snap.id}`;
+                        const defaultPp = paymentProfiles.find(p => p.userId === i.userId && p.isDefault);
+                        if (defaultPp?.iban) return `iban:${defaultPp.iban}`;
+                        if (defaultPp?.id != null) return `pp:${defaultPp.id}`;
+                        return `no-pp:${i.userId}`;
                       })).size;
                       return (
                         <div className="text-xs text-gray-500 mt-0.5">
-                          {invCount} invoice{invCount === 1 ? '' : 's'} · {contractorCount} contractor{contractorCount === 1 ? '' : 's'}
+                          {contractorCount} contractor{contractorCount === 1 ? '' : 's'} · {invoiceCount} invoice{invoiceCount === 1 ? '' : 's'}
                         </div>
                       );
                     })()}
