@@ -9760,7 +9760,7 @@ const TimesheetSystem = () => {
                         </tbody>
                         <tfoot className="bg-gray-100 font-semibold">
                           <tr>
-                            <td className="border border-gray-200 px-4 py-3 text-gray-700 sticky left-0 z-10 bg-gray-100" colSpan={4}>Filtered Total ({displayGroups.length} payee{displayGroups.length !== 1 ? 's' : ''}, {filtered.length} invoice{filtered.length !== 1 ? 's' : ''})</td>
+                            <td className="border border-gray-200 px-4 py-3 text-gray-700 sticky left-0 z-10 bg-gray-100" colSpan={4}>Filtered Total ({filtered.length} contractor{filtered.length !== 1 ? 's' : ''}, {displayGroups.length} invoice{displayGroups.length !== 1 ? 's' : ''})</td>
                             <td className="border border-gray-200 px-4 py-3 text-center">{filtered.reduce((s, i) => s + (i.totalHours ?? 0), 0).toFixed(2)}</td>
                             <td className="border border-gray-200 px-4 py-3"></td>
                             <td className="border border-gray-200 px-4 py-3 text-right text-indigo-700">${filtered.reduce((s, i) => s + i.totalAmount, 0).toFixed(2)}</td>
