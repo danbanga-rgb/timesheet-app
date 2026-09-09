@@ -9343,48 +9343,47 @@ const TimesheetSystem = () => {
                 </div>
 
                 {/* KPI cards — reflect current filters */}
+                {(() => {
+                  // Contractor rows vs distinct wire beneficiaries. Beneficiary key hierarchy
+                  // (robust to empty-IBAN US/ACH profiles per [[umbrella-payment-patterns]]):
+                  //   snapshot.iban → snapshot.pp.id → default.iban → default.pp.id → user_id
+                  const beneficiaryKey = (i: Invoice): string => {
+                    const snap = i.paymentProfile;
+                    if (snap?.iban) return `iban:${snap.iban}`;
+                    if (snap?.id != null) return `pp:${snap.id}`;
+                    const d = paymentProfiles.find(p => p.userId === i.userId && p.isDefault);
+                    if (d?.iban) return `iban:${d.iban}`;
+                    if (d?.id != null) return `pp:${d.id}`;
+                    return `no-pp:${i.userId}`;
+                  };
+                  const countCaption = (rows: Invoice[]) => {
+                    const c = rows.length;
+                    if (c === 0) return null;
+                    const inv = new Set(rows.map(beneficiaryKey)).size;
+                    return `${c} contractor${c === 1 ? '' : 's'} · ${inv} invoice${inv === 1 ? '' : 's'}`;
+                  };
+                  const submitted = filtered.filter(i => i.status === 'submitted');
+                  const approved  = filtered.filter(i => i.status === 'approved');
+                  const paid      = filtered.filter(i => i.status === 'paid');
+                  return (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                   <div className="bg-white rounded-lg shadow-md p-4">
                     <div className="text-sm text-gray-500 mb-1">{totalLabel}</div>
                     <div className="text-2xl font-bold text-indigo-600">${totalFilteredUsd.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
                     <div className="text-xs text-gray-400 mt-1">{nonUsdFiltered.length > 0 ? `excl. ${nonUsdFiltered.length} non-USD` : 'USD only'}</div>
-                    {(() => {
-                      // Primary count = ROWS = distinct contractors covered (people paid).
-                      // Aligns with the pills/badge/table below.
-                      // Secondary count = distinct WIRE BENEFICIARIES (payments to process).
-                      // Umbrella accounts (Teal: 6 users → 1 IBAN → 1 wire) collapse.
-                      // Grouping key hierarchy, robust to empty-IBAN US/ACH cases:
-                      //   1) snapshot payment_profile.iban
-                      //   2) snapshot payment_profile.id
-                      //   3) live-default payment_profile.iban
-                      //   4) live-default payment_profile.id
-                      //   5) user_id (last resort — no PP row at all)
-                      const contractorCount = filtered.length;
-                      const invoiceCount = new Set(filtered.map(i => {
-                        const snap = i.paymentProfile;
-                        if (snap?.iban) return `iban:${snap.iban}`;
-                        if (snap?.id != null) return `pp:${snap.id}`;
-                        const defaultPp = paymentProfiles.find(p => p.userId === i.userId && p.isDefault);
-                        if (defaultPp?.iban) return `iban:${defaultPp.iban}`;
-                        if (defaultPp?.id != null) return `pp:${defaultPp.id}`;
-                        return `no-pp:${i.userId}`;
-                      })).size;
-                      return (
-                        <div className="text-xs text-gray-500 mt-0.5">
-                          {contractorCount} contractor{contractorCount === 1 ? '' : 's'} · {invoiceCount} invoice{invoiceCount === 1 ? '' : 's'}
-                        </div>
-                      );
-                    })()}
+                    {countCaption(filtered) && <div className="text-xs text-gray-500 mt-0.5">{countCaption(filtered)}</div>}
                   </div>
                   <div className="bg-white rounded-lg shadow-md p-4">
                     <div className="text-sm text-gray-500 mb-1">Pending Review</div>
-                    <div className="text-2xl font-bold text-yellow-600">{filtered.filter(i => i.status === 'submitted').length}</div>
+                    <div className="text-2xl font-bold text-yellow-600">{submitted.length}</div>
                     <div className="text-xs text-gray-400 mt-1">awaiting approval</div>
+                    {countCaption(submitted) && <div className="text-xs text-gray-500 mt-0.5">{countCaption(submitted)}</div>}
                   </div>
                   <div className="bg-white rounded-lg shadow-md p-4">
                     <div className="text-sm text-gray-500 mb-1">Approved</div>
-                    <div className="text-2xl font-bold text-green-600">{filtered.filter(i => i.status === 'approved').length}</div>
+                    <div className="text-2xl font-bold text-green-600">{approved.length}</div>
                     <div className="text-xs text-gray-400 mt-1">ready to pay</div>
+                    {countCaption(approved) && <div className="text-xs text-gray-500 mt-0.5">{countCaption(approved)}</div>}
                   </div>
                   {nonUsdFiltered.length > 0 ? (
                     <div className="bg-amber-50 border border-amber-300 rounded-lg shadow-md p-4">
@@ -9397,11 +9396,14 @@ const TimesheetSystem = () => {
                   ) : (
                     <div className="bg-white rounded-lg shadow-md p-4">
                       <div className="text-sm text-gray-500 mb-1">Paid</div>
-                      <div className="text-2xl font-bold text-blue-600">{filtered.filter(i => i.status === 'paid').length}</div>
+                      <div className="text-2xl font-bold text-blue-600">{paid.length}</div>
                       <div className="text-xs text-gray-400 mt-1">invoices settled</div>
+                      {countCaption(paid) && <div className="text-xs text-gray-500 mt-0.5">{countCaption(paid)}</div>}
                     </div>
                   )}
                 </div>
+                  );
+                })()}
 
                 <div className="bg-white rounded-lg shadow-md p-6">
                   {/* Table */}
