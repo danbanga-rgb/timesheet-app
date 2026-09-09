@@ -9715,7 +9715,9 @@ const TimesheetSystem = () => {
                                           ? <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs">{parseLocalDate(inv.payOnDate!).toLocaleDateString()}</span>
                                           : <span className="text-gray-300 text-xs">—</span>}
                                       </td>
-                                      <td className="border border-gray-200 px-4 py-2 text-center text-gray-400 text-xs">—</td>
+                                      <td className="border border-gray-200 px-4 py-2 text-center whitespace-nowrap">
+                                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${paymentMethodChipClass(inv)}`}>{paymentMethodLabel(inv)}</span>
+                                      </td>
                                       <td className="border border-gray-200 px-4 py-2 text-center whitespace-nowrap">
                                         {inv.paidDate
                                           ? <span className="px-2 py-0.5 bg-green-50 text-green-700 rounded text-xs">{parseLocalDate(inv.paidDate!).toLocaleDateString()}</span>
