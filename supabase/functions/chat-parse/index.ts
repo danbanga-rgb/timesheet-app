@@ -220,9 +220,9 @@ Extract initial field values from the message for the classified intent:
 - user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), role_title (job title like "Data Engineer", "QA", "Developer"), bill_rate_min, bill_rate_max, limit (number)
 - user.count: same fields as user.list except no limit
 
-For role_title: extract when the user says a JOB title (not an auth role) — "data engineers", "QA testers", "developers", "senior developers", "solutions architects", "PMs", "designers". Do NOT confuse with `role` (auth role — timesheetuser / manager / accountant / vendormanager / admin). Rule: if it names an occupation or seniority, it's role_title. If it names a permission role in the app, it's role.
+For role_title: extract when the user says a JOB title (not an auth role) — "data engineers", "QA testers", "developers", "senior developers", "solutions architects", "PMs", "designers". Do NOT confuse with role (auth role — timesheetuser / manager / accountant / vendormanager / admin). Rule: if it names an occupation or seniority, it's role_title. If it names a permission role in the app, it's role.
 
-For user.list and user.count: role defaults to `timesheetuser` (contractors) on the server. Extract `role` explicitly ONLY when the user asked about a different role — e.g. "list admins" → role=admin, "how many vendor managers" → role=vendormanager, "show accountants" → role=accountant. Contractor/consultant/people/etc. queries → leave role blank (server default applies).
+For user.list and user.count: role defaults to timesheetuser (contractors) on the server. Extract role explicitly ONLY when the user asked about a different role — e.g. "list admins" → role=admin, "how many vendor managers" → role=vendormanager, "show accountants" → role=accountant. Contractor/consultant/people/etc. queries → leave role blank (server default applies).
 
 For user.list temporal signals ("recent", "last person", "who just ended", "latest", "who's the newest") → extract sort=recent. Server sorts by end_date DESC (or start_date DESC when active=true).
 
