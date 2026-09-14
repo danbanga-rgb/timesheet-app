@@ -43,9 +43,20 @@ export const INTENTS: IntentSpec[] = [
     description: 'Look up a single user by name or email and show their details (project, dates, pay rate, bill rate, status)',
     read_only: true,
     extraction_hint:
-      'The user is asking about a specific person by name or email (e.g. "when does Sarah start?", "what is X\'s project?", "is Y still active?", "what is X\'s pay rate?", "what does X bill?", "X\'s payrate", "X\'s billrate", "X\'s hourly", "X\'s rate"). Rates, dates, project, invoicing status — all live on the user profile card and route to this intent. Extract the target as name or email. Do NOT match on generic pronouns.',
+      'The user is asking about a specific person by name or email. Rates, dates, project, invoicing status — all live on the user profile card and route to this intent.\n' +
+      'Also extract a `focus` field indicating what specifically was asked, so the reply can stay tight (avoid dumping the full card when a scoped question was asked):\n' +
+      '- "what is X\'s title/role/position" → focus=title\n' +
+      '- "X\'s pay rate", "how much does X make", "X\'s payrate", "X\'s hourly" → focus=rate (both rates shown)\n' +
+      '- "X\'s bill rate", "X\'s billrate", "what does X bill" → focus=rate\n' +
+      '- "when did X start/end/begin/finish", "X\'s start date" → focus=dates\n' +
+      '- "who does X report to", "X\'s manager", "X\'s VM" → focus=manager\n' +
+      '- "where does X live", "X\'s country", "X\'s location", "is X onshore/offshore" → focus=location\n' +
+      '- "what project is X on" → focus=project\n' +
+      '- "tell me about X", "who is X", "show X", "X\'s details/profile" → focus=full (default when open-ended)\n' +
+      'Do NOT match on generic pronouns for target.',
     fields: [
       { name: 'target', input_type: 'text', required: true, hint: 'name or email of the user to look up' },
+      { name: 'focus', input_type: 'buttons', options: ['title', 'rate', 'dates', 'manager', 'location', 'project', 'full'], default: 'full', ask_only_if_mentioned: true, hint: 'which attribute the user asked about (server projects the card accordingly)' },
     ],
   },
   {

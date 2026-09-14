@@ -1053,16 +1053,69 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
   const managerName = mgr ? `${(mgr as { name: string }).name} (${(mgr as { email: string }).email})` : null;
   const vmName = vm ? `${(vm as { name: string }).name} (${(vm as { email: string }).email})` : null;
 
+  const focus = String(conv.captured.focus ?? 'full');
+  const displayName = `${user.name} (${user.email})`;
+  const roleTitle = eng?.[0]?.role_title as string | null | undefined;
+
+  // Scoped projections — surface only what CA asked about. Fallback to full
+  // card when focus is unknown / open-ended.
+  if (focus === 'title') {
+    const line = roleTitle
+      ? `${displayName} — ${roleTitle}`
+      : `${displayName} — (no job title on file)`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'rate') {
+    const bits: string[] = [];
+    if (payRate != null) bits.push(`Pay $${payRate}/hr${payRateNote}`);
+    else bits.push('Pay (not on file)');
+    if (billRate != null) bits.push(`Bill $${billRate}/hr${roleTitle ? ` (${roleTitle})` : ''}`);
+    else bits.push('Bill (not on file)');
+    const line = `${displayName} — ${bits.join(', ')}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'dates') {
+    const bits: string[] = [];
+    bits.push(user.start_date ? `started ${user.start_date}` : 'no start date');
+    if (endDate) bits.push(endDate > today ? `ends ${endDate}` : `ended ${endDate}`);
+    else bits.push('active');
+    const line = `${displayName} — ${bits.join(', ')}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'manager') {
+    const parts: string[] = [];
+    if (managerName) parts.push(`manager ${managerName}`);
+    if (vmName) parts.push(`reports to ${vmName}`);
+    if (parts.length === 0) parts.push('(no manager or vendor manager on file)');
+    const line = `${displayName} — ${parts.join(', ')}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'location') {
+    const line = `${displayName} — ${user.country ?? '(no country)'}${user.location_type ? ` (${user.location_type})` : ''}${user.region ? `, ${user.region}` : ''}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'project') {
+    const line = `${displayName} — ${projectName}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+
+  // focus === 'full' or anything else → default card
   const lines = [
     ...(assumptionNote ? [assumptionNote, ''] : []),
-    `${user.name} (${user.email})`,
+    displayName,
     `  Status: ${status}`,
     `  Role: ${user.role}`,
     `  Country: ${user.country ?? '(none)'}${user.location_type ? ` (${user.location_type})` : ''}`,
     `  Project: ${projectName}`,
     `  Started: ${user.start_date ?? '(not set — no reminders)'}`,
     `  Pay rate: ${payRate != null ? `$${payRate}/hr${payRateNote}` : '(not on file — no invoices yet)'}`,
-    `  Bill rate: ${billRate != null ? `$${billRate}/hr${billRateNote}` : '(not on file — no client engagement)'}`,
+    `  Bill rate: ${billRate != null ? `$${billRate}/hr${eng?.[0]?.role_title ? ` (${eng[0].role_title})` : ''}` : '(not on file — no client engagement)'}`,
     ...(managerName ? [`  Manager: ${managerName}`] : []),
     ...(vmName ? [`  Vendor manager: ${vmName}`] : []),
     `  Invoicing: ${user.invoice_enabled ? 'YES' : 'NO'}`,
@@ -1186,6 +1239,24 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   const truncated = rows.length > limit;
   const shown = truncated ? rows.slice(0, limit) : rows;
+
+  // Slice 8: enrich rendered rows with role_title + bill_rate when the filter
+  // was scoped to those attributes. Skipped otherwise so the default list
+  // format stays unchanged.
+  const showRoleTitle = Boolean(c.role_title);
+  const showBillRate = c.bill_rate_min != null && c.bill_rate_min !== ''
+    || c.bill_rate_max != null && c.bill_rate_max !== '';
+  const engMap = new Map<string, { role_title: string | null; bill_rate: number | null }>();
+  if ((showRoleTitle || showBillRate) && shown.length > 0) {
+    const { data: engs } = await admin.from('client_engagements')
+      .select('user_id, role_title, bill_rate, effective_from')
+      .in('user_id', shown.map((r) => r.id))
+      .is('effective_to', null)
+      .order('effective_from', { ascending: false });
+    for (const e of (engs ?? []) as Array<{ user_id: string; role_title: string | null; bill_rate: number | null }>) {
+      if (!engMap.has(e.user_id)) engMap.set(e.user_id, { role_title: e.role_title, bill_rate: e.bill_rate });
+    }
+  }
   const filterParts: string[] = [];
   if (c.role) filterParts.push(String(c.role));
   if (c.project) filterParts.push(`project=${c.project}`);
@@ -1211,7 +1282,14 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   const lines = shown.map((r, i) => {
     const project = r.project_id ? (projMap.get(r.project_id) ?? '') : '';
+    const eng = engMap.get(r.id);
     const bits: string[] = [];
+    if (showRoleTitle) {
+      bits.push(eng?.role_title ? eng.role_title : '(no title)');
+    }
+    if (showBillRate) {
+      bits.push(eng?.bill_rate != null ? `$${eng.bill_rate}/hr` : '(no bill rate)');
+    }
     if (project) bits.push(project);
     if (r.country) bits.push(r.country);
     if (r.start_date) bits.push(`started ${r.start_date}`);
