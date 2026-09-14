@@ -20,6 +20,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { findIntent, intentCatalog, type IntentSpec } from './intents.ts';
 import { callClaude } from '../_shared/llm.ts';
+import { currentBillRate, currentPayRate } from '../_shared/rates.ts';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -857,17 +858,14 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
   const status = !endDate ? 'ACTIVE (no end date)' : endDate > today ? `ACTIVE (ends ${endDate})` : `ENDED ${endDate}`;
 
   // Rate + reporting-line lookups fired in parallel to keep the card snappy.
-  // Pay rate = most recent invoice rate. Bill rate = current client_engagement bill_rate.
-  // Manager and vendor manager names are resolved from their respective foreign keys.
+  // Rates come from rate_history (single source of truth). client_engagement is
+  // still consulted for role_title annotation. Invoice is consulted for
+  // pay-rate provenance when the current rate came from the backfill.
   const managerId = (user.manager_id as string | null) ?? null;
   const vmId = (user.vendor_manager_id as string | null) ?? null;
-  const [{ data: lastInv }, { data: eng }, { data: mgr }, { data: vm }] = await Promise.all([
-    admin.from('invoices')
-      .select('rate, period_start, invoice_number')
-      .eq('user_id', user.id)
-      .not('rate', 'is', null)
-      .order('period_start', { ascending: false })
-      .limit(1),
+  const [payRow, billRow, { data: eng }, { data: mgr }, { data: vm }] = await Promise.all([
+    currentPayRate(admin, user.id as string),
+    currentBillRate(admin, user.id as string),
     admin.from('client_engagements')
       .select('bill_rate, role_title, effective_from, effective_to')
       .eq('user_id', user.id)
@@ -881,9 +879,24 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
       ? admin.from('profiles').select('name, email').eq('id', vmId).maybeSingle()
       : Promise.resolve({ data: null }),
   ]);
-  const payRate = lastInv?.[0]?.rate as number | null | undefined;
-  const payRateNote = lastInv?.[0] ? ` (last invoice ${lastInv[0].invoice_number}, ${(lastInv[0].period_start as string).slice(0, 7)})` : '';
-  const billRate = eng?.[0]?.bill_rate as number | null | undefined;
+  const payRate = payRow?.rate ?? null;
+  let payRateNote = '';
+  if (payRow) {
+    if (payRow.source.startsWith('backfill:invoices')) {
+      const { data: lastInv } = await admin.from('invoices')
+        .select('period_start, invoice_number')
+        .eq('user_id', user.id)
+        .not('rate', 'is', null)
+        .order('period_start', { ascending: false })
+        .limit(1);
+      if (lastInv?.[0]) {
+        payRateNote = ` (last invoice ${lastInv[0].invoice_number}, ${(lastInv[0].period_start as string).slice(0, 7)})`;
+      }
+    } else {
+      payRateNote = ` (as of ${payRow.effective_from})`;
+    }
+  }
+  const billRate = billRow?.rate ?? null;
   const billRateNote = eng?.[0]?.role_title ? ` (${eng[0].role_title})` : '';
   const managerName = mgr ? `${(mgr as { name: string }).name} (${(mgr as { email: string }).email})` : null;
   const vmName = vm ? `${(vm as { name: string }).name} (${(vm as { email: string }).email})` : null;
