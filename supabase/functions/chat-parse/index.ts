@@ -210,8 +210,10 @@ Extract initial field values from the message for the classified intent:
 - user.set_start_date / user.set_end_date: target (name or email), start_date / end_date
 - user.update_country_region: target (name or email), country (ISO code preferred, else full name), optional region
 - user.get: target (name or email)
-- user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), limit (number)
+- user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), role_title (job title like "Data Engineer", "QA", "Developer"), bill_rate_min, bill_rate_max, limit (number)
 - user.count: same fields as user.list except no limit
+
+For role_title: extract when the user says a JOB title (not an auth role) — "data engineers", "QA testers", "developers", "senior developers", "solutions architects", "PMs", "designers". Do NOT confuse with `role` (auth role — timesheetuser / manager / accountant / vendormanager / admin). Rule: if it names an occupation or seniority, it's role_title. If it names a permission role in the app, it's role.
 
 For user.create when CA pastes an intake email (multi-line "Name: X / Position: Y / Client: Z / Pay rate: $A / Bill rate: $B / Payment terms: C"): capture EVERY field. role_title, pay_rate, bill_rate, payment_terms, client are all common. Do NOT ask for name/email separately if CA gave them in the paste.
 
@@ -1103,6 +1105,17 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
     q = q.lte('end_date', todayIso());
   }
 
+  // Client-engagement-scoped filters (role_title, bill_rate_min/max) — pre-query
+  // matching user_ids then apply .in on profiles.
+  const engFilterUserIds = await resolveEngagementFilterUserIds(admin, c);
+  if (engFilterUserIds !== null) {
+    if (engFilterUserIds.length === 0) {
+      await writeBot(admin, conv.id, 'No users match those filters.');
+      return;
+    }
+    q = q.in('id', engFilterUserIds);
+  }
+
   // Project filter: resolve project name/code → id first
   if (c.project) {
     const tok = String(c.project).trim().toLowerCase();
@@ -1187,6 +1200,9 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
   if (c.active === true) filterParts.push('active');
   if (c.active === false) filterParts.push('terminated');
   if (c.missing_start_date === true) filterParts.push('missing start_date');
+  if (c.role_title) filterParts.push(`title~${c.role_title}`);
+  if (c.bill_rate_min != null && c.bill_rate_min !== '') filterParts.push(`bill≥$${c.bill_rate_min}`);
+  if (c.bill_rate_max != null && c.bill_rate_max !== '') filterParts.push(`bill≤$${c.bill_rate_max}`);
   const filterDesc = filterParts.length > 0 ? ` matching ${filterParts.join(', ')}` : '';
 
   const header = truncated
@@ -1250,11 +1266,19 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
     vmId = resolved.user.id;
   }
 
+  // Client-engagement-scoped filters (role_title, bill_rate_min/max).
+  const engFilterUserIds = await resolveEngagementFilterUserIds(admin, c);
+  if (engFilterUserIds !== null && engFilterUserIds.length === 0) {
+    await writeBot(admin, conv.id, `Total${c.role_title || c.bill_rate_min || c.bill_rate_max ? ` matching those job filters` : ''}: 0`);
+    return;
+  }
+
   const baseQuery = () => {
     let q = admin.from('profiles').select('*', { count: 'exact', head: true });
     q = applyFilters(q);
     if (projectId != null) q = q.eq('project_id', projectId);
     if (vmId != null) q = q.eq('vendor_manager_id', vmId);
+    if (engFilterUserIds !== null) q = q.in('id', engFilterUserIds);
     return q;
   };
 
@@ -1279,6 +1303,9 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
   if (c.active === true) filterParts.push('active');
   if (c.active === false) filterParts.push('terminated');
   if (c.missing_start_date === true) filterParts.push('missing start_date');
+  if (c.role_title) filterParts.push(`title~${c.role_title}`);
+  if (c.bill_rate_min != null && c.bill_rate_min !== '') filterParts.push(`bill≥$${c.bill_rate_min}`);
+  if (c.bill_rate_max != null && c.bill_rate_max !== '') filterParts.push(`bill≤$${c.bill_rate_max}`);
   const filterDesc = filterParts.length > 0 ? ` matching ${filterParts.join(', ')}` : '';
 
   const lines = [`Total${filterDesc}: ${total ?? 0}`];
@@ -1291,6 +1318,32 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
     lines.push(`  Ended: ${endedRes.count ?? 0}`);
   }
   await writeBot(admin, conv.id, lines.join('\n'));
+}
+
+// Resolves user_ids that match client-engagement-scoped filters (role_title,
+// bill_rate_min, bill_rate_max). Returns null when no such filter is set (i.e.
+// caller should NOT apply an .in() restriction). Returns [] when filters are
+// set but nothing matches (caller should short-circuit with a "no results"
+// reply). Otherwise returns the deduped list of matching user_ids.
+async function resolveEngagementFilterUserIds(
+  admin: SupabaseClient,
+  c: Record<string, unknown>,
+): Promise<string[] | null> {
+  const roleTitle = typeof c.role_title === 'string' ? c.role_title.trim() : '';
+  const billMin = c.bill_rate_min != null && c.bill_rate_min !== '' ? Number(c.bill_rate_min) : null;
+  const billMax = c.bill_rate_max != null && c.bill_rate_max !== '' ? Number(c.bill_rate_max) : null;
+  if (!roleTitle && billMin === null && billMax === null) return null;
+
+  // Current engagements only.
+  let q = admin.from('client_engagements').select('user_id').is('effective_to', null);
+  if (roleTitle) q = q.ilike('role_title', `%${roleTitle}%`);
+  if (billMin !== null && Number.isFinite(billMin)) q = q.gte('bill_rate', billMin);
+  if (billMax !== null && Number.isFinite(billMax)) q = q.lte('bill_rate', billMax);
+
+  const { data, error } = await q;
+  if (error) throw new Error(`client_engagements filter failed: ${error.message}`);
+  const ids = Array.from(new Set(((data ?? []) as Array<{ user_id: string }>).map((r) => r.user_id).filter(Boolean)));
+  return ids;
 }
 
 // Fuzzy-resolve a target string to a profiles row. Accepts:
