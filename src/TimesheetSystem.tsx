@@ -200,6 +200,7 @@ import {
 import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
 import ContractAdminDashboard from './roles/ContractAdmin';
 import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
+import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
 import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
@@ -252,7 +253,7 @@ interface UserProfile {
   id: string;
   username: string;
   name: string;
-  role: 'timesheetuser' | 'manager' | 'accountant' | 'admin' | 'vendormanager' | 'contract_admin';
+  role: 'timesheetuser' | 'manager' | 'accountant' | 'admin' | 'vendormanager' | 'contract_admin' | 'external_payee';
   managerId: string | null;
   email: string;
   country: string;
@@ -1248,6 +1249,7 @@ const TimesheetSystem = () => {
   const [invoicePayOnPreset, setInvoicePayOnPreset] = useState<Set<string>>(new Set()); // empty=all, 'none'=not assigned, 'YYYY-MM-DD'=specific date
   const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState<Set<string>>(new Set()); // empty=all
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
+  const [showManualInvoiceModal, setShowManualInvoiceModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
   const [converaMatchingView, setConveraMatchingView] = useState<'profiles' | 'beneficiaries'>('profiles');
   const [copiedVendorId, setCopiedVendorId] = useState<string | null>(null);
@@ -9316,7 +9318,8 @@ const TimesheetSystem = () => {
                         </div>
                       </div>
                     </div>
-                    <div className="flex justify-end gap-2">
+                    <div className="flex justify-end gap-2 flex-wrap">
+                      <button onClick={() => setShowManualInvoiceModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm"><FileText className="w-4 h-4" /> + Manual Invoice</button>
                       <button onClick={() => { setShowConveraMatchingModal(true); loadConveraBeneficiaries(); loadConveraLastPaymentDates(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 text-sm"><Users className="w-4 h-4" /> Convera Matching</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                       <button onClick={() => { setInvoicePaymentMethodPreset(new Set(['Convera'])); openConveraBatchPreview(filtered); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 text-sm"><Download className="w-4 h-4" /> Convera Batch</button>
@@ -13685,6 +13688,54 @@ const TimesheetSystem = () => {
               </div>
             );
           })()}
+
+          {/* Manual Invoice Modal — Slice M3 */}
+          <ManualInvoiceModal
+            open={showManualInvoiceModal}
+            onClose={() => setShowManualInvoiceModal(false)}
+            users={users.map(u => ({
+              id: u.id,
+              name: u.name,
+              email: u.email,
+              role: u.role,
+              countryCode: u.country || null,
+              projectId: u.projectId,
+              invoiceEnabled: u.invoiceEnabled,
+              paymentTerms: u.paymentTerms,
+            }))}
+            paymentProfiles={paymentProfiles.map(p => ({
+              id: p.id,
+              userId: p.userId,
+              profileName: p.profileName,
+              companyName: p.companyName,
+              iban: p.iban,
+              swift: p.swift,
+              bankName: p.bankName,
+              qbVendorName: p.qbVendorName,
+              isDefault: p.isDefault,
+              paymentEmail: p.paymentEmail,
+              bankAddress: p.bankAddress,
+              bankBranch: p.bankBranch,
+              companyAddress: p.companyAddress,
+              country: p.country,
+            }))}
+            invoices={invoices.map(i => ({
+              id: i.id,
+              userId: i.userId,
+              periodStart: i.periodStart,
+              invoiceNumber: i.invoiceNumber,
+              status: i.status,
+            }))}
+            currentAccountantId={currentUser.id}
+            onCreated={() => { fetchUsers(); fetchPaymentProfiles(); fetchInvoices(); }}
+            paymentMethodFromProfile={(profile) => {
+              if (!profile) return '';
+              // Simplified — no full invoice context here, so we do a country-based fallback
+              // consistent with paymentMethod() elsewhere.
+              const c = (profile.country || '').toUpperCase();
+              return c === 'US' ? 'Intuit' : 'Convera';
+            }}
+          />
 
           {/* Convera Matching Modal */}
           {showConveraMatchingModal && (() => {
