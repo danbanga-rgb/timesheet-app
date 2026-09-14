@@ -77,6 +77,7 @@ export const INTENTS: IntentSpec[] = [
       { name: 'role_title', input_type: 'text', hint: 'job title filter (e.g. "Data Engineer", "QA", "Developer"). Distinct from `role` (which is the auth role like timesheetuser). Case-insensitive partial match against client_engagements.role_title.' },
       { name: 'bill_rate_min', input_type: 'text', hint: 'minimum bill rate USD/hr (number)' },
       { name: 'bill_rate_max', input_type: 'text', hint: 'maximum bill rate USD/hr (number)' },
+      { name: 'sort', input_type: 'buttons', options: ['recent', 'name'], hint: 'temporal signal — set sort=recent when user says "recent", "last", "latest", "who just ended". Otherwise sort by name.' },
     ],
   },
   {
@@ -123,6 +124,7 @@ export const INTENTS: IntentSpec[] = [
       { name: 'role_title', input_type: 'text', hint: 'job title filter (e.g. "Data Engineer", "QA", "Developer"). Distinct from `role` (which is the auth role like timesheetuser). Case-insensitive partial match against client_engagements.role_title.' },
       { name: 'bill_rate_min', input_type: 'text', hint: 'minimum bill rate USD/hr (number)' },
       { name: 'bill_rate_max', input_type: 'text', hint: 'maximum bill rate USD/hr (number)' },
+      { name: 'sort', input_type: 'buttons', options: ['recent', 'name'], hint: 'temporal signal — set sort=recent when user says "recent", "last", "latest", "who just ended". Otherwise sort by name.' },
       { name: 'limit', input_type: 'text', default: 20, hint: 'max results (default 20, hard cap 50)' },
     ],
   },

@@ -215,6 +215,10 @@ Extract initial field values from the message for the classified intent:
 
 For role_title: extract when the user says a JOB title (not an auth role) — "data engineers", "QA testers", "developers", "senior developers", "solutions architects", "PMs", "designers". Do NOT confuse with `role` (auth role — timesheetuser / manager / accountant / vendormanager / admin). Rule: if it names an occupation or seniority, it's role_title. If it names a permission role in the app, it's role.
 
+For user.list and user.count: role defaults to `timesheetuser` (contractors) on the server. Extract `role` explicitly ONLY when the user asked about a different role — e.g. "list admins" → role=admin, "how many vendor managers" → role=vendormanager, "show accountants" → role=accountant. Contractor/consultant/people/etc. queries → leave role blank (server default applies).
+
+For user.list temporal signals ("recent", "last person", "who just ended", "latest", "who's the newest") → extract sort=recent. Server sorts by end_date DESC (or start_date DESC when active=true).
+
 For user.create when CA pastes an intake email (multi-line "Name: X / Position: Y / Client: Z / Pay rate: $A / Bill rate: $B / Payment terms: C"): capture EVERY field. role_title, pay_rate, bill_rate, payment_terms, client are all common. Do NOT ask for name/email separately if CA gave them in the paste.
 
 Do NOT invent values. Only extract what's explicitly stated.
@@ -1145,7 +1149,11 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   let q = admin.from('profiles').select('id, name, email, role, country, project_id, start_date, end_date, location_type');
 
-  if (c.role) q = q.eq('role', String(c.role));
+  // Default role filter: timesheetuser (contractors) unless CA explicitly asked
+  // about another role. Rationale — CA lookups are almost always about
+  // contractors; admin/CA/VM/accountant accounts pollute the results.
+  const effectiveRole = c.role ? String(c.role) : 'timesheetuser';
+  q = q.eq('role', effectiveRole);
   if (c.country) q = q.eq('country', String(c.country).toUpperCase());
   if (c.location_type) q = q.eq('location_type', String(c.location_type));
   if (c.missing_start_date === true) q = q.is('start_date', null);
@@ -1218,7 +1226,15 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
   }
 
   // Get one extra to detect "there are more" and cap fetched rows.
-  q = q.order('name', { ascending: true }).limit(limit + 1);
+  // Slice 3: sort by end_date DESC when active=false or user asked for "recent".
+  const sortMode = String(c.sort ?? '');
+  const wantTemporal = sortMode === 'recent' || c.active === false;
+  if (wantTemporal) {
+    q = q.order('end_date', { ascending: false, nullsFirst: false });
+  } else {
+    q = q.order('name', { ascending: true });
+  }
+  q = q.limit(limit + 1);
 
   const { data, error } = await q;
   if (error) throw new Error(`Query failed: ${error.message}`);
@@ -1259,6 +1275,7 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
   }
   const filterParts: string[] = [];
   if (c.role) filterParts.push(String(c.role));
+  else filterParts.push('contractors');
   if (c.project) filterParts.push(`project=${c.project}`);
   if (c.country) filterParts.push(`country=${String(c.country).toUpperCase()}`);
   if (c.location_type) filterParts.push(String(c.location_type));
@@ -1308,9 +1325,11 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
   const c = conv.captured;
 
   // Build the same filter chain as execUserList so counts are consistent with lists.
+  // Slice 3: default role=timesheetuser unless CA explicitly asked otherwise.
+  const effectiveCountRole = c.role ? String(c.role) : 'timesheetuser';
   const applyFilters = (q: ReturnType<SupabaseClient['from']>) => {
     let out = q;
-    if (c.role) out = out.eq('role', String(c.role));
+    out = out.eq('role', effectiveCountRole);
     if (c.country) out = out.eq('country', String(c.country).toUpperCase());
     if (c.location_type) out = out.eq('location_type', String(c.location_type));
     if (c.missing_start_date === true) out = out.is('start_date', null);
@@ -1374,6 +1393,7 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
 
   const filterParts: string[] = [];
   if (c.role) filterParts.push(String(c.role));
+  else filterParts.push('contractors');
   if (c.project) filterParts.push(`project=${c.project}`);
   if (c.country) filterParts.push(`country=${String(c.country).toUpperCase()}`);
   if (c.location_type) filterParts.push(String(c.location_type));
