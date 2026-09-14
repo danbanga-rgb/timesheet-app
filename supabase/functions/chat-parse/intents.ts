@@ -148,7 +148,13 @@ export const INTENTS: IntentSpec[] = [
     required_permission: 'user.create',
     description: 'Create a new user profile (contractor, staff, manager, etc.)',
     extraction_hint:
-      'The user wants to create/add/onboard a new person. Extract as many fields as they mention. Do NOT invent values.',
+      'The user wants to create/add/onboard a new person. Extract as many fields as they mention. Do NOT invent values.\n' +
+      'CA often pastes an intake email — capture EVERYTHING they mention:\n' +
+      '- "Position: X" / "Title: X" / "Role: X" (job title, distinct from auth role) → role_title\n' +
+      '- "Pay rate: $X/hr" / "paying $X" / "rate: $X" (no bill context) → pay_rate (number, USD/hr)\n' +
+      '- "Bill rate: $X/hr" / "billing $X" / "billed at $X" → bill_rate (number, USD/hr)\n' +
+      '- "Payment terms: NET+X" / "NET30" / "end of month + 15" → payment_terms (string as given)\n' +
+      '- "Client: X" / "for X" / "on X project" → client (CA typically writes the project name here)',
     fields: [
       { name: 'name', input_type: 'text', required: true, hint: 'full name' },
       { name: 'email', input_type: 'text', required: true, validate: 'email' },
@@ -175,13 +181,43 @@ export const INTENTS: IntentSpec[] = [
         hint: 'auto-derived from country (US=onshore, else offshore); do not ask separately',
       },
       {
+        name: 'client',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'CA writes the project name here (e.g. "APFM", "Genworth"). Server resolves to project + inherits client_id.',
+      },
+      {
         name: 'project',
         input_type: 'buttons',
         options_from: 'projects',
         encouraged: true,
-        hint: 'which project/client they will work on',
+        hint: 'which project/client they will work on; resolved from `client` field if only that is given',
       },
       { name: 'start_date', input_type: 'date', encouraged: true, validate: 'date' },
+      {
+        name: 'role_title',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'job title / position (e.g. "QA Engineer", "Data Engineer"). Stored on client_engagements.',
+      },
+      {
+        name: 'bill_rate',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'USD/hr we charge the client. Number only (e.g. 65 for $65/hr). Stored on client_engagements + rate_history.',
+      },
+      {
+        name: 'pay_rate',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'USD/hr we pay the contractor. Number only. Stored on rate_history.',
+      },
+      {
+        name: 'payment_terms',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'Payment terms string as given (e.g. "NET+15", "NET30", "end of month + 15"). Stored on profiles.payment_terms.',
+      },
       {
         name: 'vendor_manager',
         input_type: 'buttons',

@@ -206,12 +206,14 @@ If unclear or unmatched:
 {"intent": null, "suggested_reply": "Short reply describing what you CAN do — create users, set/update start or end dates, look up a single user's details, or list users matching filters."}
 
 Extract initial field values from the message for the classified intent:
-- user.create: name, email, role, location_type, country, project, start_date, end_date, vendor_manager, invoice_enabled, send_invite
+- user.create: name, email, role, location_type, country, client, project, start_date, end_date, vendor_manager, role_title, pay_rate, bill_rate, payment_terms, invoice_enabled, send_invite
 - user.set_start_date / user.set_end_date: target (name or email), start_date / end_date
 - user.update_country_region: target (name or email), country (ISO code preferred, else full name), optional region
 - user.get: target (name or email)
 - user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), limit (number)
 - user.count: same fields as user.list except no limit
+
+For user.create when CA pastes an intake email (multi-line "Name: X / Position: Y / Client: Z / Pay rate: $A / Bill rate: $B / Payment terms: C"): capture EVERY field. role_title, pay_rate, bill_rate, payment_terms, client are all common. Do NOT ask for name/email separately if CA gave them in the paste.
 
 Do NOT invent values. Only extract what's explicitly stated.
 For role: timesheetuser, manager, accountant, vendormanager, admin, contract_admin. Synonyms: "contractors"/"consultants"/"people"=timesheetuser; "VMs"/"vendor managers"=vendormanager; "accountants"=accountant.
@@ -353,6 +355,51 @@ Return JSON:
   // Server-side validation: drop invented, enforce types, coerce.
   const validated = validateExtracted(spec, rawExtracted);
   const merged = normalizeCaptured(spec, { ...captured, ...validated });
+
+  // For user.create: resolve the project (from either `project` or `client` input)
+  // before completing collection. When it matches multiple, ask CA to pick.
+  if (spec.name === 'user.create') {
+    const projectInput = (typeof merged.project === 'string' && merged.project.trim())
+      || (typeof merged.client === 'string' && merged.client.trim())
+      || null;
+    const alreadyResolved = (merged as Record<string, unknown>)._project_resolved !== undefined;
+    if (projectInput && !alreadyResolved) {
+      const { data: allProjects } = await admin.from('projects').select('id, name, code');
+      const projects = (allProjects ?? []) as Array<{ id: number; name: string; code: string }>;
+      const tok = projectInput.toLowerCase();
+      const matches = projects.filter((p) =>
+        p.name.toLowerCase().includes(tok) || p.code.toLowerCase().includes(tok));
+      if (matches.length === 0) {
+        delete merged.project;
+        delete merged.client;
+        await admin.from('chat_conversations').update({
+          captured: merged, last_activity_at: new Date().toISOString(),
+        }).eq('id', conv.id);
+        const available = projects.map((p) => p.name).join(', ');
+        await writeBot(admin, conv.id,
+          `No project matches "${projectInput}". Available: ${available}. Which one?`);
+        return;
+      }
+      if (matches.length > 1) {
+        delete merged.project;
+        delete merged.client;
+        await admin.from('chat_conversations').update({
+          captured: merged, last_activity_at: new Date().toISOString(),
+        }).eq('id', conv.id);
+        const list = matches.map((p, i) => `  ${i + 1}. ${p.name} (${p.code})`).join('\n');
+        await writeBot(admin, conv.id,
+          `"${projectInput}" matches multiple projects:\n${list}\n\nWhich one? Note: different project codes land on separate invoices.`);
+        return;
+      }
+      // Single match — pin project name to the resolved canonical and cache metadata.
+      const one = matches[0];
+      merged.project = one.name;
+      (merged as Record<string, unknown>)._project_resolved = {
+        id: one.id, name: one.name, code: one.code,
+      };
+      delete merged.client;  // consumed
+    }
+  }
 
   // For intents that address an existing user, resolve the target NOW so the
   // confirmation summary shows the actual user + current values (not just a
@@ -548,15 +595,38 @@ async function execUserCreate(
 ): Promise<void> {
   const captured = conv.captured;
 
-  // Resolve project name → project_id (LLM extracted a name; we need the ID)
-  let project_id: number | null = null;
-  if (captured.project) {
+  // Resolve project: prefer the pre-resolved metadata attached during
+  // driveCollecting (Slice 1b disambiguation). Fall back to name/code match
+  // for any legacy flows that didn't run through resolution.
+  const preResolved = (captured as Record<string, unknown>)._project_resolved as
+    | { id: number; name: string; code: string } | undefined;
+  let project_id: number | null = preResolved?.id ?? null;
+  let projectName: string | null = preResolved?.name ?? null;
+  if (project_id === null && captured.project) {
     const tok = String(captured.project).trim().toLowerCase();
     const { data: projects } = await admin.from('projects').select('id, name, code');
     const match = (projects ?? []).find((p) =>
       String(p.name).toLowerCase() === tok || String(p.code).toLowerCase() === tok);
     if (!match) throw new Error(`Project "${captured.project}" not found`);
     project_id = match.id as number;
+    projectName = match.name as string;
+  }
+
+  // Derive client_id from project name via prefix match against clients.name.
+  // "APFM" project → APFM client; "A&E Networks" project → A&E TV client via
+  // first-token match. Used to populate client_engagements.client_id later.
+  let client_id: number | null = null;
+  if (projectName) {
+    const { data: clients } = await admin.from('clients').select('id, name');
+    const projLower = projectName.toLowerCase();
+    const found = (clients ?? []).find((c: { name: string }) => {
+      const cn = String(c.name).toLowerCase();
+      if (projLower.startsWith(cn)) return true;
+      const firstTok = cn.split(/[\s\/&]+/)[0];
+      if (firstTok && firstTok.length >= 3 && projLower.startsWith(firstTok)) return true;
+      return false;
+    });
+    client_id = (found as { id: number } | undefined)?.id ?? null;
   }
 
   // Resolve vendor manager name → user id (if role starts with vendor and value present)
@@ -610,6 +680,66 @@ async function execUserCreate(
   const createResult = JSON.parse(createBody);
   const createdUserId = createResult?.user?.id ?? createResult?.id ?? null;
 
+  // Slice 1: extended writes. Payment terms → profiles. role_title/bill_rate → client_engagements.
+  // pay_rate + bill_rate → rate_history. Non-fatal on failure — the user is created;
+  // we surface warnings so CA can fix in admin UI. Full failure would strand the auth user.
+  const warnings: string[] = [];
+  const payTermsInput = typeof captured.payment_terms === 'string' ? captured.payment_terms.trim() : null;
+  if (payTermsInput && createdUserId) {
+    const { error } = await admin.from('profiles').update({ payment_terms: payTermsInput }).eq('id', createdUserId);
+    if (error) warnings.push(`payment_terms: ${error.message}`);
+  }
+
+  const roleTitle = typeof captured.role_title === 'string' ? captured.role_title.trim() : null;
+  const billRate = coerceRate(captured.bill_rate);
+  const payRate = coerceRate(captured.pay_rate);
+  const effectiveFrom = (captured.start_date as string | undefined) || todayIso();
+
+  let engagementId: number | null = null;
+  if (createdUserId && (roleTitle || billRate !== null || client_id !== null)) {
+    if (client_id === null) {
+      warnings.push(`client_engagements skipped: could not derive client_id from project "${projectName ?? '(none)'}"`);
+    } else {
+      const { data: eng, error } = await admin.from('client_engagements').insert({
+        user_id: createdUserId,
+        client_id,
+        role_title: roleTitle,
+        bill_rate: billRate,
+        sow_reference: null,
+        effective_from: effectiveFrom,
+        effective_to: null,
+      }).select('id').single();
+      if (error) warnings.push(`client_engagements: ${error.message}`);
+      else engagementId = (eng?.id as number) ?? null;
+    }
+  }
+
+  if (createdUserId && payRate !== null) {
+    const { error } = await admin.from('rate_history').insert({
+      user_id: createdUserId,
+      rate_kind: 'pay',
+      rate: payRate,
+      effective_from: effectiveFrom,
+      effective_to: null,
+      source: 'chat:user.create',
+      created_by: conv.user_id,
+    });
+    if (error) warnings.push(`pay rate_history: ${error.message}`);
+  }
+  if (createdUserId && billRate !== null) {
+    const { error } = await admin.from('rate_history').insert({
+      user_id: createdUserId,
+      rate_kind: 'bill',
+      rate: billRate,
+      effective_from: effectiveFrom,
+      effective_to: null,
+      client_engagement_id: engagementId,
+      source: 'chat:user.create',
+      created_by: conv.user_id,
+    });
+    if (error) warnings.push(`bill rate_history: ${error.message}`);
+  }
+
   // Invite send — default YES unless explicitly false in captured
   const sendInvite = captured.send_invite !== false;
   let inviteStatus = 'skipped';
@@ -637,7 +767,7 @@ async function execUserCreate(
     }
   }
 
-  const overallStatus = inviteError ? 'partial' : 'success';
+  const overallStatus = (inviteError || warnings.length > 0) ? 'partial' : 'success';
   await admin.from('chat_actions').update({
     status: overallStatus,
     completed_at: new Date().toISOString(),
@@ -645,6 +775,11 @@ async function execUserCreate(
       created_user_id: createdUserId,
       invite_status: inviteStatus,
       invite_error: inviteError,
+      extended_writes_warnings: warnings.length > 0 ? warnings : undefined,
+      wrote_client_engagement: engagementId,
+      wrote_pay_rate: payRate,
+      wrote_bill_rate: billRate,
+      wrote_payment_terms: payTermsInput,
     },
   }).eq('id', actionId);
 
@@ -654,9 +789,24 @@ async function execUserCreate(
     reply += `\n⚠️ Invite failed to send: ${inviteError}. Retry via app UI or ask again ("resend invite ${captured.email}") once that intent is wired.`;
   }
   if (!sendInvite) reply += ' No invite sent.';
+  if (warnings.length > 0) {
+    reply += `\n⚠️ Extended fields had issues (user still created):\n${warnings.map((w) => `  • ${w}`).join('\n')}`;
+  }
 
   await writeBot(admin, conv.id, reply);
   await resetAfterSuccess(admin, conv.id);
+}
+
+// coerceRate — accepts number, "23", "$23", "23.5" → number; anything else → null.
+function coerceRate(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return Number.isFinite(v) && v >= 0 ? v : null;
+  if (typeof v === 'string') {
+    const cleaned = v.replace(/[$,\s]/g, '').replace(/\/hr$/i, '');
+    const n = Number(cleaned);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+  return null;
 }
 
 // ─── Update-date executor (shared by set_start_date + set_end_date) ────────
@@ -1334,9 +1484,21 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
   const resolved = enriched._target_resolved as
     | { name: string; email: string; start_date: string | null; end_date: string | null }
     | undefined;
+  const projectResolved = enriched._project_resolved as
+    | { id: number; name: string; code: string } | undefined;
 
   const lines = spec.fields
     .filter((f) => f.applies_if ? f.applies_if(enriched) : true)
+    .filter((f) => {
+      // Hide unused ask_only_if_mentioned fields with no default — they're
+      // encouraged extras (role_title, rates, payment_terms) that should stay
+      // silent when CA didn't provide them.
+      if (!f.ask_only_if_mentioned) return true;
+      if (f.default !== undefined) return true;
+      return enriched[f.name] !== undefined && enriched[f.name] !== null && enriched[f.name] !== '';
+    })
+    // 'client' is consumed into 'project' during resolution; never show it.
+    .filter((f) => f.name !== 'client')
     .map((f) => {
       const v = enriched[f.name];
       let displayValue: string;
@@ -1355,6 +1517,11 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
         return `  End Date: ${cur} → ${String(v)}`;
       }
 
+      // Project: show code alongside name when we have a resolution.
+      if (projectResolved && f.name === 'project') {
+        return `  Project: ${projectResolved.name} (${projectResolved.code})`;
+      }
+
       if (v === null || v === undefined) {
         // Special case: start_date null gates the user out of reminders
         // (send-reminder skips users without a start_date). Flag it so the
@@ -1366,10 +1533,21 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
         }
       } else if (typeof v === 'boolean') {
         displayValue = v ? 'YES' : 'NO';
+      } else if (f.name === 'bill_rate' || f.name === 'pay_rate') {
+        // Money formatting.
+        const n = typeof v === 'number' ? v : Number(String(v).replace(/[^\d.]/g, ''));
+        displayValue = Number.isFinite(n) ? `$${n}/hr` : String(v);
       } else {
         displayValue = String(v);
       }
-      const humanLabel = f.name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+      const labelMap: Record<string, string> = {
+        role_title: 'Position',
+        bill_rate: 'Bill Rate',
+        pay_rate: 'Pay Rate',
+        payment_terms: 'Payment Terms',
+      };
+      const humanLabel = labelMap[f.name] ??
+        f.name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
       return `  ${humanLabel}: ${displayValue}`;
     })
     .join('\n');
