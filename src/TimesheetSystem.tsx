@@ -201,6 +201,7 @@ import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, t
 import ContractAdminDashboard from './roles/ContractAdmin';
 import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
 import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
+import { buildInvoiceLines as sharedBuildInvoiceLines } from './lib/invoiceLines';
 import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
@@ -3670,26 +3671,15 @@ const TimesheetSystem = () => {
   }
 
   function buildInvoiceLines(userId: string, periodStart: string, periodEnd: string, rate: number): InvoiceLine[] {
-    const startD = parseLocalDate(periodStart), endD = parseLocalDate(periodEnd);
-    const userTimesheets = timesheets.filter(t => {
-      if (t.userId !== userId || t.status !== 'approved') return false;
-      const weekMon = parseLocalDate(t.weekStart);
-      const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
-      return weekMon <= endD && weekSun >= startD;
-    });
-    return userTimesheets
-      .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
-      .map(ts => {
-        const weekMon = parseLocalDate(ts.weekStart);
-        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4); // Keep Fri for invoice label
-        let hours = 0;
-        Object.entries(ts.entries).forEach(([dateKey, entry]) => {
-          const d = parseLocalDate(dateKey);
-          if (d >= startD && d <= endD) hours += parseFloat((entry as TimeEntry)?.hours || '0');
-        });
-        return { weekStart: ts.weekStart, weekEndingFri: formatDate(weekFri), hours: parseFloat(hours.toFixed(2)), rate, amount: parseFloat((hours * rate).toFixed(2)) };
-      })
-      .filter(l => l.hours > 0);
+    // Delegates to the shared lib. TimeEntry.hours is stringly-typed here but
+    // the lib accepts { hours: string }, matching.
+    return sharedBuildInvoiceLines(
+      timesheets.map(t => ({ userId: t.userId, weekStart: t.weekStart, status: t.status, entries: t.entries as Record<string, { hours: string }> })),
+      userId,
+      periodStart,
+      periodEnd,
+      rate,
+    );
   }
 
   const submitInvoice = async () => {

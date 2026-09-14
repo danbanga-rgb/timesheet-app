@@ -11,6 +11,7 @@ import { X } from 'lucide-react';
 import PayeePicker from './PayeePicker';
 import type { PayeeCandidate } from './types';
 import { supabase } from '../../supabaseClient';
+import { buildInvoiceLines, type InvoiceLine } from '../../lib/invoiceLines';
 
 // Types imported/duplicated from TimesheetSystem — kept minimal so the module
 // is standalone. Full Invoice/PaymentProfile shapes live in the monolith.
@@ -70,12 +71,6 @@ interface Props {
   paymentMethodFromProfile: (profile: PaymentProfileLite | null) => 'Intuit' | 'Convera' | '';
 }
 
-interface ManualLine {
-  periodStart: string;   // YYYY-MM-DD
-  hours: number;
-  rate: number;
-}
-
 const CURRENCIES = ['USD', 'EUR', 'GBP'] as const;
 const PAY_TERMS = ['NET15', 'NET30', 'NET45', 'NET60'] as const;
 
@@ -90,7 +85,7 @@ export default function ManualInvoiceModal({
   const [paymentMethodOverride, setPaymentMethodOverride] = useState<'Intuit' | 'Convera' | ''>('');
   const [currency, setCurrency] = useState<string>('USD');
   const [paymentTerms, setPaymentTerms] = useState<string>('NET30');
-  const [lines, setLines] = useState<ManualLine[]>([]);
+  const [lines, setLines] = useState<InvoiceLine[]>([]);
   const [invoiceNumber, setInvoiceNumber] = useState<string>('');
   const [invoiceNumberEdited, setInvoiceNumberEdited] = useState(false);
   const [payOnDate, setPayOnDate] = useState<string>('');
@@ -135,31 +130,14 @@ export default function ManualInvoiceModal({
   const lastDay = new Date(year, month, 0).getDate();
   const periodEnd = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-  // Slice M4 — timesheet auto-populate. Weeks whose Sunday-end falls within
-  // the selected month are pulled in; sum(hours) across the week's entries is
-  // the week's total. Consistent with the consolidation monthly rollup.
-  const timesheetLines = useMemo<ManualLine[]>(() => {
+  // Slice M4 — timesheet auto-populate. Reuses the canonical buildInvoiceLines
+  // (extracted from TimesheetSystem.buildInvoiceLines) so partial-week
+  // splitting matches contractor-submitted invoices exactly. A week spanning
+  // Jul 27–Aug 2 contributes only its Aug 1–2 day-cells to an Aug 2026 invoice.
+  const timesheetLines = useMemo<InvoiceLine[]>(() => {
     if (!selectedUser || selectedUser.role !== 'timesheetuser') return [];
-    const monthNum = month;
-    const yearNum = year;
-    return timesheets
-      .filter(ts => ts.userId === selectedUser.id && ts.status === 'approved')
-      .filter(ts => {
-        const [y, m, d] = ts.weekStart.split('-').map(Number);
-        const monday = new Date(y, m - 1, d);
-        const sunday = new Date(monday);
-        sunday.setDate(monday.getDate() + 6);
-        return sunday.getFullYear() === yearNum && sunday.getMonth() + 1 === monthNum;
-      })
-      .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
-      .map(ts => {
-        const total = Object.values(ts.entries ?? {}).reduce((s, e) => {
-          const h = Number(e.hours);
-          return s + (Number.isFinite(h) ? h : 0);
-        }, 0);
-        return { periodStart: ts.weekStart, hours: total, rate: 0 };
-      });
-  }, [selectedUser, timesheets, year, month]);
+    return buildInvoiceLines(timesheets, selectedUser.id, periodStart, periodEnd, 0);
+  }, [selectedUser, timesheets, periodStart, periodEnd]);
 
   const [defaultPayRate, setDefaultPayRate] = useState<number | null>(null);
 
@@ -187,7 +165,7 @@ export default function ManualInvoiceModal({
 
   // Timesheet-based total for variance calculation.
   const timesheetTotalHours = useMemo(
-    () => timesheetLines.reduce((s, l) => s + l.hours, 0),
+    () => timesheetLines.reduce((s, l) => s + (l.hours ?? 0), 0),
     [timesheetLines],
   );
 
@@ -200,9 +178,20 @@ export default function ManualInvoiceModal({
     setError(null);
     if (timesheetLines.length > 0) {
       const rate = defaultPayRate ?? 0;
-      setLines(timesheetLines.map(l => ({ ...l, rate })));
+      setLines(timesheetLines.map(l => ({
+        ...l,
+        rate,
+        amount: parseFloat(((l.hours ?? 0) * rate).toFixed(2)),
+      })));
     } else {
-      setLines([{ periodStart: periodEnd, hours: 0, rate: defaultPayRate ?? 0 }]);
+      // Fall back to a single lump-sum line dated to period end.
+      setLines([{
+        weekStart: periodEnd,
+        weekEndingFri: periodEnd,
+        hours: 0,
+        rate: defaultPayRate ?? 0,
+        amount: 0,
+      }]);
     }
   }, [selectedUserId, defaultPayRate, timesheetLines.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -211,7 +200,11 @@ export default function ManualInvoiceModal({
     if (!selectedUser || selectedUser.role !== 'timesheetuser') return;
     if (timesheetLines.length > 0) {
       const rate = defaultPayRate ?? lines[0]?.rate ?? 0;
-      setLines(timesheetLines.map(l => ({ ...l, rate })));
+      setLines(timesheetLines.map(l => ({
+        ...l,
+        rate,
+        amount: parseFloat(((l.hours ?? 0) * (rate ?? 0)).toFixed(2)),
+      })));
     }
   }, [year, month]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -243,7 +236,7 @@ export default function ManualInvoiceModal({
   }, [selectedUser, year, month, invoices, invoiceNumberEdited]);
 
   const totalHours = lines.reduce((s, l) => s + (Number(l.hours) || 0), 0);
-  const totalAmount = lines.reduce((s, l) => s + (Number(l.hours) || 0) * (Number(l.rate) || 0), 0);
+  const totalAmount = lines.reduce((s, l) => s + Number(l.amount || 0), 0);
   const flatRate = totalHours > 0 ? totalAmount / totalHours : (lines[0]?.rate ?? 0);
 
   const dupInvoices = useMemo(() => {
@@ -292,7 +285,16 @@ export default function ManualInvoiceModal({
       project_id: selectedUser.projectId,
       period_start: periodStart,
       period_end: periodEnd,
-      lines: lines.map(l => ({ period_start: l.periodStart, hours: Number(l.hours), rate: Number(l.rate) })),
+      // Canonical InvoiceLine shape — matches contractor-submitted invoices so
+      // the accountant review modal, reconciler, and Convera/Intuit exports all
+      // read these lines with zero special-casing.
+      lines: lines.map(l => ({
+        weekStart: l.weekStart,
+        weekEndingFri: l.weekEndingFri,
+        hours: l.hours,
+        rate: l.rate,
+        amount: l.amount,
+      })),
       total_hours: totalHours || null,
       rate: flatRate || null,
       total_amount: totalAmount,
@@ -466,7 +468,7 @@ export default function ManualInvoiceModal({
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 text-xs text-gray-600">
                       <tr>
-                        <th className="px-3 py-1.5 text-left">Date</th>
+                        <th className="px-3 py-1.5 text-left">Week Ending</th>
                         <th className="px-3 py-1.5 text-right w-24">Hours</th>
                         <th className="px-3 py-1.5 text-right w-24">Rate</th>
                         <th className="px-3 py-1.5 text-right w-28">Amount</th>
@@ -476,23 +478,20 @@ export default function ManualInvoiceModal({
                     <tbody>
                       {lines.map((line, i) => (
                         <tr key={i} className="border-t border-gray-100">
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="date"
-                              value={line.periodStart}
-                              min={periodStart}
-                              max={periodEnd}
-                              onChange={e => setLines(ls => ls.map((l, j) => j === i ? { ...l, periodStart: e.target.value } : l))}
-                              className="w-full px-2 py-1 border border-gray-200 rounded text-sm"
-                            />
+                          <td className="px-3 py-1.5 text-gray-700">
+                            W/E {new Date(line.weekEndingFri + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                           </td>
                           <td className="px-3 py-1.5">
                             <input
                               type="number"
                               step="0.25"
                               min="0"
-                              value={line.hours || ''}
-                              onChange={e => setLines(ls => ls.map((l, j) => j === i ? { ...l, hours: Number(e.target.value) } : l))}
+                              value={line.hours ?? ''}
+                              onChange={e => setLines(ls => ls.map((l, j) => {
+                                if (j !== i) return l;
+                                const h = Number(e.target.value);
+                                return { ...l, hours: h, amount: parseFloat((h * (l.rate ?? 0)).toFixed(2)) };
+                              }))}
                               className="w-full px-2 py-1 border border-gray-200 rounded text-sm text-right"
                             />
                           </td>
@@ -501,13 +500,17 @@ export default function ManualInvoiceModal({
                               type="number"
                               step="0.01"
                               min="0"
-                              value={line.rate || ''}
-                              onChange={e => setLines(ls => ls.map((l, j) => j === i ? { ...l, rate: Number(e.target.value) } : l))}
+                              value={line.rate ?? ''}
+                              onChange={e => setLines(ls => ls.map((l, j) => {
+                                if (j !== i) return l;
+                                const r = Number(e.target.value);
+                                return { ...l, rate: r, amount: parseFloat(((l.hours ?? 0) * r).toFixed(2)) };
+                              }))}
                               className="w-full px-2 py-1 border border-gray-200 rounded text-sm text-right"
                             />
                           </td>
                           <td className="px-3 py-1.5 text-right font-medium">
-                            ${((line.hours || 0) * (line.rate || 0)).toFixed(2)}
+                            ${(line.amount ?? 0).toFixed(2)}
                           </td>
                           <td className="px-3 py-1.5 text-center">
                             {lines.length > 1 && (
@@ -542,7 +545,10 @@ export default function ManualInvoiceModal({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setLines(ls => [...ls, { periodStart: periodEnd, hours: 0, rate: ls[ls.length - 1]?.rate ?? 0 }])}
+                  onClick={() => setLines(ls => {
+                    const lastRate = ls[ls.length - 1]?.rate ?? defaultPayRate ?? 0;
+                    return [...ls, { weekStart: periodEnd, weekEndingFri: periodEnd, hours: 0, rate: lastRate, amount: 0 }];
+                  })}
                   className="mt-2 text-xs text-indigo-600 hover:underline"
                 >
                   + Add line
