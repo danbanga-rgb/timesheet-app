@@ -202,7 +202,10 @@ STRICT CLASSIFICATION RULES:
 If the user's intent matches one of the available intents, return JSON:
 {"intent": "<intent-name>", "fields": { ...extracted-field-values }}
 
-If unclear or unmatched:
+If the user sent a polite dismissal / closing statement / chitchat that ends the current thread ("thanks", "no worries", "later", "I'll take it up with X", "I'll ask them", "never mind", "no thanks", "ok cool", "got it", "bye"), return JSON:
+{"intent": null, "chitchat_close": true}
+
+Otherwise if unclear or unmatched:
 {"intent": null, "suggested_reply": "Short reply describing what you CAN do — create users, set/update start or end dates, look up a single user's details, or list users matching filters."}
 
 Extract initial field values from the message for the classified intent:
@@ -232,6 +235,13 @@ User's message: """${msg.content}"""`;
   const intent = (parsed?.intent as string | null) ?? null;
 
   if (!intent) {
+    // Slice 6: chitchat close — acknowledge briefly and stay idle. Don't dump
+    // the capabilities list on polite closes ("I'll ask them", "thanks",
+    // "later"). CA-facing polish; without this, the bot feels naggy.
+    if (parsed?.chitchat_close === true) {
+      await writeBot(admin, conv.id, 'Got it.');
+      return;
+    }
     const reply = (parsed?.suggested_reply as string) ??
       "I'm not sure what you'd like to do. Try 'add Sarah Chen as timesheetuser starting Monday' for example.";
     await writeBot(admin, conv.id, reply);
@@ -277,7 +287,9 @@ User's message: """${msg.content}"""`;
     phase: 'collecting',
     started_at: new Date().toISOString(),
     last_activity_at: new Date().toISOString(),
-    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    // Slice 5: CA treats chat as always-there. `/clear` is the explicit end.
+    // 24h collecting timeout is a safety net for truly abandoned sessions.
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
   }).eq('id', conv.id);
 
   // Hand off to the LLM-driven collecting loop. It uses the same latest message
@@ -485,16 +497,17 @@ async function handleConfirmation(
   jwt: string,
 ): Promise<void> {
   const spec = findIntent(conv.intent!)!;
-  const confirmPrompt = `The user was asked to confirm creating something with these values:
+  const confirmPrompt = `The user was asked to confirm ${spec.description.toLowerCase()} with these values:
 ${JSON.stringify(conv.captured, null, 2)}
 
 Their reply: """${msg.content}"""
 
 Return JSON:
-{"action": "yes" | "no" | "edit" | "unknown", "edits": {"field-name": "new-value", ...}}
+{"action": "yes" | "no" | "edit" | "interrupt" | "unknown", "edits": {"field-name": "new-value", ...}, "interrupt_hint": "brief description of what they now want to do"}
 - "yes": user confirmed / said YES / go ahead / proceed
 - "no": user cancelled / declined
 - "edit": user is correcting one or more field values (list them in "edits")
+- "interrupt": user completely switched topics — starting a new intent instead of answering the confirmation. Signals: they asked a lookup question, mentioned a different person, started a new list query, said "wait, first..." etc.
 - "unknown": can't tell — bot will re-ask`;
 
   const parsed = await callClaude(confirmPrompt);
@@ -507,6 +520,16 @@ Return JSON:
   }
   if (action === 'no') {
     await writeBot(admin, conv.id, 'Cancelled. Nothing was done.');
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+  if (action === 'interrupt') {
+    // Slice 4: user switched intent mid-confirmation. Offer a clean switch
+    // rather than stonewalling. Cancel the pending intent so the user
+    // re-sends the new query on a fresh conversation via handleIdle.
+    const hint = typeof parsed?.interrupt_hint === 'string' ? parsed.interrupt_hint : 'a new request';
+    await writeBot(admin, conv.id,
+      `Looks like you\'re switching to ${hint}. I\'ll cancel the pending ${spec.description.toLowerCase()} — send your new question and I\'ll pick it up. (Reply YES first if you actually meant to confirm.)`);
     await setPhase(admin, conv.id, 'cancelled');
     return;
   }
