@@ -200,6 +200,8 @@ import {
 import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
 import ContractAdminDashboard from './roles/ContractAdmin';
 import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
+import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
+import { buildInvoiceLines as sharedBuildInvoiceLines } from './lib/invoiceLines';
 import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
@@ -252,7 +254,7 @@ interface UserProfile {
   id: string;
   username: string;
   name: string;
-  role: 'timesheetuser' | 'manager' | 'accountant' | 'admin' | 'vendormanager' | 'contract_admin';
+  role: 'timesheetuser' | 'manager' | 'accountant' | 'admin' | 'vendormanager' | 'contract_admin' | 'external_payee';
   managerId: string | null;
   email: string;
   country: string;
@@ -374,7 +376,8 @@ interface Invoice {
   paymentMethodOverride: string | null; // accountant-editable: 'Intuit' or 'Convera'
   isVendorInvoice: boolean;
   vendorManagerId: string | null;
-  source: 'direct' | 'imported' | null;
+  source: 'direct' | 'imported' | 'manual' | null;
+  createdBy: string | null;  // profiles.id of accountant who created a source='manual' invoice; NULL otherwise
   reconciliationStatus: 'matched' | 'mismatch' | 'unverifiable' | null;
   reconciliationDelta: number | null;
   reconciliationNotes: string | null;
@@ -1246,7 +1249,9 @@ const TimesheetSystem = () => {
   const [invoiceMonthPreset, setInvoiceMonthPreset] = useState<Set<string>>(new Set());
   const [invoicePayOnPreset, setInvoicePayOnPreset] = useState<Set<string>>(new Set()); // empty=all, 'none'=not assigned, 'YYYY-MM-DD'=specific date
   const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState<Set<string>>(new Set()); // empty=all
+  const [invoiceSourceFilter, setInvoiceSourceFilter] = useState<'all' | 'contractor' | 'manual'>('all');
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
+  const [showManualInvoiceModal, setShowManualInvoiceModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
   const [converaMatchingView, setConveraMatchingView] = useState<'profiles' | 'beneficiaries'>('profiles');
   const [copiedVendorId, setCopiedVendorId] = useState<string | null>(null);
@@ -3641,7 +3646,8 @@ const TimesheetSystem = () => {
       paymentMethodOverride: (r.payment_method as string) || null,
       isVendorInvoice: !!(r.is_vendor_invoice as boolean),
       vendorManagerId: (r.vendor_manager_id as string) || null,
-      source: (r.source as 'direct' | 'imported') || null,
+      source: (r.source as Invoice['source']) || null,
+      createdBy: (r.created_by as string) || null,
       reconciliationStatus: (r.reconciliation_status as 'matched' | 'mismatch' | 'unverifiable') || null,
       reconciliationDelta: r.reconciliation_delta != null ? Number(r.reconciliation_delta) : null,
       reconciliationNotes: (r.reconciliation_notes as string) || null,
@@ -3665,26 +3671,15 @@ const TimesheetSystem = () => {
   }
 
   function buildInvoiceLines(userId: string, periodStart: string, periodEnd: string, rate: number): InvoiceLine[] {
-    const startD = parseLocalDate(periodStart), endD = parseLocalDate(periodEnd);
-    const userTimesheets = timesheets.filter(t => {
-      if (t.userId !== userId || t.status !== 'approved') return false;
-      const weekMon = parseLocalDate(t.weekStart);
-      const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
-      return weekMon <= endD && weekSun >= startD;
-    });
-    return userTimesheets
-      .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
-      .map(ts => {
-        const weekMon = parseLocalDate(ts.weekStart);
-        const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4); // Keep Fri for invoice label
-        let hours = 0;
-        Object.entries(ts.entries).forEach(([dateKey, entry]) => {
-          const d = parseLocalDate(dateKey);
-          if (d >= startD && d <= endD) hours += parseFloat((entry as TimeEntry)?.hours || '0');
-        });
-        return { weekStart: ts.weekStart, weekEndingFri: formatDate(weekFri), hours: parseFloat(hours.toFixed(2)), rate, amount: parseFloat((hours * rate).toFixed(2)) };
-      })
-      .filter(l => l.hours > 0);
+    // Delegates to the shared lib. TimeEntry.hours is stringly-typed here but
+    // the lib accepts { hours: string }, matching.
+    return sharedBuildInvoiceLines(
+      timesheets.map(t => ({ userId: t.userId, weekStart: t.weekStart, status: t.status, entries: t.entries as Record<string, { hours: string }> })),
+      userId,
+      periodStart,
+      periodEnd,
+      rate,
+    );
   }
 
   const submitInvoice = async () => {
@@ -9111,6 +9106,8 @@ const TimesheetSystem = () => {
             let filtered = [...preStatusFiltered];
             if (accountantInvoiceFilter.size > 0) filtered = filtered.filter(i => accountantInvoiceFilter.has(i.status));
             if (invoicePaymentMethodPreset.size > 0) filtered = filtered.filter(i => invoicePaymentMethodPreset.has(paymentMethod(i)));
+            if (invoiceSourceFilter === 'manual') filtered = filtered.filter(i => i.source === 'manual');
+            else if (invoiceSourceFilter === 'contractor') filtered = filtered.filter(i => i.source !== 'manual');
             filtered = filtered.sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
 
             const usdFiltered = filtered.filter(i => !i.currency || i.currency === 'USD');
@@ -9232,6 +9229,27 @@ const TimesheetSystem = () => {
                         );
                       })()}
                     </div>
+                    {/* Source pills */}
+                    <div className="flex flex-wrap gap-1.5 items-center">
+                      <span className="text-xs font-medium text-gray-600 mr-1">Source:</span>
+                      {(['all', 'contractor', 'manual'] as const).map(k => {
+                        const count = k === 'all'
+                          ? preStatusFiltered.length
+                          : k === 'manual'
+                            ? preStatusFiltered.filter(i => i.source === 'manual').length
+                            : preStatusFiltered.filter(i => i.source !== 'manual').length;
+                        const active = invoiceSourceFilter === k;
+                        const label = k === 'all' ? 'All' : k === 'contractor' ? 'Contractor' : 'Manual';
+                        const activeColor = k === 'manual' ? 'bg-amber-600 border-amber-600 text-white' : 'bg-gray-700 border-gray-700 text-white';
+                        const inactiveColor = k === 'manual' ? 'bg-white text-amber-700 border-amber-300 hover:border-amber-500' : 'bg-white text-gray-600 border-gray-300 hover:border-gray-500';
+                        return (
+                          <button key={k} onClick={() => setInvoiceSourceFilter(k)}
+                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? activeColor : inactiveColor}`}>
+                            {label} <span className="opacity-70">({count})</span>
+                          </button>
+                        );
+                      })}
+                    </div>
                     {/* Contractor picker */}
                     <div className="relative">
                       <button
@@ -9314,7 +9332,8 @@ const TimesheetSystem = () => {
                         </div>
                       </div>
                     </div>
-                    <div className="flex justify-end gap-2">
+                    <div className="flex justify-end gap-2 flex-wrap">
+                      <button onClick={() => setShowManualInvoiceModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm"><FileText className="w-4 h-4" /> + Manual Invoice</button>
                       <button onClick={() => { setShowConveraMatchingModal(true); loadConveraBeneficiaries(); loadConveraLastPaymentDates(); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 text-sm"><Users className="w-4 h-4" /> Convera Matching</button>
                       <button onClick={() => exportInvoicesCSV(filtered)} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"><Download className="w-4 h-4" /> Export CSV</button>
                       <button onClick={() => { setInvoicePaymentMethodPreset(new Set(['Convera'])); openConveraBatchPreview(filtered); }} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 text-sm"><Download className="w-4 h-4" /> Convera Batch</button>
@@ -9521,6 +9540,7 @@ const TimesheetSystem = () => {
                                     <td className="border border-gray-200 px-4 py-3 text-center">
                                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[inv.status]}`}>{inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}</span>
                                       {inv.corrected && <span className="ml-1 px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">Corrected</span>}
+                                      {inv.source === 'manual' && <span className="ml-1 px-2 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800" title="Created by accountant via + Manual Invoice">Manual</span>}
                                     </td>
                                     <td className="border border-gray-200 px-4 py-3 text-center">{reconCell(inv)}</td>
                                     <td className="border border-gray-200 px-4 py-3 text-center" onClick={e => e.stopPropagation()}>
@@ -9724,6 +9744,7 @@ const TimesheetSystem = () => {
                                           {inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}
                                         </span>
                                         {inv.corrected && <span className="ml-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">Corrected</span>}
+                                        {inv.source === 'manual' && <span className="ml-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">Manual</span>}
                                       </td>
                                       <td className="border border-gray-200 px-4 py-2 text-center">{reconCell(inv, true)}</td>
                                       <td className="border border-gray-200 px-4 py-2 text-center" onClick={e => e.stopPropagation()}>
@@ -12988,10 +13009,15 @@ const TimesheetSystem = () => {
                         </div>
                       </div>
                     ) : (
-                      <button onClick={() => setConveraBatchManualEditor({ open: true, search: '', benef: null, amount: '', ref1: '' })}
-                        className="w-full py-2 border border-dashed border-yellow-400 rounded-lg text-sm text-yellow-700 hover:bg-yellow-50 transition-colors">
-                        + Add manual row (for beneficiaries outside the invoice flow)
-                      </button>
+                      <div className="space-y-1.5">
+                        <button onClick={() => setConveraBatchManualEditor({ open: true, search: '', benef: null, amount: '', ref1: '' })}
+                          className="w-full py-2 border border-dashed border-yellow-400 rounded-lg text-sm text-yellow-700 hover:bg-yellow-50 transition-colors">
+                          + Add manual row (for beneficiaries outside the invoice flow)
+                        </button>
+                        <p className="text-xs text-gray-500 text-center">
+                          Tip: for a persistent record, create a <span className="font-medium">+ Manual Invoice</span> on the Invoices tab first — it lands in the batch here automatically.
+                        </p>
+                      </div>
                     )}
 
                     {converaBatchExcluded.length > 0 && (() => {
@@ -13683,6 +13709,71 @@ const TimesheetSystem = () => {
               </div>
             );
           })()}
+
+          {/* Manual Invoice Modal — Slice M3 */}
+          <ManualInvoiceModal
+            open={showManualInvoiceModal}
+            onClose={() => setShowManualInvoiceModal(false)}
+            users={users.map(u => ({
+              id: u.id,
+              name: u.name,
+              email: u.email,
+              role: u.role,
+              countryCode: u.country || null,
+              projectId: u.projectId,
+              invoiceEnabled: u.invoiceEnabled,
+              paymentTerms: u.paymentTerms,
+            }))}
+            paymentProfiles={paymentProfiles.map(p => ({
+              id: p.id,
+              userId: p.userId,
+              profileName: p.profileName,
+              companyName: p.companyName,
+              iban: p.iban,
+              swift: p.swift,
+              bankName: p.bankName,
+              qbVendorName: p.qbVendorName,
+              isDefault: p.isDefault,
+              paymentEmail: p.paymentEmail,
+              bankAddress: p.bankAddress,
+              bankBranch: p.bankBranch,
+              companyAddress: p.companyAddress,
+              country: p.country,
+              converaBeneficiaryId: p.converaBeneficiaryId ?? null,
+            }))}
+            converaBeneficiaries={converaBeneficiaries.map(b => ({
+              id: b.id,
+              shortName: b.shortName,
+              beneficiaryName: b.beneficiaryName,
+              vendorId: b.vendorId,
+              bankName: b.bankName,
+              bankAccount: b.bankAccount,
+              currency: b.currency,
+            }))}
+            invoices={invoices.map(i => ({
+              id: i.id,
+              userId: i.userId,
+              periodStart: i.periodStart,
+              invoiceNumber: i.invoiceNumber,
+              status: i.status,
+            }))}
+            timesheets={timesheets.map(t => ({
+              id: t.id,
+              userId: t.userId,
+              weekStart: t.weekStart,
+              status: t.status,
+              entries: Object.fromEntries(Object.entries(t.entries).map(([k, v]) => [k, { hours: v.hours }])),
+            }))}
+            currentAccountantId={currentUser.id}
+            onCreated={() => { fetchUsers(); fetchPaymentProfiles(); fetchInvoices(); }}
+            paymentMethodFromProfile={(profile) => {
+              if (!profile) return '';
+              // Simplified — no full invoice context here, so we do a country-based fallback
+              // consistent with paymentMethod() elsewhere.
+              const c = (profile.country || '').toUpperCase();
+              return c === 'US' ? 'Intuit' : 'Convera';
+            }}
+          />
 
           {/* Convera Matching Modal */}
           {showConveraMatchingModal && (() => {
