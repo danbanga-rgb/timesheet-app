@@ -457,6 +457,12 @@ export default function ManualInvoiceModal({
                         </div>
                       )}
                     </div>
+                    {method === 'Convera' && !bene && (
+                      <div className="mt-2 text-xs text-amber-800 bg-amber-100/60 border border-amber-200 rounded px-2 py-1 flex items-start gap-1">
+                        <span>⚠</span>
+                        <span>No Convera beneficiary linked to this profile. The invoice will save but Convera Batch export will skip it until you link a beneficiary (Payment Profiles → Import Beneficiaries).</span>
+                      </div>
+                    )}
                     {beneNameDiffers && (
                       <div className="mt-2 text-xs text-amber-700 flex items-start gap-1">
                         <span>⚠</span>
