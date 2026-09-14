@@ -30,6 +30,17 @@ interface PaymentProfileLite {
   bankBranch?: string | null;
   companyAddress?: string | null;
   country?: string | null;
+  converaBeneficiaryId?: number | null;
+}
+
+interface ConveraBeneficiaryLite {
+  id: number;
+  shortName: string;
+  beneficiaryName: string;
+  vendorId: string | null;
+  bankName: string | null;
+  bankAccount: string;
+  currency: string;
 }
 
 interface InvoiceLite {
@@ -66,6 +77,7 @@ interface Props {
   paymentProfiles: PaymentProfileLite[];
   invoices: InvoiceLite[];
   timesheets: TimesheetLite[];
+  converaBeneficiaries: ConveraBeneficiaryLite[];
   currentAccountantId: string;
   onCreated: () => void;
   paymentMethodFromProfile: (profile: PaymentProfileLite | null) => 'Intuit' | 'Convera' | '';
@@ -103,8 +115,8 @@ function buildLinesForSave(args: {
 const PAY_TERMS = ['NET15', 'NET30', 'NET45', 'NET60'] as const;
 
 export default function ManualInvoiceModal({
-  open, onClose, users, paymentProfiles, invoices, timesheets, currentAccountantId, onCreated,
-  paymentMethodFromProfile,
+  open, onClose, users, paymentProfiles, invoices, timesheets, converaBeneficiaries,
+  currentAccountantId, onCreated, paymentMethodFromProfile,
 }: Props) {
   const [selectedUserId, setSelectedUserId] = useState<string>('');
   const [year, setYear] = useState<number>(new Date().getFullYear());
@@ -264,8 +276,6 @@ export default function ManualInvoiceModal({
       && inv.periodStart <= periodEnd);
   }, [invoices, selectedUser, periodStart, periodEnd]);
 
-  const noQbVendor = selectedProfile && !selectedProfile.qbVendorName;
-
   const canSave =
     !!selectedUser
     && !!selectedProfile
@@ -382,6 +392,86 @@ export default function ManualInvoiceModal({
 
           {selectedUser && (
             <>
+              {/* Payment target — surfaces the beneficiary details so the accountant
+                  is unambiguously routing the money to the right entity. Especially
+                  important when payee name != beneficiary name (Himavath → Enugala). */}
+              {selectedProfile && (() => {
+                const method = paymentMethodOverride || paymentMethodFromProfile(selectedProfile);
+                const bene = selectedProfile.converaBeneficiaryId
+                  ? converaBeneficiaries.find(b => b.id === selectedProfile.converaBeneficiaryId)
+                  : null;
+                const beneNameDiffers = bene && bene.beneficiaryName
+                  && bene.beneficiaryName.toLowerCase() !== selectedUser.name.toLowerCase();
+                const accent = method === 'Intuit' ? 'green' : method === 'Convera' ? 'purple' : 'gray';
+                const borderCls = accent === 'green' ? 'border-green-200 bg-green-50/50' : accent === 'purple' ? 'border-purple-200 bg-purple-50/50' : 'border-gray-200 bg-gray-50';
+                const labelCls = accent === 'green' ? 'text-green-700' : accent === 'purple' ? 'text-purple-700' : 'text-gray-600';
+                const valueCls = accent === 'green' ? 'text-green-900' : accent === 'purple' ? 'text-purple-900' : 'text-gray-800';
+                return (
+                  <div className={`rounded-lg border p-3 ${borderCls} text-sm`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={`text-xs font-semibold uppercase tracking-wide ${labelCls}`}>
+                        Payment target · {method || 'Unassigned'}
+                      </span>
+                      {userProfiles.length > 1 && (
+                        <select
+                          value={selectedProfile.id}
+                          onChange={e => setSelectedProfileId(Number(e.target.value))}
+                          className="text-xs px-2 py-0.5 border border-gray-300 rounded bg-white"
+                        >
+                          {userProfiles.map(p => (
+                            <option key={p.id} value={p.id}>{p.profileName}{p.isDefault ? ' (default)' : ''}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                      <div>
+                        <span className="text-gray-500">Company: </span>
+                        <span className={`font-medium ${valueCls}`}>{selectedProfile.companyName || selectedProfile.profileName || '—'}</span>
+                      </div>
+                      {bene && (
+                        <div>
+                          <span className="text-gray-500">Bene: </span>
+                          <span className={`font-medium ${valueCls}`}>{bene.shortName || bene.beneficiaryName}</span>
+                          {bene.vendorId && <span className="ml-1 text-gray-400">({bene.vendorId})</span>}
+                        </div>
+                      )}
+                      {selectedProfile.iban && (
+                        <div className="col-span-2 font-mono">
+                          <span className="text-gray-500">IBAN: </span>
+                          <span className={valueCls}>{selectedProfile.iban}</span>
+                          {selectedProfile.swift && <span className="ml-2 text-gray-500">SWIFT </span>}
+                          {selectedProfile.swift && <span className={valueCls}>{selectedProfile.swift}</span>}
+                        </div>
+                      )}
+                      {(selectedProfile.bankName || bene?.bankName) && (
+                        <div className="col-span-2">
+                          <span className="text-gray-500">Bank: </span>
+                          <span className={valueCls}>{selectedProfile.bankName || bene?.bankName}</span>
+                        </div>
+                      )}
+                      {method === 'Intuit' && selectedProfile.paymentEmail && (
+                        <div className="col-span-2">
+                          <span className="text-gray-500">Email: </span>
+                          <span className={valueCls}>{selectedProfile.paymentEmail}</span>
+                        </div>
+                      )}
+                    </div>
+                    {beneNameDiffers && (
+                      <div className="mt-2 text-xs text-amber-700 flex items-start gap-1">
+                        <span>⚠</span>
+                        <span>Payee is <span className="font-medium">{selectedUser.name}</span> but Convera beneficiary is <span className="font-medium">{bene?.beneficiaryName}</span>. Confirm this is the intended routing.</span>
+                      </div>
+                    )}
+                    {!selectedProfile.qbVendorName && (
+                      <div className="mt-2 text-xs text-yellow-800">
+                        No QB vendor mapping on this profile — invoice will save but won't push to QB until mapped in Payment Profiles.
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Period */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -410,22 +500,8 @@ export default function ManualInvoiceModal({
                 </div>
               </div>
 
-              {/* Payment profile picker (when multiple) + method + currency */}
+              {/* Payment method + currency + terms + pay-on-date */}
               <div className="grid grid-cols-2 gap-3">
-                {userProfiles.length > 1 && (
-                  <div className="col-span-2">
-                    <label className="block text-xs font-semibold text-gray-600 mb-1.5">Payment profile</label>
-                    <select
-                      value={selectedProfile?.id ?? ''}
-                      onChange={e => setSelectedProfileId(Number(e.target.value))}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
-                    >
-                      {userProfiles.map(p => (
-                        <option key={p.id} value={p.id}>{p.profileName}{p.isDefault ? ' (default)' : ''}{p.iban ? ` — ${p.iban.slice(0, 10)}…` : ''}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
                 <div>
                   <label className="block text-xs font-semibold text-gray-600 mb-1.5">Payment method</label>
                   <select
@@ -599,12 +675,6 @@ export default function ManualInvoiceModal({
                     />
                     Create anyway
                   </label>
-                </div>
-              )}
-
-              {noQbVendor && (
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 text-xs text-yellow-900">
-                  This payee has no QB vendor mapping — invoice will save, but won't push to QB until you set qb_vendor_name in Payment Profiles.
                 </div>
               )}
 

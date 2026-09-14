@@ -13739,6 +13739,16 @@ const TimesheetSystem = () => {
               bankBranch: p.bankBranch,
               companyAddress: p.companyAddress,
               country: p.country,
+              converaBeneficiaryId: p.converaBeneficiaryId ?? null,
+            }))}
+            converaBeneficiaries={converaBeneficiaries.map(b => ({
+              id: b.id,
+              shortName: b.shortName,
+              beneficiaryName: b.beneficiaryName,
+              vendorId: b.vendorId,
+              bankName: b.bankName,
+              bankAccount: b.bankAccount,
+              currency: b.currency,
             }))}
             invoices={invoices.map(i => ({
               id: i.id,
