@@ -141,6 +141,32 @@ export const INTENTS: IntentSpec[] = [
     ],
   },
   {
+    name: 'user.update_pay_rate',
+    required_permission: 'user.update_pay_rate',
+    description: "Update an existing user's pay rate (what we pay the contractor)",
+    extraction_hint:
+      "The user wants to change/increase/set someone's pay rate. Signals: \"increase X's pay rate to Y\", \"set X pay to $Z/hr\", \"X's new pay is 25\", \"raise X to 28/hr\". Extract target (name or email) + rate (number) + optional effective_from + optional reason/notes.",
+    fields: [
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'rate', input_type: 'text', required: true, hint: 'new pay rate USD/hr (number only, no $ or /hr)' },
+      { name: 'effective_from', input_type: 'date', validate: 'date', hint: 'when the new rate takes effect; defaults to today' },
+      { name: 'notes', input_type: 'text', ask_only_if_mentioned: true, hint: 'optional reason / context for the change' },
+    ],
+  },
+  {
+    name: 'user.update_bill_rate',
+    required_permission: 'user.update_bill_rate',
+    description: "Update an existing user's bill rate (what we charge the client)",
+    extraction_hint:
+      "The user wants to change/increase/set someone's bill rate. Signals: \"raise X's bill rate to Y\", \"we're billing X at $Z now\", \"X's new bill rate is 90\". Extract target (name or email) + rate (number) + optional effective_from + optional reason/notes.",
+    fields: [
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'rate', input_type: 'text', required: true, hint: 'new bill rate USD/hr (number only, no $ or /hr)' },
+      { name: 'effective_from', input_type: 'date', validate: 'date', hint: 'when the new rate takes effect; defaults to today' },
+      { name: 'notes', input_type: 'text', ask_only_if_mentioned: true, hint: 'optional reason / context for the change' },
+    ],
+  },
+  {
     name: 'user.set_start_date',
     required_permission: 'user.set_start_date',
     description: 'Set/update the start date of an existing user',

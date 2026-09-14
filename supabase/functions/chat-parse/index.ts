@@ -20,7 +20,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { findIntent, intentCatalog, type IntentSpec } from './intents.ts';
 import { callClaude } from '../_shared/llm.ts';
-import { currentBillRate, currentPayRate } from '../_shared/rates.ts';
+import { currentBillRate, currentPayRate, setRate } from '../_shared/rates.ts';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -193,6 +193,8 @@ STRICT CLASSIFICATION RULES:
 - user.create: user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts as", "is joining", "new hire".
 - user.set_start_date / user.set_end_date: user is **setting a date on an EXISTING person** (verbs: "set", "update", "change", "ends", "starts on"). If the person doesn't exist yet, fall back to user.create.
 - user.update_country_region: user is **changing an existing user's country** (verbs: "update country", "change country", "move to <country>", "<name> is now in <country>", "<name>'s country is <country>").
+- user.update_pay_rate: user is **changing an existing user's PAY rate** (what we pay them). Verbs: "increase X's pay to Y", "raise X's rate to $Z", "set X's pay rate to N", "X's new pay is $A". If the message says "bill rate" instead of "pay", use user.update_bill_rate.
+- user.update_bill_rate: user is **changing an existing user's BILL rate** (what we charge the client). Verbs: "raise X's bill rate to Y", "we're billing X at $Z now", "X's new bill rate is $N".
 - user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details", "what is X's pay rate?", "X's payrate", "X's bill rate", "X's billrate", "how much does X make/bill", "X's hourly rate"). Rates + dates + project all live on this single profile card.
 - user.list: user is **asking for MULTIPLE users matching a filter** — signals include: "who is on <project>?", "list <role>", "show users with <property>", "which <role> ended...?", "who reports to <name>?", "contractors for <name>", "team for <manager name>", "everyone in <country>". When you see "reports to <X>" or "contractors for <X>", extract that person as vendor_manager.
 - user.count: user is **asking for an aggregate NUMBER, not a list of names** — signals: "how many <role>?", "count of <X>", "total number of <Y>", "just the counts", "just counts not names", "how many onshore + offshore". Uses the same filter fields as user.list. If a prior turn returned a long list and the user follows up with "just count" or "how many", classify as user.count.
@@ -212,6 +214,8 @@ Extract initial field values from the message for the classified intent:
 - user.create: name, email, role, location_type, country, client, project, start_date, end_date, vendor_manager, role_title, pay_rate, bill_rate, payment_terms, invoice_enabled, send_invite
 - user.set_start_date / user.set_end_date: target (name or email), start_date / end_date
 - user.update_country_region: target (name or email), country (ISO code preferred, else full name), optional region
+- user.update_pay_rate: target (name or email), rate (number, no $ or /hr), optional effective_from, optional notes
+- user.update_bill_rate: target (name or email), rate (number, no $ or /hr), optional effective_from, optional notes
 - user.get: target (name or email)
 - user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), role_title (job title like "Data Engineer", "QA", "Developer"), bill_rate_min, bill_rate_max, limit (number)
 - user.count: same fields as user.list except no limit
@@ -448,10 +452,22 @@ Return JSON:
     // for the confirmation summary. Executor re-resolves so identity is safe.
     const u = resolved.user;
     merged.target = u.email;
-    (merged as Record<string, unknown>)._target_resolved = {
+    const resolvedMeta: Record<string, unknown> = {
       id: u.id, name: u.name, email: u.email,
       start_date: u.start_date, end_date: u.end_date,
     };
+    // For rate updates, also fetch current pay/bill so the confirmation shows
+    // before → after unambiguously.
+    if (spec.name === 'user.update_pay_rate') {
+      const cur = await currentPayRate(admin, u.id);
+      resolvedMeta.current_pay_rate = cur?.rate ?? null;
+      resolvedMeta.current_pay_effective_from = cur?.effective_from ?? null;
+    } else if (spec.name === 'user.update_bill_rate') {
+      const cur = await currentBillRate(admin, u.id);
+      resolvedMeta.current_bill_rate = cur?.rate ?? null;
+      resolvedMeta.current_bill_effective_from = cur?.effective_from ?? null;
+    }
+    (merged as Record<string, unknown>)._target_resolved = resolvedMeta;
   }
 
   const stillMissingRequired = computeMissingRequired(spec, merged);
@@ -602,6 +618,8 @@ async function executeIntent(
       await execUserSetDate(admin, conv, actionId, spec.name === 'user.set_start_date' ? 'start_date' : 'end_date');
     } else if (spec.name === 'user.update_country_region') {
       await execUserUpdateCountry(admin, conv, actionId);
+    } else if (spec.name === 'user.update_pay_rate' || spec.name === 'user.update_bill_rate') {
+      await execUserUpdateRate(admin, conv, actionId, spec.name === 'user.update_pay_rate' ? 'pay' : 'bill');
     } else {
       throw new Error(`Executor for ${spec.name} not wired yet`);
     }
@@ -928,6 +946,85 @@ async function execUserUpdateCountry(
   await writeBot(admin, conv.id,
     `✅ ${user.name} (${user.email}) — country set to ${country}${region ? `, region ${region}` : ''} (${location_type}).`);
   await resetAfterSuccess(admin, conv.id);
+}
+
+// ─── Rate update executor (shared by user.update_pay_rate + user.update_bill_rate) ────
+async function execUserUpdateRate(
+  admin: SupabaseClient,
+  conv: Conversation,
+  actionId: string,
+  kind: 'pay' | 'bill',
+): Promise<void> {
+  const target = String(conv.captured.target ?? '').trim();
+  const rateRaw = conv.captured.rate;
+  const rate = coerceRate(rateRaw);
+  const effectiveFrom = String(conv.captured.effective_from ?? '').trim() || todayIso();
+  const notes = conv.captured.notes ? String(conv.captured.notes).trim() : null;
+
+  if (!target) throw new Error('Missing target');
+  if (rate === null) throw new Error(`Rate "${rateRaw}" not recognized. Use a plain number like 25 or 65.`);
+
+  const resolved = await resolveUser(admin, target);
+  if (resolved.kind === 'none') throw new Error(`No user found matching "${target}"`);
+  if (resolved.kind === 'multi') {
+    const list = resolved.candidates.map((c, i) => `  ${i + 1}. ${c.name} (${c.email})`).join('\n');
+    await admin.from('chat_actions').update({
+      status: 'cancelled', completed_at: new Date().toISOString(),
+      action_output: { reason: 'ambiguous_target', candidates: resolved.candidates },
+    }).eq('id', actionId);
+    await writeBot(admin, conv.id,
+      `Multiple matches for "${target}":\n${list}\n\nRe-send with a more specific name or use the email address.`);
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+  const user = resolved.user;
+
+  // Look up existing rate for before/after messaging.
+  const current = kind === 'pay'
+    ? await currentPayRate(admin, user.id)
+    : await currentBillRate(admin, user.id);
+  const previousRate = current?.rate ?? null;
+
+  // Close current row + insert new via setRate helper.
+  try {
+    const inserted = await setRate(admin, {
+      userId: user.id,
+      kind,
+      rate,
+      effectiveFrom,
+      source: `chat:user.update_${kind}_rate`,
+      createdBy: conv.user_id,
+      notes,
+      clientEngagementId: kind === 'bill' ? (current?.client_engagement_id ?? null) : null,
+    });
+
+    // For bill rate: also update the current client_engagements.bill_rate so
+    // read-back paths that haven't migrated to rate_history yet stay accurate.
+    if (kind === 'bill' && current?.client_engagement_id) {
+      await admin.from('client_engagements')
+        .update({ bill_rate: rate })
+        .eq('id', current.client_engagement_id);
+    }
+
+    await admin.from('chat_actions').update({
+      status: 'success', completed_at: new Date().toISOString(),
+      action_output: {
+        user_id: user.id, email: user.email,
+        kind, previous_rate: previousRate, new_rate: rate,
+        effective_from: effectiveFrom, notes,
+        rate_history_id: inserted.id,
+      },
+    }).eq('id', actionId);
+
+    const prevDisp = previousRate != null ? `$${previousRate}/hr` : '(none on file)';
+    const kindLabel = kind === 'pay' ? 'Pay rate' : 'Bill rate';
+    await writeBot(admin, conv.id,
+      `✅ ${user.name} (${user.email}) — ${kindLabel}: ${prevDisp} → $${rate}/hr, effective ${effectiveFrom}.`);
+    await resetAfterSuccess(admin, conv.id);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Rate update failed: ${msg}`);
+  }
 }
 
 // Normalize a country string to a 2-letter ISO code. Accepts already-ISO
@@ -1690,6 +1787,17 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
         const cur = resolved.end_date ?? '(not set)';
         return `  End Date: ${cur} → ${String(v)}`;
       }
+      // Rate updates: show current → new so CA sees the actual delta.
+      if (f.name === 'rate' && spec.name === 'user.update_pay_rate') {
+        const cur = (enriched._target_resolved as { current_pay_rate?: number | null } | undefined)?.current_pay_rate;
+        const curDisp = cur != null ? `$${cur}/hr` : '(not on file)';
+        return `  Pay Rate: ${curDisp} → $${Number(v)}/hr`;
+      }
+      if (f.name === 'rate' && spec.name === 'user.update_bill_rate') {
+        const cur = (enriched._target_resolved as { current_bill_rate?: number | null } | undefined)?.current_bill_rate;
+        const curDisp = cur != null ? `$${cur}/hr` : '(not on file)';
+        return `  Bill Rate: ${curDisp} → $${Number(v)}/hr`;
+      }
 
       // Project: show code alongside name when we have a resolution.
       if (projectResolved && f.name === 'project') {
@@ -1731,7 +1839,9 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
 function needsTargetResolution(intentName: string): boolean {
   return intentName === 'user.set_start_date'
     || intentName === 'user.set_end_date'
-    || intentName === 'user.update_country_region';
+    || intentName === 'user.update_country_region'
+    || intentName === 'user.update_pay_rate'
+    || intentName === 'user.update_bill_rate';
 }
 
 function targetAlreadyResolved(captured: Record<string, unknown>): boolean {
