@@ -72,6 +72,34 @@ interface Props {
 }
 
 const CURRENCIES = ['USD', 'EUR', 'GBP'] as const;
+
+// Builds the canonical lines[] to write on the invoice row. When the
+// accountant's total matches the timesheet sum (within a 0.02h tolerance),
+// preserves the per-week breakdown so the review modal and reconciler show
+// the same weekly pattern as contractor-submitted invoices. When accountant
+// has overridden the total, collapses to a single line at period end.
+function buildLinesForSave(args: {
+  timesheetLines: InvoiceLine[];
+  totalHours: number;
+  rate: number;
+  periodEnd: string;
+}): InvoiceLine[] {
+  const tsSum = args.timesheetLines.reduce((s, l) => s + (l.hours ?? 0), 0);
+  if (args.timesheetLines.length > 0 && Math.abs(args.totalHours - tsSum) <= 0.02) {
+    return args.timesheetLines.map(l => ({
+      ...l,
+      rate: args.rate,
+      amount: parseFloat(((l.hours ?? 0) * args.rate).toFixed(2)),
+    }));
+  }
+  return [{
+    weekStart: args.periodEnd,
+    weekEndingFri: args.periodEnd,
+    hours: args.totalHours,
+    rate: args.rate,
+    amount: parseFloat((args.totalHours * args.rate).toFixed(2)),
+  }];
+}
 const PAY_TERMS = ['NET15', 'NET30', 'NET45', 'NET60'] as const;
 
 export default function ManualInvoiceModal({
@@ -85,7 +113,14 @@ export default function ManualInvoiceModal({
   const [paymentMethodOverride, setPaymentMethodOverride] = useState<'Intuit' | 'Convera' | ''>('');
   const [currency, setCurrency] = useState<string>('USD');
   const [paymentTerms, setPaymentTerms] = useState<string>('NET30');
-  const [lines, setLines] = useState<InvoiceLine[]>([]);
+  // Simplified line model: single total hours + flat rate at the invoice
+  // level. Weekly breakdown for timesheetuser payees is generated at save
+  // time from timesheetLines with the accountant-supplied rate. If accountant
+  // overrides hours away from the timesheet sum, lines collapse to one lump
+  // row dated to period end. This mirrors what the contractor Invoice Approval
+  // modal shows read-only, minus the per-week editing (which adds no value).
+  const [totalHoursInput, setTotalHoursInput] = useState<string>('');
+  const [rateInput, setRateInput] = useState<string>('');
   const [invoiceNumber, setInvoiceNumber] = useState<string>('');
   const [invoiceNumberEdited, setInvoiceNumberEdited] = useState(false);
   const [payOnDate, setPayOnDate] = useState<string>('');
@@ -169,44 +204,25 @@ export default function ManualInvoiceModal({
     [timesheetLines],
   );
 
-  // Reset dependent state when payee changes. Prefill from timesheets if available.
+  // Reset dependent state when payee changes. Prefill hours from TS sum,
+  // rate from rate_history.
   useEffect(() => {
     if (!selectedUser) return;
     setSelectedProfileId(null);
     setPaymentMethodOverride('');
     setInvoiceNumberEdited(false);
     setError(null);
-    if (timesheetLines.length > 0) {
-      const rate = defaultPayRate ?? 0;
-      setLines(timesheetLines.map(l => ({
-        ...l,
-        rate,
-        amount: parseFloat(((l.hours ?? 0) * rate).toFixed(2)),
-      })));
-    } else {
-      // Fall back to a single lump-sum line dated to period end.
-      setLines([{
-        weekStart: periodEnd,
-        weekEndingFri: periodEnd,
-        hours: 0,
-        rate: defaultPayRate ?? 0,
-        amount: 0,
-      }]);
-    }
-  }, [selectedUserId, defaultPayRate, timesheetLines.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedUserId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // When month/year changes for a timesheetuser payee, re-populate.
+  // Auto-prefill hours from the timesheet sum when it changes (payee/period).
   useEffect(() => {
-    if (!selectedUser || selectedUser.role !== 'timesheetuser') return;
-    if (timesheetLines.length > 0) {
-      const rate = defaultPayRate ?? lines[0]?.rate ?? 0;
-      setLines(timesheetLines.map(l => ({
-        ...l,
-        rate,
-        amount: parseFloat(((l.hours ?? 0) * (rate ?? 0)).toFixed(2)),
-      })));
-    }
-  }, [year, month]); // eslint-disable-line react-hooks/exhaustive-deps
+    setTotalHoursInput(timesheetTotalHours > 0 ? timesheetTotalHours.toFixed(2) : '');
+  }, [timesheetTotalHours]);
+
+  // Prefill rate from rate_history once resolved.
+  useEffect(() => {
+    if (defaultPayRate != null) setRateInput(defaultPayRate.toFixed(2));
+  }, [defaultPayRate]);
 
   // Default currency + payment terms + payment method from resolved profile.
   useEffect(() => {
@@ -235,9 +251,10 @@ export default function ManualInvoiceModal({
     setInvoiceNumber(candidate);
   }, [selectedUser, year, month, invoices, invoiceNumberEdited]);
 
-  const totalHours = lines.reduce((s, l) => s + (Number(l.hours) || 0), 0);
-  const totalAmount = lines.reduce((s, l) => s + Number(l.amount || 0), 0);
-  const flatRate = totalHours > 0 ? totalAmount / totalHours : (lines[0]?.rate ?? 0);
+  const totalHours = Number(totalHoursInput) || 0;
+  const flatRate = Number(rateInput) || 0;
+  const totalAmount = parseFloat((totalHours * flatRate).toFixed(2));
+  const variance = timesheetTotalHours > 0 ? totalHours - timesheetTotalHours : 0;
 
   const dupInvoices = useMemo(() => {
     if (!selectedUser) return [];
@@ -288,13 +305,15 @@ export default function ManualInvoiceModal({
       // Canonical InvoiceLine shape — matches contractor-submitted invoices so
       // the accountant review modal, reconciler, and Convera/Intuit exports all
       // read these lines with zero special-casing.
-      lines: lines.map(l => ({
-        weekStart: l.weekStart,
-        weekEndingFri: l.weekEndingFri,
-        hours: l.hours,
-        rate: l.rate,
-        amount: l.amount,
-      })),
+      // If the accountant left hours == timesheet sum, use the per-week TS
+      // breakdown at the accountant's rate. If he overrode hours, collapse to
+      // one lump line (weekly split is meaningless once total is manual).
+      lines: buildLinesForSave({
+        timesheetLines,
+        totalHours,
+        rate: flatRate,
+        periodEnd,
+      }),
       total_hours: totalHours || null,
       rate: flatRate || null,
       total_amount: totalAmount,
@@ -327,7 +346,8 @@ export default function ManualInvoiceModal({
     onCreated();
     // Reset local state ready for next open.
     setSelectedUserId('');
-    setLines([]);
+    setTotalHoursInput('');
+    setRateInput('');
     setInvoiceNumberEdited(false);
     setPayOnDate('');
     setNotes('');
@@ -449,110 +469,94 @@ export default function ManualInvoiceModal({
                 </div>
               </div>
 
-              {/* Lines editor */}
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-xs font-semibold text-gray-600">Line items</label>
+              {/* Read-only timesheet summary — mirrors the Invoice Approval modal */}
+              {selectedUser?.role === 'timesheetuser' && (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-semibold text-gray-600">Timesheets in period</label>
+                    {timesheetLines.length > 0 ? (
+                      <span className="text-xs text-indigo-600">{timesheetLines.length} approved · {timesheetTotalHours.toFixed(2)}h total</span>
+                    ) : (
+                      <span className="text-xs text-amber-600">No approved timesheets for {new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</span>
+                    )}
+                  </div>
                   {timesheetLines.length > 0 && (
-                    <span className="text-xs text-indigo-600">
-                      Auto-filled from {timesheetLines.length} approved timesheet{timesheetLines.length === 1 ? '' : 's'} ({timesheetTotalHours.toFixed(2)}h)
-                    </span>
-                  )}
-                  {selectedUser?.role === 'timesheetuser' && timesheetLines.length === 0 && (
-                    <span className="text-xs text-amber-600">
-                      No approved timesheets for {new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
-                    </span>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 text-xs text-gray-600">
+                          <tr>
+                            <th className="px-3 py-1.5 text-left">Week Ending</th>
+                            <th className="px-3 py-1.5 text-center">Status</th>
+                            <th className="px-3 py-1.5 text-right">Hrs in Period</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {timesheetLines.map((line, i) => (
+                            <tr key={i} className="border-t border-gray-100">
+                              <td className="px-3 py-1.5 text-gray-700 font-mono">
+                                W/E {new Date(line.weekEndingFri + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                              </td>
+                              <td className="px-3 py-1.5 text-center">
+                                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Approved</span>
+                              </td>
+                              <td className="px-3 py-1.5 text-right font-mono">{(line.hours ?? 0).toFixed(2)}h</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-gray-50 border-t border-gray-200 font-semibold text-sm">
+                          <tr>
+                            <td className="px-3 py-2 text-right" colSpan={2}>Sum</td>
+                            <td className="px-3 py-2 text-right font-mono text-indigo-700">{timesheetTotalHours.toFixed(2)}h</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
                   )}
                 </div>
-                <div className="border border-gray-200 rounded-lg overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 text-xs text-gray-600">
-                      <tr>
-                        <th className="px-3 py-1.5 text-left">Week Ending</th>
-                        <th className="px-3 py-1.5 text-right w-24">Hours</th>
-                        <th className="px-3 py-1.5 text-right w-24">Rate</th>
-                        <th className="px-3 py-1.5 text-right w-28">Amount</th>
-                        <th className="w-8" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {lines.map((line, i) => (
-                        <tr key={i} className="border-t border-gray-100">
-                          <td className="px-3 py-1.5 text-gray-700">
-                            W/E {new Date(line.weekEndingFri + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                          </td>
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.25"
-                              min="0"
-                              value={line.hours ?? ''}
-                              onChange={e => setLines(ls => ls.map((l, j) => {
-                                if (j !== i) return l;
-                                const h = Number(e.target.value);
-                                return { ...l, hours: h, amount: parseFloat((h * (l.rate ?? 0)).toFixed(2)) };
-                              }))}
-                              className="w-full px-2 py-1 border border-gray-200 rounded text-sm text-right"
-                            />
-                          </td>
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={line.rate ?? ''}
-                              onChange={e => setLines(ls => ls.map((l, j) => {
-                                if (j !== i) return l;
-                                const r = Number(e.target.value);
-                                return { ...l, rate: r, amount: parseFloat(((l.hours ?? 0) * r).toFixed(2)) };
-                              }))}
-                              className="w-full px-2 py-1 border border-gray-200 rounded text-sm text-right"
-                            />
-                          </td>
-                          <td className="px-3 py-1.5 text-right font-medium">
-                            ${(line.amount ?? 0).toFixed(2)}
-                          </td>
-                          <td className="px-3 py-1.5 text-center">
-                            {lines.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => setLines(ls => ls.filter((_, j) => j !== i))}
-                                className="text-gray-400 hover:text-red-600 text-lg leading-none"
-                                title="Remove line"
-                              >×</button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot className="bg-gray-50 border-t border-gray-200 font-semibold text-sm">
-                      <tr>
-                        <td className="px-3 py-2 text-right" colSpan={1}>Total</td>
-                        <td className="px-3 py-2 text-right">
-                          {totalHours.toFixed(2)}h
-                          {timesheetTotalHours > 0 && Math.abs(totalHours - timesheetTotalHours) > 0.01 && (
-                            <span className="ml-1 text-xs font-normal text-amber-700">
-                              (Δ {(totalHours - timesheetTotalHours) >= 0 ? '+' : ''}{(totalHours - timesheetTotalHours).toFixed(2)} vs timesheets)
-                            </span>
-                          )}
-                        </td>
-                        <td />
-                        <td className="px-3 py-2 text-right text-indigo-700">${totalAmount.toFixed(2)}</td>
-                        <td />
-                      </tr>
-                    </tfoot>
-                  </table>
+              )}
+
+              {/* Invoice values — single hours + rate + computed amount */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1.5">Invoice values</label>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <div className="text-xs text-gray-500 mb-0.5">Total hours</div>
+                    <input
+                      type="number"
+                      step="0.25"
+                      min="0"
+                      value={totalHoursInput}
+                      onChange={e => setTotalHoursInput(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-right font-mono"
+                      placeholder="0.00"
+                    />
+                    {Math.abs(variance) > 0.01 && (
+                      <div className="text-xs text-amber-700 mt-0.5 text-right">
+                        Δ {variance >= 0 ? '+' : ''}{variance.toFixed(2)}h vs timesheets
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500 mb-0.5">
+                      Rate {defaultPayRate != null && <span className="text-gray-400">· last: ${defaultPayRate.toFixed(2)}/hr</span>}
+                    </div>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={rateInput}
+                      onChange={e => setRateInput(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-right font-mono"
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500 mb-0.5">Amount</div>
+                    <div className="px-3 py-2 border border-gray-200 bg-gray-50 rounded-lg text-sm text-right font-mono font-semibold text-indigo-700">
+                      ${totalAmount.toFixed(2)}
+                    </div>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setLines(ls => {
-                    const lastRate = ls[ls.length - 1]?.rate ?? defaultPayRate ?? 0;
-                    return [...ls, { weekStart: periodEnd, weekEndingFri: periodEnd, hours: 0, rate: lastRate, amount: 0 }];
-                  })}
-                  className="mt-2 text-xs text-indigo-600 hover:underline"
-                >
-                  + Add line
-                </button>
               </div>
 
               {/* Invoice number */}
