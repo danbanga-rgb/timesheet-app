@@ -374,7 +374,8 @@ interface Invoice {
   paymentMethodOverride: string | null; // accountant-editable: 'Intuit' or 'Convera'
   isVendorInvoice: boolean;
   vendorManagerId: string | null;
-  source: 'direct' | 'imported' | null;
+  source: 'direct' | 'imported' | 'manual' | null;
+  createdBy: string | null;  // profiles.id of accountant who created a source='manual' invoice; NULL otherwise
   reconciliationStatus: 'matched' | 'mismatch' | 'unverifiable' | null;
   reconciliationDelta: number | null;
   reconciliationNotes: string | null;
@@ -3641,7 +3642,8 @@ const TimesheetSystem = () => {
       paymentMethodOverride: (r.payment_method as string) || null,
       isVendorInvoice: !!(r.is_vendor_invoice as boolean),
       vendorManagerId: (r.vendor_manager_id as string) || null,
-      source: (r.source as 'direct' | 'imported') || null,
+      source: (r.source as Invoice['source']) || null,
+      createdBy: (r.created_by as string) || null,
       reconciliationStatus: (r.reconciliation_status as 'matched' | 'mismatch' | 'unverifiable') || null,
       reconciliationDelta: r.reconciliation_delta != null ? Number(r.reconciliation_delta) : null,
       reconciliationNotes: (r.reconciliation_notes as string) || null,
