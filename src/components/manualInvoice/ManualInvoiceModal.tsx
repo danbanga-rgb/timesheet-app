@@ -50,12 +50,21 @@ interface UserLite {
   paymentTerms: string | null;
 }
 
+interface TimesheetLite {
+  id: number;
+  userId: string;
+  weekStart: string;                        // YYYY-MM-DD Monday
+  status: string;                           // 'pending' | 'approved' | 'rejected'
+  entries: Record<string, { hours: string }>;  // dateKey → { hours }
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
   users: UserLite[];
   paymentProfiles: PaymentProfileLite[];
   invoices: InvoiceLite[];
+  timesheets: TimesheetLite[];
   currentAccountantId: string;
   onCreated: () => void;
   paymentMethodFromProfile: (profile: PaymentProfileLite | null) => 'Intuit' | 'Convera' | '';
@@ -71,7 +80,7 @@ const CURRENCIES = ['USD', 'EUR', 'GBP'] as const;
 const PAY_TERMS = ['NET15', 'NET30', 'NET45', 'NET60'] as const;
 
 export default function ManualInvoiceModal({
-  open, onClose, users, paymentProfiles, invoices, currentAccountantId, onCreated,
+  open, onClose, users, paymentProfiles, invoices, timesheets, currentAccountantId, onCreated,
   paymentMethodFromProfile,
 }: Props) {
   const [selectedUserId, setSelectedUserId] = useState<string>('');
@@ -126,15 +135,85 @@ export default function ManualInvoiceModal({
   const lastDay = new Date(year, month, 0).getDate();
   const periodEnd = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-  // Reset dependent state when payee changes.
+  // Slice M4 — timesheet auto-populate. Weeks whose Sunday-end falls within
+  // the selected month are pulled in; sum(hours) across the week's entries is
+  // the week's total. Consistent with the consolidation monthly rollup.
+  const timesheetLines = useMemo<ManualLine[]>(() => {
+    if (!selectedUser || selectedUser.role !== 'timesheetuser') return [];
+    const monthNum = month;
+    const yearNum = year;
+    return timesheets
+      .filter(ts => ts.userId === selectedUser.id && ts.status === 'approved')
+      .filter(ts => {
+        const [y, m, d] = ts.weekStart.split('-').map(Number);
+        const monday = new Date(y, m - 1, d);
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        return sunday.getFullYear() === yearNum && sunday.getMonth() + 1 === monthNum;
+      })
+      .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
+      .map(ts => {
+        const total = Object.values(ts.entries ?? {}).reduce((s, e) => {
+          const h = Number(e.hours);
+          return s + (Number.isFinite(h) ? h : 0);
+        }, 0);
+        return { periodStart: ts.weekStart, hours: total, rate: 0 };
+      });
+  }, [selectedUser, timesheets, year, month]);
+
+  const [defaultPayRate, setDefaultPayRate] = useState<number | null>(null);
+
+  // Fetch the payee's current pay rate from rate_history when they change.
+  useEffect(() => {
+    if (!selectedUser) { setDefaultPayRate(null); return; }
+    let cancelled = false;
+    (async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data } = await supabase
+        .from('rate_history')
+        .select('rate')
+        .eq('user_id', selectedUser.id)
+        .eq('rate_kind', 'pay')
+        .lte('effective_from', today)
+        .or(`effective_to.is.null,effective_to.gt.${today}`)
+        .order('effective_from', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (cancelled) return;
+      setDefaultPayRate((data?.rate as number | null) ?? null);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedUser]);
+
+  // Timesheet-based total for variance calculation.
+  const timesheetTotalHours = useMemo(
+    () => timesheetLines.reduce((s, l) => s + l.hours, 0),
+    [timesheetLines],
+  );
+
+  // Reset dependent state when payee changes. Prefill from timesheets if available.
   useEffect(() => {
     if (!selectedUser) return;
     setSelectedProfileId(null);
     setPaymentMethodOverride('');
-    setLines([{ periodStart: periodEnd, hours: 0, rate: 0 }]);
     setInvoiceNumberEdited(false);
     setError(null);
-  }, [selectedUserId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (timesheetLines.length > 0) {
+      const rate = defaultPayRate ?? 0;
+      setLines(timesheetLines.map(l => ({ ...l, rate })));
+    } else {
+      setLines([{ periodStart: periodEnd, hours: 0, rate: defaultPayRate ?? 0 }]);
+    }
+  }, [selectedUserId, defaultPayRate, timesheetLines.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When month/year changes for a timesheetuser payee, re-populate.
+  useEffect(() => {
+    if (!selectedUser || selectedUser.role !== 'timesheetuser') return;
+    if (timesheetLines.length > 0) {
+      const rate = defaultPayRate ?? lines[0]?.rate ?? 0;
+      setLines(timesheetLines.map(l => ({ ...l, rate })));
+    }
+  }, [year, month]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Default currency + payment terms + payment method from resolved profile.
   useEffect(() => {
@@ -370,7 +449,19 @@ export default function ManualInvoiceModal({
 
               {/* Lines editor */}
               <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1.5">Line items</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-semibold text-gray-600">Line items</label>
+                  {timesheetLines.length > 0 && (
+                    <span className="text-xs text-indigo-600">
+                      Auto-filled from {timesheetLines.length} approved timesheet{timesheetLines.length === 1 ? '' : 's'} ({timesheetTotalHours.toFixed(2)}h)
+                    </span>
+                  )}
+                  {selectedUser?.role === 'timesheetuser' && timesheetLines.length === 0 && (
+                    <span className="text-xs text-amber-600">
+                      No approved timesheets for {new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+                    </span>
+                  )}
+                </div>
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 text-xs text-gray-600">
@@ -433,7 +524,16 @@ export default function ManualInvoiceModal({
                     </tbody>
                     <tfoot className="bg-gray-50 border-t border-gray-200 font-semibold text-sm">
                       <tr>
-                        <td className="px-3 py-2 text-right" colSpan={3}>Total</td>
+                        <td className="px-3 py-2 text-right" colSpan={1}>Total</td>
+                        <td className="px-3 py-2 text-right">
+                          {totalHours.toFixed(2)}h
+                          {timesheetTotalHours > 0 && Math.abs(totalHours - timesheetTotalHours) > 0.01 && (
+                            <span className="ml-1 text-xs font-normal text-amber-700">
+                              (Δ {(totalHours - timesheetTotalHours) >= 0 ? '+' : ''}{(totalHours - timesheetTotalHours).toFixed(2)} vs timesheets)
+                            </span>
+                          )}
+                        </td>
+                        <td />
                         <td className="px-3 py-2 text-right text-indigo-700">${totalAmount.toFixed(2)}</td>
                         <td />
                       </tr>

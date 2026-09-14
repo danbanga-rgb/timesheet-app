@@ -13726,6 +13726,13 @@ const TimesheetSystem = () => {
               invoiceNumber: i.invoiceNumber,
               status: i.status,
             }))}
+            timesheets={timesheets.map(t => ({
+              id: t.id,
+              userId: t.userId,
+              weekStart: t.weekStart,
+              status: t.status,
+              entries: Object.fromEntries(Object.entries(t.entries).map(([k, v]) => [k, { hours: v.hours }])),
+            }))}
             currentAccountantId={currentUser.id}
             onCreated={() => { fetchUsers(); fetchPaymentProfiles(); fetchInvoices(); }}
             paymentMethodFromProfile={(profile) => {
