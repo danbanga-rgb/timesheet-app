@@ -43,9 +43,20 @@ export const INTENTS: IntentSpec[] = [
     description: 'Look up a single user by name or email and show their details (project, dates, pay rate, bill rate, status)',
     read_only: true,
     extraction_hint:
-      'The user is asking about a specific person by name or email (e.g. "when does Sarah start?", "what is X\'s project?", "is Y still active?", "what is X\'s pay rate?", "what does X bill?", "X\'s payrate", "X\'s billrate", "X\'s hourly", "X\'s rate"). Rates, dates, project, invoicing status — all live on the user profile card and route to this intent. Extract the target as name or email. Do NOT match on generic pronouns.',
+      'The user is asking about a specific person by name or email. Rates, dates, project, invoicing status — all live on the user profile card and route to this intent.\n' +
+      'Also extract a `focus` field indicating what specifically was asked, so the reply can stay tight (avoid dumping the full card when a scoped question was asked):\n' +
+      '- "what is X\'s title/role/position" → focus=title\n' +
+      '- "X\'s pay rate", "how much does X make", "X\'s payrate", "X\'s hourly" → focus=rate (both rates shown)\n' +
+      '- "X\'s bill rate", "X\'s billrate", "what does X bill" → focus=rate\n' +
+      '- "when did X start/end/begin/finish", "X\'s start date" → focus=dates\n' +
+      '- "who does X report to", "X\'s manager", "X\'s VM" → focus=manager\n' +
+      '- "where does X live", "X\'s country", "X\'s location", "is X onshore/offshore" → focus=location\n' +
+      '- "what project is X on" → focus=project\n' +
+      '- "tell me about X", "who is X", "show X", "X\'s details/profile" → focus=full (default when open-ended)\n' +
+      'Do NOT match on generic pronouns for target.',
     fields: [
       { name: 'target', input_type: 'text', required: true, hint: 'name or email of the user to look up' },
+      { name: 'focus', input_type: 'buttons', options: ['title', 'rate', 'dates', 'manager', 'location', 'project', 'full'], default: 'full', ask_only_if_mentioned: true, hint: 'which attribute the user asked about (server projects the card accordingly)' },
     ],
   },
   {
@@ -63,6 +74,10 @@ export const INTENTS: IntentSpec[] = [
       { name: 'vendor_manager', input_type: 'text', hint: 'name or email of a vendor manager' },
       { name: 'active', input_type: 'yes_no', hint: 'YES = currently active, NO = terminated' },
       { name: 'missing_start_date', input_type: 'yes_no', hint: 'YES = never-set start_date' },
+      { name: 'role_title', input_type: 'text', hint: 'job title filter (e.g. "Data Engineer", "QA", "Developer"). Distinct from `role` (which is the auth role like timesheetuser). Case-insensitive partial match against client_engagements.role_title.' },
+      { name: 'bill_rate_min', input_type: 'text', hint: 'minimum bill rate USD/hr (number)' },
+      { name: 'bill_rate_max', input_type: 'text', hint: 'maximum bill rate USD/hr (number)' },
+      { name: 'sort', input_type: 'buttons', options: ['recent', 'name'], hint: 'temporal signal — set sort=recent when user says "recent", "last", "latest", "who just ended". Otherwise sort by name.' },
     ],
   },
   {
@@ -106,6 +121,10 @@ export const INTENTS: IntentSpec[] = [
         input_type: 'yes_no',
         hint: 'YES = only users with a null start_date (i.e. never-set); useful to audit silent users that never got reminders',
       },
+      { name: 'role_title', input_type: 'text', hint: 'job title filter (e.g. "Data Engineer", "QA", "Developer"). Distinct from `role` (which is the auth role like timesheetuser). Case-insensitive partial match against client_engagements.role_title.' },
+      { name: 'bill_rate_min', input_type: 'text', hint: 'minimum bill rate USD/hr (number)' },
+      { name: 'bill_rate_max', input_type: 'text', hint: 'maximum bill rate USD/hr (number)' },
+      { name: 'sort', input_type: 'buttons', options: ['recent', 'name'], hint: 'temporal signal — set sort=recent when user says "recent", "last", "latest", "who just ended". Otherwise sort by name.' },
       { name: 'limit', input_type: 'text', default: 20, hint: 'max results (default 20, hard cap 50)' },
     ],
   },
@@ -119,6 +138,32 @@ export const INTENTS: IntentSpec[] = [
       { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
       { name: 'country', input_type: 'text', required: true, hint: 'ISO 2-letter code (US, HR, BA, RS, MK, SI, CA, GB, IN, AM, ...) or full country name — server normalizes' },
       { name: 'region', input_type: 'text', hint: 'optional; if omitted, server picks the default region for that country' },
+    ],
+  },
+  {
+    name: 'user.update_pay_rate',
+    required_permission: 'user.update_pay_rate',
+    description: "Update an existing user's pay rate (what we pay the contractor)",
+    extraction_hint:
+      "The user wants to change/increase/set someone's pay rate. Signals: \"increase X's pay rate to Y\", \"set X pay to $Z/hr\", \"X's new pay is 25\", \"raise X to 28/hr\". Extract target (name or email) + rate (number) + optional effective_from + optional reason/notes.",
+    fields: [
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'rate', input_type: 'text', required: true, hint: 'new pay rate USD/hr (number only, no $ or /hr)' },
+      { name: 'effective_from', input_type: 'date', validate: 'date', hint: 'when the new rate takes effect; defaults to today' },
+      { name: 'notes', input_type: 'text', ask_only_if_mentioned: true, hint: 'optional reason / context for the change' },
+    ],
+  },
+  {
+    name: 'user.update_bill_rate',
+    required_permission: 'user.update_bill_rate',
+    description: "Update an existing user's bill rate (what we charge the client)",
+    extraction_hint:
+      "The user wants to change/increase/set someone's bill rate. Signals: \"raise X's bill rate to Y\", \"we're billing X at $Z now\", \"X's new bill rate is 90\". Extract target (name or email) + rate (number) + optional effective_from + optional reason/notes.",
+    fields: [
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'rate', input_type: 'text', required: true, hint: 'new bill rate USD/hr (number only, no $ or /hr)' },
+      { name: 'effective_from', input_type: 'date', validate: 'date', hint: 'when the new rate takes effect; defaults to today' },
+      { name: 'notes', input_type: 'text', ask_only_if_mentioned: true, hint: 'optional reason / context for the change' },
     ],
   },
   {
@@ -148,7 +193,13 @@ export const INTENTS: IntentSpec[] = [
     required_permission: 'user.create',
     description: 'Create a new user profile (contractor, staff, manager, etc.)',
     extraction_hint:
-      'The user wants to create/add/onboard a new person. Extract as many fields as they mention. Do NOT invent values.',
+      'The user wants to create/add/onboard a new person. Extract as many fields as they mention. Do NOT invent values.\n' +
+      'CA often pastes an intake email — capture EVERYTHING they mention:\n' +
+      '- "Position: X" / "Title: X" / "Role: X" (job title, distinct from auth role) → role_title\n' +
+      '- "Pay rate: $X/hr" / "paying $X" / "rate: $X" (no bill context) → pay_rate (number, USD/hr)\n' +
+      '- "Bill rate: $X/hr" / "billing $X" / "billed at $X" → bill_rate (number, USD/hr)\n' +
+      '- "Payment terms: NET+X" / "NET30" / "end of month + 15" → payment_terms (string as given)\n' +
+      '- "Client: X" / "for X" / "on X project" → client (CA typically writes the project name here)',
     fields: [
       { name: 'name', input_type: 'text', required: true, hint: 'full name' },
       { name: 'email', input_type: 'text', required: true, validate: 'email' },
@@ -175,13 +226,43 @@ export const INTENTS: IntentSpec[] = [
         hint: 'auto-derived from country (US=onshore, else offshore); do not ask separately',
       },
       {
+        name: 'client',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'CA writes the project name here (e.g. "APFM", "Genworth"). Server resolves to project + inherits client_id.',
+      },
+      {
         name: 'project',
         input_type: 'buttons',
         options_from: 'projects',
         encouraged: true,
-        hint: 'which project/client they will work on',
+        hint: 'which project/client they will work on; resolved from `client` field if only that is given',
       },
       { name: 'start_date', input_type: 'date', encouraged: true, validate: 'date' },
+      {
+        name: 'role_title',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'job title / position (e.g. "QA Engineer", "Data Engineer"). Stored on client_engagements.',
+      },
+      {
+        name: 'bill_rate',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'USD/hr we charge the client. Number only (e.g. 65 for $65/hr). Stored on client_engagements + rate_history.',
+      },
+      {
+        name: 'pay_rate',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'USD/hr we pay the contractor. Number only. Stored on rate_history.',
+      },
+      {
+        name: 'payment_terms',
+        input_type: 'text',
+        ask_only_if_mentioned: true,
+        hint: 'Payment terms string as given (e.g. "NET+15", "NET30", "end of month + 15"). Stored on profiles.payment_terms.',
+      },
       {
         name: 'vendor_manager',
         input_type: 'buttons',

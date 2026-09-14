@@ -20,6 +20,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { findIntent, intentCatalog, type IntentSpec } from './intents.ts';
 import { callClaude } from '../_shared/llm.ts';
+import { currentBillRate, currentPayRate, setRate } from '../_shared/rates.ts';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -192,6 +193,8 @@ STRICT CLASSIFICATION RULES:
 - user.create: user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts as", "is joining", "new hire".
 - user.set_start_date / user.set_end_date: user is **setting a date on an EXISTING person** (verbs: "set", "update", "change", "ends", "starts on"). If the person doesn't exist yet, fall back to user.create.
 - user.update_country_region: user is **changing an existing user's country** (verbs: "update country", "change country", "move to <country>", "<name> is now in <country>", "<name>'s country is <country>").
+- user.update_pay_rate: user is **changing an existing user's PAY rate** (what we pay them). Verbs: "increase X's pay to Y", "raise X's rate to $Z", "set X's pay rate to N", "X's new pay is $A". If the message says "bill rate" instead of "pay", use user.update_bill_rate.
+- user.update_bill_rate: user is **changing an existing user's BILL rate** (what we charge the client). Verbs: "raise X's bill rate to Y", "we're billing X at $Z now", "X's new bill rate is $N".
 - user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details", "what is X's pay rate?", "X's payrate", "X's bill rate", "X's billrate", "how much does X make/bill", "X's hourly rate"). Rates + dates + project all live on this single profile card.
 - user.list: user is **asking for MULTIPLE users matching a filter** — signals include: "who is on <project>?", "list <role>", "show users with <property>", "which <role> ended...?", "who reports to <name>?", "contractors for <name>", "team for <manager name>", "everyone in <country>". When you see "reports to <X>" or "contractors for <X>", extract that person as vendor_manager.
 - user.count: user is **asking for an aggregate NUMBER, not a list of names** — signals: "how many <role>?", "count of <X>", "total number of <Y>", "just the counts", "just counts not names", "how many onshore + offshore". Uses the same filter fields as user.list. If a prior turn returned a long list and the user follows up with "just count" or "how many", classify as user.count.
@@ -201,16 +204,29 @@ STRICT CLASSIFICATION RULES:
 If the user's intent matches one of the available intents, return JSON:
 {"intent": "<intent-name>", "fields": { ...extracted-field-values }}
 
-If unclear or unmatched:
+If the user sent a polite dismissal / closing statement / chitchat that ends the current thread ("thanks", "no worries", "later", "I'll take it up with X", "I'll ask them", "never mind", "no thanks", "ok cool", "got it", "bye"), return JSON:
+{"intent": null, "chitchat_close": true}
+
+Otherwise if unclear or unmatched:
 {"intent": null, "suggested_reply": "Short reply describing what you CAN do — create users, set/update start or end dates, look up a single user's details, or list users matching filters."}
 
 Extract initial field values from the message for the classified intent:
-- user.create: name, email, role, location_type, country, project, start_date, end_date, vendor_manager, invoice_enabled, send_invite
+- user.create: name, email, role, location_type, country, client, project, start_date, end_date, vendor_manager, role_title, pay_rate, bill_rate, payment_terms, invoice_enabled, send_invite
 - user.set_start_date / user.set_end_date: target (name or email), start_date / end_date
 - user.update_country_region: target (name or email), country (ISO code preferred, else full name), optional region
+- user.update_pay_rate: target (name or email), rate (number, no $ or /hr), optional effective_from, optional notes
+- user.update_bill_rate: target (name or email), rate (number, no $ or /hr), optional effective_from, optional notes
 - user.get: target (name or email)
-- user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), limit (number)
+- user.list: role, project, country, location_type, vendor_manager (name/email), active (yes/no), missing_start_date (yes/no), role_title (job title like "Data Engineer", "QA", "Developer"), bill_rate_min, bill_rate_max, limit (number)
 - user.count: same fields as user.list except no limit
+
+For role_title: extract when the user says a JOB title (not an auth role) — "data engineers", "QA testers", "developers", "senior developers", "solutions architects", "PMs", "designers". Do NOT confuse with `role` (auth role — timesheetuser / manager / accountant / vendormanager / admin). Rule: if it names an occupation or seniority, it's role_title. If it names a permission role in the app, it's role.
+
+For user.list and user.count: role defaults to `timesheetuser` (contractors) on the server. Extract `role` explicitly ONLY when the user asked about a different role — e.g. "list admins" → role=admin, "how many vendor managers" → role=vendormanager, "show accountants" → role=accountant. Contractor/consultant/people/etc. queries → leave role blank (server default applies).
+
+For user.list temporal signals ("recent", "last person", "who just ended", "latest", "who's the newest") → extract sort=recent. Server sorts by end_date DESC (or start_date DESC when active=true).
+
+For user.create when CA pastes an intake email (multi-line "Name: X / Position: Y / Client: Z / Pay rate: $A / Bill rate: $B / Payment terms: C"): capture EVERY field. role_title, pay_rate, bill_rate, payment_terms, client are all common. Do NOT ask for name/email separately if CA gave them in the paste.
 
 Do NOT invent values. Only extract what's explicitly stated.
 For role: timesheetuser, manager, accountant, vendormanager, admin, contract_admin. Synonyms: "contractors"/"consultants"/"people"=timesheetuser; "VMs"/"vendor managers"=vendormanager; "accountants"=accountant.
@@ -223,6 +239,13 @@ User's message: """${msg.content}"""`;
   const intent = (parsed?.intent as string | null) ?? null;
 
   if (!intent) {
+    // Slice 6: chitchat close — acknowledge briefly and stay idle. Don't dump
+    // the capabilities list on polite closes ("I'll ask them", "thanks",
+    // "later"). CA-facing polish; without this, the bot feels naggy.
+    if (parsed?.chitchat_close === true) {
+      await writeBot(admin, conv.id, 'Got it.');
+      return;
+    }
     const reply = (parsed?.suggested_reply as string) ??
       "I'm not sure what you'd like to do. Try 'add Sarah Chen as timesheetuser starting Monday' for example.";
     await writeBot(admin, conv.id, reply);
@@ -268,7 +291,9 @@ User's message: """${msg.content}"""`;
     phase: 'collecting',
     started_at: new Date().toISOString(),
     last_activity_at: new Date().toISOString(),
-    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    // Slice 5: CA treats chat as always-there. `/clear` is the explicit end.
+    // 24h collecting timeout is a safety net for truly abandoned sessions.
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
   }).eq('id', conv.id);
 
   // Hand off to the LLM-driven collecting loop. It uses the same latest message
@@ -353,6 +378,51 @@ Return JSON:
   const validated = validateExtracted(spec, rawExtracted);
   const merged = normalizeCaptured(spec, { ...captured, ...validated });
 
+  // For user.create: resolve the project (from either `project` or `client` input)
+  // before completing collection. When it matches multiple, ask CA to pick.
+  if (spec.name === 'user.create') {
+    const projectInput = (typeof merged.project === 'string' && merged.project.trim())
+      || (typeof merged.client === 'string' && merged.client.trim())
+      || null;
+    const alreadyResolved = (merged as Record<string, unknown>)._project_resolved !== undefined;
+    if (projectInput && !alreadyResolved) {
+      const { data: allProjects } = await admin.from('projects').select('id, name, code');
+      const projects = (allProjects ?? []) as Array<{ id: number; name: string; code: string }>;
+      const tok = projectInput.toLowerCase();
+      const matches = projects.filter((p) =>
+        p.name.toLowerCase().includes(tok) || p.code.toLowerCase().includes(tok));
+      if (matches.length === 0) {
+        delete merged.project;
+        delete merged.client;
+        await admin.from('chat_conversations').update({
+          captured: merged, last_activity_at: new Date().toISOString(),
+        }).eq('id', conv.id);
+        const available = projects.map((p) => p.name).join(', ');
+        await writeBot(admin, conv.id,
+          `No project matches "${projectInput}". Available: ${available}. Which one?`);
+        return;
+      }
+      if (matches.length > 1) {
+        delete merged.project;
+        delete merged.client;
+        await admin.from('chat_conversations').update({
+          captured: merged, last_activity_at: new Date().toISOString(),
+        }).eq('id', conv.id);
+        const list = matches.map((p, i) => `  ${i + 1}. ${p.name} (${p.code})`).join('\n');
+        await writeBot(admin, conv.id,
+          `"${projectInput}" matches multiple projects:\n${list}\n\nWhich one? Note: different project codes land on separate invoices.`);
+        return;
+      }
+      // Single match — pin project name to the resolved canonical and cache metadata.
+      const one = matches[0];
+      merged.project = one.name;
+      (merged as Record<string, unknown>)._project_resolved = {
+        id: one.id, name: one.name, code: one.code,
+      };
+      delete merged.client;  // consumed
+    }
+  }
+
   // For intents that address an existing user, resolve the target NOW so the
   // confirmation summary shows the actual user + current values (not just a
   // fuzzy string). If none/multi, we ask before advancing.
@@ -382,10 +452,22 @@ Return JSON:
     // for the confirmation summary. Executor re-resolves so identity is safe.
     const u = resolved.user;
     merged.target = u.email;
-    (merged as Record<string, unknown>)._target_resolved = {
+    const resolvedMeta: Record<string, unknown> = {
       id: u.id, name: u.name, email: u.email,
       start_date: u.start_date, end_date: u.end_date,
     };
+    // For rate updates, also fetch current pay/bill so the confirmation shows
+    // before → after unambiguously.
+    if (spec.name === 'user.update_pay_rate') {
+      const cur = await currentPayRate(admin, u.id);
+      resolvedMeta.current_pay_rate = cur?.rate ?? null;
+      resolvedMeta.current_pay_effective_from = cur?.effective_from ?? null;
+    } else if (spec.name === 'user.update_bill_rate') {
+      const cur = await currentBillRate(admin, u.id);
+      resolvedMeta.current_bill_rate = cur?.rate ?? null;
+      resolvedMeta.current_bill_effective_from = cur?.effective_from ?? null;
+    }
+    (merged as Record<string, unknown>)._target_resolved = resolvedMeta;
   }
 
   const stillMissingRequired = computeMissingRequired(spec, merged);
@@ -431,16 +513,17 @@ async function handleConfirmation(
   jwt: string,
 ): Promise<void> {
   const spec = findIntent(conv.intent!)!;
-  const confirmPrompt = `The user was asked to confirm creating something with these values:
+  const confirmPrompt = `The user was asked to confirm ${spec.description.toLowerCase()} with these values:
 ${JSON.stringify(conv.captured, null, 2)}
 
 Their reply: """${msg.content}"""
 
 Return JSON:
-{"action": "yes" | "no" | "edit" | "unknown", "edits": {"field-name": "new-value", ...}}
+{"action": "yes" | "no" | "edit" | "interrupt" | "unknown", "edits": {"field-name": "new-value", ...}, "interrupt_hint": "brief description of what they now want to do"}
 - "yes": user confirmed / said YES / go ahead / proceed
 - "no": user cancelled / declined
 - "edit": user is correcting one or more field values (list them in "edits")
+- "interrupt": user completely switched topics — starting a new intent instead of answering the confirmation. Signals: they asked a lookup question, mentioned a different person, started a new list query, said "wait, first..." etc.
 - "unknown": can't tell — bot will re-ask`;
 
   const parsed = await callClaude(confirmPrompt);
@@ -453,6 +536,16 @@ Return JSON:
   }
   if (action === 'no') {
     await writeBot(admin, conv.id, 'Cancelled. Nothing was done.');
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+  if (action === 'interrupt') {
+    // Slice 4: user switched intent mid-confirmation. Offer a clean switch
+    // rather than stonewalling. Cancel the pending intent so the user
+    // re-sends the new query on a fresh conversation via handleIdle.
+    const hint = typeof parsed?.interrupt_hint === 'string' ? parsed.interrupt_hint : 'a new request';
+    await writeBot(admin, conv.id,
+      `Looks like you\'re switching to ${hint}. I\'ll cancel the pending ${spec.description.toLowerCase()} — send your new question and I\'ll pick it up. (Reply YES first if you actually meant to confirm.)`);
     await setPhase(admin, conv.id, 'cancelled');
     return;
   }
@@ -525,6 +618,8 @@ async function executeIntent(
       await execUserSetDate(admin, conv, actionId, spec.name === 'user.set_start_date' ? 'start_date' : 'end_date');
     } else if (spec.name === 'user.update_country_region') {
       await execUserUpdateCountry(admin, conv, actionId);
+    } else if (spec.name === 'user.update_pay_rate' || spec.name === 'user.update_bill_rate') {
+      await execUserUpdateRate(admin, conv, actionId, spec.name === 'user.update_pay_rate' ? 'pay' : 'bill');
     } else {
       throw new Error(`Executor for ${spec.name} not wired yet`);
     }
@@ -547,15 +642,38 @@ async function execUserCreate(
 ): Promise<void> {
   const captured = conv.captured;
 
-  // Resolve project name → project_id (LLM extracted a name; we need the ID)
-  let project_id: number | null = null;
-  if (captured.project) {
+  // Resolve project: prefer the pre-resolved metadata attached during
+  // driveCollecting (Slice 1b disambiguation). Fall back to name/code match
+  // for any legacy flows that didn't run through resolution.
+  const preResolved = (captured as Record<string, unknown>)._project_resolved as
+    | { id: number; name: string; code: string } | undefined;
+  let project_id: number | null = preResolved?.id ?? null;
+  let projectName: string | null = preResolved?.name ?? null;
+  if (project_id === null && captured.project) {
     const tok = String(captured.project).trim().toLowerCase();
     const { data: projects } = await admin.from('projects').select('id, name, code');
     const match = (projects ?? []).find((p) =>
       String(p.name).toLowerCase() === tok || String(p.code).toLowerCase() === tok);
     if (!match) throw new Error(`Project "${captured.project}" not found`);
     project_id = match.id as number;
+    projectName = match.name as string;
+  }
+
+  // Derive client_id from project name via prefix match against clients.name.
+  // "APFM" project → APFM client; "A&E Networks" project → A&E TV client via
+  // first-token match. Used to populate client_engagements.client_id later.
+  let client_id: number | null = null;
+  if (projectName) {
+    const { data: clients } = await admin.from('clients').select('id, name');
+    const projLower = projectName.toLowerCase();
+    const found = (clients ?? []).find((c: { name: string }) => {
+      const cn = String(c.name).toLowerCase();
+      if (projLower.startsWith(cn)) return true;
+      const firstTok = cn.split(/[\s\/&]+/)[0];
+      if (firstTok && firstTok.length >= 3 && projLower.startsWith(firstTok)) return true;
+      return false;
+    });
+    client_id = (found as { id: number } | undefined)?.id ?? null;
   }
 
   // Resolve vendor manager name → user id (if role starts with vendor and value present)
@@ -609,6 +727,66 @@ async function execUserCreate(
   const createResult = JSON.parse(createBody);
   const createdUserId = createResult?.user?.id ?? createResult?.id ?? null;
 
+  // Slice 1: extended writes. Payment terms → profiles. role_title/bill_rate → client_engagements.
+  // pay_rate + bill_rate → rate_history. Non-fatal on failure — the user is created;
+  // we surface warnings so CA can fix in admin UI. Full failure would strand the auth user.
+  const warnings: string[] = [];
+  const payTermsInput = typeof captured.payment_terms === 'string' ? captured.payment_terms.trim() : null;
+  if (payTermsInput && createdUserId) {
+    const { error } = await admin.from('profiles').update({ payment_terms: payTermsInput }).eq('id', createdUserId);
+    if (error) warnings.push(`payment_terms: ${error.message}`);
+  }
+
+  const roleTitle = typeof captured.role_title === 'string' ? captured.role_title.trim() : null;
+  const billRate = coerceRate(captured.bill_rate);
+  const payRate = coerceRate(captured.pay_rate);
+  const effectiveFrom = (captured.start_date as string | undefined) || todayIso();
+
+  let engagementId: number | null = null;
+  if (createdUserId && (roleTitle || billRate !== null || client_id !== null)) {
+    if (client_id === null) {
+      warnings.push(`client_engagements skipped: could not derive client_id from project "${projectName ?? '(none)'}"`);
+    } else {
+      const { data: eng, error } = await admin.from('client_engagements').insert({
+        user_id: createdUserId,
+        client_id,
+        role_title: roleTitle,
+        bill_rate: billRate,
+        sow_reference: null,
+        effective_from: effectiveFrom,
+        effective_to: null,
+      }).select('id').single();
+      if (error) warnings.push(`client_engagements: ${error.message}`);
+      else engagementId = (eng?.id as number) ?? null;
+    }
+  }
+
+  if (createdUserId && payRate !== null) {
+    const { error } = await admin.from('rate_history').insert({
+      user_id: createdUserId,
+      rate_kind: 'pay',
+      rate: payRate,
+      effective_from: effectiveFrom,
+      effective_to: null,
+      source: 'chat:user.create',
+      created_by: conv.user_id,
+    });
+    if (error) warnings.push(`pay rate_history: ${error.message}`);
+  }
+  if (createdUserId && billRate !== null) {
+    const { error } = await admin.from('rate_history').insert({
+      user_id: createdUserId,
+      rate_kind: 'bill',
+      rate: billRate,
+      effective_from: effectiveFrom,
+      effective_to: null,
+      client_engagement_id: engagementId,
+      source: 'chat:user.create',
+      created_by: conv.user_id,
+    });
+    if (error) warnings.push(`bill rate_history: ${error.message}`);
+  }
+
   // Invite send — default YES unless explicitly false in captured
   const sendInvite = captured.send_invite !== false;
   let inviteStatus = 'skipped';
@@ -636,7 +814,7 @@ async function execUserCreate(
     }
   }
 
-  const overallStatus = inviteError ? 'partial' : 'success';
+  const overallStatus = (inviteError || warnings.length > 0) ? 'partial' : 'success';
   await admin.from('chat_actions').update({
     status: overallStatus,
     completed_at: new Date().toISOString(),
@@ -644,6 +822,11 @@ async function execUserCreate(
       created_user_id: createdUserId,
       invite_status: inviteStatus,
       invite_error: inviteError,
+      extended_writes_warnings: warnings.length > 0 ? warnings : undefined,
+      wrote_client_engagement: engagementId,
+      wrote_pay_rate: payRate,
+      wrote_bill_rate: billRate,
+      wrote_payment_terms: payTermsInput,
     },
   }).eq('id', actionId);
 
@@ -653,9 +836,24 @@ async function execUserCreate(
     reply += `\n⚠️ Invite failed to send: ${inviteError}. Retry via app UI or ask again ("resend invite ${captured.email}") once that intent is wired.`;
   }
   if (!sendInvite) reply += ' No invite sent.';
+  if (warnings.length > 0) {
+    reply += `\n⚠️ Extended fields had issues (user still created):\n${warnings.map((w) => `  • ${w}`).join('\n')}`;
+  }
 
   await writeBot(admin, conv.id, reply);
   await resetAfterSuccess(admin, conv.id);
+}
+
+// coerceRate — accepts number, "23", "$23", "23.5" → number; anything else → null.
+function coerceRate(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return Number.isFinite(v) && v >= 0 ? v : null;
+  if (typeof v === 'string') {
+    const cleaned = v.replace(/[$,\s]/g, '').replace(/\/hr$/i, '');
+    const n = Number(cleaned);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+  return null;
 }
 
 // ─── Update-date executor (shared by set_start_date + set_end_date) ────────
@@ -748,6 +946,85 @@ async function execUserUpdateCountry(
   await writeBot(admin, conv.id,
     `✅ ${user.name} (${user.email}) — country set to ${country}${region ? `, region ${region}` : ''} (${location_type}).`);
   await resetAfterSuccess(admin, conv.id);
+}
+
+// ─── Rate update executor (shared by user.update_pay_rate + user.update_bill_rate) ────
+async function execUserUpdateRate(
+  admin: SupabaseClient,
+  conv: Conversation,
+  actionId: string,
+  kind: 'pay' | 'bill',
+): Promise<void> {
+  const target = String(conv.captured.target ?? '').trim();
+  const rateRaw = conv.captured.rate;
+  const rate = coerceRate(rateRaw);
+  const effectiveFrom = String(conv.captured.effective_from ?? '').trim() || todayIso();
+  const notes = conv.captured.notes ? String(conv.captured.notes).trim() : null;
+
+  if (!target) throw new Error('Missing target');
+  if (rate === null) throw new Error(`Rate "${rateRaw}" not recognized. Use a plain number like 25 or 65.`);
+
+  const resolved = await resolveUser(admin, target);
+  if (resolved.kind === 'none') throw new Error(`No user found matching "${target}"`);
+  if (resolved.kind === 'multi') {
+    const list = resolved.candidates.map((c, i) => `  ${i + 1}. ${c.name} (${c.email})`).join('\n');
+    await admin.from('chat_actions').update({
+      status: 'cancelled', completed_at: new Date().toISOString(),
+      action_output: { reason: 'ambiguous_target', candidates: resolved.candidates },
+    }).eq('id', actionId);
+    await writeBot(admin, conv.id,
+      `Multiple matches for "${target}":\n${list}\n\nRe-send with a more specific name or use the email address.`);
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+  const user = resolved.user;
+
+  // Look up existing rate for before/after messaging.
+  const current = kind === 'pay'
+    ? await currentPayRate(admin, user.id)
+    : await currentBillRate(admin, user.id);
+  const previousRate = current?.rate ?? null;
+
+  // Close current row + insert new via setRate helper.
+  try {
+    const inserted = await setRate(admin, {
+      userId: user.id,
+      kind,
+      rate,
+      effectiveFrom,
+      source: `chat:user.update_${kind}_rate`,
+      createdBy: conv.user_id,
+      notes,
+      clientEngagementId: kind === 'bill' ? (current?.client_engagement_id ?? null) : null,
+    });
+
+    // For bill rate: also update the current client_engagements.bill_rate so
+    // read-back paths that haven't migrated to rate_history yet stay accurate.
+    if (kind === 'bill' && current?.client_engagement_id) {
+      await admin.from('client_engagements')
+        .update({ bill_rate: rate })
+        .eq('id', current.client_engagement_id);
+    }
+
+    await admin.from('chat_actions').update({
+      status: 'success', completed_at: new Date().toISOString(),
+      action_output: {
+        user_id: user.id, email: user.email,
+        kind, previous_rate: previousRate, new_rate: rate,
+        effective_from: effectiveFrom, notes,
+        rate_history_id: inserted.id,
+      },
+    }).eq('id', actionId);
+
+    const prevDisp = previousRate != null ? `$${previousRate}/hr` : '(none on file)';
+    const kindLabel = kind === 'pay' ? 'Pay rate' : 'Bill rate';
+    await writeBot(admin, conv.id,
+      `✅ ${user.name} (${user.email}) — ${kindLabel}: ${prevDisp} → $${rate}/hr, effective ${effectiveFrom}.`);
+    await resetAfterSuccess(admin, conv.id);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Rate update failed: ${msg}`);
+  }
 }
 
 // Normalize a country string to a 2-letter ISO code. Accepts already-ISO
@@ -857,17 +1134,14 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
   const status = !endDate ? 'ACTIVE (no end date)' : endDate > today ? `ACTIVE (ends ${endDate})` : `ENDED ${endDate}`;
 
   // Rate + reporting-line lookups fired in parallel to keep the card snappy.
-  // Pay rate = most recent invoice rate. Bill rate = current client_engagement bill_rate.
-  // Manager and vendor manager names are resolved from their respective foreign keys.
+  // Rates come from rate_history (single source of truth). client_engagement is
+  // still consulted for role_title annotation. Invoice is consulted for
+  // pay-rate provenance when the current rate came from the backfill.
   const managerId = (user.manager_id as string | null) ?? null;
   const vmId = (user.vendor_manager_id as string | null) ?? null;
-  const [{ data: lastInv }, { data: eng }, { data: mgr }, { data: vm }] = await Promise.all([
-    admin.from('invoices')
-      .select('rate, period_start, invoice_number')
-      .eq('user_id', user.id)
-      .not('rate', 'is', null)
-      .order('period_start', { ascending: false })
-      .limit(1),
+  const [payRow, billRow, { data: eng }, { data: mgr }, { data: vm }] = await Promise.all([
+    currentPayRate(admin, user.id as string),
+    currentBillRate(admin, user.id as string),
     admin.from('client_engagements')
       .select('bill_rate, role_title, effective_from, effective_to')
       .eq('user_id', user.id)
@@ -881,23 +1155,91 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
       ? admin.from('profiles').select('name, email').eq('id', vmId).maybeSingle()
       : Promise.resolve({ data: null }),
   ]);
-  const payRate = lastInv?.[0]?.rate as number | null | undefined;
-  const payRateNote = lastInv?.[0] ? ` (last invoice ${lastInv[0].invoice_number}, ${(lastInv[0].period_start as string).slice(0, 7)})` : '';
-  const billRate = eng?.[0]?.bill_rate as number | null | undefined;
+  const payRate = payRow?.rate ?? null;
+  let payRateNote = '';
+  if (payRow) {
+    if (payRow.source.startsWith('backfill:invoices')) {
+      const { data: lastInv } = await admin.from('invoices')
+        .select('period_start, invoice_number')
+        .eq('user_id', user.id)
+        .not('rate', 'is', null)
+        .order('period_start', { ascending: false })
+        .limit(1);
+      if (lastInv?.[0]) {
+        payRateNote = ` (last invoice ${lastInv[0].invoice_number}, ${(lastInv[0].period_start as string).slice(0, 7)})`;
+      }
+    } else {
+      payRateNote = ` (as of ${payRow.effective_from})`;
+    }
+  }
+  const billRate = billRow?.rate ?? null;
   const billRateNote = eng?.[0]?.role_title ? ` (${eng[0].role_title})` : '';
   const managerName = mgr ? `${(mgr as { name: string }).name} (${(mgr as { email: string }).email})` : null;
   const vmName = vm ? `${(vm as { name: string }).name} (${(vm as { email: string }).email})` : null;
 
+  const focus = String(conv.captured.focus ?? 'full');
+  const displayName = `${user.name} (${user.email})`;
+  const roleTitle = eng?.[0]?.role_title as string | null | undefined;
+
+  // Scoped projections — surface only what CA asked about. Fallback to full
+  // card when focus is unknown / open-ended.
+  if (focus === 'title') {
+    const line = roleTitle
+      ? `${displayName} — ${roleTitle}`
+      : `${displayName} — (no job title on file)`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'rate') {
+    const bits: string[] = [];
+    if (payRate != null) bits.push(`Pay $${payRate}/hr${payRateNote}`);
+    else bits.push('Pay (not on file)');
+    if (billRate != null) bits.push(`Bill $${billRate}/hr${roleTitle ? ` (${roleTitle})` : ''}`);
+    else bits.push('Bill (not on file)');
+    const line = `${displayName} — ${bits.join(', ')}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'dates') {
+    const bits: string[] = [];
+    bits.push(user.start_date ? `started ${user.start_date}` : 'no start date');
+    if (endDate) bits.push(endDate > today ? `ends ${endDate}` : `ended ${endDate}`);
+    else bits.push('active');
+    const line = `${displayName} — ${bits.join(', ')}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'manager') {
+    const parts: string[] = [];
+    if (managerName) parts.push(`manager ${managerName}`);
+    if (vmName) parts.push(`reports to ${vmName}`);
+    if (parts.length === 0) parts.push('(no manager or vendor manager on file)');
+    const line = `${displayName} — ${parts.join(', ')}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'location') {
+    const line = `${displayName} — ${user.country ?? '(no country)'}${user.location_type ? ` (${user.location_type})` : ''}${user.region ? `, ${user.region}` : ''}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+  if (focus === 'project') {
+    const line = `${displayName} — ${projectName}`;
+    await writeBot(admin, conv.id, [...(assumptionNote ? [assumptionNote, ''] : []), line].join('\n'));
+    return;
+  }
+
+  // focus === 'full' or anything else → default card
   const lines = [
     ...(assumptionNote ? [assumptionNote, ''] : []),
-    `${user.name} (${user.email})`,
+    displayName,
     `  Status: ${status}`,
     `  Role: ${user.role}`,
     `  Country: ${user.country ?? '(none)'}${user.location_type ? ` (${user.location_type})` : ''}`,
     `  Project: ${projectName}`,
     `  Started: ${user.start_date ?? '(not set — no reminders)'}`,
     `  Pay rate: ${payRate != null ? `$${payRate}/hr${payRateNote}` : '(not on file — no invoices yet)'}`,
-    `  Bill rate: ${billRate != null ? `$${billRate}/hr${billRateNote}` : '(not on file — no client engagement)'}`,
+    `  Bill rate: ${billRate != null ? `$${billRate}/hr${eng?.[0]?.role_title ? ` (${eng[0].role_title})` : ''}` : '(not on file — no client engagement)'}`,
     ...(managerName ? [`  Manager: ${managerName}`] : []),
     ...(vmName ? [`  Vendor manager: ${vmName}`] : []),
     `  Invoicing: ${user.invoice_enabled ? 'YES' : 'NO'}`,
@@ -927,7 +1269,11 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   let q = admin.from('profiles').select('id, name, email, role, country, project_id, start_date, end_date, location_type');
 
-  if (c.role) q = q.eq('role', String(c.role));
+  // Default role filter: timesheetuser (contractors) unless CA explicitly asked
+  // about another role. Rationale — CA lookups are almost always about
+  // contractors; admin/CA/VM/accountant accounts pollute the results.
+  const effectiveRole = c.role ? String(c.role) : 'timesheetuser';
+  q = q.eq('role', effectiveRole);
   if (c.country) q = q.eq('country', String(c.country).toUpperCase());
   if (c.location_type) q = q.eq('location_type', String(c.location_type));
   if (c.missing_start_date === true) q = q.is('start_date', null);
@@ -938,6 +1284,17 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
   if (c.active === false) {
     // terminated = end_date in the past
     q = q.lte('end_date', todayIso());
+  }
+
+  // Client-engagement-scoped filters (role_title, bill_rate_min/max) — pre-query
+  // matching user_ids then apply .in on profiles.
+  const engFilterUserIds = await resolveEngagementFilterUserIds(admin, c);
+  if (engFilterUserIds !== null) {
+    if (engFilterUserIds.length === 0) {
+      await writeBot(admin, conv.id, 'No users match those filters.');
+      return;
+    }
+    q = q.in('id', engFilterUserIds);
   }
 
   // Project filter: resolve project name/code → id first
@@ -989,7 +1346,15 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
   }
 
   // Get one extra to detect "there are more" and cap fetched rows.
-  q = q.order('name', { ascending: true }).limit(limit + 1);
+  // Slice 3: sort by end_date DESC when active=false or user asked for "recent".
+  const sortMode = String(c.sort ?? '');
+  const wantTemporal = sortMode === 'recent' || c.active === false;
+  if (wantTemporal) {
+    q = q.order('end_date', { ascending: false, nullsFirst: false });
+  } else {
+    q = q.order('name', { ascending: true });
+  }
+  q = q.limit(limit + 1);
 
   const { data, error } = await q;
   if (error) throw new Error(`Query failed: ${error.message}`);
@@ -1010,8 +1375,27 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   const truncated = rows.length > limit;
   const shown = truncated ? rows.slice(0, limit) : rows;
+
+  // Slice 8: enrich rendered rows with role_title + bill_rate when the filter
+  // was scoped to those attributes. Skipped otherwise so the default list
+  // format stays unchanged.
+  const showRoleTitle = Boolean(c.role_title);
+  const showBillRate = c.bill_rate_min != null && c.bill_rate_min !== ''
+    || c.bill_rate_max != null && c.bill_rate_max !== '';
+  const engMap = new Map<string, { role_title: string | null; bill_rate: number | null }>();
+  if ((showRoleTitle || showBillRate) && shown.length > 0) {
+    const { data: engs } = await admin.from('client_engagements')
+      .select('user_id, role_title, bill_rate, effective_from')
+      .in('user_id', shown.map((r) => r.id))
+      .is('effective_to', null)
+      .order('effective_from', { ascending: false });
+    for (const e of (engs ?? []) as Array<{ user_id: string; role_title: string | null; bill_rate: number | null }>) {
+      if (!engMap.has(e.user_id)) engMap.set(e.user_id, { role_title: e.role_title, bill_rate: e.bill_rate });
+    }
+  }
   const filterParts: string[] = [];
   if (c.role) filterParts.push(String(c.role));
+  else filterParts.push('contractors');
   if (c.project) filterParts.push(`project=${c.project}`);
   if (c.country) filterParts.push(`country=${String(c.country).toUpperCase()}`);
   if (c.location_type) filterParts.push(String(c.location_type));
@@ -1024,6 +1408,9 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
   if (c.active === true) filterParts.push('active');
   if (c.active === false) filterParts.push('terminated');
   if (c.missing_start_date === true) filterParts.push('missing start_date');
+  if (c.role_title) filterParts.push(`title~${c.role_title}`);
+  if (c.bill_rate_min != null && c.bill_rate_min !== '') filterParts.push(`bill≥$${c.bill_rate_min}`);
+  if (c.bill_rate_max != null && c.bill_rate_max !== '') filterParts.push(`bill≤$${c.bill_rate_max}`);
   const filterDesc = filterParts.length > 0 ? ` matching ${filterParts.join(', ')}` : '';
 
   const header = truncated
@@ -1032,7 +1419,14 @@ async function execUserList(admin: SupabaseClient, conv: Conversation): Promise<
 
   const lines = shown.map((r, i) => {
     const project = r.project_id ? (projMap.get(r.project_id) ?? '') : '';
+    const eng = engMap.get(r.id);
     const bits: string[] = [];
+    if (showRoleTitle) {
+      bits.push(eng?.role_title ? eng.role_title : '(no title)');
+    }
+    if (showBillRate) {
+      bits.push(eng?.bill_rate != null ? `$${eng.bill_rate}/hr` : '(no bill rate)');
+    }
     if (project) bits.push(project);
     if (r.country) bits.push(r.country);
     if (r.start_date) bits.push(`started ${r.start_date}`);
@@ -1051,9 +1445,11 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
   const c = conv.captured;
 
   // Build the same filter chain as execUserList so counts are consistent with lists.
+  // Slice 3: default role=timesheetuser unless CA explicitly asked otherwise.
+  const effectiveCountRole = c.role ? String(c.role) : 'timesheetuser';
   const applyFilters = (q: ReturnType<SupabaseClient['from']>) => {
     let out = q;
-    if (c.role) out = out.eq('role', String(c.role));
+    out = out.eq('role', effectiveCountRole);
     if (c.country) out = out.eq('country', String(c.country).toUpperCase());
     if (c.location_type) out = out.eq('location_type', String(c.location_type));
     if (c.missing_start_date === true) out = out.is('start_date', null);
@@ -1087,11 +1483,19 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
     vmId = resolved.user.id;
   }
 
+  // Client-engagement-scoped filters (role_title, bill_rate_min/max).
+  const engFilterUserIds = await resolveEngagementFilterUserIds(admin, c);
+  if (engFilterUserIds !== null && engFilterUserIds.length === 0) {
+    await writeBot(admin, conv.id, `Total${c.role_title || c.bill_rate_min || c.bill_rate_max ? ` matching those job filters` : ''}: 0`);
+    return;
+  }
+
   const baseQuery = () => {
     let q = admin.from('profiles').select('*', { count: 'exact', head: true });
     q = applyFilters(q);
     if (projectId != null) q = q.eq('project_id', projectId);
     if (vmId != null) q = q.eq('vendor_manager_id', vmId);
+    if (engFilterUserIds !== null) q = q.in('id', engFilterUserIds);
     return q;
   };
 
@@ -1109,6 +1513,7 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
 
   const filterParts: string[] = [];
   if (c.role) filterParts.push(String(c.role));
+  else filterParts.push('contractors');
   if (c.project) filterParts.push(`project=${c.project}`);
   if (c.country) filterParts.push(`country=${String(c.country).toUpperCase()}`);
   if (c.location_type) filterParts.push(String(c.location_type));
@@ -1116,6 +1521,9 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
   if (c.active === true) filterParts.push('active');
   if (c.active === false) filterParts.push('terminated');
   if (c.missing_start_date === true) filterParts.push('missing start_date');
+  if (c.role_title) filterParts.push(`title~${c.role_title}`);
+  if (c.bill_rate_min != null && c.bill_rate_min !== '') filterParts.push(`bill≥$${c.bill_rate_min}`);
+  if (c.bill_rate_max != null && c.bill_rate_max !== '') filterParts.push(`bill≤$${c.bill_rate_max}`);
   const filterDesc = filterParts.length > 0 ? ` matching ${filterParts.join(', ')}` : '';
 
   const lines = [`Total${filterDesc}: ${total ?? 0}`];
@@ -1128,6 +1536,32 @@ async function execUserCount(admin: SupabaseClient, conv: Conversation): Promise
     lines.push(`  Ended: ${endedRes.count ?? 0}`);
   }
   await writeBot(admin, conv.id, lines.join('\n'));
+}
+
+// Resolves user_ids that match client-engagement-scoped filters (role_title,
+// bill_rate_min, bill_rate_max). Returns null when no such filter is set (i.e.
+// caller should NOT apply an .in() restriction). Returns [] when filters are
+// set but nothing matches (caller should short-circuit with a "no results"
+// reply). Otherwise returns the deduped list of matching user_ids.
+async function resolveEngagementFilterUserIds(
+  admin: SupabaseClient,
+  c: Record<string, unknown>,
+): Promise<string[] | null> {
+  const roleTitle = typeof c.role_title === 'string' ? c.role_title.trim() : '';
+  const billMin = c.bill_rate_min != null && c.bill_rate_min !== '' ? Number(c.bill_rate_min) : null;
+  const billMax = c.bill_rate_max != null && c.bill_rate_max !== '' ? Number(c.bill_rate_max) : null;
+  if (!roleTitle && billMin === null && billMax === null) return null;
+
+  // Current engagements only.
+  let q = admin.from('client_engagements').select('user_id').is('effective_to', null);
+  if (roleTitle) q = q.ilike('role_title', `%${roleTitle}%`);
+  if (billMin !== null && Number.isFinite(billMin)) q = q.gte('bill_rate', billMin);
+  if (billMax !== null && Number.isFinite(billMax)) q = q.lte('bill_rate', billMax);
+
+  const { data, error } = await q;
+  if (error) throw new Error(`client_engagements filter failed: ${error.message}`);
+  const ids = Array.from(new Set(((data ?? []) as Array<{ user_id: string }>).map((r) => r.user_id).filter(Boolean)));
+  return ids;
 }
 
 // Fuzzy-resolve a target string to a profiles row. Accepts:
@@ -1321,9 +1755,21 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
   const resolved = enriched._target_resolved as
     | { name: string; email: string; start_date: string | null; end_date: string | null }
     | undefined;
+  const projectResolved = enriched._project_resolved as
+    | { id: number; name: string; code: string } | undefined;
 
   const lines = spec.fields
     .filter((f) => f.applies_if ? f.applies_if(enriched) : true)
+    .filter((f) => {
+      // Hide unused ask_only_if_mentioned fields with no default — they're
+      // encouraged extras (role_title, rates, payment_terms) that should stay
+      // silent when CA didn't provide them.
+      if (!f.ask_only_if_mentioned) return true;
+      if (f.default !== undefined) return true;
+      return enriched[f.name] !== undefined && enriched[f.name] !== null && enriched[f.name] !== '';
+    })
+    // 'client' is consumed into 'project' during resolution; never show it.
+    .filter((f) => f.name !== 'client')
     .map((f) => {
       const v = enriched[f.name];
       let displayValue: string;
@@ -1341,6 +1787,22 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
         const cur = resolved.end_date ?? '(not set)';
         return `  End Date: ${cur} → ${String(v)}`;
       }
+      // Rate updates: show current → new so CA sees the actual delta.
+      if (f.name === 'rate' && spec.name === 'user.update_pay_rate') {
+        const cur = (enriched._target_resolved as { current_pay_rate?: number | null } | undefined)?.current_pay_rate;
+        const curDisp = cur != null ? `$${cur}/hr` : '(not on file)';
+        return `  Pay Rate: ${curDisp} → $${Number(v)}/hr`;
+      }
+      if (f.name === 'rate' && spec.name === 'user.update_bill_rate') {
+        const cur = (enriched._target_resolved as { current_bill_rate?: number | null } | undefined)?.current_bill_rate;
+        const curDisp = cur != null ? `$${cur}/hr` : '(not on file)';
+        return `  Bill Rate: ${curDisp} → $${Number(v)}/hr`;
+      }
+
+      // Project: show code alongside name when we have a resolution.
+      if (projectResolved && f.name === 'project') {
+        return `  Project: ${projectResolved.name} (${projectResolved.code})`;
+      }
 
       if (v === null || v === undefined) {
         // Special case: start_date null gates the user out of reminders
@@ -1353,10 +1815,21 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
         }
       } else if (typeof v === 'boolean') {
         displayValue = v ? 'YES' : 'NO';
+      } else if (f.name === 'bill_rate' || f.name === 'pay_rate') {
+        // Money formatting.
+        const n = typeof v === 'number' ? v : Number(String(v).replace(/[^\d.]/g, ''));
+        displayValue = Number.isFinite(n) ? `$${n}/hr` : String(v);
       } else {
         displayValue = String(v);
       }
-      const humanLabel = f.name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+      const labelMap: Record<string, string> = {
+        role_title: 'Position',
+        bill_rate: 'Bill Rate',
+        pay_rate: 'Pay Rate',
+        payment_terms: 'Payment Terms',
+      };
+      const humanLabel = labelMap[f.name] ??
+        f.name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
       return `  ${humanLabel}: ${displayValue}`;
     })
     .join('\n');
@@ -1366,7 +1839,9 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
 function needsTargetResolution(intentName: string): boolean {
   return intentName === 'user.set_start_date'
     || intentName === 'user.set_end_date'
-    || intentName === 'user.update_country_region';
+    || intentName === 'user.update_country_region'
+    || intentName === 'user.update_pay_rate'
+    || intentName === 'user.update_bill_rate';
 }
 
 function targetAlreadyResolved(captured: Record<string, unknown>): boolean {
