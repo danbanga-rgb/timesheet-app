@@ -203,10 +203,11 @@ import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
 import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
 import { buildInvoiceLines as sharedBuildInvoiceLines } from './lib/invoiceLines';
 import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
-import { parseLocalDate, formatDate, getWeekDates } from './lib/dates';
+import { parseLocalDate, formatDate, getWeekDates, isWeekend } from './lib/dates';
 import { triggerDownload } from './lib/csv';
 import { isTestAccount } from './lib/isTestAccount';
 import MonthRangePicker, { buildMonthPresets } from './components/MonthRangePicker';
+import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
@@ -1834,11 +1835,6 @@ const TimesheetSystem = () => {
     return `${payRun.getFullYear()}-${String(payRun.getMonth() + 1).padStart(2, '0')}-${String(payRun.getDate()).padStart(2, '0')}`;
   }
 
-  function getWeekSunday(weekStart: Date): Date {
-    const sun = new Date(weekStart);
-    sun.setDate(sun.getDate() + 6);
-    return sun;
-  }
 
 
   function detectUserLocation() {
@@ -1981,7 +1977,6 @@ const TimesheetSystem = () => {
     return (holidaysByYear[year]?.[country] || []).find(h => h.date === dateStr);
   }
 
-  function isWeekend(date: Date): boolean { const d = date.getDay(); return d === 0 || d === 6; }
 
   // ─── AUTH ─────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
@@ -6230,93 +6225,6 @@ const TimesheetSystem = () => {
     setSelectedTimesheetIds(selectedTimesheetIds.length === pendingIds.length && pendingIds.length > 0 ? [] : pendingIds);
   };
 
-  // ─── SHARED TIMESHEET DETAIL MODAL ───────────────────────────────────────
-  const TimesheetDetailModal = () => {
-    if (!selectedTimesheetForView) return null;
-    const user = users.find(u => u.id === selectedTimesheetForView.userId);
-    const project = projects.find(p => p.id === (selectedTimesheetForView.projectId ?? user?.projectId));
-    const weekDates = getWeekDates(parseLocalDate(selectedTimesheetForView.weekStart));
-    const dailyData = weekDates.map(date => {
-      const dateKey = formatDate(date);
-      const entry = selectedTimesheetForView.entries[dateKey];
-      const holiday = user ? isHoliday(date, user.country) : undefined;
-      const weekend = isWeekend(date);
-      return { date, dateKey, dayName: date.toLocaleDateString('en-US', { weekday: 'long' }), hours: parseFloat(entry?.hours || '0'), holiday: holiday || undefined, holidayName: holiday?.name, weekend };
-    });
-    const totalHours = dailyData.reduce((s, d) => s + d.hours, 0);
-
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={closeTimesheetModal}>
-        <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-3xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-          <div className="sticky top-0 bg-white border-b p-6 z-10">
-            <div className="flex justify-between items-start">
-              <div>
-                <h2 className="text-2xl font-bold text-gray-800">Timesheet Details</h2>
-                <div className="mt-2 space-y-1">
-                  <p className="text-gray-600"><span className="font-medium">Employee:</span> {selectedTimesheetForView.userName}</p>
-                  <p className="text-gray-600"><span className="font-medium">Week:</span> {parseLocalDate(selectedTimesheetForView.weekStart).toLocaleDateString()} – {getWeekSunday(parseLocalDate(selectedTimesheetForView.weekStart)).toLocaleDateString()}</p>
-                  {project && <p className="text-indigo-600"><span className="font-medium">Project:</span> {project.name} ({project.code})</p>}
-                  {user && (
-                    <p className="text-gray-600 flex items-center gap-1">
-                      <MapPin className="w-4 h-4" />
-                      <span className="font-medium">Location:</span> {countries.find(c => c.code === user.country)?.name}{user.region ? ', ' + user.region : ''}
-                    </p>
-                  )}
-                  <p className="text-gray-600"><span className="font-medium">Submitted:</span> {new Date(selectedTimesheetForView.submittedAt).toLocaleString()}</p>
-                </div>
-              </div>
-              <button onClick={closeTimesheetModal} className="text-gray-500 hover:text-gray-700 p-1"><X className="w-6 h-6" /></button>
-            </div>
-          </div>
-          <div className="p-6">
-            <span className={'inline-block mb-4 px-4 py-2 rounded-full text-sm font-medium ' + (selectedTimesheetForView.status === 'approved' ? 'bg-green-100 text-green-800' : selectedTimesheetForView.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800')}>
-              Status: {selectedTimesheetForView.status.charAt(0).toUpperCase() + selectedTimesheetForView.status.slice(1)}
-            </span>
-            <h3 className="text-lg font-semibold text-gray-800 mb-4">Daily Breakdown</h3>
-            <div className="space-y-3">
-              {dailyData.map(day => (
-                <div key={day.dateKey} className={'p-4 rounded-lg border-2 ' + (day.holiday ? 'bg-red-50 border-red-200' : day.weekend ? 'bg-gray-100 border-gray-200' : 'bg-blue-50 border-blue-200')}>
-                  <div className="flex justify-between items-center">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-gray-800">{day.dayName}</span>
-                        {day.holiday && <span className="px-2 py-1 bg-red-100 text-red-700 text-xs rounded-full font-medium">Holiday: {day.holidayName}</span>}
-                        {day.weekend && <span className="px-2 py-1 bg-gray-200 text-gray-600 text-xs rounded-full font-medium">Weekend</span>}
-                      </div>
-                      <p className="text-sm text-gray-600 mt-1">{day.date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</p>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-3xl font-bold text-indigo-600">{day.hours > 0 ? day.hours.toFixed(1) : '0'}</div>
-                      <div className="text-sm text-gray-600">hours</div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="mt-6 p-6 bg-indigo-600 text-white rounded-lg">
-              <div className="flex justify-between items-center">
-                <div><div className="text-sm opacity-90">Total Hours for Week</div><div className="text-4xl font-bold mt-1">{totalHours.toFixed(1)}h</div></div>
-                <div className="text-right"><div className="text-sm opacity-90">Standard Week</div><div className="text-2xl font-semibold mt-1">40h</div>{totalHours !== 40 && <div className="text-sm mt-1">{totalHours > 40 ? '+' : ''}{(totalHours - 40).toFixed(1)}h</div>}</div>
-              </div>
-            </div>
-            {(currentUser?.role === 'manager' || currentUser?.role === 'accountant') && selectedTimesheetForView.status !== 'rejected' && (
-              <div className="mt-6 flex gap-3">
-                {selectedTimesheetForView.status === 'pending' && (
-                  <button onClick={async () => { await handleApproval(selectedTimesheetForView.id, 'approved'); closeTimesheetModal(); alert('Timesheet approved!'); }} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium">
-                    <CheckCircle className="w-5 h-5" /> Approve Timesheet
-                  </button>
-                )}
-                <button onClick={async () => { if (!window.confirm('Reject this timesheet? The employee will need to resubmit.')) return; await handleApproval(selectedTimesheetForView.id, 'rejected'); closeTimesheetModal(); alert('Timesheet rejected.'); }} className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium">
-                  <XCircle className="w-5 h-5" /> {selectedTimesheetForView.status === 'approved' ? 'Revoke & Reject' : 'Reject Timesheet'}
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
   // ─── LOADING SCREEN ───────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -7199,7 +7107,18 @@ const TimesheetSystem = () => {
         setDateRange={setDateRange}
         selectedTimesheetIds={selectedTimesheetIds}
         showTimesheetModal={showTimesheetModal}
-        timesheetDetailModal={<TimesheetDetailModal />}
+        timesheetDetailModal={selectedTimesheetForView ? (
+          <TimesheetDetailModal
+            timesheet={selectedTimesheetForView}
+            users={users}
+            projects={projects}
+            currentUser={currentUser!}
+            countries={countries}
+            isHoliday={isHoliday}
+            onClose={closeTimesheetModal}
+            onApproval={handleApproval}
+          />
+        ) : null}
         onLogout={handleLogout}
         onApproval={handleApproval}
         bulkApproveTimesheets={bulkApproveTimesheets}
@@ -14751,7 +14670,18 @@ const TimesheetSystem = () => {
           })()}
         </div>
         <style>{`@media print { body * { visibility: hidden; } .bg-white.rounded-lg.shadow-md.p-6, .bg-white.rounded-lg.shadow-md.p-6 * { visibility: visible; } .bg-white.rounded-lg.shadow-md.p-6 { position: absolute; left: 0; top: 0; width: 100%; } button { display: none !important; } }`}</style>
-        {showTimesheetModal && <TimesheetDetailModal />}
+        {showTimesheetModal && selectedTimesheetForView && (
+          <TimesheetDetailModal
+            timesheet={selectedTimesheetForView}
+            users={users}
+            projects={projects}
+            currentUser={currentUser!}
+            countries={countries}
+            isHoliday={isHoliday}
+            onClose={closeTimesheetModal}
+            onApproval={handleApproval}
+          />
+        )}
       {/* ─── Client Invoice modal (Phase 1: transient, print-only) ────────── */}
       {invoiceModal && createPortal((() => {
         const S = invoiceModal;
@@ -16179,7 +16109,18 @@ const TimesheetSystem = () => {
           );
         })()}
 
-        {showTimesheetModal && <TimesheetDetailModal />}
+        {showTimesheetModal && selectedTimesheetForView && (
+          <TimesheetDetailModal
+            timesheet={selectedTimesheetForView}
+            users={users}
+            projects={projects}
+            currentUser={currentUser!}
+            countries={countries}
+            isHoliday={isHoliday}
+            onClose={closeTimesheetModal}
+            onApproval={handleApproval}
+          />
+        )}
 
         {/* Profile Tab */}
         {userTab === 'profile' && (

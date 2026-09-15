@@ -28,3 +28,14 @@ export function getWeekDates(startDate: Date): Date[] {
   }
   return dates;
 }
+
+export function getWeekSunday(weekStart: Date): Date {
+  const sun = new Date(weekStart);
+  sun.setDate(sun.getDate() + 6);
+  return sun;
+}
+
+export function isWeekend(date: Date): boolean {
+  const d = date.getDay();
+  return d === 0 || d === 6;
+}
