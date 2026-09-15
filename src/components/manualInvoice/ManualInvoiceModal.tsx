@@ -309,6 +309,7 @@ export default function ManualInvoiceModal({
     const payload = {
       invoice_number: invoiceNumber.trim(),
       user_id: selectedUser.id,
+      user_name: selectedUser.name,
       project_id: selectedUser.projectId,
       period_start: periodStart,
       period_end: periodEnd,
