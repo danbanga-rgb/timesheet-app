@@ -193,6 +193,7 @@ STRICT CLASSIFICATION RULES:
 - user.create: user is **providing information to create a new user**. Signals: "add", "create", "onboard", "starts as", "is joining", "new hire".
 - user.set_start_date / user.set_end_date: user is **setting a date on an EXISTING person** (verbs: "set", "update", "change", "ends", "starts on"). If the person doesn't exist yet, fall back to user.create.
 - user.update_country_region: user is **changing an existing user's country** (verbs: "update country", "change country", "move to <country>", "<name> is now in <country>", "<name>'s country is <country>").
+- user.update_project: user is **reassigning an existing user to a different project** (verbs: "move X to <project>", "reassign X to <project>", "X is now on <project>", "switch X to <project>", "put X on <project>"). Distinguish from user.update_country_region — "move to Croatia" is country, "move to APFM" is project.
 - user.update_pay_rate: user is **changing an existing user's PAY rate** (what we pay them). Verbs: "increase X's pay to Y", "raise X's rate to $Z", "set X's pay rate to N", "X's new pay is $A". If the message says "bill rate" instead of "pay", use user.update_bill_rate.
 - user.update_bill_rate: user is **changing an existing user's BILL rate** (what we charge the client). Verbs: "raise X's bill rate to Y", "we're billing X at $Z now", "X's new bill rate is $N".
 - user.get: user is **asking about ONE specific person** ("when does X start?", "what is X's project?", "is X still active?", "show X's details", "what is X's pay rate?", "X's payrate", "X's bill rate", "X's billrate", "how much does X make/bill", "X's hourly rate"). Rates + dates + project all live on this single profile card.
@@ -214,6 +215,7 @@ Extract initial field values from the message for the classified intent:
 - user.create: name, email, role, location_type, country, client, project, start_date, end_date, vendor_manager, role_title, pay_rate, bill_rate, payment_terms, invoice_enabled, send_invite
 - user.set_start_date / user.set_end_date: target (name or email), start_date / end_date
 - user.update_country_region: target (name or email), country (ISO code preferred, else full name), optional region
+- user.update_project: target (name or email), project (name or code)
 - user.update_pay_rate: target (name or email), rate (number, no $ or /hr), optional effective_from, optional notes
 - user.update_bill_rate: target (name or email), rate (number, no $ or /hr), optional effective_from, optional notes
 - user.get: target (name or email)
@@ -378,9 +380,10 @@ Return JSON:
   const validated = validateExtracted(spec, rawExtracted);
   const merged = normalizeCaptured(spec, { ...captured, ...validated });
 
-  // For user.create: resolve the project (from either `project` or `client` input)
-  // before completing collection. When it matches multiple, ask CA to pick.
-  if (spec.name === 'user.create') {
+  // For user.create + user.update_project: resolve the project (from either
+  // `project` or `client` input) before completing collection. When it matches
+  // multiple, ask CA to pick. `client` field only exists on user.create.
+  if (spec.name === 'user.create' || spec.name === 'user.update_project') {
     const projectInput = (typeof merged.project === 'string' && merged.project.trim())
       || (typeof merged.client === 'string' && merged.client.trim())
       || null;
@@ -466,6 +469,18 @@ Return JSON:
       const cur = await currentBillRate(admin, u.id);
       resolvedMeta.current_bill_rate = cur?.rate ?? null;
       resolvedMeta.current_bill_effective_from = cur?.effective_from ?? null;
+    } else if (spec.name === 'user.update_project') {
+      // Fetch current project so confirmation shows current → new.
+      const { data: prof } = await admin.from('profiles')
+        .select('project_id').eq('id', u.id).maybeSingle();
+      const currentProjectId = (prof as { project_id?: number | null } | null)?.project_id ?? null;
+      resolvedMeta.current_project_id = currentProjectId;
+      if (currentProjectId != null) {
+        const { data: proj } = await admin.from('projects')
+          .select('name, code').eq('id', currentProjectId).maybeSingle();
+        resolvedMeta.current_project_name = (proj as { name?: string } | null)?.name ?? null;
+        resolvedMeta.current_project_code = (proj as { code?: string } | null)?.code ?? null;
+      }
     }
     (merged as Record<string, unknown>)._target_resolved = resolvedMeta;
   }
@@ -618,6 +633,8 @@ async function executeIntent(
       await execUserSetDate(admin, conv, actionId, spec.name === 'user.set_start_date' ? 'start_date' : 'end_date');
     } else if (spec.name === 'user.update_country_region') {
       await execUserUpdateCountry(admin, conv, actionId);
+    } else if (spec.name === 'user.update_project') {
+      await execUserUpdateProject(admin, conv, actionId);
     } else if (spec.name === 'user.update_pay_rate' || spec.name === 'user.update_bill_rate') {
       await execUserUpdateRate(admin, conv, actionId, spec.name === 'user.update_pay_rate' ? 'pay' : 'bill');
     } else {
@@ -945,6 +962,80 @@ async function execUserUpdateCountry(
 
   await writeBot(admin, conv.id,
     `✅ ${user.name} (${user.email}) — country set to ${country}${region ? `, region ${region}` : ''} (${location_type}).`);
+  await resetAfterSuccess(admin, conv.id);
+}
+
+// ─── Project update executor ───────────────────────────────────────
+
+async function execUserUpdateProject(
+  admin: SupabaseClient,
+  conv: Conversation,
+  actionId: string,
+): Promise<void> {
+  const target = String(conv.captured.target ?? '').trim();
+  if (!target) throw new Error('Missing target');
+
+  // Project comes pre-resolved from driveCollecting (single-match path).
+  // Fall back to a name/code match if metadata was lost (defensive).
+  const preResolved = (conv.captured as Record<string, unknown>)._project_resolved as
+    | { id: number; name: string; code: string } | undefined;
+  let projectId: number | null = preResolved?.id ?? null;
+  let projectName: string | null = preResolved?.name ?? null;
+  let projectCode: string | null = preResolved?.code ?? null;
+  if (projectId === null) {
+    const raw = String(conv.captured.project ?? '').trim();
+    if (!raw) throw new Error('Missing project');
+    const { data: projects } = await admin.from('projects').select('id, name, code');
+    const tok = raw.toLowerCase();
+    const match = (projects ?? []).find((p) =>
+      String(p.name).toLowerCase() === tok || String(p.code).toLowerCase() === tok);
+    if (!match) throw new Error(`Project "${raw}" not found`);
+    projectId = match.id as number;
+    projectName = match.name as string;
+    projectCode = match.code as string;
+  }
+
+  const resolved = await resolveUser(admin, target);
+  if (resolved.kind === 'none') throw new Error(`No user found matching "${target}"`);
+  if (resolved.kind === 'multi') {
+    const list = resolved.candidates.map((c, i) => `  ${i + 1}. ${c.name} (${c.email})`).join('\n');
+    await admin.from('chat_actions').update({
+      status: 'cancelled', completed_at: new Date().toISOString(),
+      action_output: { reason: 'ambiguous_target', candidates: resolved.candidates },
+    }).eq('id', actionId);
+    await writeBot(admin, conv.id,
+      `Multiple matches for "${target}":\n${list}\n\nRe-send with a more specific name or use the email address.`);
+    await setPhase(admin, conv.id, 'cancelled');
+    return;
+  }
+  const user = resolved.user;
+
+  // Read previous project for the success message.
+  const targetMeta = (conv.captured as Record<string, unknown>)._target_resolved as
+    | { current_project_id?: number | null; current_project_name?: string | null } | undefined;
+  const previousProjectId = targetMeta?.current_project_id ?? null;
+  const previousProjectName = targetMeta?.current_project_name ?? null;
+
+  const { error } = await admin.from('profiles').update({
+    project_id: projectId,
+  }).eq('id', user.id);
+  if (error) throw new Error(`Update failed: ${error.message}`);
+
+  await admin.from('chat_actions').update({
+    status: 'success', completed_at: new Date().toISOString(),
+    action_output: {
+      user_id: user.id, email: user.email,
+      previous_project_id: previousProjectId,
+      previous_project_name: previousProjectName,
+      new_project_id: projectId,
+      new_project_name: projectName,
+      new_project_code: projectCode,
+    },
+  }).eq('id', actionId);
+
+  const prevDisp = previousProjectName ?? '(none)';
+  await writeBot(admin, conv.id,
+    `✅ ${user.name} (${user.email}) — Project: ${prevDisp} → ${projectName} (${projectCode}).`);
   await resetAfterSuccess(admin, conv.id);
 }
 
@@ -1799,8 +1890,17 @@ function formatConfirmationSummary(spec: IntentSpec, captured: Record<string, un
         return `  Bill Rate: ${curDisp} → $${Number(v)}/hr`;
       }
 
-      // Project: show code alongside name when we have a resolution.
+      // Project: for user.update_project show current → new; for user.create
+      // show the resolved name + code.
       if (projectResolved && f.name === 'project') {
+        if (spec.name === 'user.update_project') {
+          const cur = (enriched._target_resolved as
+            | { current_project_name?: string | null; current_project_code?: string | null } | undefined);
+          const curDisp = cur?.current_project_name
+            ? `${cur.current_project_name}${cur.current_project_code ? ` (${cur.current_project_code})` : ''}`
+            : '(none)';
+          return `  Project: ${curDisp} → ${projectResolved.name} (${projectResolved.code})`;
+        }
         return `  Project: ${projectResolved.name} (${projectResolved.code})`;
       }
 
@@ -1840,6 +1940,7 @@ function needsTargetResolution(intentName: string): boolean {
   return intentName === 'user.set_start_date'
     || intentName === 'user.set_end_date'
     || intentName === 'user.update_country_region'
+    || intentName === 'user.update_project'
     || intentName === 'user.update_pay_rate'
     || intentName === 'user.update_bill_rate';
 }

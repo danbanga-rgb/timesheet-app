@@ -129,6 +129,17 @@ export const INTENTS: IntentSpec[] = [
     ],
   },
   {
+    name: 'user.update_project',
+    required_permission: 'user.update_project',
+    description: "Update an existing user's project assignment (which project/client they work on)",
+    extraction_hint:
+      "The user wants to reassign someone to a different project. Signals: \"move X to Y project\", \"reassign X to Y\", \"X is now on Y\", \"switch X to Y\", \"put X on Y\". Extract target (name or email) + project (name or code — server resolves + disambiguates).",
+    fields: [
+      { name: 'target', input_type: 'text', required: true, hint: 'name or email of the existing user' },
+      { name: 'project', input_type: 'buttons', options_from: 'projects', required: true, hint: 'project name or code — server fuzzy-matches against projects table and asks if ambiguous' },
+    ],
+  },
+  {
     name: 'user.update_country_region',
     required_permission: 'user.update_country_region',
     description: "Update an existing user's country (and optionally region)",
