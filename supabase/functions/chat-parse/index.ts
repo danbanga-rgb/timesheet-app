@@ -183,10 +183,20 @@ date from an unknown reference year.
 Available intents (only pick from these):
 ${allowedIntents.map((i) => `- "${i.name}": ${i.description}`).join('\n')}
 
-${history.length > 0 ? `RECENT CONVERSATION (context for follow-ups and corrections):
+${history.length > 0 ? `RECENT CONVERSATION (context for follow-ups):
 ${history.map((m) => `${m.direction === 'in' ? 'User' : 'Bot'}: ${m.content}`).join('\n')}
 
-If the user's latest message is a correction or refinement of a previous read/query (e.g. "no I meant X", "the other one", "just the offshore ones"), pick the SAME intent as that previous query and extract the corrected filters/target. Prior extracted values do NOT carry over automatically — the corrected message should re-supply what changes.
+FOLLOW-UP HANDLING — carry-forward rule for reads (user.list, user.count, user.get):
+
+When the latest message is a follow-up on a prior list/count/get and uses referential language — "these", "those", "that list", "just", "only", "from that list", "and", "how about", "no I meant", "actually", "the other" — you MUST include prior filters/target in your fields output alongside any new or corrected values. **Prior extracted values do NOT auto-carry — you re-supply them by reading the prior turn's user message.**
+
+Cases:
+- **Narrowing** ("which of these are onshore?", "just the offshore", "and who's active?", "of those, who's on APFM?"): include prior filters + new filter. Example: prior "list vendormanagers" (role=vendormanager) + new "which are onshore" → fields = {role: "vendormanager", location_type: "onshore"}.
+- **Correction** ("no I meant vendormanagers", "actually Croatia"): include prior filters, replace the corrected field. Example: prior "list admins in Croatia" + new "no I meant vendormanagers" → fields = {role: "vendormanager", country: "HR"}.
+- **List → count switch** ("just the count", "how many of them", "just count them"): use user.count with the SAME filters as the prior list. Example: prior "list contractors in Croatia" + new "just the count" → user.count with country=HR (role defaults to timesheetuser).
+- **Target follow-up on user.get** ("and their project?", "when do they start?"): use user.get with the prior target + set focus to what was asked.
+
+Only treat the message as a **new query** (do NOT inherit) when it names a fresh subject and uses no referential language. When in doubt, prefer inheritance. Do not confuse "just the offshore ones" (narrowing, inherit) with "show me offshore contractors" (new, don't inherit).
 ` : ''}
 
 STRICT CLASSIFICATION RULES:
