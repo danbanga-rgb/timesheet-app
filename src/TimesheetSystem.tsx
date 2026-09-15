@@ -206,6 +206,7 @@ import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
 import { parseLocalDate, formatDate, getWeekDates } from './lib/dates';
 import { triggerDownload } from './lib/csv';
 import { isTestAccount } from './lib/isTestAccount';
+import MonthRangePicker, { buildMonthPresets } from './components/MonthRangePicker';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
 import {
@@ -1181,9 +1182,7 @@ const TimesheetSystem = () => {
   // When accountant edits/creates a profile for another contractor, this overrides currentUser
   // in savePaymentProfile. Null = save against currentUser (contractor's own management page).
   const [profileEditUserId, setProfileEditUserId] = useState<string | null>(null);
-  const [consolidatedRange, setConsolidatedRange] = useState({ start: '', end: '' });
   const [appliedRange, setAppliedRange] = useState({ start: '', end: '' });
-  const [consolidatedMonthPreset, setConsolidatedMonthPreset] = useState('');
   const [consolidatedProjectFilter, setConsolidatedProjectFilter] = useState('all');
   const [excludeTestAccounts, setExcludeTestAccounts] = useState(true);
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
@@ -1445,7 +1444,6 @@ const TimesheetSystem = () => {
   const [vmInvoiceNumber, setVmInvoiceNumber] = useState('');
   const [vmNotes, setVmNotes] = useState('');
   const [vmPhoneConfirm, setVmPhoneConfirm] = useState('');
-  const [tsOnlyRange, setTsOnlyRange] = useState({ start: '', end: '' });
   const [tsOnlyApplied, setTsOnlyApplied] = useState({ start: '', end: '' });
   const [tsOnlySelectedUsers, setTsOnlySelectedUsers] = useState<string[] | null>(null);
   const [tsOnlySearch, setTsOnlySearch] = useState('');
@@ -1456,9 +1454,7 @@ const TimesheetSystem = () => {
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   // Manager consolidated view
-  const [managerConsolidatedRange, setManagerConsolidatedRange] = useState({ start: '', end: '' });
   const [managerAppliedRange, setManagerAppliedRange] = useState({ start: '', end: '' });
-  const [managerMonthPreset, setManagerMonthPreset] = useState('');
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<PaymentProfile | null>(null);
   const emptyProfileForm = (): Omit<PaymentProfile, 'id' | 'userId'> => ({
@@ -7326,17 +7322,6 @@ const TimesheetSystem = () => {
 
           {/* Manager Consolidated View */}
           {viewMode === 'consolidated' && (() => {
-            // Build month options: last 12 months
-            const mgMonthOptions: { label: string; value: string; start: string; end: string }[] = [];
-            const now = new Date();
-            for (let i = 0; i < 12; i++) {
-              const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-              const label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-              const monthVal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-              const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
-              const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-              mgMonthOptions.push({ label, value: monthVal, start: formatDate(firstDay), end: formatDate(lastDay) });
-            }
 
             // Build report — same logic as accountant but scoped to managed users only
             const generateMgrReport = () => {
@@ -7421,61 +7406,8 @@ const TimesheetSystem = () => {
                 </div>
 
                 {/* Controls */}
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
-                  <div className="mb-4">
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Quick Select — Month</label>
-                    <div className="flex flex-wrap gap-2">
-                      {mgMonthOptions.slice(0, 6).map(opt => (
-                        <button
-                          key={opt.value}
-                          onClick={() => {
-                            setManagerMonthPreset(opt.value);
-                            setManagerConsolidatedRange({ start: opt.start, end: opt.end });
-                            setManagerAppliedRange({ start: opt.start, end: opt.end });
-                          }}
-                          className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-                            managerMonthPreset === opt.value
-                              ? 'bg-indigo-600 text-white border-indigo-600'
-                              : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-3 items-end pt-3 border-t border-gray-200">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Start Date</label>
-                      <input type="date" value={managerConsolidatedRange.start}
-                        onChange={e => { setManagerConsolidatedRange(r => ({...r, start: e.target.value})); setManagerMonthPreset(''); }}
-                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">End Date</label>
-                      <input type="date" value={managerConsolidatedRange.end}
-                        onChange={e => { setManagerConsolidatedRange(r => ({...r, end: e.target.value})); setManagerMonthPreset(''); }}
-                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
-                    </div>
-                    <button
-                      onClick={() => setManagerAppliedRange({ ...managerConsolidatedRange })}
-                      disabled={!managerConsolidatedRange.start || !managerConsolidatedRange.end}
-                      className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium"
-                    >
-                      <CheckCircle className="w-4 h-4" /> Apply
-                    </button>
-                    {managerAppliedRange.start && (
-                      <button
-                        onClick={() => { setManagerAppliedRange({ start: '', end: '' }); setManagerConsolidatedRange({ start: '', end: '' }); setManagerMonthPreset(''); }}
-                        className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 underline"
-                      >Clear</button>
-                    )}
-                    {managerAppliedRange.start && managerAppliedRange.end && (
-                      <span className="text-sm text-green-700 font-medium bg-green-50 px-3 py-2 rounded-lg border border-green-200">
-                        Showing: {parseLocalDate(managerAppliedRange.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} – {parseLocalDate(managerAppliedRange.end).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                      </span>
-                    )}
-                  </div>
+                <div className="mb-6">
+                  <MonthRangePicker value={managerAppliedRange} onChange={setManagerAppliedRange} />
                 </div>
 
                 {mgrReport
@@ -7723,26 +7655,12 @@ const TimesheetSystem = () => {
               {/* Period selection */}
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">Billing Period</label>
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {Array.from({ length: 6 }, (_, i) => {
-                    const d = new Date(new Date().getFullYear(), new Date().getMonth() - i, 1);
-                    const start = formatDate(new Date(d.getFullYear(), d.getMonth(), 1));
-                    const end = formatDate(new Date(d.getFullYear(), d.getMonth() + 1, 0));
-                    const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-                    return (
-                      <button key={start} onClick={() => setVmPeriod({ start, end })}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${vmPeriod.start === start ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-gray-700 border-gray-300 hover:border-teal-400'}`}>
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="flex gap-3 items-end flex-wrap">
-                  <div><label className="block text-xs text-gray-500 mb-1">From</label>
-                    <input type="date" value={vmPeriod.start} onChange={e => setVmPeriod(p => ({...p, start: e.target.value}))} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" /></div>
-                  <div><label className="block text-xs text-gray-500 mb-1">To</label>
-                    <input type="date" value={vmPeriod.end} onChange={e => setVmPeriod(p => ({...p, end: e.target.value}))} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" /></div>
-                </div>
+                <MonthRangePicker
+                  value={vmPeriod}
+                  onChange={setVmPeriod}
+                  variant="teal"
+                  presets={[{ options: buildMonthPresets(6) }]}
+                />
               </div>
 
               {/* Per-user rates */}
@@ -8311,18 +8229,6 @@ const TimesheetSystem = () => {
           )}
 
           {accountantTab === 'consolidated' && (() => {
-            // Build month preset options: last 12 months
-            const monthOptions: { label: string; value: string; start: string; end: string }[] = [];
-            const now = new Date();
-            for (let i = 0; i < 12; i++) {
-              const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-              const label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-              const monthVal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-              const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
-              const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-              monthOptions.push({ label, value: monthVal, start: formatDate(firstDay), end: formatDate(lastDay) });
-            }
-
             const downloadConsolidatedCSV = (includeStatus: boolean) => {
               if (!consolidatedReport) return;
               const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
@@ -8417,71 +8323,8 @@ const TimesheetSystem = () => {
                 </div>
 
                 {/* Controls */}
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
-                  {/* Month presets */}
-                  <div className="mb-4">
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Quick Select — Month</label>
-                    <div className="flex flex-wrap gap-2">
-                      {monthOptions.slice(0, 6).map(opt => (
-                        <button
-                          key={opt.value}
-                          onClick={() => {
-                            setConsolidatedMonthPreset(opt.value);
-                            setConsolidatedRange({ start: opt.start, end: opt.end });
-                          }}
-                          className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-                            consolidatedMonthPreset === opt.value
-                              ? 'bg-indigo-600 text-white border-indigo-600'
-                              : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Custom date range + Apply */}
-                  <div className="flex flex-wrap gap-3 items-end pt-3 border-t border-gray-200">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Start Date</label>
-                      <input
-                        type="date"
-                        value={consolidatedRange.start}
-                        onChange={e => { setConsolidatedRange({...consolidatedRange, start: e.target.value}); setConsolidatedMonthPreset(''); }}
-                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">End Date</label>
-                      <input
-                        type="date"
-                        value={consolidatedRange.end}
-                        onChange={e => { setConsolidatedRange({...consolidatedRange, end: e.target.value}); setConsolidatedMonthPreset(''); }}
-                        className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
-                      />
-                    </div>
-                    <button
-                      onClick={() => setAppliedRange({ ...consolidatedRange })}
-                      disabled={!consolidatedRange.start || !consolidatedRange.end}
-                      className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium"
-                    >
-                      <CheckCircle className="w-4 h-4" /> Apply
-                    </button>
-                    {appliedRange.start && (
-                      <button
-                        onClick={() => { setAppliedRange({ start: '', end: '' }); setConsolidatedRange({ start: '', end: '' }); setConsolidatedMonthPreset(''); }}
-                        className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 underline"
-                      >
-                        Clear
-                      </button>
-                    )}
-                    {appliedRange.start && appliedRange.end && (
-                      <span className="text-sm text-green-700 font-medium bg-green-50 px-3 py-2 rounded-lg border border-green-200">
-                        Showing: {parseLocalDate(appliedRange.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} – {parseLocalDate(appliedRange.end).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                      </span>
-                    )}
-                  </div>
+                <div className="mb-6">
+                  <MonthRangePicker value={appliedRange} onChange={setAppliedRange} />
                 </div>
 
                 {consolidatedReport
@@ -9904,13 +9747,6 @@ const TimesheetSystem = () => {
 
                       {/* Quick select presets */}
                       {(() => {
-                        const now = new Date();
-                        const monthOpts = Array.from({ length: 6 }, (_, i) => {
-                          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-                          const start = formatDate(new Date(d.getFullYear(), d.getMonth(), 1));
-                          const end   = formatDate(new Date(d.getFullYear(), d.getMonth() + 1, 0));
-                          return { label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }), start, end };
-                        });
                         const todayMon = (() => { const d = new Date(); d.setHours(0,0,0,0); const day = d.getDay(); d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day)); return d; })();
                         const biWeekEnd = new Date(todayMon); biWeekEnd.setDate(biWeekEnd.getDate() - 1);
                         const biWeekStart = new Date(todayMon); biWeekStart.setDate(biWeekStart.getDate() - 14);
@@ -9918,49 +9754,22 @@ const TimesheetSystem = () => {
                         const lastWeekStart = new Date(todayMon); lastWeekStart.setDate(lastWeekStart.getDate() - 7);
                         const lastWeekEnd = new Date(todayMon); lastWeekEnd.setDate(lastWeekEnd.getDate() - 1);
                         const lastWeekLabel = `${lastWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${lastWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
-                        const isActive = (s: string, e: string) => tsOnlyApplied.start === s && tsOnlyApplied.end === e;
                         return (
-                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4 space-y-4">
-                            <div>
-                              <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Bi-Weekly</label>
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  onClick={() => { const s = formatDate(lastWeekStart); const e = formatDate(lastWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
-                                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(lastWeekStart), formatDate(lastWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
-                                >Last Week ({lastWeekLabel})</button>
-                                <button
-                                  onClick={() => { const s = formatDate(biWeekStart); const e = formatDate(biWeekEnd); setTsOnlyRange({ start: s, end: e }); setTsOnlyApplied({ start: s, end: e }); }}
-                                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(formatDate(biWeekStart), formatDate(biWeekEnd)) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
-                                >Last 2 Weeks ({biWeekLabel})</button>
-                              </div>
-                            </div>
-                            <div>
-                              <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Month</label>
-                              <div className="flex flex-wrap gap-2">
-                                {monthOpts.map(opt => (
-                                  <button
-                                    key={opt.start}
-                                    onClick={() => { setTsOnlyRange({ start: opt.start, end: opt.end }); setTsOnlyApplied({ start: opt.start, end: opt.end }); }}
-                                    className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive(opt.start, opt.end) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
-                                  >{opt.label}</button>
-                                ))}
-                              </div>
-                            </div>
-                            <div>
-                              <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Custom Range</label>
-                              <div className="flex flex-wrap gap-3 items-end">
-                                <div>
-                                  <label className="block text-xs text-gray-500 mb-1">From</label>
-                                  <input type="date" value={tsOnlyRange.start} onChange={e => setTsOnlyRange({...tsOnlyRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
-                                </div>
-                                <div>
-                                  <label className="block text-xs text-gray-500 mb-1">To</label>
-                                  <input type="date" value={tsOnlyRange.end} onChange={e => setTsOnlyRange({...tsOnlyRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white" />
-                                </div>
-                                <button onClick={() => setTsOnlyApplied(tsOnlyRange)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium">Apply</button>
-                                <button onClick={() => { setTsOnlyRange({ start: '', end: '' }); setTsOnlyApplied({ start: '', end: '' }); }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm">Clear All</button>
-                              </div>
-                            </div>
+                          <div className="mb-4">
+                            <MonthRangePicker
+                              value={tsOnlyApplied}
+                              onChange={setTsOnlyApplied}
+                              presets={[
+                                {
+                                  group: 'Bi-Weekly',
+                                  options: [
+                                    { label: `Last Week (${lastWeekLabel})`, start: formatDate(lastWeekStart), end: formatDate(lastWeekEnd) },
+                                    { label: `Last 2 Weeks (${biWeekLabel})`, start: formatDate(biWeekStart), end: formatDate(biWeekEnd) },
+                                  ],
+                                },
+                                { group: 'Month', options: buildMonthPresets(6) },
+                              ]}
+                            />
                           </div>
                         );
                       })()}
@@ -15998,48 +15807,8 @@ const TimesheetSystem = () => {
           </div>
 
           {/* Filters */}
-          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-5">
-            {/* Month quick-select */}
-            <div className="mb-4">
-              <label className="block text-sm font-semibold text-gray-700 mb-2">Quick Select — Month</label>
-              <div className="flex flex-wrap gap-2">
-                {(() => {
-                  const now = new Date();
-                  return Array.from({ length: 6 }, (_, i) => {
-                    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-                    const label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-                    const monthVal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-                    const start = new Date(d.getFullYear(), d.getMonth(), 1);
-                    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-                    const isActive = dateRange.start === formatDate(start) && dateRange.end === formatDate(end);
-                    return (
-                      <button
-                        key={monthVal}
-                        onClick={() => setDateRange({ start: formatDate(start), end: formatDate(end) })}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${isActive ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'}`}
-                      >
-                        {label}
-                      </button>
-                    );
-                  });
-                })()}
-              </div>
-            </div>
-
-            {/* Custom date range */}
-            <div className="flex flex-wrap gap-3 items-end pt-3 border-t border-gray-200">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Start Date</label>
-                <input type="date" value={dateRange.start} onChange={e => setDateRange({...dateRange, start: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">End Date</label>
-                <input type="date" value={dateRange.end} onChange={e => setDateRange({...dateRange, end: e.target.value})} className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
-              </div>
-              {(dateRange.start || dateRange.end) && (
-                <button onClick={() => setDateRange({start: '', end: ''})} className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 underline">Clear</button>
-              )}
-            </div>
+          <div className="mb-5">
+            <MonthRangePicker value={dateRange} onChange={setDateRange} />
           </div>
 
           <div className="overflow-x-auto -mx-3 sm:mx-0 px-3 sm:px-0">
