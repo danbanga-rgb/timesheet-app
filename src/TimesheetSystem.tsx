@@ -7575,7 +7575,7 @@ const TimesheetSystem = () => {
                   : (
                     <div className="text-center py-12 text-gray-400">
                       <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                      <p className="text-base">Select a month or custom date range, then click <strong className="text-gray-500">Apply</strong>.</p>
+                      <p className="text-base">Select a month or custom date range to see the report.</p>
                     </div>
                   )
                 }
