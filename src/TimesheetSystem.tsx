@@ -203,6 +203,9 @@ import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
 import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
 import { buildInvoiceLines as sharedBuildInvoiceLines } from './lib/invoiceLines';
 import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
+import { parseLocalDate, formatDate, getWeekDates } from './lib/dates';
+import { triggerDownload } from './lib/csv';
+import { isTestAccount } from './lib/isTestAccount';
 import { excelDateToIso } from './lib/xlsxHelpers';
 import { parseIntuitXlsxBuffer, type IntuitXlsxRow } from './lib/parseIntuitXlsx';
 import {
@@ -1815,13 +1818,6 @@ const TimesheetSystem = () => {
     return weekStart;
   }
 
-  function parseLocalDate(dateStr: string): Date {
-    // Handle full ISO strings like '2026-02-23T00:00:00.000Z' by taking just the date part
-    const clean = dateStr.split('T')[0];
-    const [y, m, d] = clean.split('-').map(Number);
-    return new Date(y, m - 1, d);
-  }
-
   function calculatePayOn(periodEnd: string, terms: string): string {
     const daysMap: Record<string, number> = { NET15: 15, NET30: 30, NET45: 45, NET60: 60 };
     const n = daysMap[terms];
@@ -1842,24 +1838,6 @@ const TimesheetSystem = () => {
     if (dow === 6) payRun.setDate(payRun.getDate() - 1); // Sat → Fri
     if (dow === 0) payRun.setDate(payRun.getDate() + 1); // Sun → Mon
     return `${payRun.getFullYear()}-${String(payRun.getMonth() + 1).padStart(2, '0')}-${String(payRun.getDate()).padStart(2, '0')}`;
-  }
-
-  function formatDate(date: Date): string {
-    const d = new Date(date);
-    d.setHours(0, 0, 0, 0);
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-  }
-
-  function getWeekDates(startDate: Date): Date[] {
-    // startDate is Monday; returns Mon–Sun (7 days)
-    const dates: Date[] = [];
-    for (let i = 0; i < 7; i++) {
-      const date = new Date(startDate);
-      date.setDate(date.getDate() + i);
-      date.setHours(0, 0, 0, 0);
-      dates.push(date);
-    }
-    return dates;
   }
 
   function getWeekSunday(weekStart: Date): Date {
@@ -3512,6 +3490,9 @@ const TimesheetSystem = () => {
       setConveraBeneficiaries(normBenefs);
       // Auto-match payment profiles (skip manual overrides and already-linked profiles)
       const { data: profiles } = await supabase.from('payment_profiles').select('id, user_id, iban, convera_match_override, convera_beneficiary_id');
+      // TODO(modularization): 4 sibling `isTestAccount` copies extracted to src/lib/isTestAccount.ts. This variant lacks `.trim()` — likely
+      // an oversight (regex uses word boundaries so trim doesn't affect the hotmail/yahoo branch, but `l === 'test'` would miss `'test '`).
+      // Left inline in this slice; migrating to the shared helper is a follow-up behavior-change slice.
       const isTestName = (name: string) => { const l = (name || '').toLowerCase(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
       const intuitUserIds = new Set(invoices.filter(inv => paymentMethod(inv).toLowerCase() === 'intuit').map(inv => inv.userId));
       const unmatched: { profileId: number; userId: string; userName: string; suggested?: { beneficiaryId: number; level: 'iban' | 'name'; shortName: string; incomingVendorId: string | null } }[] = [];
@@ -6190,7 +6171,6 @@ const TimesheetSystem = () => {
   const generateReport = () => {
     const weekKey = formatDate(reportWeek);
     const weekTimesheets = timesheets.filter(t => t.weekStart === weekKey);
-    const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
     const weekEndKey = formatDate(new Date(parseLocalDate(weekKey).getTime() + 6 * 86400000));
     return users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekEndKey && (!u.endDate || u.endDate >= weekKey) && !isTestAccount(u.name)).map(user => {
       const timesheet = weekTimesheets.find(t => t.userId === user.id);
@@ -6232,15 +6212,6 @@ const TimesheetSystem = () => {
     });
     triggerDownload(csv, `timesheets_export_${Date.now()}.csv`);
   };
-
-  function triggerDownload(csv: string, filename: string) {
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url; link.download = filename; link.style.display = 'none';
-    document.body.appendChild(link); link.click(); document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }
 
   // ─── FILTER / MODAL HELPERS ───────────────────────────────────────────────
   const getFilteredTimesheets = (userId: string | null = null) => {
@@ -8056,7 +8027,6 @@ const TimesheetSystem = () => {
         if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
       });
 
-      const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
       const allTimesheetUsers = users.filter(u => {
         if (u.role !== 'timesheetuser') return false;
         if (consolidatedProjectFilter === 'all') return true;
@@ -8217,7 +8187,6 @@ const TimesheetSystem = () => {
                 </div>
               </div>
               {(() => {
-                const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
                 const weekKey = formatDate(reportWeek);
                 const testAccounts = users.filter(u => u.role === 'timesheetuser' && u.startDate && u.startDate <= weekKey && (!u.endDate || u.endDate >= weekKey) && isTestAccount(u.name));
                 const submitted = reportData.filter(r => r.status === 'approved').length;
@@ -12539,7 +12508,6 @@ const TimesheetSystem = () => {
 
           {accountantTab === 'profiles' && (() => {
             const accountantManagedRoles = ['timesheetuser', 'vendormanager'];
-            const isTestAccount = (name: string) => { const l = (name || '').toLowerCase().trim(); return l === 'test' || /\b(hotmail|yahoo)\b/.test(l); };
             const allManagedUsers = users
               .filter(u => accountantManagedRoles.includes(u.role))
               .filter(u => !profileTabExcludeTest || !isTestAccount(u.name));
