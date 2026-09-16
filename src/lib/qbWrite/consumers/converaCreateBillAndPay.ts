@@ -29,6 +29,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { pushConveraInvoiceCreateBill } from './converaInvoiceCreateBill';
 import { resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from '../../vendorResolution';
+import { findMirrorBankDeviation } from '../mirrorDeviationCheck';
 import type { ExecuteResult } from '../types';
 
 export interface ConveraCreateBillAndPayResult extends ExecuteResult {
@@ -84,7 +85,7 @@ interface PaymentProfileRow {
 interface VendorRow { list_id: string; name: string }
 interface AccountRow { list_id: string; full_name: string }
 
-const CONVERA_BANK_PATTERN = 'western union holding';
+const CONVERA_BANK_PATTERN = '8220 - key point checking';
 
 function findConveraBank(accounts: AccountRow[]): AccountRow | null {
   const target = CONVERA_BANK_PATTERN.toLowerCase();
@@ -327,6 +328,20 @@ export async function pushConveraCreateBillAndPay(
       continue;
     }
     if (applications.length === 0) continue;
+
+    // Mirror-deviation guardrail — block if this sub-group's vendor has a
+    // clear historical bank convention and the proposed bank diverges.
+    const subGroupVendor = vendorByLowerName.get(g.vendorName.toLowerCase().trim());
+    if (subGroupVendor) {
+      const deviation = await findMirrorBankDeviation(supabase, subGroupVendor.list_id, bank!.list_id);
+      if (deviation) {
+        skippedIneligible.push({
+          eventId: g.event.id,
+          reason: `sub-group vendor='${g.vendorName}' mirror_deviation: last ${deviation.sampleSize} bill payments posted to '${deviation.historicalBankFullName}' (${deviation.modeCount}/${deviation.sampleSize}) but proposed bank is '${bank!.full_name}'. Update account routing to match convention, or override manually.`,
+        });
+        continue;
+      }
+    }
 
     const payload: Record<string, unknown> = {
       payeeVendorName: g.vendorName,

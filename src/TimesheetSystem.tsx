@@ -1399,6 +1399,7 @@ const TimesheetSystem = () => {
     newCount: number;
     refreshedCount: number;
     skippedCount: number;
+    intoHoldingSkipped: number;
     amountChangedRows: { key: string; oldAmount: number; newAmount: number; state: string }[];
     batchId: number | null;
   } | null>(null);
@@ -5089,6 +5090,7 @@ const TimesheetSystem = () => {
         umbrellaGroup?: Invoice[];
       };
       const incomingRows: IncomingRow[] = [];
+      let intoHoldingSkipped = 0;
 
       // Simple stable string hash for synthetic keys
       const strHash = (s: string): number => {
@@ -5104,6 +5106,13 @@ const TimesheetSystem = () => {
         const amount       = parseFloat(String(r[iAmount]));
         const rawRef       = iRef1 >= 0 ? String(r[iRef1] ?? '').trim() : '';
         if (!beneficiary || isNaN(amount) || amount <= 0) continue;
+
+        // "Into Holding" rows are Convera funds-purchase transfers that pre-fund the
+        // Holding account — not vendor payments. Filter them out so they never enter
+        // convera_transactions or produce qb_ingest_events. Accountant used to click
+        // Ignore on each one manually; automating that here.
+        const rowItemType = iType >= 0 ? String(r[iType] ?? '').trim() : '';
+        if (rowItemType.toLowerCase() === 'into holding') { intoHoldingSkipped++; continue; }
 
         // Confirmation + Line: real if present, otherwise synthesized from stable row content
         let confirmation: string;
@@ -5340,6 +5349,7 @@ const TimesheetSystem = () => {
         newCount: newRows.length,
         refreshedCount: refreshRows.length,
         skippedCount,
+        intoHoldingSkipped,
         amountChangedRows: amountChanged,
         batchId,
       });
@@ -9287,6 +9297,9 @@ const TimesheetSystem = () => {
                       )}
                       {paymentsImportSummary.skippedCount > 0 && (
                         <li>⏭️ <strong>{paymentsImportSummary.skippedCount}</strong> row{paymentsImportSummary.skippedCount === 1 ? '' : 's'} already processed (matched / no-invoice / flagged) — skipped. Reopen their original batch to change them.</li>
+                      )}
+                      {paymentsImportSummary.intoHoldingSkipped > 0 && (
+                        <li>💧 <strong>{paymentsImportSummary.intoHoldingSkipped}</strong> <em>Into Holding</em> row{paymentsImportSummary.intoHoldingSkipped === 1 ? '' : 's'} auto-ignored (Convera funds-purchase transfers, not vendor payments).</li>
                       )}
                       {paymentsImportSummary.amountChangedRows.length > 0 && (
                         <li className="text-amber-700">

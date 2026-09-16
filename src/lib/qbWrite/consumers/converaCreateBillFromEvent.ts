@@ -34,6 +34,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { executeIntents } from '../execute';
+import { findMirrorBankDeviation } from '../mirrorDeviationCheck';
 import type { CreateBillIntent, ExecuteResult, PayBillIntent } from '../types';
 
 export interface ConveraCreateBillFromEventResult extends ExecuteResult {
@@ -62,7 +63,7 @@ interface VendorRow { list_id: string; name: string }
 interface AccountRow { list_id: string; full_name: string }
 interface MirrorBillRow { entity_ref: string; vendor_list_id: string; amount: number | string | null; is_settled: boolean | null }
 
-const CONVERA_BANK_PATTERN = 'western union holding';
+const CONVERA_BANK_PATTERN = '8220 - key point checking';
 
 function findConveraBank(accounts: AccountRow[]): AccountRow | null {
   const target = CONVERA_BANK_PATTERN.toLowerCase();
@@ -163,6 +164,17 @@ export async function pushConveraCreateBillFromEvent(
         skippedIneligible.push({ eventId: e.id, reason: `${openBills.length} open bills for vendor '${vendor}' in QB, ${amountMatches.length} match wire amount ($${eventAmount.toFixed(2)}). Manual disambiguation needed in QB.` });
         continue;
       }
+    }
+
+    // Mirror-deviation guardrail (Case C + D). Blocks silent bank routing regressions
+    // by comparing the proposed bank against the vendor's historical BillPmt mode.
+    const deviation = await findMirrorBankDeviation(supabase, e.counterparty_qb_vendor_list_id!, bank.list_id);
+    if (deviation) {
+      skippedIneligible.push({
+        eventId: e.id,
+        reason: `mirror_deviation: vendor's last ${deviation.sampleSize} bill payments in QB posted to '${deviation.historicalBankFullName}' (${deviation.modeCount}/${deviation.sampleSize}), but proposed bank is '${bank.full_name}'. Update the account routing to match convention, or override manually.`,
+      });
+      continue;
     }
 
     if (existingBill) {

@@ -2,7 +2,7 @@
 //
 // Verifies:
 //  - no-invoice event (matched_invoice_ids=[]) + target=bill_add_and_pmt →
-//    bill_add + chained pay_bill + verify (all with WU Holding bank + hydration)
+//    bill_add + chained pay_bill + verify (all with 8220 Key Point bank + hydration)
 //  - event with matched_invoice_ids populated → skipped (route via
 //    pushConveraCreateBillAndPay instead)
 //  - wrong source / status / target skipped
@@ -40,6 +40,8 @@ function makeMockSupabase(tables: Record<string, Row[]>) {
           if (op === 'is' && value === null) this._rows = this._rows.filter(r => r[col] != null);
           return this;
         },
+        order() { return this; },
+        limit(n: number) { this._rows = this._rows.slice(0, n); return this; },
         then(resolve: (v: { data: Row[]; error: null }) => unknown) {
           return resolve({ data: this._rows, error: null });
         },
@@ -68,7 +70,7 @@ const bhavaniEvent = {
 
 const vendors = [{ list_id: 'V-BHAVANI', name: 'Bhavani Enugala' }];
 const bankAccounts = [
-  { list_id: 'A-WU', full_name: 'BANK/CASH:Western Union Holding', account_type: 'Bank', is_active: true },
+  { list_id: 'A-8220', full_name: 'BANK/CASH:8220 - Key Point Checking', account_type: 'Bank', is_active: true },
 ];
 const expenseAccounts = [
   { list_id: 'EXP-VENDOR-CONSULTANTS', full_name: 'Vendor Consultants' },
@@ -82,7 +84,7 @@ describe('pushConveraCreateBillFromEvent', () => {
     expect(inserts).toHaveLength(0);
   });
 
-  it('no-invoice Bhavani event → bill_add + chained pay_bill + verify against WU Holding bank', async () => {
+  it('no-invoice Bhavani event → bill_add + chained pay_bill + verify against 8220 Key Point bank', async () => {
     const { client, inserts } = makeMockSupabase({
       qb_ingest_events: [bhavaniEvent],
       qb_vendors: vendors,
@@ -105,7 +107,7 @@ describe('pushConveraCreateBillFromEvent', () => {
     expect(payInsert).toBeDefined();
     const payload = (payInsert!.rows[0] as { payload: Record<string, unknown> }).payload;
     expect(payload.payeeVendorName).toBe('Bhavani Enugala');
-    expect(payload.bankAccountName).toBe('BANK/CASH:Western Union Holding');
+    expect(payload.bankAccountName).toBe('BANK/CASH:8220 - Key Point Checking');
     expect(payload.refNumber).toBe('OTR9999999');
     expect(payload.applications).toEqual([{ billTxnId: null, paymentAmount: 4393 }]);
     expect(payload.__hydrate_bill_txn_id_from_dep).toBe(billAddJobId);

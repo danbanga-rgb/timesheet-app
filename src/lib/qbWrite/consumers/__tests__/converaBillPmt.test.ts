@@ -43,6 +43,8 @@ function makeMockSupabase(tables: Record<string, Row[]>) {
           if (op === 'is' && value === null) this._rows = this._rows.filter(r => r[col] != null);
           return this;
         },
+        order() { return this; },
+        limit(n: number) { this._rows = this._rows.slice(0, n); return this; },
         then(resolve: (v: { data: Row[]; error: null }) => unknown) {
           return resolve({ data: this._rows, error: null });
         },
@@ -148,7 +150,7 @@ describe('pushConveraBillPmt', () => {
     expect(payJob.kind).toBe('bill_pmt_add');
     const payload = payJob.payload as Record<string, unknown>;
     expect(payload.payeeVendorName).toBe('Fat Struct - Tomislav');
-    expect(payload.bankAccountName).toBe('BANK/CASH:Western Union Holding');
+    expect(payload.bankAccountName).toBe('BANK/CASH:8220 - Key Point Checking');
     expect(payload.refNumber).toBe('OTR6649769');
     expect(payload.sourceConveraTxnId).toBe(700);
     expect(payload.applications).toEqual([{ billTxnId: 'FS-BILL-A', paymentAmount: 3520 }]);
@@ -293,16 +295,68 @@ describe('pushConveraBillPmt', () => {
     expect(r.skippedIneligible[0].reason).toMatch(/Sync QB state/);
   });
 
-  it('skips events when the WU Holding bank account is missing', async () => {
+  it('mirror_deviation guardrail: skips when vendor history diverges from proposed bank', async () => {
+    // Vendor V-FATSTRUCT has 5 historical bill payments in qb_mirror, all on
+    // A-WU (Western Union Holding). Proposed bank is A-8220 (Key Point). Should
+    // trip the deviation guardrail and skip with a mirror_deviation reason.
+    const historicalWuPayments = Array.from({ length: 5 }, (_, i) => ({
+      entity_kind: 'bill_payment',
+      entity_ref: `BPMT-WU-${i}`,
+      vendor_list_id: 'V-FATSTRUCT',
+      data: { bank_list_id: 'A-WU', bank_full_name: 'BANK/CASH:Western Union Holding' },
+      queried_at: `2026-08-0${i + 1}T00:00:00Z`,
+    }));
     const { client } = makeMockSupabase({
       qb_ingest_events: [readyEvent],
       convera_transactions: converaTxns,
       invoices,
       convera_transaction_invoices: umbrellaLinks,
       qb_vendors: vendors,
-      qb_accounts: [{ list_id: 'A-8220', full_name: 'BANK/CASH:8220 - Key Point Checking', account_type: 'Bank', is_active: true }],
+      qb_accounts: bankAccounts,
+      qb_mirror: [...qbMirror, ...historicalWuPayments],
     });
     const r = await pushConveraBillPmt(client, [42]);
-    expect(r.skippedIneligible[0].reason).toMatch(/western union holding/i);
+    expect(r.jobIds).toEqual([]);
+    expect(r.skippedIneligible).toHaveLength(1);
+    expect(r.skippedIneligible[0].reason).toMatch(/mirror_deviation/);
+    expect(r.skippedIneligible[0].reason).toMatch(/Western Union Holding/);
+    expect(r.skippedIneligible[0].reason).toMatch(/8220/);
+  });
+
+  it('mirror_deviation guardrail: allows push when vendor history aligns with proposed bank', async () => {
+    // Vendor V-FATSTRUCT has 5 historical bill payments on A-8220 (matching
+    // proposed bank). No deviation → push proceeds.
+    const historicalKpPayments = Array.from({ length: 5 }, (_, i) => ({
+      entity_kind: 'bill_payment',
+      entity_ref: `BPMT-KP-${i}`,
+      vendor_list_id: 'V-FATSTRUCT',
+      data: { bank_list_id: 'A-8220', bank_full_name: 'BANK/CASH:8220 - Key Point Checking' },
+      queried_at: `2026-08-0${i + 1}T00:00:00Z`,
+    }));
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [readyEvent],
+      convera_transactions: converaTxns,
+      invoices,
+      convera_transaction_invoices: umbrellaLinks,
+      qb_vendors: vendors,
+      qb_accounts: bankAccounts,
+      qb_mirror: [...qbMirror, ...historicalKpPayments],
+    });
+    const r = await pushConveraBillPmt(client, [42]);
+    expect(r.skippedIneligible).toEqual([]);
+    expect(r.jobIds).toHaveLength(1);
+  });
+
+  it('skips events when the 8220 Key Point bank account is missing', async () => {
+    const { client } = makeMockSupabase({
+      qb_ingest_events: [readyEvent],
+      convera_transactions: converaTxns,
+      invoices,
+      convera_transaction_invoices: umbrellaLinks,
+      qb_vendors: vendors,
+      qb_accounts: [{ list_id: 'A-WU', full_name: 'BANK/CASH:Western Union Holding', account_type: 'Bank', is_active: true }],
+    });
+    const r = await pushConveraBillPmt(client, [42]);
+    expect(r.skippedIneligible[0].reason).toMatch(/8220 - key point checking/i);
   });
 });

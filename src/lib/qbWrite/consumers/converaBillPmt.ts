@@ -10,10 +10,12 @@
 // Slice C-2 will replace that skip with an automatic bill_add + hydrate + pay
 // chain.
 //
-// Bank account: Convera uses "Western Union Holding" (per
-// [[qb-payment-iif-export]] pre-cutover convention and the qb_accounts probe
-// 2026-09-02). The classifier defaults bill_pmt bank to 8220 Key Point which
-// is Intuit-only — this consumer looks up WU Holding fresh and OVERRIDES.
+// Bank account: Convera BillPaymentChecks post against "8220 - Key Point
+// Checking" — the same bank Intuit uses. Convera's "Into Holding" rows are a
+// separate pre-funding transfer and are filtered out at XLS ingest. The
+// accountant's historical convention (see qb_mirror bill_payment rows for
+// any Convera vendor) is that every EFT wire, including those funded via
+// Holding, is booked on 8220.
 //
 // RefNumber: Convera confirmation_number (10 chars — fits INVARIANTS #5).
 // Traceable back to the Convera XLS row without check-number-sequence
@@ -27,6 +29,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { executeIntents } from '../execute';
+import { findMirrorBankDeviation } from '../mirrorDeviationCheck';
 import type { ExecuteResult, PayBillIntent } from '../types';
 
 export interface ConveraBillPmtResult extends ExecuteResult {
@@ -70,7 +73,7 @@ interface VendorRow { list_id: string; name: string }
 interface AccountRow { list_id: string; full_name: string }
 interface MirrorBillRow { entity_ref: string; is_settled: boolean | null }
 
-const CONVERA_BANK_PATTERN = 'western union holding';
+const CONVERA_BANK_PATTERN = '8220 - key point checking';
 
 /** Resolve the QB bank account by full_name substring match (case-insensitive).
  *  Returns null when not found — caller records this as a fatal skip since we
@@ -272,6 +275,19 @@ export async function pushConveraBillPmt(
       skippedIneligible.push({
         eventId: e.id,
         reason: `amount-mismatch: wire amount=${eventAmount.toFixed(2)} but sum(applications)=${applicationsTotal.toFixed(2)}. Reconcile umbrella allocation on convera_transaction_invoices.amount_share, or verify invoice totals.`,
+      });
+      continue;
+    }
+
+    // Mirror-deviation guardrail — block if the vendor's historical bank in
+    // qb_mirror diverges from the bank we're about to book against. Prevents
+    // silent routing regressions (e.g. the 2026-08-31 batch that landed on WU
+    // Holding while every prior payment for these vendors was on 8220).
+    const deviation = await findMirrorBankDeviation(supabase, e.counterparty_qb_vendor_list_id!, bank.list_id);
+    if (deviation) {
+      skippedIneligible.push({
+        eventId: e.id,
+        reason: `mirror_deviation: vendor's last ${deviation.sampleSize} bill payments in QB posted to '${deviation.historicalBankFullName}' (${deviation.modeCount}/${deviation.sampleSize}), but proposed bank is '${bank.full_name}'. Update the account routing to match convention, or override manually if this is a deliberate change.`,
       });
       continue;
     }
