@@ -19,6 +19,7 @@ import {
 } from '../supabase/functions/_shared/edit-history';
 import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
 import { resolveLivePaymentProfile } from './lib/paymentProfileResolver';
+import { buildConsolidatedReport } from './lib/consolidatedReport';
 import ContractAdminDashboard from './roles/ContractAdmin';
 import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
 import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
@@ -6736,68 +6737,19 @@ const TimesheetSystem = () => {
     const weekDates = getWeekDates(reportWeek);
     const grandTotal = reportData.reduce((s, r) => s + r.total, 0);
 
-    const generateConsolidatedReport = () => {
-      if (!appliedRange.start || !appliedRange.end) return null;
-      const startD = parseLocalDate(appliedRange.start), endD = parseLocalDate(appliedRange.end);
-
-      // Include any week (Mon–Sun) that overlaps the range
-      const inRange = timesheets.filter(t => {
-        const weekMon = parseLocalDate(t.weekStart);
-        const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
-        return weekMon <= endD && weekSun >= startD;
-      });
-
-      const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort();
-      const partialWeeks = new Set<string>();
-
-      // A week is partial if its Monday or Sunday falls outside the range
-      weekEndings.forEach(we => {
-        const weekMon = parseLocalDate(we);
-        const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
-        if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
-      });
-
-      const allTimesheetUsers = users.filter(u => {
+    const consolidatedReport = buildConsolidatedReport({
+      timesheets, users, projects,
+      range: appliedRange,
+      countryName,
+      userFilter: (u) => {
         if (u.role !== 'timesheetuser') return false;
         if (consolidatedProjectFilter === 'all') return true;
         if (consolidatedProjectFilter === 'unassigned') return !u.projectId;
         return String(u.projectId) === consolidatedProjectFilter;
-      });
-      const excludedTestNames = excludeTestAccounts ? allTimesheetUsers.filter(u => isTestAccount(u.name)).map(u => u.name) : [];
-      const timesheetUsers = excludeTestAccounts ? allTimesheetUsers.filter(u => !isTestAccount(u.name)) : allTimesheetUsers;
-      const employeeRows = timesheetUsers.map(user => {
-        const hours: Record<string, number | null> = {}, statuses: Record<string, string> = {};
-        let rowTotal = 0;
-        weekEndings.forEach(we => {
-          const weEnd = formatDate(new Date(parseLocalDate(we).getTime() + 6 * 86400000));
-          const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
-          if (ts) {
-            // Sum only the days that fall within the applied range
-            let h = 0;
-            Object.entries(ts.entries).forEach(([dateKey, entry]) => {
-              const d = parseLocalDate(dateKey);
-              if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0') || 0;
-            });
-            hours[we] = h; statuses[we] = ts.status; rowTotal += h;
-          } else if (!user.startDate || user.startDate > weEnd || (user.endDate && user.endDate < we)) {
-            hours[we] = null; statuses[we] = 'n/a';
-          } else { hours[we] = null; statuses[we] = 'not submitted'; }
-        });
-        const latestTs = inRange.filter(t => t.userId === user.id).sort((a, b) => b.weekStart.localeCompare(a.weekStart))[0];
-        const project = projects.find(p => p.id === (latestTs?.projectId ?? user.projectId));
-        return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
-      });
-
-      const colTotals: Record<string, number> = {};
-      weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
-      const sourceCounts = {
-        portal: inRange.filter(t => t.source === 'direct' && !isTestAccount(users.find(u => u.id === t.userId)?.name ?? '')).length,
-        email:  inRange.filter(t => t.source === 'imported' && !isTestAccount(users.find(u => u.id === t.userId)?.name ?? '')).length,
-      };
-      return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0), excludedTestNames, sourceCounts };
-    };
-
-    const consolidatedReport = generateConsolidatedReport();
+      },
+      excludeTestAccounts,
+      includeSourceCounts: true,
+    });
 
     return (
       <div className="min-h-screen bg-gray-50 p-3 sm:p-6">

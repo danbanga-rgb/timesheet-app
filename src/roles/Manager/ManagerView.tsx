@@ -4,6 +4,7 @@ import { parseLocalDate, formatDate, getWeekDates } from '../../lib/dates';
 import { triggerDownload } from '../../lib/csv';
 import MonthRangePicker from '../../components/MonthRangePicker';
 import ConsolidatedTable from '../../components/ConsolidatedTable';
+import { buildConsolidatedReport } from '../../lib/consolidatedReport';
 import type { UserProfile, Timesheet, Project, TimeEntry } from '../../types';
 
 // Manager dashboard view.
@@ -65,51 +66,13 @@ export default function ManagerView({
   const managedUsers = users.filter(u => u.managerId === currentUser.id);
   const filteredTimesheets = getFilteredTimesheets().filter(t => managedUsers.some(u => u.id === t.userId));
 
-  const generateMgrReport = () => {
-    if (!managerAppliedRange.start || !managerAppliedRange.end) return null;
-    const startD = parseLocalDate(managerAppliedRange.start);
-    const endD = parseLocalDate(managerAppliedRange.end);
-    const teamTimesheets = timesheets.filter(t => managedUsers.some(u => u.id === t.userId));
-    const inRange = teamTimesheets.filter(t => {
-      const weekMon = parseLocalDate(t.weekStart);
-      const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
-      return weekMon <= endD && weekSun >= startD;
-    });
-    const weekEndings = [...new Set(inRange.map(t => t.weekStart))].sort() as string[];
-    const partialWeeks = new Set<string>();
-    weekEndings.forEach(we => {
-      const weekMon = parseLocalDate(we);
-      const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
-      if (weekMon < startD || weekSun > endD) partialWeeks.add(we);
-    });
-    const employeeRows = managedUsers.map(user => {
-      const hours: Record<string, number | null> = {};
-      const statuses: Record<string, string> = {};
-      let rowTotal = 0;
-      weekEndings.forEach(we => {
-        const weEnd = formatDate(new Date(parseLocalDate(we).getTime() + 6 * 86400000));
-        const ts = inRange.find(t => t.userId === user.id && t.weekStart === we);
-        if (ts) {
-          let h = 0;
-          Object.entries(ts.entries).forEach(([dateKey, entry]) => {
-            const d = parseLocalDate(dateKey);
-            if (d >= startD && d <= endD) h += parseFloat((entry as TimeEntry)?.hours || '0') || 0;
-          });
-          hours[we] = h; statuses[we] = ts.status; rowTotal += h;
-        } else if (!user.startDate || user.startDate > weEnd || (user.endDate && user.endDate < we)) {
-          hours[we] = null; statuses[we] = 'n/a';
-        } else { hours[we] = null; statuses[we] = 'not submitted'; }
-      });
-      const latestTs = inRange.filter(t => t.userId === user.id).sort((a, b) => b.weekStart.localeCompare(a.weekStart))[0];
-      const project = projects.find(p => p.id === (latestTs?.projectId ?? user.projectId));
-      return { name: user.name, country: countryName(user.country), project: project ? `${project.name} (${project.code})` : 'Not Assigned', hours, statuses, rowTotal };
-    });
-    const colTotals: Record<string, number> = {};
-    weekEndings.forEach(we => { colTotals[we] = employeeRows.reduce((s, r) => s + (r.hours[we] || 0), 0); });
-    return { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: employeeRows.reduce((s, r) => s + r.rowTotal, 0) };
-  };
-
-  const mgrReport = generateMgrReport();
+  const managedIds = new Set(managedUsers.map(u => u.id));
+  const mgrReport = buildConsolidatedReport({
+    timesheets, users, projects,
+    range: managerAppliedRange,
+    countryName,
+    userFilter: (u) => managedIds.has(u.id),
+  });
 
   const downloadMgrCSV = () => {
     if (!mgrReport) return;
