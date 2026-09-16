@@ -1,209 +1,205 @@
-regions: top=1-482, prerole=483-6049, admin+auth=6050-6854, acctWrap=6855-7030, tab:weekly=7031-7159, tab:consolidated=7160-7271, tab:client-estimation=7272-7803, tab:invoices=7804-8542, tab:timesheet-only=8543-8706, tab:payments=8707-9464, tab:qb-automation=9465-11182, tab:profiles=11183-11380, acctModals=11381-14260, tsUser=14261-15471
+regions: top=1-360, prerole=361-5924, admin+auth=5925-6729, acctWrap=6730-6844, tab:weekly=6845-6973, tab:consolidated=6974-6982, tab:client-estimation=6983-7514, tab:invoices=7515-8253, tab:timesheet-only=8254-8417, tab:payments=8418-9175, tab:qb-automation=9176-10893, tab:profiles=10894-11091, acctModals=11092-13949, tsUser=13950-15160
 
-  484 currentUser                        acctModals:4  acctWrap:3  admin+auth:9  prerole:54  tab:client-estimation:1  tsUser:42
-  486 loading                            prerole:11  tab:client-estimation:1
-  487 users                              acctModals:7  acctWrap:3  admin+auth:21  prerole:21  tab:client-estimation:2  tab:invoices:1  tab:payments:1  tab:profiles:2  tab:timesheet-only:8  tab:weekly:1  tsUser:1
-  488 projects                           acctModals:2  acctWrap:1  admin+auth:14  prerole:9  tab:client-estimation:3  tab:consolidated:1  tab:invoices:2  tab:timesheet-only:2  tsUser:5
-  734 timesheets                         acctModals:8  acctWrap:1  admin+auth:9  prerole:30  tab:client-estimation:2  tab:invoices:3  tab:timesheet-only:2  top:1  tsUser:13
-  736 accountantTab                      acctModals:1  acctWrap:8  prerole:8  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:1  tab:qb-automation:1  tab:timesheet-only:1  tab:weekly:1
-  738 estimationMonth                    prerole:4  tab:client-estimation:11
-  743 estimationClients                  acctModals:1  prerole:2  tab:client-estimation:1
-  754 estimationEngagements              prerole:1  tab:client-estimation:5
-  755 estimationLoading                  prerole:2  tab:client-estimation:4
-  756 estimationError                    prerole:2  tab:client-estimation:3
-  757 estimationSort                     tab:client-estimation:9
-  758 estimationOverrides                prerole:1  tab:client-estimation:3
-  759 estimationImportPreview            tab:client-estimation:11
-  763 estimationImportApplying           tab:client-estimation:5
-  802 invoiceModal                       acctModals:5  tab:client-estimation:1
-  803 profileTabSearch                   acctModals:1  tab:profiles:4
-  804 profileTabFilter                   acctModals:1  tab:profiles:5
-  805 profileTabExcludeTest              tab:profiles:2
-  806 qbVendorEditingId                  acctModals:4  prerole:1  tab:profiles:4
-  807 showQbExportModal                  acctModals:5  tab:invoices:1
-  808 qbExportSelectedIds                acctModals:14  prerole:1  tab:invoices:1
-  809 qbExportSnapshot                   acctModals:1  prerole:2  tab:invoices:1
-  810 qbExportCategoryFilter             acctModals:14
-  848 showConveraBatchModal              acctModals:4  prerole:2
-  849 converaBatchGroups                 acctModals:3  prerole:3
-  850 converaBatchCombine                acctModals:4  prerole:2
-  851 converaBatchSkipped                acctModals:4  prerole:1
-  856 converaBatchExcluded               acctModals:4  prerole:1
-  860 converaBatchManualRows             acctModals:8  prerole:2
-  861 converaBatchManualEditor           acctModals:24  prerole:1
-  866 showIntuitBatchModal               acctModals:4  prerole:1
-  867 intuitBatchInvoices                acctModals:4  prerole:1
-  868 copiedIntuitField                  acctModals:5  prerole:2
-  870 paymentIifPreview                  acctModals:5  tab:payments:1
-  871 expandedProfileUsers               tab:profiles:5
-  874 profileEditUserId                  admin+auth:1  prerole:4  tab:profiles:2  tsUser:3
-  875 appliedRange                       acctWrap:2  tab:consolidated:3
-  876 consolidatedProjectFilter          acctWrap:3  tab:consolidated:2
-  877 excludeTestAccounts                acctWrap:2  tab:consolidated:2
-  878 loginForm                          prerole:7
-  879 selectedWeek                       prerole:6  tsUser:5
-  880 timeEntries                        prerole:6  tsUser:3
-  881 detectedLocation                   prerole:5
-  882 reminderEmails                     prerole:2  tsUser:1
-  883 showReminderLog                    tsUser:3
-  884 reportWeek                         acctWrap:1  prerole:6  tab:weekly:2
-  885 adminView                          admin+auth:10
-  886 adminUserSearch                    admin+auth:7
-  887 adminUserRoleFilter                admin+auth:7
-  888 allocationsProjectFilter           admin+auth:7
-  889 editingUser                        admin+auth:4  prerole:7
-  890 editingProject                     admin+auth:1  prerole:5
-  891 showUserModal                      admin+auth:5  prerole:3
-  892 showQuickAddModal                  admin+auth:4  prerole:2
-  893 showProjectModal                   admin+auth:3  prerole:2
-  894 userForm                           admin+auth:33  prerole:41
-  897 projectForm                        admin+auth:4  prerole:5
-  900 dateRange                          admin+auth:2  prerole:2  tsUser:1
-  901 selectedTimesheetForView           acctModals:2  admin+auth:2  prerole:2  tsUser:2
-  902 showWeekendHours                   prerole:3  tsUser:2
-  903 showTimesheetModal                 acctModals:1  admin+auth:1  prerole:2  tsUser:1
-  904 selectedTimesheetIds               admin+auth:1  prerole:7
-  905 invoices                           acctModals:5  acctWrap:4  admin+auth:4  prerole:115  tab:invoices:12  tab:payments:12  tab:profiles:1  tab:qb-automation:43  tsUser:11
-  906 paymentProfiles                    acctModals:11  acctWrap:1  admin+auth:1  prerole:26  tab:invoices:3  tab:payments:2  tab:profiles:2  tab:qb-automation:9  tsUser:4
-  907 userTab                            tsUser:14
-  908 invoiceView                        prerole:1  tsUser:5
-  909 invoiceMonth                       prerole:4  tsUser:9
-  910 invoiceRate                        prerole:2  tsUser:4
-  911 invoiceCurrency                    prerole:1  tsUser:2
-  912 invoiceNotes                       prerole:2  tsUser:1
-  913 invoiceNumber                      acctModals:20  acctWrap:1  prerole:29  tab:client-estimation:1  tab:invoices:3  tab:payments:7  tab:qb-automation:8  tsUser:9
-  914 selectedPaymentProfileId           prerole:2  tsUser:2
-  915 selectedInvoice                    acctModals:2  prerole:14  tab:invoices:6  tab:profiles:1  tsUser:3
-  916 showInvoiceModal                   acctModals:3  prerole:1  tab:invoices:6  tab:profiles:1  tsUser:6
-  917 accountantInvoiceFilter            tab:invoices:11
-  918 showConsolidatedExportMenu         tab:consolidated:5
-  919 invoiceDateRange                   tab:invoices:5
-  920 invoicePayDateRange                tab:invoices:5
-  921 invoicePaidDateRange               tab:invoices:5
-  922 pendingPayOnDate                   acctModals:9  prerole:3  tab:invoices:4
-  923 pendingPaymentMethod               acctModals:9  prerole:2
-  924 pendingPaymentTerms                acctModals:6  prerole:2
-  925 pendingInvoiceNumber               acctModals:6  prerole:2
-  926 pendingPaidDate                    acctModals:4  prerole:2  tab:invoices:4
-  927 pendingUsdRate                     acctModals:3  prerole:3
-  929 pendingPeriodStart                 acctModals:3  prerole:1
-  930 pendingPeriodEnd                   acctModals:3  prerole:1
-  931 pendingEditReason                  acctModals:6  prerole:1
-  932 periodEditOpen                     acctModals:4  prerole:1
-  933 periodEditPreviewShown             acctModals:6  prerole:1
-  935 pendingHours                       acctModals:4  prerole:1
-  936 pendingRate                        acctModals:4  prerole:1
-  937 pendingValueReason                 acctModals:6  prerole:1
-  938 valueEditOpen                      acctModals:4  prerole:1
-  939 valueEditPreviewShown              acctModals:6  prerole:1
-  940 invoiceMonthPreset                 prerole:2  tab:invoices:7
-  941 invoicePayOnPreset                 tab:invoices:9
-  942 invoicePaymentMethodPreset         prerole:1  tab:invoices:8
-  943 invoiceSourceFilter                tab:invoices:4
-  944 showConveraMatchingModal           acctModals:3  tab:invoices:1
-  945 showManualInvoiceModal             acctModals:2  tab:invoices:1
-  946 converaMatchingSearch              acctModals:5
-  947 converaMatchingView                acctModals:7
-  948 copiedVendorId                     acctModals:3
-  950 beneficiaryFilter                  acctModals:4
-  952 beneficiarySort                    acctModals:4
-  954 showConveraModal                   acctModals:3  tab:payments:1  tab:profiles:1
-  955 converaTab                         acctModals:3  tab:payments:1  tab:profiles:1
-  956 converaError                       acctModals:3  prerole:5
-  958 intuitXlsxFile                     acctModals:5  prerole:3
-  959 intuitXlsxPreview                  acctModals:10  prerole:5
-  960 intuitXlsxImporting                acctModals:2  prerole:2
-  961 intuitXlsxResult                   acctModals:4  prerole:2
-  964 qbIngestEvents                     prerole:3  tab:qb-automation:14
-  967 postedSortKey                      prerole:2  tab:qb-automation:2
-  968 postedSortDir                      prerole:2  tab:qb-automation:2
-  974 nonPostedSortKey                   prerole:2  tab:qb-automation:2
-  975 nonPostedSortDir                   prerole:2  tab:qb-automation:2
-  981 missingBillsSortKey                prerole:2  tab:qb-automation:2
-  982 missingBillsSortDir                prerole:2  tab:qb-automation:2
-  991 qbG75PostedInvoiceIds              prerole:1  tab:qb-automation:1
-  995 qbG76PostedInvoiceIds              prerole:1  tab:qb-automation:1
- 1000 vendorDecisionState                acctWrap:12  prerole:1  tab:qb-automation:1
- 1009 qbIngestLoading                    prerole:2  tab:qb-automation:4
- 1010 qbInboxExpanded                    prerole:1  tab:qb-automation:10
- 1016 showQbPushPreview                  tab:qb-automation:4
- 1017 qbPushRecords                      prerole:2  tab:qb-automation:4
- 1021 pushResult                         tab:qb-automation:10
- 1028 qbOpenBills                        prerole:2  tab:qb-automation:4
- 1029 qbSyncingBills                     prerole:2  tab:qb-automation:3
- 1031 qbWcLastSeen                       prerole:1  tab:qb-automation:5
- 1035 qbBillQueryPending                 prerole:2  tab:qb-automation:3
- 1038 qbPendingJobDetails                prerole:1  tab:qb-automation:4
- 1039 showPendingJobsPopup               tab:qb-automation:5
- 1040 qbSyncingVendors                   prerole:2  tab:qb-automation:2
- 1041 qbVendorQueryPending               prerole:2  tab:qb-automation:1
- 1043 qbVendorsList                      acctWrap:1  prerole:6  tab:qb-automation:7
- 1044 qbAccountsList                     prerole:2  tab:qb-automation:6
- 1045 qbVendorMappings                   prerole:2  tab:qb-automation:6
- 1049 mapVendorOpenFor                   prerole:2  tab:qb-automation:5
- 1050 mapForm                            prerole:15  tab:qb-automation:18
- 1051 mapSaving                          prerole:2  tab:qb-automation:2
- 1053 converaBeneficiaries               acctModals:11  prerole:9  tab:profiles:1
- 1056 converaTransactions                acctWrap:2  prerole:10  tab:payments:8
- 1057 importBatches                      acctWrap:2  prerole:2  tab:payments:3
- 1058 selectedBatchId                    prerole:5  tab:payments:6
- 1059 paymentsStateFilter                prerole:2  tab:payments:10
- 1060 paymentsSortKey                    tab:payments:7
- 1061 paymentsSortDir                    tab:payments:4
- 1062 paymentsImportFile                 prerole:7  tab:payments:4
- 1063 paymentsImporting                  prerole:2  tab:payments:1
- 1064 paymentsImportError                prerole:10  tab:payments:2
- 1065 showHistoricalTxns                 tab:payments:6
- 1067 showWiderForTxn                    tab:payments:2
- 1068 showProcessPreview                 prerole:3  tab:payments:4
- 1070 stagedMatches                      prerole:7  tab:payments:15
- 1073 notesDrafts                        tab:payments:5
- 1075 addInvoicePickerFor                prerole:1  tab:payments:4
- 1080 addInvoicePickerSearch             tab:payments:6
- 1084 processCommitting                  prerole:3  tab:payments:4
- 1085 paymentsImportSummary              prerole:4  tab:payments:15
- 1093 paymentsProcessResult              prerole:3  tab:payments:8
- 1101 paymentsFileInputKey               prerole:3  tab:payments:1
- 1102 converaLastPaymentDates            acctModals:3  prerole:2
- 1103 beneficiaryImportFile              acctModals:6
- 1104 beneficiaryImporting               acctModals:2  prerole:2
- 1105 beneficiaryImportResult            acctModals:8  prerole:3
- 1109 beneficiaryOverrideProfileId       acctModals:13  prerole:1  tab:profiles:1
- 1110 beneficiaryOverrideSearch          acctModals:15  prerole:1
- 1112 invoiceAttachmentFile              prerole:3  tsUser:5
- 1113 invoicePhoneConfirm                prerole:3  tsUser:4
- 1114 profileNewPassword                 admin+auth:2  tsUser:10
- 1115 profileConfirmPassword             admin+auth:2  tsUser:7
- 1116 bannerPhone                        prerole:1  tsUser:3
- 1117 bannerCountry                      prerole:3  tsUser:4
- 1118 bannerCountryOther                 prerole:2  tsUser:3
- 1119 bannerRegion                       prerole:5  tsUser:4
- 1120 bannerRegionOther                  prerole:2  tsUser:4
- 1121 bannerSaving                       prerole:4  tsUser:2
- 1122 bannerDismissed                    prerole:3
- 1123 profileShowNewPw                   admin+auth:2  tsUser:3
- 1124 profileShowConfirmPw               admin+auth:2  tsUser:3
- 1125 profilePwLoading                   admin+auth:2  tsUser:4
- 1126 profilePhone                       tsUser:4
- 1127 profilePhoneSaving                 tsUser:4
- 1128 tsOnlyApplied                      tab:timesheet-only:4
- 1129 tsOnlySelectedUsers                tab:timesheet-only:2
- 1130 invoiceSelectedUsers               tab:invoices:6
- 1131 invoiceUserSearch                  tab:invoices:4
- 1132 invoiceUserDropdownOpen            tab:invoices:3
- 1133 attachmentUploading                acctModals:1  prerole:4  tsUser:2
- 1134 attachmentSignedUrls               prerole:4
- 1135 showProfileModal                   admin+auth:2  prerole:1  tab:profiles:2  tsUser:10
- 1136 editingProfile                     admin+auth:2  prerole:5  tab:profiles:2  tsUser:7
- 1142 profileForm                        admin+auth:2  prerole:19  tab:profiles:2  tsUser:19
- 1147 showTemplateProfileModal           acctModals:3  prerole:2
- 1148 templateProfileText                acctModals:3  prerole:3
- 1149 templateProfileUserId              acctModals:1  prerole:6
- 1150 templateProfilePreview             acctModals:5  prerole:6
- 1151 templateProfileError               acctModals:1  prerole:5
- 1152 templateProfileSaving              acctModals:2  prerole:2
- 1153 passwordResetMode                  prerole:5
- 1154 newPassword                        prerole:7
- 1155 newPasswordConfirm                 prerole:5
- 1156 passwordResetLoading               prerole:4
- 2555 recomputeBusy                      prerole:2  tab:qb-automation:1
+  362 currentUser                        acctModals:4  acctWrap:3  admin+auth:9  prerole:54  tab:client-estimation:1  tsUser:42
+  364 loading                            prerole:11  tab:client-estimation:1
+  365 users                              acctModals:7  admin+auth:21  prerole:21  tab:client-estimation:2  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:2  tab:timesheet-only:8  tab:weekly:1  tsUser:1
+  366 projects                           acctModals:2  admin+auth:14  prerole:9  tab:client-estimation:3  tab:consolidated:1  tab:invoices:2  tab:timesheet-only:2  tsUser:5
+  612 timesheets                         acctModals:8  admin+auth:9  prerole:30  tab:client-estimation:2  tab:consolidated:1  tab:invoices:3  tab:timesheet-only:2  top:1  tsUser:13
+  614 accountantTab                      acctModals:1  acctWrap:8  prerole:8  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:1  tab:qb-automation:1  tab:timesheet-only:1  tab:weekly:1
+  616 estimationMonth                    prerole:4  tab:client-estimation:11
+  621 estimationClients                  acctModals:1  prerole:2  tab:client-estimation:1
+  632 estimationEngagements              prerole:1  tab:client-estimation:5
+  633 estimationLoading                  prerole:2  tab:client-estimation:4
+  634 estimationError                    prerole:2  tab:client-estimation:3
+  635 estimationSort                     tab:client-estimation:9
+  636 estimationOverrides                prerole:1  tab:client-estimation:3
+  637 estimationImportPreview            tab:client-estimation:11
+  641 estimationImportApplying           tab:client-estimation:5
+  680 invoiceModal                       acctModals:5  tab:client-estimation:1
+  681 profileTabSearch                   acctModals:1  tab:profiles:4
+  682 profileTabFilter                   acctModals:1  tab:profiles:5
+  683 profileTabExcludeTest              tab:profiles:2
+  684 qbVendorEditingId                  acctModals:4  prerole:1  tab:profiles:4
+  685 showQbExportModal                  acctModals:5  tab:invoices:1
+  686 qbExportSelectedIds                acctModals:14  prerole:1  tab:invoices:1
+  687 qbExportSnapshot                   acctModals:1  prerole:2  tab:invoices:1
+  688 qbExportCategoryFilter             acctModals:14
+  726 showConveraBatchModal              acctModals:4  prerole:2
+  727 converaBatchGroups                 acctModals:3  prerole:3
+  728 converaBatchCombine                acctModals:4  prerole:2
+  729 converaBatchSkipped                acctModals:4  prerole:1
+  734 converaBatchExcluded               acctModals:4  prerole:1
+  738 converaBatchManualRows             acctModals:8  prerole:2
+  739 converaBatchManualEditor           acctModals:24  prerole:1
+  744 showIntuitBatchModal               acctModals:4  prerole:1
+  745 intuitBatchInvoices                acctModals:4  prerole:1
+  746 copiedIntuitField                  acctModals:5  prerole:2
+  748 paymentIifPreview                  acctModals:5  tab:payments:1
+  749 expandedProfileUsers               tab:profiles:5
+  752 profileEditUserId                  admin+auth:1  prerole:4  tab:profiles:2  tsUser:3
+  753 loginForm                          prerole:7
+  754 selectedWeek                       prerole:6  tsUser:5
+  755 timeEntries                        prerole:6  tsUser:3
+  756 detectedLocation                   prerole:5
+  757 reminderEmails                     prerole:2  tsUser:1
+  758 showReminderLog                    tsUser:3
+  759 reportWeek                         acctWrap:1  prerole:6  tab:weekly:2
+  760 adminView                          admin+auth:10
+  761 adminUserSearch                    admin+auth:7
+  762 adminUserRoleFilter                admin+auth:7
+  763 allocationsProjectFilter           admin+auth:7
+  764 editingUser                        admin+auth:4  prerole:7
+  765 editingProject                     admin+auth:1  prerole:5
+  766 showUserModal                      admin+auth:5  prerole:3
+  767 showQuickAddModal                  admin+auth:4  prerole:2
+  768 showProjectModal                   admin+auth:3  prerole:2
+  769 userForm                           admin+auth:33  prerole:41
+  772 projectForm                        admin+auth:4  prerole:5
+  775 dateRange                          admin+auth:2  prerole:2  tsUser:1
+  776 selectedTimesheetForView           acctModals:2  admin+auth:2  prerole:2  tsUser:2
+  777 showWeekendHours                   prerole:3  tsUser:2
+  778 showTimesheetModal                 acctModals:1  admin+auth:1  prerole:2  tsUser:1
+  779 selectedTimesheetIds               admin+auth:1  prerole:7
+  780 invoices                           acctModals:5  acctWrap:4  admin+auth:4  prerole:115  tab:invoices:12  tab:payments:12  tab:profiles:1  tab:qb-automation:43  tsUser:11
+  781 paymentProfiles                    acctModals:9  acctWrap:1  admin+auth:1  prerole:24  tab:invoices:3  tab:payments:2  tab:profiles:2  tab:qb-automation:9  tsUser:4
+  782 userTab                            tsUser:14
+  783 invoiceView                        prerole:1  tsUser:5
+  784 invoiceMonth                       prerole:4  tsUser:9
+  785 invoiceRate                        prerole:2  tsUser:4
+  786 invoiceCurrency                    prerole:1  tsUser:2
+  787 invoiceNotes                       prerole:2  tsUser:1
+  788 invoiceNumber                      acctModals:20  acctWrap:1  prerole:29  tab:client-estimation:1  tab:invoices:3  tab:payments:7  tab:qb-automation:8  tsUser:9
+  789 selectedPaymentProfileId           prerole:2  tsUser:2
+  790 selectedInvoice                    acctModals:2  prerole:16  tab:invoices:2  tab:profiles:1  tsUser:3
+  791 showInvoiceModal                   acctModals:3  prerole:2  tab:invoices:2  tab:profiles:1  tsUser:6
+  792 accountantInvoiceFilter            tab:invoices:11
+  793 invoiceDateRange                   tab:invoices:5
+  794 invoicePayDateRange                tab:invoices:5
+  795 invoicePaidDateRange               tab:invoices:5
+  796 pendingPayOnDate                   acctModals:9  prerole:4
+  797 pendingPaymentMethod               acctModals:9  prerole:2
+  798 pendingPaymentTerms                acctModals:6  prerole:2
+  799 pendingInvoiceNumber               acctModals:6  prerole:2
+  800 pendingPaidDate                    acctModals:4  prerole:3
+  801 pendingUsdRate                     acctModals:3  prerole:3
+  803 pendingPeriodStart                 acctModals:3  prerole:1
+  804 pendingPeriodEnd                   acctModals:3  prerole:1
+  805 pendingEditReason                  acctModals:6  prerole:1
+  806 periodEditOpen                     acctModals:4  prerole:1
+  807 periodEditPreviewShown             acctModals:6  prerole:1
+  809 pendingHours                       acctModals:4  prerole:1
+  810 pendingRate                        acctModals:4  prerole:1
+  811 pendingValueReason                 acctModals:6  prerole:1
+  812 valueEditOpen                      acctModals:4  prerole:1
+  813 valueEditPreviewShown              acctModals:6  prerole:1
+  814 invoiceMonthPreset                 prerole:2  tab:invoices:7
+  815 invoicePayOnPreset                 tab:invoices:9
+  816 invoicePaymentMethodPreset         prerole:1  tab:invoices:8
+  817 invoiceSourceFilter                tab:invoices:4
+  818 showConveraMatchingModal           acctModals:3  tab:invoices:1
+  819 showManualInvoiceModal             acctModals:2  tab:invoices:1
+  820 converaMatchingSearch              acctModals:5
+  821 converaMatchingView                acctModals:7
+  822 copiedVendorId                     acctModals:3
+  824 beneficiaryFilter                  acctModals:4
+  826 beneficiarySort                    acctModals:4
+  828 showConveraModal                   acctModals:3  tab:payments:1  tab:profiles:1
+  829 converaTab                         acctModals:3  tab:payments:1  tab:profiles:1
+  830 converaError                       acctModals:3  prerole:5
+  832 intuitXlsxFile                     acctModals:5  prerole:3
+  833 intuitXlsxPreview                  acctModals:10  prerole:5
+  834 intuitXlsxImporting                acctModals:2  prerole:2
+  835 intuitXlsxResult                   acctModals:4  prerole:2
+  838 qbIngestEvents                     prerole:3  tab:qb-automation:14
+  841 postedSortKey                      prerole:2  tab:qb-automation:2
+  842 postedSortDir                      prerole:2  tab:qb-automation:2
+  848 nonPostedSortKey                   prerole:2  tab:qb-automation:2
+  849 nonPostedSortDir                   prerole:2  tab:qb-automation:2
+  855 missingBillsSortKey                prerole:2  tab:qb-automation:2
+  856 missingBillsSortDir                prerole:2  tab:qb-automation:2
+  865 qbG75PostedInvoiceIds              prerole:1  tab:qb-automation:1
+  869 qbG76PostedInvoiceIds              prerole:1  tab:qb-automation:1
+  874 vendorDecisionState                acctWrap:12  prerole:1  tab:qb-automation:1
+  883 qbIngestLoading                    prerole:2  tab:qb-automation:4
+  884 qbInboxExpanded                    prerole:1  tab:qb-automation:10
+  890 showQbPushPreview                  tab:qb-automation:4
+  891 qbPushRecords                      prerole:2  tab:qb-automation:4
+  895 pushResult                         tab:qb-automation:10
+  902 qbOpenBills                        prerole:2  tab:qb-automation:4
+  903 qbSyncingBills                     prerole:2  tab:qb-automation:3
+  905 qbWcLastSeen                       prerole:1  tab:qb-automation:5
+  909 qbBillQueryPending                 prerole:2  tab:qb-automation:3
+  912 qbPendingJobDetails                prerole:1  tab:qb-automation:4
+  913 showPendingJobsPopup               tab:qb-automation:5
+  914 qbSyncingVendors                   prerole:2  tab:qb-automation:2
+  915 qbVendorQueryPending               prerole:2  tab:qb-automation:1
+  917 qbVendorsList                      acctWrap:1  prerole:6  tab:qb-automation:7
+  918 qbAccountsList                     prerole:2  tab:qb-automation:6
+  919 qbVendorMappings                   prerole:2  tab:qb-automation:6
+  923 mapVendorOpenFor                   prerole:2  tab:qb-automation:5
+  924 mapForm                            prerole:15  tab:qb-automation:18
+  925 mapSaving                          prerole:2  tab:qb-automation:2
+  927 converaBeneficiaries               acctModals:11  prerole:9  tab:profiles:1
+  930 converaTransactions                acctWrap:2  prerole:10  tab:payments:8
+  931 importBatches                      acctWrap:2  prerole:2  tab:payments:3
+  932 selectedBatchId                    prerole:5  tab:payments:6
+  933 paymentsStateFilter                prerole:2  tab:payments:10
+  934 paymentsSortKey                    tab:payments:7
+  935 paymentsSortDir                    tab:payments:4
+  936 paymentsImportFile                 prerole:7  tab:payments:4
+  937 paymentsImporting                  prerole:2  tab:payments:1
+  938 paymentsImportError                prerole:10  tab:payments:2
+  939 showHistoricalTxns                 tab:payments:6
+  941 showWiderForTxn                    tab:payments:2
+  942 showProcessPreview                 prerole:3  tab:payments:4
+  944 stagedMatches                      prerole:7  tab:payments:15
+  947 notesDrafts                        tab:payments:5
+  949 addInvoicePickerFor                prerole:1  tab:payments:4
+  954 addInvoicePickerSearch             tab:payments:6
+  958 processCommitting                  prerole:3  tab:payments:4
+  959 paymentsImportSummary              prerole:4  tab:payments:15
+  967 paymentsProcessResult              prerole:3  tab:payments:8
+  975 paymentsFileInputKey               prerole:3  tab:payments:1
+  976 converaLastPaymentDates            acctModals:3  prerole:2
+  977 beneficiaryImportFile              acctModals:6
+  978 beneficiaryImporting               acctModals:2  prerole:2
+  979 beneficiaryImportResult            acctModals:8  prerole:3
+  983 beneficiaryOverrideProfileId       acctModals:13  prerole:1  tab:profiles:1
+  984 beneficiaryOverrideSearch          acctModals:15  prerole:1
+  986 invoiceAttachmentFile              prerole:3  tsUser:5
+  987 invoicePhoneConfirm                prerole:3  tsUser:4
+  988 profileNewPassword                 admin+auth:2  tsUser:10
+  989 profileConfirmPassword             admin+auth:2  tsUser:7
+  990 bannerPhone                        prerole:1  tsUser:3
+  991 bannerCountry                      prerole:3  tsUser:4
+  992 bannerCountryOther                 prerole:2  tsUser:3
+  993 bannerRegion                       prerole:5  tsUser:4
+  994 bannerRegionOther                  prerole:2  tsUser:4
+  995 bannerSaving                       prerole:4  tsUser:2
+  996 bannerDismissed                    prerole:3
+  997 profileShowNewPw                   admin+auth:2  tsUser:3
+  998 profileShowConfirmPw               admin+auth:2  tsUser:3
+  999 profilePwLoading                   admin+auth:2  tsUser:4
+ 1000 profilePhone                       tsUser:4
+ 1001 profilePhoneSaving                 tsUser:4
+ 1002 tsOnlyApplied                      tab:timesheet-only:4
+ 1003 tsOnlySelectedUsers                tab:timesheet-only:2
+ 1004 invoiceSelectedUsers               tab:invoices:6
+ 1005 invoiceUserSearch                  tab:invoices:4
+ 1006 invoiceUserDropdownOpen            tab:invoices:3
+ 1007 attachmentUploading                acctModals:1  prerole:4  tsUser:2
+ 1008 attachmentSignedUrls               prerole:4
+ 1009 showProfileModal                   admin+auth:2  prerole:1  tab:profiles:2  tsUser:10
+ 1010 editingProfile                     admin+auth:2  prerole:5  tab:profiles:2  tsUser:7
+ 1016 profileForm                        admin+auth:2  prerole:19  tab:profiles:2  tsUser:19
+ 1021 showTemplateProfileModal           acctModals:3  prerole:2
+ 1022 templateProfileText                acctModals:3  prerole:3
+ 1023 templateProfileUserId              acctModals:1  prerole:6
+ 1024 templateProfilePreview             acctModals:5  prerole:6
+ 1025 templateProfileError               acctModals:1  prerole:5
+ 1026 templateProfileSaving              acctModals:2  prerole:2
+ 1027 passwordResetMode                  prerole:5
+ 1028 newPassword                        prerole:7
+ 1029 newPasswordConfirm                 prerole:5
+ 1030 passwordResetLoading               prerole:4
+ 2429 recomputeBusy                      prerole:2  tab:qb-automation:1
