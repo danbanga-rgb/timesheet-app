@@ -144,6 +144,7 @@ import {
   vendorMapEntry,
 } from '../supabase/functions/_shared/edit-history';
 import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
+import { resolveLivePaymentProfile } from './lib/paymentProfileResolver';
 import ContractAdminDashboard from './roles/ContractAdmin';
 import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
 import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
@@ -3633,19 +3634,7 @@ const TimesheetSystem = () => {
     const AP_ACCOUNT      = 'Accounts Payable';
     const EXPENSE_ACCOUNT = 'Project Related Costs:Personnel Expenses:Consulting:Vendor Consultants';
     const termsToDays: Record<string, number> = { NET15: 15, NET30: 30, NET45: 45, NET60: 60 };
-    const findLivePp = (inv: Invoice) => {
-      const pp = inv.paymentProfile;
-      if (!pp) return null;
-      if (pp.id) {
-        const byId = paymentProfiles.find(p => p.id === pp.id);
-        if (byId) return byId;
-      }
-      if (pp.iban) {
-        const byIban = paymentProfiles.find(p => p.userId === inv.userId && p.iban === pp.iban);
-        if (byIban) return byIban;
-      }
-      return paymentProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null;
-    };
+    const findLivePp = (inv: Invoice) => resolveLivePaymentProfile(inv, paymentProfiles);
     const monthsFull = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const monthsShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const fmtDate = (yyyyMmDd: string) => {
@@ -11922,19 +11911,7 @@ const TimesheetSystem = () => {
           {/* QB Export Modal (Chunk 2a — read-only preview) */}
           {showQbExportModal && (() => {
             // Build rows from the current invoice filter
-            const findLivePp = (inv: Invoice) => {
-              const pp = inv.paymentProfile;
-              if (!pp) return null;
-              if (pp.id) {
-                const byId = paymentProfiles.find(p => p.id === pp.id);
-                if (byId) return byId;
-              }
-              if (pp.iban) {
-                const byIban = paymentProfiles.find(p => p.userId === inv.userId && p.iban === pp.iban);
-                if (byIban) return byIban;
-              }
-              return paymentProfiles.find(p => p.userId === inv.userId && p.isDefault) ?? null;
-            };
+            const findLivePp = (inv: Invoice) => resolveLivePaymentProfile(inv, paymentProfiles);
             const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
             const fmtPeriod = (start: string, end: string) => {
               if (!start) return '—';
