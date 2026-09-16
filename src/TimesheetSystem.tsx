@@ -158,6 +158,7 @@ import MultiSelectDropdown from './components/MultiSelectDropdown';
 import SourceBadge from './components/SourceBadge';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
 import FilterPills from './components/FilterPills';
+import QbVendorNameEditor from './components/QbVendorNameEditor';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -803,7 +804,6 @@ const TimesheetSystem = () => {
   const [profileTabFilter, setProfileTabFilter] = useState<'all'|'multiple'|'unmatched'|'no-qb-vendor'>('all');
   const [profileTabExcludeTest, setProfileTabExcludeTest] = useState(true);
   const [qbVendorEditingId, setQbVendorEditingId] = useState<number | null>(null);
-  const [qbVendorEditValue, setQbVendorEditValue] = useState<string>('');
   const [showQbExportModal, setShowQbExportModal] = useState(false);
   const [qbExportSelectedIds, setQbExportSelectedIds] = useState<Set<number>>(new Set());
   const [qbExportSnapshot, setQbExportSnapshot] = useState<Invoice[]>([]);
@@ -3599,8 +3599,7 @@ const TimesheetSystem = () => {
     const { error } = await supabase.from('payment_profiles').update({ qb_vendor_name: next }).eq('id', profileId);
     if (error) { alert('Error saving QB vendor: ' + error.message); return; }
     setPaymentProfiles(prev => prev.map(p => p.id === profileId ? { ...p, qbVendorName: next } : p));
-    setQbVendorEditingId(null);
-    setQbVendorEditValue('');
+    // Caller resets qbVendorEditingId in its own onSave handler (F2).
   };
 
   // Set invoice qb_export_status (used for Skip/Unskip in modal).
@@ -11317,26 +11316,15 @@ const TimesheetSystem = () => {
                                   </td>
                                   <td className="px-4 py-2 text-xs">
                                     {qbVendorEditingId === p.id ? (
-                                      <div className="flex items-center gap-1">
-                                        <input
-                                          type="text"
-                                          list="qb-vendor-suggestions"
-                                          value={qbVendorEditValue}
-                                          autoFocus
-                                          onChange={e => setQbVendorEditValue(e.target.value)}
-                                          onKeyDown={e => {
-                                            if (e.key === 'Enter') saveQbVendorName(p.id, qbVendorEditValue);
-                                            if (e.key === 'Escape') { setQbVendorEditingId(null); setQbVendorEditValue(''); }
-                                          }}
-                                          placeholder="Type or pick a vendor..."
-                                          className="px-2 py-1 border border-indigo-400 rounded text-xs min-w-[220px] focus:ring-1 focus:ring-indigo-500 focus:outline-none"
-                                        />
-                                        <button onClick={() => saveQbVendorName(p.id, qbVendorEditValue)} className="text-green-600 hover:underline text-xs">✓</button>
-                                        <button onClick={() => { setQbVendorEditingId(null); setQbVendorEditValue(''); }} className="text-gray-500 hover:underline text-xs">✕</button>
-                                      </div>
+                                      <QbVendorNameEditor
+                                        initialValue={p.qbVendorName || ''}
+                                        suggestions={qbVendorSuggestions}
+                                        onSave={(v) => { saveQbVendorName(p.id, v); setQbVendorEditingId(null); }}
+                                        onCancel={() => setQbVendorEditingId(null)}
+                                      />
                                     ) : (
                                       <button
-                                        onClick={() => { setQbVendorEditingId(p.id); setQbVendorEditValue(p.qbVendorName || ''); }}
+                                        onClick={() => setQbVendorEditingId(p.id)}
                                         className={'text-left hover:underline ' + (p.qbVendorName ? 'text-gray-700' : 'text-amber-600')}
                                         title="Click to edit QB vendor mapping"
                                       >
@@ -12104,27 +12092,18 @@ const TimesheetSystem = () => {
                               <td className="px-2 py-1 font-medium text-gray-800 whitespace-nowrap">{r.inv.userName}</td>
                               <td className="px-2 py-1 text-gray-600 whitespace-nowrap">{fmtPeriod(r.inv.periodStart, r.inv.periodEnd)}</td>
                               <td className="px-2 py-1">
-                                {isEditingVendor ? (
-                                  <div className="flex items-center gap-1">
-                                    <input
-                                      type="text"
-                                      list="qb-vendor-suggestions-modal"
-                                      value={qbVendorEditValue}
-                                      autoFocus
-                                      onChange={e => setQbVendorEditValue(e.target.value)}
-                                      onKeyDown={e => {
-                                        if (e.key === 'Enter' && r.livePp) saveQbVendorName(r.livePp.id, qbVendorEditValue);
-                                        if (e.key === 'Escape') { setQbVendorEditingId(null); setQbVendorEditValue(''); }
-                                      }}
-                                      placeholder="Type or pick..."
-                                      className="px-2 py-0.5 border border-indigo-400 rounded text-xs min-w-[180px]"
-                                    />
-                                    <button onClick={() => r.livePp && saveQbVendorName(r.livePp.id, qbVendorEditValue)} className="text-green-600 hover:underline text-xs">✓</button>
-                                    <button onClick={() => { setQbVendorEditingId(null); setQbVendorEditValue(''); }} className="text-gray-500 hover:underline text-xs">✕</button>
-                                  </div>
+                                {isEditingVendor && r.livePp ? (
+                                  <QbVendorNameEditor
+                                    initialValue={r.vendorName || ''}
+                                    suggestions={qbVendorSuggestions}
+                                    placeholder="Type or pick..."
+                                    inputMinWidth={180}
+                                    onSave={(v) => { if (r.livePp) { saveQbVendorName(r.livePp.id, v); } setQbVendorEditingId(null); }}
+                                    onCancel={() => setQbVendorEditingId(null)}
+                                  />
                                 ) : r.livePp ? (
                                   <button
-                                    onClick={() => { setQbVendorEditingId(r.livePp!.id); setQbVendorEditValue(r.vendorName || ''); }}
+                                    onClick={() => setQbVendorEditingId(r.livePp!.id)}
                                     className={'text-left hover:underline ' + (r.vendorName ? 'text-gray-700' : 'text-amber-600 italic')}
                                     title="Click to edit (persistent — updates payment profile)"
                                   >
