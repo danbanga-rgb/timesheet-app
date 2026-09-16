@@ -160,6 +160,7 @@ import StatusBadge, { type BadgeTone } from './components/StatusBadge';
 import FilterPills from './components/FilterPills';
 import QbVendorNameEditor from './components/QbVendorNameEditor';
 import SortableHeader from './components/SortableHeader';
+import CopyChip from './components/CopyChip';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -11717,20 +11718,15 @@ const TimesheetSystem = () => {
                                 // Copy chip that reuses the copiedIntuitField state — one "copied" indicator
                                 // at a time is fine across the modal. Sanitizes IBAN on copy so any invisible
                                 // chars in the stored value never reach the paste target.
-                                const copyChip = (fieldKey: string, display: string, copyValue?: string) => {
-                                  const copied = copiedIntuitField === fieldKey;
-                                  return (
-                                    <button
-                                      type="button"
-                                      onClick={() => copyIntuitField(fieldKey, copyValue ?? display)}
-                                      title="Click to copy"
-                                      className={`inline-flex items-center gap-1 font-mono text-[11px] px-1.5 py-0.5 rounded border transition-colors align-baseline ${copied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-indigo-200 text-indigo-900 hover:border-emerald-400 hover:bg-emerald-50'}`}
-                                    >
-                                      <Copy className="w-2.5 h-2.5" />
-                                      {copied ? '✓ copied' : display}
-                                    </button>
-                                  );
-                                };
+                                const copyChip = (fieldKey: string, display: string, copyValue?: string) => (
+                                  <CopyChip
+                                    label={display}
+                                    copied={copiedIntuitField === fieldKey}
+                                    onCopy={() => copyIntuitField(fieldKey, copyValue ?? display)}
+                                    size="sm"
+                                    monospace
+                                  />
+                                );
                                 return (
                                   <div className="mt-1.5 p-2 bg-indigo-50 border border-indigo-200 rounded">
                                     <div className="text-indigo-900 mb-1.5"><strong>Create Convera beneficiary with these details:</strong></div>
@@ -11862,14 +11858,12 @@ const TimesheetSystem = () => {
                                     <AlertTriangle className="w-3 h-3" /> no payment profile
                                   </span>
                                 ) : (
-                                  <button
-                                    onClick={() => copyIntuitField(payeeKey, payee)}
+                                  <CopyChip
+                                    label={payee}
+                                    copied={payeeCopied}
+                                    onCopy={() => copyIntuitField(payeeKey, payee)}
                                     title="Click to copy payee name as it should appear in Intuit"
-                                    className={`inline-flex items-center gap-1.5 text-sm px-2 py-1 rounded border transition-colors font-medium ${payeeCopied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-gray-300 text-gray-800 hover:border-emerald-400 hover:bg-emerald-50'}`}
-                                  >
-                                    <Copy className="w-3 h-3" />
-                                    {payeeCopied ? '✓ copied' : payee}
-                                  </button>
+                                  />
                                 )}
                                 <div className="text-xs text-gray-500 mt-1 leading-tight">
                                   <div>{inv.userName || '—'}</div>
@@ -11885,24 +11879,21 @@ const TimesheetSystem = () => {
                                 </div>
                               </td>
                               <td className="px-3 py-2 align-top">
-                                <button
-                                  onClick={() => copyIntuitField(invKey, inv.invoiceNumber)}
-                                  title="Click to copy"
-                                  className={`inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded border transition-colors ${invCopied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-gray-300 text-gray-700 hover:border-emerald-400 hover:bg-emerald-50'}`}
-                                >
-                                  <Copy className="w-3 h-3" />
-                                  {invCopied ? '✓ copied' : inv.invoiceNumber}
-                                </button>
+                                <CopyChip
+                                  label={inv.invoiceNumber}
+                                  copied={invCopied}
+                                  onCopy={() => copyIntuitField(invKey, inv.invoiceNumber)}
+                                  monospace
+                                />
                               </td>
                               <td className="px-3 py-2 text-right align-top">
-                                <button
-                                  onClick={() => copyIntuitField(amtKey, amountRaw)}
+                                <CopyChip
+                                  label={`${inv.currency || 'USD'} ${amountDisplay}`}
+                                  copied={amtCopied}
+                                  onCopy={() => copyIntuitField(amtKey, amountRaw)}
                                   title={`Click to copy ${amountRaw}`}
-                                  className={`inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded border transition-colors ${amtCopied ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-white border-gray-300 text-gray-700 hover:border-emerald-400 hover:bg-emerald-50'}`}
-                                >
-                                  <Copy className="w-3 h-3" />
-                                  {amtCopied ? '✓ copied' : `${inv.currency || 'USD'} ${amountDisplay}`}
-                                </button>
+                                  monospace
+                                />
                               </td>
                             </tr>
                           );
