@@ -157,6 +157,7 @@ import StickyScrollWrapper from './components/StickyScrollWrapper';
 import MultiSelectDropdown from './components/MultiSelectDropdown';
 import SourceBadge from './components/SourceBadge';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
+import FilterPills from './components/FilterPills';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -12672,18 +12673,15 @@ const TimesheetSystem = () => {
                       return (
                         <div>
                           <div className="px-6 py-2.5 bg-gray-50 border-b border-gray-200 flex items-center gap-2 flex-wrap">
-                            <button onClick={() => setBeneficiaryFilter('all')}
-                              className={`px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700 ${beneficiaryFilter === 'all' ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}>
-                              All: {totalAll}
-                            </button>
-                            <button onClick={() => setBeneficiaryFilter('with_vendor')}
-                              className={`px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700 ${beneficiaryFilter === 'with_vendor' ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}>
-                              With Vendor ID: {totalWithVendor}
-                            </button>
-                            <button onClick={() => setBeneficiaryFilter('without_vendor')}
-                              className={`px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-700 ${beneficiaryFilter === 'without_vendor' ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}>
-                              Without: {totalWithoutVendor}
-                            </button>
+                            <FilterPills<BeneficiaryFilter>
+                              options={[
+                                { value: 'all',            label: `All: ${totalAll}`,                       tone: 'bg-gray-100 text-gray-700' },
+                                { value: 'with_vendor',    label: `With Vendor ID: ${totalWithVendor}`,     tone: 'bg-indigo-100 text-indigo-700' },
+                                { value: 'without_vendor', label: `Without: ${totalWithoutVendor}`,         tone: 'bg-amber-100 text-amber-700' },
+                              ]}
+                              selected={beneficiaryFilter}
+                              onChange={setBeneficiaryFilter}
+                            />
                             <span className="ml-auto text-xs text-gray-500">Showing {beneRows.length}</span>
                           </div>
                           <table className="w-full text-sm border-collapse">
