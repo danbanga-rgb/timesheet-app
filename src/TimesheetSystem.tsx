@@ -3,59 +3,6 @@
 // Phase 3 of the Production Deployment Guide
 // ============================================================
 
-// Provides overflow-x scroll + a sticky mirror scrollbar that floats at the
-// bottom of the viewport so users don't have to scroll to the page bottom to
-// drag the scrollbar horizontally.
-const StickyScrollWrapper = ({ children, className, maxHeight }: { children: React.ReactNode; className?: string; maxHeight?: string }) => {
-  const outerRef = useRef<HTMLDivElement>(null);
-  const mirrorRef = useRef<HTMLDivElement>(null);
-  const syncingRef = useRef(false);
-  const [tableWidth, setTableWidth] = useState(0);
-
-  useEffect(() => {
-    const outer = outerRef.current;
-    const mirror = mirrorRef.current;
-    if (!outer || !mirror) return;
-    const onOuter = () => {
-      if (syncingRef.current) return;
-      syncingRef.current = true;
-      mirror.scrollLeft = outer.scrollLeft;
-      requestAnimationFrame(() => { syncingRef.current = false; });
-    };
-    const onMirror = () => {
-      if (syncingRef.current) return;
-      syncingRef.current = true;
-      outer.scrollLeft = mirror.scrollLeft;
-      requestAnimationFrame(() => { syncingRef.current = false; });
-    };
-    outer.addEventListener('scroll', onOuter);
-    mirror.addEventListener('scroll', onMirror);
-    const ro = new ResizeObserver(() => setTableWidth(outer.scrollWidth));
-    ro.observe(outer);
-    setTableWidth(outer.scrollWidth);
-    return () => {
-      outer.removeEventListener('scroll', onOuter);
-      mirror.removeEventListener('scroll', onMirror);
-      ro.disconnect();
-    };
-  }, []);
-
-  // When maxHeight is set, the outer container also handles vertical scrolling so that
-  // sticky-top table headers stay anchored as the user scrolls the rows.
-  const outerStyle = maxHeight ? { maxHeight } : undefined;
-  const outerOverflow = maxHeight ? 'overflow-auto' : 'overflow-x-auto';
-  return (
-    <div>
-      <div ref={outerRef} style={outerStyle} className={`${outerOverflow} -mx-3 sm:mx-0 px-3 sm:px-0 ${className ?? ''}`}>
-        {children}
-      </div>
-      <div ref={mirrorRef} className="overflow-x-scroll sticky bottom-0 -mx-3 sm:mx-0 bg-white border-t border-gray-100" style={{ height: 14 }}>
-        <div style={{ width: tableWidth, height: 1 }} />
-      </div>
-    </div>
-  );
-};
-
 export const ConsolidatedTable = ({ report, parseLocalDate, testAccounts = [] }: { report: { weekEndings: string[]; partialWeeks: Set<string>; employeeRows: { name: string; country: string; project: string; hours: Record<string, number | null>; statuses: Record<string, string>; rowTotal: number }[]; colTotals: Record<string, number>; grandTotal: number; sourceCounts?: { portal: number; email: number } }; parseLocalDate: (s: string) => Date; testAccounts?: string[] }) => {
   const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal, sourceCounts } = report;
   const allStatuses = employeeRows.flatMap(r => Object.values(r.statuses));
@@ -206,6 +153,7 @@ import { parseLocalDate, formatDate, getWeekDates, isWeekend } from './lib/dates
 import { triggerDownload } from './lib/csv';
 import { isTestAccount } from './lib/isTestAccount';
 import MonthRangePicker, { buildMonthPresets } from './components/MonthRangePicker';
+import StickyScrollWrapper from './components/StickyScrollWrapper';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
