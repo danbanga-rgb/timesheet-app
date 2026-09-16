@@ -1,49 +1,48 @@
-regions: top=1-360, prerole=361-5924, admin+auth=5925-6729, acctWrap=6730-6844, tab:weekly=6845-6973, tab:consolidated=6974-6982, tab:client-estimation=6983-7514, tab:invoices=7515-8253, tab:timesheet-only=8254-8417, tab:payments=8418-9175, tab:qb-automation=9176-10893, tab:profiles=10894-11091, acctModals=11092-13949, tsUser=13950-15160
+regions: top=1-361, prerole=362-5887, admin+auth=5888-6692, acctWrap=6693-6804, tab:weekly=6805-6808, tab:consolidated=6809-6817, tab:client-estimation=6818-7349, tab:invoices=7350-8088, tab:timesheet-only=8089-8252, tab:payments=8253-9010, tab:qb-automation=9011-10728, tab:profiles=10729-10926, acctModals=10927-13784, tsUser=13785-14995
 
-  362 currentUser                        acctModals:4  acctWrap:3  admin+auth:9  prerole:54  tab:client-estimation:1  tsUser:42
-  364 loading                            prerole:11  tab:client-estimation:1
-  365 users                              acctModals:7  admin+auth:21  prerole:21  tab:client-estimation:2  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:2  tab:timesheet-only:8  tab:weekly:1  tsUser:1
-  366 projects                           acctModals:2  admin+auth:14  prerole:9  tab:client-estimation:3  tab:consolidated:1  tab:invoices:2  tab:timesheet-only:2  tsUser:5
-  612 timesheets                         acctModals:8  admin+auth:9  prerole:30  tab:client-estimation:2  tab:consolidated:1  tab:invoices:3  tab:timesheet-only:2  top:1  tsUser:13
-  614 accountantTab                      acctModals:1  acctWrap:8  prerole:8  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:1  tab:qb-automation:1  tab:timesheet-only:1  tab:weekly:1
-  616 estimationMonth                    prerole:4  tab:client-estimation:11
-  621 estimationClients                  acctModals:1  prerole:2  tab:client-estimation:1
-  632 estimationEngagements              prerole:1  tab:client-estimation:5
-  633 estimationLoading                  prerole:2  tab:client-estimation:4
-  634 estimationError                    prerole:2  tab:client-estimation:3
-  635 estimationSort                     tab:client-estimation:9
-  636 estimationOverrides                prerole:1  tab:client-estimation:3
-  637 estimationImportPreview            tab:client-estimation:11
-  641 estimationImportApplying           tab:client-estimation:5
-  680 invoiceModal                       acctModals:5  tab:client-estimation:1
-  681 profileTabSearch                   acctModals:1  tab:profiles:4
-  682 profileTabFilter                   acctModals:1  tab:profiles:5
-  683 profileTabExcludeTest              tab:profiles:2
-  684 qbVendorEditingId                  acctModals:4  prerole:1  tab:profiles:4
-  685 showQbExportModal                  acctModals:5  tab:invoices:1
-  686 qbExportSelectedIds                acctModals:14  prerole:1  tab:invoices:1
-  687 qbExportSnapshot                   acctModals:1  prerole:2  tab:invoices:1
-  688 qbExportCategoryFilter             acctModals:14
-  726 showConveraBatchModal              acctModals:4  prerole:2
-  727 converaBatchGroups                 acctModals:3  prerole:3
-  728 converaBatchCombine                acctModals:4  prerole:2
-  729 converaBatchSkipped                acctModals:4  prerole:1
-  734 converaBatchExcluded               acctModals:4  prerole:1
-  738 converaBatchManualRows             acctModals:8  prerole:2
-  739 converaBatchManualEditor           acctModals:24  prerole:1
-  744 showIntuitBatchModal               acctModals:4  prerole:1
-  745 intuitBatchInvoices                acctModals:4  prerole:1
-  746 copiedIntuitField                  acctModals:5  prerole:2
-  748 paymentIifPreview                  acctModals:5  tab:payments:1
-  749 expandedProfileUsers               tab:profiles:5
-  752 profileEditUserId                  admin+auth:1  prerole:4  tab:profiles:2  tsUser:3
-  753 loginForm                          prerole:7
-  754 selectedWeek                       prerole:6  tsUser:5
-  755 timeEntries                        prerole:6  tsUser:3
-  756 detectedLocation                   prerole:5
-  757 reminderEmails                     prerole:2  tsUser:1
-  758 showReminderLog                    tsUser:3
-  759 reportWeek                         acctWrap:1  prerole:6  tab:weekly:2
+  363 currentUser                        acctModals:4  acctWrap:3  admin+auth:9  prerole:54  tab:client-estimation:1  tsUser:42
+  365 loading                            prerole:11  tab:client-estimation:1
+  366 users                              acctModals:7  admin+auth:21  prerole:20  tab:client-estimation:2  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:2  tab:timesheet-only:8  tab:weekly:1  tsUser:1
+  367 projects                           acctModals:2  admin+auth:14  prerole:8  tab:client-estimation:3  tab:consolidated:1  tab:invoices:2  tab:timesheet-only:2  tab:weekly:1  tsUser:5
+  613 timesheets                         acctModals:8  admin+auth:9  prerole:29  tab:client-estimation:2  tab:consolidated:1  tab:invoices:3  tab:timesheet-only:2  tab:weekly:1  top:1  tsUser:13
+  615 accountantTab                      acctModals:1  acctWrap:8  prerole:8  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:1  tab:qb-automation:1  tab:timesheet-only:1  tab:weekly:1
+  617 estimationMonth                    prerole:4  tab:client-estimation:11
+  622 estimationClients                  acctModals:1  prerole:2  tab:client-estimation:1
+  633 estimationEngagements              prerole:1  tab:client-estimation:5
+  634 estimationLoading                  prerole:2  tab:client-estimation:4
+  635 estimationError                    prerole:2  tab:client-estimation:3
+  636 estimationSort                     tab:client-estimation:9
+  637 estimationOverrides                prerole:1  tab:client-estimation:3
+  638 estimationImportPreview            tab:client-estimation:11
+  642 estimationImportApplying           tab:client-estimation:5
+  681 invoiceModal                       acctModals:5  tab:client-estimation:1
+  682 profileTabSearch                   acctModals:1  tab:profiles:4
+  683 profileTabFilter                   acctModals:1  tab:profiles:5
+  684 profileTabExcludeTest              tab:profiles:2
+  685 qbVendorEditingId                  acctModals:4  prerole:1  tab:profiles:4
+  686 showQbExportModal                  acctModals:5  tab:invoices:1
+  687 qbExportSelectedIds                acctModals:14  prerole:1  tab:invoices:1
+  688 qbExportSnapshot                   acctModals:1  prerole:2  tab:invoices:1
+  689 qbExportCategoryFilter             acctModals:14
+  727 showConveraBatchModal              acctModals:4  prerole:2
+  728 converaBatchGroups                 acctModals:3  prerole:3
+  729 converaBatchCombine                acctModals:4  prerole:2
+  730 converaBatchSkipped                acctModals:4  prerole:1
+  735 converaBatchExcluded               acctModals:4  prerole:1
+  739 converaBatchManualRows             acctModals:8  prerole:2
+  740 converaBatchManualEditor           acctModals:24  prerole:1
+  745 showIntuitBatchModal               acctModals:4  prerole:1
+  746 intuitBatchInvoices                acctModals:4  prerole:1
+  747 copiedIntuitField                  acctModals:5  prerole:2
+  749 paymentIifPreview                  acctModals:5  tab:payments:1
+  750 expandedProfileUsers               tab:profiles:5
+  753 profileEditUserId                  admin+auth:1  prerole:4  tab:profiles:2  tsUser:3
+  754 loginForm                          prerole:7
+  755 selectedWeek                       prerole:6  tsUser:5
+  756 timeEntries                        prerole:6  tsUser:3
+  757 detectedLocation                   prerole:5
+  758 reminderEmails                     prerole:2  tsUser:1
+  759 showReminderLog                    tsUser:3
   760 adminView                          admin+auth:10
   761 adminUserSearch                    admin+auth:7
   762 adminUserRoleFilter                admin+auth:7
