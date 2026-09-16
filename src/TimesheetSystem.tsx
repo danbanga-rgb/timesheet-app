@@ -3519,6 +3519,19 @@ const TimesheetSystem = () => {
     return 'blocked';
   };
 
+  // Opens the InvoiceDetail modal for edit/approve/mark-paid actions. Resets
+  // the pending* fields (payOn / paid) so a previous edit doesn't leak into
+  // the new invoice. Row-click opens (which don't reset) use the 2-call form
+  // — the reset effect at ~1583 clears pending* on selectedInvoice.id change,
+  // so the explicit resets here are belt-and-braces for the action buttons.
+  // See §1b-C X3.
+  const openInvoiceDetail = (inv: Invoice) => {
+    setSelectedInvoice(inv);
+    setPendingPayOnDate('');
+    setPendingPaidDate('');
+    setShowInvoiceModal(true);
+  };
+
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
     const invoice = invoices.find(i => i.id === invoiceId);
     // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b). Refuse approval when
@@ -8294,11 +8307,11 @@ const TimesheetSystem = () => {
                                         )}
                                         {inv.status === 'approved' && (
                                           <>
-                                            <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
+                                            <button onClick={() => openInvoiceDetail(inv)} className="px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Mark Paid</button>
                                             {!inv.paidDate && <button onClick={() => { if (!window.confirm(`Reject ${inv.userName}'s invoice?`)) return; handleInvoiceAction(inv.id, 'rejected'); }} className="px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Reject</button>}
                                           </>
                                         )}
-                                        {inv.status === 'rejected' && <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">Re-approve</button>}
+                                        {inv.status === 'rejected' && <button onClick={() => openInvoiceDetail(inv)} className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">Re-approve</button>}
                                         {inv.status === 'paid' && <span className="text-gray-400 text-xs">—</span>}
                                       </div>
                                     </td>
@@ -8496,11 +8509,11 @@ const TimesheetSystem = () => {
                                           )}
                                           {inv.status === 'approved' && (
                                             <>
-                                              <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Paid</button>
+                                              <button onClick={() => openInvoiceDetail(inv)} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Paid</button>
                                               {!inv.paidDate && <button onClick={() => { if (!window.confirm(`Reject ${inv.userName}'s invoice?`)) return; handleInvoiceAction(inv.id, 'rejected'); }} className="px-2 py-0.5 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">✕</button>}
                                             </>
                                           )}
-                                          {inv.status === 'rejected' && <button onClick={() => { setSelectedInvoice(inv); setPendingPayOnDate(''); setPendingPaidDate(''); setShowInvoiceModal(true); }} className="px-2 py-0.5 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">↩</button>}
+                                          {inv.status === 'rejected' && <button onClick={() => openInvoiceDetail(inv)} className="px-2 py-0.5 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium">↩</button>}
                                           {inv.status === 'paid' && <span className="text-gray-400 text-xs">—</span>}
                                         </div>
                                       </td>
