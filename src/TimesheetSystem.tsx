@@ -159,6 +159,7 @@ import SourceBadge from './components/SourceBadge';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
 import FilterPills from './components/FilterPills';
 import QbVendorNameEditor from './components/QbVendorNameEditor';
+import SortableHeader from './components/SortableHeader';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -9081,12 +9082,12 @@ const TimesheetSystem = () => {
                     <table className="w-full text-sm">
                       <thead className="bg-gray-50 sticky top-0">
                         <tr>
-                          <th onClick={() => toggleSort('date')}        className="px-3 py-2 text-left font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Date{sortArrow('date')}</th>
-                          <th onClick={() => toggleSort('beneficiary')} className="px-3 py-2 text-left font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Beneficiary{sortArrow('beneficiary')}</th>
-                          <th onClick={() => toggleSort('amount')}      className="px-3 py-2 text-right font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Amount{sortArrow('amount')}</th>
+                          <SortableHeader onClick={() => toggleSort('date')}        className="px-3 py-2 font-medium text-gray-600 whitespace-nowrap" indicator={sortArrow('date')}>Date</SortableHeader>
+                          <SortableHeader onClick={() => toggleSort('beneficiary')} className="px-3 py-2 font-medium text-gray-600 whitespace-nowrap" indicator={sortArrow('beneficiary')}>Beneficiary</SortableHeader>
+                          <SortableHeader onClick={() => toggleSort('amount')}      className="px-3 py-2 font-medium text-gray-600 whitespace-nowrap" align="right" indicator={sortArrow('amount')}>Amount</SortableHeader>
                           <th className="px-3 py-2 text-left font-medium text-gray-600">Ref</th>
                           <th className="px-3 py-2 text-left font-medium text-gray-600 min-w-[220px]">Match</th>
-                          <th onClick={() => toggleSort('confidence')}  className="px-3 py-2 text-center font-medium text-gray-600 cursor-pointer hover:bg-gray-100 whitespace-nowrap">Confidence{sortArrow('confidence')}</th>
+                          <SortableHeader onClick={() => toggleSort('confidence')}  className="px-3 py-2 font-medium text-gray-600 whitespace-nowrap" align="center" indicator={sortArrow('confidence')}>Confidence</SortableHeader>
                           <th className="px-3 py-2 text-center font-medium text-gray-600">State</th>
                         </tr>
                       </thead>
@@ -10700,9 +10701,9 @@ const TimesheetSystem = () => {
                                   ? <span className="text-gray-600">{missingBillsSortDir === 'asc' ? '▲' : '▼'}</span>
                                   : <span className="text-gray-300">↕</span>;
                                 const sTh = (k: MissingBillsSortKey, label: string, align: 'left' | 'right' = 'left') => (
-                                  <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-amber-50`} onClick={() => toggleMissingBillsSort(k)}>
-                                    <span className="inline-flex items-center gap-1">{label} {chev(k)}</span>
-                                  </th>
+                                  <SortableHeader onClick={() => toggleMissingBillsSort(k)} className="px-3 py-1.5" hoverClass="hover:bg-amber-50" align={align} indicator={<> {chev(k)}</>}>
+                                    {label}
+                                  </SortableHeader>
                                 );
                                 const dir = missingBillsSortDir === 'asc' ? 1 : -1;
                                 const key = missingBillsSortKey;
@@ -10815,9 +10816,9 @@ const TimesheetSystem = () => {
                     ? <span className="text-gray-600">{postedSortDir === 'asc' ? '▲' : '▼'}</span>
                     : <span className="text-gray-300">↕</span>;
                   const sortableTh = (k: PostedSortKey, label: string, align: 'left' | 'right' = 'left') => (
-                    <th className={`px-3 py-1.5 text-${align} cursor-pointer select-none hover:bg-gray-50`} onClick={() => togglePostedSort(k)}>
-                      <span className="inline-flex items-center gap-1">{label} {sortChevron(k)}</span>
-                    </th>
+                    <SortableHeader onClick={() => togglePostedSort(k)} className="px-3 py-1.5" hoverClass="hover:bg-gray-50" align={align} indicator={<> {sortChevron(k)}</>}>
+                      {label}
+                    </SortableHeader>
                   );
                   const renderPostedHeader = () => (
                     <thead className="bg-white text-gray-500 border-t border-b border-gray-200">
@@ -12666,12 +12667,12 @@ const TimesheetSystem = () => {
                           <table className="w-full text-sm border-collapse">
                             <thead className="bg-gray-50 sticky top-0 z-10">
                               <tr>
-                                <th onClick={() => toggleSort('shortName')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 cursor-pointer hover:bg-gray-100 select-none">Short Name / Beneficiary{sortIndicator('shortName')}</th>
-                                <th onClick={() => toggleSort('vendorId')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-32 cursor-pointer hover:bg-gray-100 select-none">Vendor ID{sortIndicator('vendorId')}</th>
-                                <th onClick={() => toggleSort('bankAccount')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-56 cursor-pointer hover:bg-gray-100 select-none">Bank Account{sortIndicator('bankAccount')}</th>
-                                <th onClick={() => toggleSort('country')} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 border-b border-gray-200 w-40 cursor-pointer hover:bg-gray-100 select-none">Country / Currency{sortIndicator('country')}</th>
-                                <th onClick={() => toggleSort('lastUsed')} className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-20 cursor-pointer hover:bg-gray-100 select-none">Last Used{sortIndicator('lastUsed')}</th>
-                                <th onClick={() => toggleSort('linked')} className="px-4 py-2.5 text-center text-xs font-semibold text-gray-600 border-b border-gray-200 w-24 cursor-pointer hover:bg-gray-100 select-none">Linked{sortIndicator('linked')}</th>
+                                <SortableHeader onClick={() => toggleSort('shortName')}   className="px-4 py-2.5 text-xs font-semibold text-gray-600 border-b border-gray-200"      indicator={sortIndicator('shortName')}>Short Name / Beneficiary</SortableHeader>
+                                <SortableHeader onClick={() => toggleSort('vendorId')}    className="px-4 py-2.5 text-xs font-semibold text-gray-600 border-b border-gray-200 w-32" indicator={sortIndicator('vendorId')}>Vendor ID</SortableHeader>
+                                <SortableHeader onClick={() => toggleSort('bankAccount')} className="px-4 py-2.5 text-xs font-semibold text-gray-600 border-b border-gray-200 w-56" indicator={sortIndicator('bankAccount')}>Bank Account</SortableHeader>
+                                <SortableHeader onClick={() => toggleSort('country')}     className="px-4 py-2.5 text-xs font-semibold text-gray-600 border-b border-gray-200 w-40" indicator={sortIndicator('country')}>Country / Currency</SortableHeader>
+                                <SortableHeader onClick={() => toggleSort('lastUsed')}    className="px-4 py-2.5 text-xs font-semibold text-gray-600 border-b border-gray-200 w-20" align="center" indicator={sortIndicator('lastUsed')}>Last Used</SortableHeader>
+                                <SortableHeader onClick={() => toggleSort('linked')}      className="px-4 py-2.5 text-xs font-semibold text-gray-600 border-b border-gray-200 w-24" align="center" indicator={sortIndicator('linked')}>Linked</SortableHeader>
                               </tr>
                             </thead>
                             <tbody>
