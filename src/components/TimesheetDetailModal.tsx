@@ -1,6 +1,6 @@
 import { MapPin, X, CheckCircle, XCircle } from 'lucide-react';
 import { parseLocalDate, formatDate, getWeekDates, getWeekSunday, isWeekend } from '../lib/dates';
-import type { UserProfile, Project, Timesheet } from '../TimesheetSystem';
+import type { UserProfile, Project, Timesheet } from '../types';
 
 // Timesheet Details modal — shows day-by-day breakdown + status +
 // approve/reject actions for managers and accountants.

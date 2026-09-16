@@ -11,7 +11,7 @@ import type {
   InvoiceLine,
   PaymentProfile,
   TimeEntry,
-} from '../../TimesheetSystem';
+} from '../../types';
 
 // Vendor Manager dashboard.
 //

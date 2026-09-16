@@ -3,7 +3,8 @@ import { LogOut, CheckCircle, FileText, BarChart2, Users, XCircle, Download } fr
 import { parseLocalDate, formatDate, getWeekDates } from '../../lib/dates';
 import { triggerDownload } from '../../lib/csv';
 import MonthRangePicker from '../../components/MonthRangePicker';
-import { ConsolidatedTable, type UserProfile, type Timesheet, type Project, type TimeEntry } from '../../TimesheetSystem';
+import { ConsolidatedTable } from '../../TimesheetSystem';
+import type { UserProfile, Timesheet, Project, TimeEntry } from '../../types';
 
 // Manager dashboard view.
 //
