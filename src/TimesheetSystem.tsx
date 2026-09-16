@@ -154,6 +154,7 @@ import { triggerDownload } from './lib/csv';
 import { isTestAccount } from './lib/isTestAccount';
 import MonthRangePicker, { buildMonthPresets } from './components/MonthRangePicker';
 import StickyScrollWrapper from './components/StickyScrollWrapper';
+import MultiSelectDropdown from './components/MultiSelectDropdown';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -1123,8 +1124,6 @@ const TimesheetSystem = () => {
   const [profilePhoneSaving, setProfilePhoneSaving] = useState(false);
   const [tsOnlyApplied, setTsOnlyApplied] = useState({ start: '', end: '' });
   const [tsOnlySelectedUsers, setTsOnlySelectedUsers] = useState<string[] | null>(null);
-  const [tsOnlySearch, setTsOnlySearch] = useState('');
-  const [tsOnlyDropdownOpen, setTsOnlyDropdownOpen] = useState(false);
   const [invoiceSelectedUsers, setInvoiceSelectedUsers] = useState<string[] | null>(null);
   const [invoiceUserSearch, setInvoiceUserSearch] = useState('');
   const [invoiceUserDropdownOpen, setInvoiceUserDropdownOpen] = useState(false);
@@ -8579,13 +8578,6 @@ const TimesheetSystem = () => {
               triggerDownload(csv, `timesheet_only_users_${Date.now()}.csv`);
             };
 
-            const searchedUsers = tsOnlyUsers.filter(u =>
-              u.name.toLowerCase().includes(tsOnlySearch.toLowerCase())
-            );
-            const toggleUser = (id: string) => {
-              const current = tsOnlySelectedUsers ?? tsOnlyUsers.map(u => u.id);
-              setTsOnlySelectedUsers(current.includes(id) ? current.filter(x => x !== id) : [...current, id]);
-            };
 
             return (
               <div className="space-y-6">
@@ -8613,72 +8605,16 @@ const TimesheetSystem = () => {
                   ) : (
                     <>
                       {/* User picker */}
-                      <div className="mb-5 relative">
+                      <div className="mb-5">
                         <label className="block text-sm font-semibold text-gray-700 mb-2">Filter Users</label>
-                        <button
-                          onClick={() => setTsOnlyDropdownOpen(o => !o)}
-                          className="w-full flex items-center justify-between px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm hover:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                        >
-                          <span className="text-gray-700">
-                            {effectiveSelected.length === tsOnlyUsers.length
-                              ? 'All users selected'
-                              : `${effectiveSelected.length} of ${tsOnlyUsers.length} users selected`}
-                          </span>
-                          <svg className={`w-4 h-4 text-gray-500 transition-transform ${tsOnlyDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                        </button>
-
-                        {tsOnlyDropdownOpen && (
-                          <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg">
-                            {/* Search */}
-                            <div className="p-2 border-b border-gray-100">
-                              <input
-                                type="text"
-                                value={tsOnlySearch}
-                                onChange={e => setTsOnlySearch(e.target.value)}
-                                placeholder="Search users..."
-                                className="w-full px-3 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                                autoFocus
-                              />
-                            </div>
-                            {/* Select all / Clear */}
-                            <div className="flex gap-2 px-3 py-1.5 border-b border-gray-100 bg-gray-50">
-                              <button
-                                onClick={() => setTsOnlySelectedUsers(tsOnlyUsers.map(u => u.id))}
-                                className="text-xs text-indigo-600 hover:underline font-medium"
-                              >Select all</button>
-                              <span className="text-gray-300">|</span>
-                              <button
-                                onClick={() => setTsOnlySelectedUsers([])}
-                                className="text-xs text-gray-500 hover:underline"
-                              >Clear</button>
-                            </div>
-                            {/* User list */}
-                            <div className="max-h-60 overflow-y-auto">
-                              {searchedUsers.length === 0 ? (
-                                <p className="text-sm text-gray-400 text-center py-4">No users match</p>
-                              ) : (
-                                searchedUsers.map(u => (
-                                  <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-indigo-50 cursor-pointer">
-                                    <input
-                                      type="checkbox"
-                                      checked={effectiveSelected.includes(u.id)}
-                                      onChange={() => toggleUser(u.id)}
-                                      className="w-4 h-4 rounded text-indigo-600"
-                                    />
-                                    <span className="text-sm text-gray-800">{u.name}</span>
-                                    <span className="text-xs text-gray-400 ml-auto">{countryName(u.country)}</span>
-                                  </label>
-                                ))
-                              )}
-                            </div>
-                            <div className="p-2 border-t border-gray-100 bg-gray-50 text-right">
-                              <button
-                                onClick={() => { setTsOnlyDropdownOpen(false); setTsOnlySearch(''); }}
-                                className="px-3 py-1.5 bg-indigo-600 text-white text-xs rounded-lg hover:bg-indigo-700"
-                              >Done</button>
-                            </div>
-                          </div>
-                        )}
+                        <MultiSelectDropdown
+                          options={tsOnlyUsers.map(u => ({ id: u.id, label: u.name, meta: countryName(u.country) }))}
+                          selected={effectiveSelected}
+                          onChange={setTsOnlySelectedUsers}
+                          itemNoun="users"
+                          searchPlaceholder="Search users..."
+                          emptyLabel="No users match"
+                        />
                       </div>
 
                       {/* Quick select presets */}
