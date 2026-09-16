@@ -156,6 +156,7 @@ import MonthRangePicker, { buildMonthPresets } from './components/MonthRangePick
 import StickyScrollWrapper from './components/StickyScrollWrapper';
 import MultiSelectDropdown from './components/MultiSelectDropdown';
 import SourceBadge from './components/SourceBadge';
+import StatusBadge, { type BadgeTone } from './components/StatusBadge';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -6211,9 +6212,9 @@ const TimesheetSystem = () => {
                         <td className="px-4 py-3 text-sm text-gray-600">{user.email}</td>
                         <td className="px-4 py-3 text-sm text-gray-600">{user.phone || <span className="text-gray-400 italic">—</span>}</td>
                         <td className="px-4 py-3 text-sm">
-                          <span className={'px-2 py-1 rounded-full text-xs font-medium ' + (user.role === 'admin' ? 'bg-purple-100 text-purple-800' : user.role === 'manager' ? 'bg-blue-100 text-blue-800' : user.role === 'vendormanager' ? 'bg-teal-100 text-teal-800' : user.role === 'accountant' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800')}>
+                          <StatusBadge tone={(user.role === 'admin' ? 'purple' : user.role === 'manager' ? 'blue' : user.role === 'vendormanager' ? 'teal' : user.role === 'accountant' ? 'green' : 'gray') as BadgeTone}>
                             {user.role === 'timesheetuser' ? 'TimesheetUser' : user.role === 'vendormanager' ? 'Vendor Manager' : user.role.charAt(0).toUpperCase() + user.role.slice(1)}
-                          </span>
+                          </StatusBadge>
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">
                           <div className="flex items-center gap-1">
@@ -6227,9 +6228,9 @@ const TimesheetSystem = () => {
                         <td className="px-4 py-3 text-sm">
                           {user.role === 'timesheetuser' ? (
                             user.locationType === 'onshore' ? (
-                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">Onshore</span>
+                              <StatusBadge tone="indigo">Onshore</StatusBadge>
                             ) : user.locationType === 'offshore' ? (
-                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">Offshore</span>
+                              <StatusBadge tone="amber">Offshore</StatusBadge>
                             ) : (
                               <span className="text-gray-400 italic">Unclassified</span>
                             )
@@ -6306,7 +6307,7 @@ const TimesheetSystem = () => {
                         <p className="text-sm text-gray-600 mb-2">Code: {project.code}</p>
                         <p className="text-sm text-gray-700">{project.description}</p>
                       </div>
-                      <span className={'px-3 py-1 rounded-full text-xs font-medium ' + (project.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800')}>{project.status.charAt(0).toUpperCase() + project.status.slice(1)}</span>
+                      <StatusBadge tone={project.status === 'active' ? 'green' : 'gray'} size="lg">{project.status.charAt(0).toUpperCase() + project.status.slice(1)}</StatusBadge>
                     </div>
                     <div className="flex gap-2 mt-4">
                       <button onClick={() => openProjectModal(project)} className="flex items-center gap-1 px-3 py-1 bg-indigo-100 text-indigo-700 rounded hover:bg-indigo-200 text-sm"><Edit2 className="w-3 h-3" /> Edit</button>
@@ -6431,9 +6432,7 @@ const TimesheetSystem = () => {
                                     ) : <span className="text-gray-400 italic">No end date</span>}
                                   </td>
                                   <td className="px-4 py-3">
-                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${isInactive ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
-                                      {isInactive ? 'Inactive' : 'Active'}
-                                    </span>
+                                    <StatusBadge tone={isInactive ? 'red' : 'green'}>{isInactive ? 'Inactive' : 'Active'}</StatusBadge>
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit user"><Edit2 className="w-4 h-4" /></button>
@@ -6490,9 +6489,7 @@ const TimesheetSystem = () => {
                                   ) : <span className="text-gray-400 italic">No end date</span>}
                                 </td>
                                 <td className="px-4 py-3">
-                                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${isInactive ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
-                                    {isInactive ? 'Inactive' : 'Active'}
-                                  </span>
+                                  <StatusBadge tone={isInactive ? 'red' : 'green'}>{isInactive ? 'Inactive' : 'Active'}</StatusBadge>
                                 </td>
                                 <td className="px-4 py-3 text-center">
                                   <button onClick={() => openUserModal(user)} className="p-1 text-indigo-600 hover:text-indigo-800" title="Edit user"><Edit2 className="w-4 h-4" /></button>
@@ -7140,7 +7137,7 @@ const TimesheetSystem = () => {
                         <td className="border border-gray-300 px-4 py-3 text-sm text-indigo-600">{row.project}</td>
                         {row.dailyHours.map((h, i) => <td key={i} className="border border-gray-300 px-4 py-3 text-center"><span className={h > 0 ? 'font-semibold' : 'text-gray-400'}>{h > 0 ? h.toFixed(1) : '-'}</span></td>)}
                         <td className="border border-gray-300 px-4 py-3 text-center font-bold text-indigo-600">{row.total.toFixed(1)}</td>
-                        <td className="border border-gray-300 px-4 py-3 text-center"><span className={'inline-block px-3 py-1 rounded-full text-xs font-medium ' + (row.status === 'approved' ? 'bg-green-100 text-green-800' : row.status === 'rejected' ? 'bg-red-100 text-red-800' : row.status === 'pending' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-600')}>{row.status === 'not submitted' ? 'Not Submitted' : row.status.charAt(0).toUpperCase() + row.status.slice(1)}</span></td>
+                        <td className="border border-gray-300 px-4 py-3 text-center"><StatusBadge tone={row.status === 'approved' ? 'green' : row.status === 'rejected' ? 'red' : row.status === 'pending' ? 'yellow' : 'gray'} size="lg">{row.status === 'not submitted' ? 'Not Submitted' : row.status.charAt(0).toUpperCase() + row.status.slice(1)}</StatusBadge></td>
                       </tr>
                     ))}
                     <tr className="bg-indigo-50 font-bold">
@@ -8689,7 +8686,7 @@ const TimesheetSystem = () => {
                                     ))}
                                     <td className="border border-gray-200 px-3 py-2 text-center font-bold text-indigo-600">{total.toFixed(1)}</td>
                                     <td className="border border-gray-200 px-3 py-2 text-center">
-                                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}` /* A10 followup: uses px-2 py-0.5 (sm-ish size) not standard */}>
                                         {ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}
                                       </span>
                                     </td>
@@ -14718,7 +14715,7 @@ const TimesheetSystem = () => {
                       {dailyHours.map((h, i) => <td key={i} className="border border-gray-300 px-4 py-2 text-center">{h > 0 ? h.toFixed(1) : '-'}</td>)}
                       <td className="border border-gray-300 px-4 py-2 text-center font-bold text-indigo-600">{total.toFixed(1)}</td>
                       <td className="border border-gray-300 px-4 py-2 text-center">
-                        <span className={'px-2 py-1 rounded-full text-xs font-medium ' + (ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800')}>{ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}</span>
+                        <StatusBadge tone={ts.status === 'approved' ? 'green' : ts.status === 'rejected' ? 'red' : 'yellow'}>{ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}</StatusBadge>
                       </td>
                       <td className="border border-gray-300 px-4 py-2 text-center text-xs text-gray-500 whitespace-nowrap">
                         {ts.submittedAt ? new Date(ts.submittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}
