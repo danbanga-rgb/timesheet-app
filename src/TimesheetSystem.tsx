@@ -155,6 +155,7 @@ import { isTestAccount } from './lib/isTestAccount';
 import MonthRangePicker, { buildMonthPresets } from './components/MonthRangePicker';
 import StickyScrollWrapper from './components/StickyScrollWrapper';
 import MultiSelectDropdown from './components/MultiSelectDropdown';
+import SourceBadge from './components/SourceBadge';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -7134,11 +7135,7 @@ const TimesheetSystem = () => {
                         <td className={`border border-gray-300 px-2 py-3 text-center text-xs text-gray-400 whitespace-nowrap sticky left-0 z-10 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>{row.timesheetId ? `#${row.timesheetId}` : '—'}</td>
                         <td className={`border border-gray-300 px-4 py-3 font-medium sticky z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)] ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`} style={{ left: 53 }}>{row.name}</td>
                         <td className="border border-gray-300 px-4 py-3">
-                          {row.source === 'imported'
-                            ? <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">Email</span>
-                            : row.source === 'direct'
-                            ? <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Portal</span>
-                            : <span className="text-gray-300">—</span>}
+                          <SourceBadge source={row.source} />
                         </td>
                         <td className="border border-gray-300 px-4 py-3 text-sm text-indigo-600">{row.project}</td>
                         {row.dailyHours.map((h, i) => <td key={i} className="border border-gray-300 px-4 py-3 text-center"><span className={h > 0 ? 'font-semibold' : 'text-gray-400'}>{h > 0 ? h.toFixed(1) : '-'}</span></td>)}
@@ -8683,11 +8680,7 @@ const TimesheetSystem = () => {
                                     <td className="border border-gray-200 px-2 py-2 text-center text-xs text-gray-400 whitespace-nowrap">#{ts.id}</td>
                                     <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
                                     <td className="border border-gray-200 px-3 py-2">
-                                      {ts.source === 'imported'
-                                        ? <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">Email</span>
-                                        : ts.source === 'direct'
-                                        ? <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Portal</span>
-                                        : <span className="text-gray-300">—</span>}
+                                      <SourceBadge source={ts.source} />
                                     </td>
                                     <td className="border border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
                                     <td className="border border-gray-200 px-3 py-2 text-indigo-600 text-xs">{project ? `${project.name} (${project.code})` : '—'}</td>
