@@ -5,6 +5,7 @@ import { triggerDownload } from '../../lib/csv';
 import MonthRangePicker from '../../components/MonthRangePicker';
 import ConsolidatedTable from '../../components/ConsolidatedTable';
 import { buildConsolidatedReport } from '../../lib/consolidatedReport';
+import { buildConsolidatedCsv } from '../../lib/consolidatedCsv';
 import type { UserProfile, Timesheet, Project, TimeEntry } from '../../types';
 
 // Manager dashboard view.
@@ -76,25 +77,7 @@ export default function ManagerView({
 
   const downloadMgrCSV = () => {
     if (!mgrReport) return;
-    const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = mgrReport;
-    let csv = 'Employee,Country,Project';
-    weekEndings.forEach(we => {
-      const weekMon = parseLocalDate(we);
-      const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-      const label = partialWeeks.has(we)
-        ? `Partial W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
-        : `W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
-      csv += `,"${label}","Status"`;
-    });
-    csv += ',Total Hours\n';
-    employeeRows.forEach(row => {
-      csv += `"${row.name}","${countryName(row.country)}","${row.project}"`;
-      weekEndings.forEach(we => { csv += `,"${row.hours[we] !== null ? row.hours[we]!.toFixed(1) : '-'}","${row.statuses[we]}"`; });
-      csv += `,"${row.rowTotal.toFixed(1)}"\n`;
-    });
-    csv += '"TOTAL","",""';
-    weekEndings.forEach(we => { csv += `,"${colTotals[we as string].toFixed(1)}",""`; });
-    csv += `,"${gt.toFixed(1)}"\n`;
+    const csv = buildConsolidatedCsv({ report: mgrReport, countryName, includeStatus: true });
     triggerDownload(csv, `team_consolidated_${managerAppliedRange.start}_to_${managerAppliedRange.end}.csv`);
   };
 

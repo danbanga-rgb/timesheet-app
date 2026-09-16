@@ -20,6 +20,7 @@ import {
 import { resolveNewProfileVendor, resolveInvoiceQbVendorName, extractSnapPpId, type ResolverPaymentProfile } from './lib/vendorResolution';
 import { resolveLivePaymentProfile } from './lib/paymentProfileResolver';
 import { buildConsolidatedReport } from './lib/consolidatedReport';
+import { buildConsolidatedCsv } from './lib/consolidatedCsv';
 import ContractAdminDashboard from './roles/ContractAdmin';
 import AdminChatActivity from './roles/AdminChat/AdminChatActivity';
 import ManualInvoiceModal from './components/manualInvoice/ManualInvoiceModal';
@@ -6991,33 +6992,7 @@ const TimesheetSystem = () => {
           {accountantTab === 'consolidated' && (() => {
             const downloadConsolidatedCSV = (includeStatus: boolean) => {
               if (!consolidatedReport) return;
-              const { weekEndings, partialWeeks, employeeRows, colTotals, grandTotal: gt } = consolidatedReport;
-              let csv = 'Employee,Country,Project';
-              weekEndings.forEach(we => {
-                const weekMon = parseLocalDate(we);
-                const weekFri = new Date(weekMon); weekFri.setDate(weekMon.getDate() + 4);
-                const label = partialWeeks.has(we)
-                  ? `Partial W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
-                  : `W/E ${weekFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
-                csv += includeStatus ? `,"${label}","Status"` : `,"${label}"`;
-              });
-              csv += ',Total Hours\n';
-              employeeRows.forEach(row => {
-                csv += `"${row.name}","${countryName(row.country)}","${row.project}"`;
-                weekEndings.forEach(we => {
-                  const h = row.hours[we];
-                  const st = row.statuses[we];
-                  csv += includeStatus
-                    ? `,"${h !== null ? h.toFixed(1) : '-'}","${st}"`
-                    : `,"${h !== null ? h.toFixed(1) : '-'}"`;
-                });
-                csv += `,"${row.rowTotal.toFixed(1)}"\n`;
-              });
-              csv += `"TOTAL","",""`;
-              weekEndings.forEach(we => {
-                csv += includeStatus ? `,"${colTotals[we].toFixed(1)}",""` : `,"${colTotals[we].toFixed(1)}"`;
-              });
-              csv += `,"${gt.toFixed(1)}"\n`;
+              const csv = buildConsolidatedCsv({ report: consolidatedReport, countryName, includeStatus });
               const rangeLabel = appliedRange.start && appliedRange.end
                 ? `${appliedRange.start}_to_${appliedRange.end}`
                 : 'consolidated';
