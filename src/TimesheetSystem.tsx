@@ -44,6 +44,7 @@ import WeeklyTab from './roles/Accountant/tabs/Weekly';
 import TimesheetOnlyTab from './roles/Accountant/tabs/TimesheetOnly';
 import ClientEstimationTab from './roles/Accountant/tabs/ClientEstimation';
 import PaymentProfilesTab, { TemplateProfileModal } from './roles/Accountant/tabs/PaymentProfiles';
+import { useInvoiceFilters } from './hooks/useInvoiceFilters';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -712,10 +713,22 @@ const TimesheetSystem = () => {
   const [selectedPaymentProfileId, setSelectedPaymentProfileId] = useState<number | null>(null);
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
-  const [accountantInvoiceFilter, setAccountantInvoiceFilter] = useState<Set<string>>(new Set());
-  const [invoiceDateRange, setInvoiceDateRange] = useState({ start: '', end: '' });
-  const [invoicePayDateRange, setInvoicePayDateRange] = useState({ start: '', end: '' });
-  const [invoicePaidDateRange, setInvoicePaidDateRange] = useState({ start: '', end: '' });
+  // I3: Invoice filter state + derived pipeline moved to useInvoiceFilters hook.
+  const {
+    accountantInvoiceFilter, setAccountantInvoiceFilter,
+    invoiceDateRange, setInvoiceDateRange,
+    invoicePayDateRange, setInvoicePayDateRange,
+    invoicePaidDateRange, setInvoicePaidDateRange,
+    invoiceMonthPreset, setInvoiceMonthPreset,
+    invoicePayOnPreset, setInvoicePayOnPreset,
+    invoicePaymentMethodPreset, setInvoicePaymentMethodPreset,
+    invoiceSourceFilter, setInvoiceSourceFilter,
+    setInvoiceSelectedUsers,
+    invoiceUsers, effectiveInvoiceUsers, invoiceMonths, payOnDates,
+    prePayOnFiltered, preStatusFiltered, filtered,
+    nonUsdFiltered, totalFilteredUsd, nonUsdByCurrency,
+    totalLabel,
+  } = useInvoiceFilters({ invoices, paymentMethod });
   const [pendingPayOnDate, setPendingPayOnDate] = useState('');
   const [pendingPaymentMethod, setPendingPaymentMethod] = useState('');
   const [pendingPaymentTerms, setPendingPaymentTerms] = useState('');
@@ -734,10 +747,6 @@ const TimesheetSystem = () => {
   const [pendingValueReason, setPendingValueReason] = useState('');
   const [valueEditOpen, setValueEditOpen] = useState(false);
   const [valueEditPreviewShown, setValueEditPreviewShown] = useState(false);
-  const [invoiceMonthPreset, setInvoiceMonthPreset] = useState<Set<string>>(new Set());
-  const [invoicePayOnPreset, setInvoicePayOnPreset] = useState<Set<string>>(new Set()); // empty=all, 'none'=not assigned, 'YYYY-MM-DD'=specific date
-  const [invoicePaymentMethodPreset, setInvoicePaymentMethodPreset] = useState<Set<string>>(new Set()); // empty=all
-  const [invoiceSourceFilter, setInvoiceSourceFilter] = useState<'all' | 'contractor' | 'manual'>('all');
   const [showConveraMatchingModal, setShowConveraMatchingModal] = useState(false);
   const [showManualInvoiceModal, setShowManualInvoiceModal] = useState(false);
   const [converaMatchingSearch, setConveraMatchingSearch] = useState('');
@@ -922,7 +931,6 @@ const TimesheetSystem = () => {
   const [profilePwLoading, setProfilePwLoading] = useState(false);
   const [profilePhone, setProfilePhone] = useState('');
   const [profilePhoneSaving, setProfilePhoneSaving] = useState(false);
-  const [invoiceSelectedUsers, setInvoiceSelectedUsers] = useState<string[] | null>(null);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -1035,14 +1043,6 @@ const TimesheetSystem = () => {
     return () => { supabase.removeChannel(channel); };
   }, [currentUser?.id]);
 
-  // Auto-default invoices tab to latest month when data first loads
-  useEffect(() => {
-    if (invoices.length > 0 && invoiceMonthPreset.size === 0) {
-      const latest = [...new Set(invoices.map(i => i.periodEnd?.slice(0, 7)).filter(Boolean) as string[])]
-        .sort((a, b) => b.localeCompare(a))[0];
-      if (latest) setInvoiceMonthPreset(new Set([latest]));
-    }
-  }, [invoices.length]);
 
   // ─── Data loading helpers ─────────────────────────────────────────────────
   async function loadProfileAndData(userId: string) {
@@ -6613,64 +6613,13 @@ const TimesheetSystem = () => {
             const statusColors: Record<string, string> = { draft: 'bg-gray-100 text-gray-700', submitted: 'bg-yellow-100 text-yellow-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', paid: 'bg-blue-100 text-blue-800' };
             const currencySymbols: Record<string, string> = { USD: '$', GBP: '£', EUR: '€', CAD: 'CA$', AUD: 'A$' };
 
-            // Distinct users who have at least one invoice — sorted by name
-            const invoiceUsers = [...new Map(invoices.map(i => [i.userId, { id: i.userId, name: i.userName }])).values()]
-              .sort((a, b) => a.name.localeCompare(b.name));
-            const effectiveInvoiceUsers = invoiceSelectedUsers ?? invoiceUsers.map(u => u.id);
+            // I3: users/months/payOnDates/filtered/etc come from useInvoiceFilters (wrapper scope).
 
-            // Full group sizes (before user filter) for "Filtered" badge
+            // Full group sizes (before user filter) — tab-only, kept here.
             const fullGroupSizes = new Map<string, number>();
             for (const inv of invoices) {
               if (inv.groupKey) fullGroupSizes.set(inv.groupKey, (fullGroupSizes.get(inv.groupKey) || 0) + 1);
             }
-
-            // Build month pills from distinct months in loaded invoices
-            const invoiceMonths = [...new Set(
-              invoices.map(i => i.periodEnd?.slice(0, 7)).filter(Boolean) as string[]
-            )].sort((a, b) => b.localeCompare(a)).slice(0, 12);
-
-            // Build pay-on-date pills from invoices matching all filters except payOnPreset itself
-            let prePayOnFiltered = invoices;
-            if (invoiceSelectedUsers !== null) prePayOnFiltered = prePayOnFiltered.filter(i => invoiceSelectedUsers.includes(i.userId));
-            if (invoiceDateRange.start && invoiceDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
-            if (invoicePayDateRange.start && invoicePayDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
-            if (invoicePaidDateRange.start && invoicePaidDateRange.end) prePayOnFiltered = prePayOnFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
-            if (invoiceMonthPreset.size > 0) prePayOnFiltered = prePayOnFiltered.filter(i => invoiceMonthPreset.has(i.periodEnd?.slice(0, 7) ?? ''));
-            const payOnDates = [...new Set(
-              prePayOnFiltered.map(i => i.payOnDate).filter(Boolean) as string[]
-            )].sort();
-
-            // Pre-status filtered: all filters except status — used for status pill counts and KPIs
-            let preStatusFiltered = invoices;
-            if (invoiceSelectedUsers !== null) preStatusFiltered = preStatusFiltered.filter(i => invoiceSelectedUsers.includes(i.userId));
-            if (invoiceDateRange.start && invoiceDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.periodStart >= invoiceDateRange.start && i.periodStart <= invoiceDateRange.end);
-            if (invoicePayDateRange.start && invoicePayDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.payOnDate && i.payOnDate >= invoicePayDateRange.start && i.payOnDate <= invoicePayDateRange.end);
-            if (invoicePaidDateRange.start && invoicePaidDateRange.end) preStatusFiltered = preStatusFiltered.filter(i => i.paidDate && i.paidDate >= invoicePaidDateRange.start && i.paidDate <= invoicePaidDateRange.end);
-            if (invoiceMonthPreset.size > 0) preStatusFiltered = preStatusFiltered.filter(i => invoiceMonthPreset.has(i.periodEnd?.slice(0, 7) ?? ''));
-            if (invoicePayOnPreset.size > 0) preStatusFiltered = preStatusFiltered.filter(i => {
-              if (invoicePayOnPreset.has('none') && !i.payOnDate) return true;
-              return i.payOnDate != null && invoicePayOnPreset.has(i.payOnDate);
-            });
-
-            let filtered = [...preStatusFiltered];
-            if (accountantInvoiceFilter.size > 0) filtered = filtered.filter(i => accountantInvoiceFilter.has(i.status));
-            if (invoicePaymentMethodPreset.size > 0) filtered = filtered.filter(i => invoicePaymentMethodPreset.has(paymentMethod(i)));
-            if (invoiceSourceFilter === 'manual') filtered = filtered.filter(i => i.source === 'manual');
-            else if (invoiceSourceFilter === 'contractor') filtered = filtered.filter(i => i.source !== 'manual');
-            filtered = filtered.sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
-
-            const usdFiltered = filtered.filter(i => !i.currency || i.currency === 'USD');
-            const nonUsdFiltered = filtered.filter(i => i.currency && i.currency !== 'USD');
-            const totalFilteredUsd = usdFiltered.reduce((s, i) => s + i.totalAmount, 0);
-            const nonUsdByCurrency = nonUsdFiltered.reduce((acc, i) => {
-              if (!acc[i.currency]) acc[i.currency] = 0;
-              acc[i.currency]++;
-              return acc;
-            }, {} as Record<string, number>);
-            const totalLabel = accountantInvoiceFilter.size === 0 ? 'Total (USD)'
-              : accountantInvoiceFilter.size === 1
-                ? `${[...accountantInvoiceFilter][0].charAt(0).toUpperCase() + [...accountantInvoiceFilter][0].slice(1)} (USD)`
-                : 'Selected (USD)';
 
 
             return (
