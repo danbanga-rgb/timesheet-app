@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { LogOut, Users, Plus, Receipt, Settings, Clock, DollarSign, Edit2, Save, X, Eye, EyeOff } from 'lucide-react';
 import { parseLocalDate, formatDate, getWeekDates } from '../../lib/dates';
+import DayHourCells from '../../components/DayHourCells';
 import MonthRangePicker, { buildMonthPresets } from '../../components/MonthRangePicker';
 import { supabase } from '../../supabaseClient';
 import type {
@@ -276,28 +277,31 @@ export default function VendorManagerView({
                         <th className="border border-teal-700 px-3 py-2 text-center">Wed</th>
                         <th className="border border-teal-700 px-3 py-2 text-center">Thu</th>
                         <th className="border border-teal-700 px-3 py-2 text-center">Fri</th>
+                        <th className="border border-teal-700 px-3 py-2 text-center">Sat</th>
+                        <th className="border border-teal-700 px-3 py-2 text-center">Sun</th>
                         <th className="border border-teal-700 px-3 py-2 text-center">Total</th>
                         <th className="border border-teal-700 px-3 py-2 text-center">Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {myTimesheets.length === 0 ? (
-                        <tr><td colSpan={10} className="text-center py-6 text-gray-400">No timesheets submitted yet</td></tr>
+                        <tr><td colSpan={12} className="text-center py-6 text-gray-400">No timesheets submitted yet</td></tr>
                       ) : (
                         myTimesheets.sort((a, b) => b.weekStart.localeCompare(a.weekStart)).map((ts, idx) => {
                           const tsUser = users.find(u => u.id === ts.userId);
                           const project = projects.find(p => p.id === (ts.projectId ?? tsUser?.projectId));
                           const weekDates = getWeekDates(parseLocalDate(ts.weekStart));
-                          const dailyHours = weekDates.map(d => parseFloat(ts.entries[formatDate(d)]?.hours || '0'));
-                          const total = dailyHours.reduce((s, h) => s + h, 0);
                           const fri = weekDates[4];
                           return (
                             <tr key={ts.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                               <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800">{ts.userName}</td>
                               <td className="border border-gray-200 px-3 py-2 whitespace-nowrap">{fri.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
                               <td className="border border-gray-200 px-3 py-2 text-teal-600 text-xs">{project ? `${project.name} (${project.code})` : '—'}</td>
-                              {dailyHours.map((h, i) => <td key={i} className="border border-gray-200 px-3 py-2 text-center">{h > 0 ? h.toFixed(1) : <span className="text-gray-300">—</span>}</td>)}
-                              <td className="border border-gray-200 px-3 py-2 text-center font-bold text-teal-700">{total.toFixed(1)}</td>
+                              <DayHourCells
+                                entries={ts.entries}
+                                weekStart={weekDates[0]}
+                                totalClassName="border border-gray-200 px-3 py-2 text-center font-bold text-teal-700"
+                              />
                               <td className="border border-gray-200 px-3 py-2 text-center">
                                 <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${ts.status === 'approved' ? 'bg-green-100 text-green-800' : ts.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
                                   {ts.status.charAt(0).toUpperCase() + ts.status.slice(1)}
