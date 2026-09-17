@@ -30,6 +30,7 @@ import MonthRangePicker from './components/MonthRangePicker';
 import StickyScrollWrapper from './components/StickyScrollWrapper';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
 import FilterPills from './components/FilterPills';
+import { FileUploadCard } from './components/FileUploadCard';
 import QbVendorNameEditor from './components/QbVendorNameEditor';
 import SortableHeader from './components/SortableHeader';
 import CopyChip from './components/CopyChip';
@@ -11458,21 +11459,16 @@ const TimesheetSystem = () => {
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Upload the <strong>Intuit BillPay payment report</strong> (.xlsx) — the list of payments Intuit sent on your behalf. Rows land in the <strong>QB Automation Inbox</strong> for classification and push into QuickBooks.</p>
                       <p className="text-xs text-gray-400 mb-4">Source: Intuit (not QuickBooks). Each row is a payment Intuit made; we don't require anything to be in QB yet.</p>
-                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
-                        {intuitXlsxFile ? (
-                          <div className="flex items-center justify-center gap-2 text-indigo-700">
-                            <FileText className="w-5 h-5" />
-                            <span className="text-sm font-medium">{intuitXlsxFile.name}</span>
-                            <button onClick={() => { setIntuitXlsxFile(null); setIntuitXlsxPreview(null); }} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
-                          </div>
-                        ) : (
-                          <label className="cursor-pointer">
-                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
-                            <p className="text-sm text-gray-600">Click to select .xlsx file</p>
-                            <input type="file" accept=".xlsx" className="hidden" onChange={e => { setIntuitXlsxFile(e.target.files?.[0] ?? null); setIntuitXlsxPreview(null); setIntuitXlsxResult(null); }} />
-                          </label>
-                        )}
-                      </div>
+                      <FileUploadCard
+                        file={intuitXlsxFile}
+                        accept=".xlsx"
+                        helpText="Click to select .xlsx file"
+                        onFileChange={f => {
+                          setIntuitXlsxFile(f);
+                          setIntuitXlsxPreview(null);
+                          if (f !== null) setIntuitXlsxResult(null);
+                        }}
+                      />
                       {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
                       {intuitXlsxResult && (
                         <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
@@ -11604,21 +11600,15 @@ const TimesheetSystem = () => {
                       })()}
                       <p className="text-sm text-gray-600 mb-1">Upload the Convera beneficiaries XLS export. Beneficiaries will be upserted and automatically matched to contractor payment profiles by Vendor ID (SYN code), IBAN, or name prefix.</p>
                       <p className="text-xs text-gray-400 mb-4">In Convera: Beneficiaries &rarr; Export. Re-import anytime to refresh.</p>
-                      <div className="border-2 border-dashed border-indigo-300 rounded-lg p-6 text-center mb-4">
-                        {beneficiaryImportFile ? (
-                          <div className="flex items-center justify-center gap-2 text-indigo-700">
-                            <FileText className="w-5 h-5" />
-                            <span className="text-sm font-medium">{beneficiaryImportFile.name}</span>
-                            <button onClick={() => setBeneficiaryImportFile(null)} className="text-gray-400 hover:text-red-500 ml-1"><X className="w-4 h-4" /></button>
-                          </div>
-                        ) : (
-                          <label className="cursor-pointer">
-                            <UploadCloud className="w-10 h-10 text-indigo-300 mx-auto mb-2" />
-                            <p className="text-sm text-gray-600">Click to select beneficiaries XLS</p>
-                            <input type="file" accept=".xls,.tsv,.txt,.csv" className="hidden" onChange={e => { setBeneficiaryImportFile(e.target.files?.[0] ?? null); setBeneficiaryImportResult(null); }} />
-                          </label>
-                        )}
-                      </div>
+                      <FileUploadCard
+                        file={beneficiaryImportFile}
+                        accept=".xls,.tsv,.txt,.csv"
+                        helpText="Click to select beneficiaries XLS"
+                        onFileChange={f => {
+                          setBeneficiaryImportFile(f);
+                          if (f !== null) setBeneficiaryImportResult(null);
+                        }}
+                      />
                       {beneficiaryImportResult && (
                         <div className="mb-4">
                           <div className="flex gap-4 mb-3">
