@@ -6881,26 +6881,17 @@ const TimesheetSystem = () => {
               return { hours: Math.max(8, monthlyMax || 0), source: 'estimated' };
             };
 
-            const engagementsByClient = new Map<number, typeof estimationEngagements>();
-            for (const e of estimationEngagements) {
-              if (!engagementsByClient.has(e.client_id)) engagementsByClient.set(e.client_id, []);
-              engagementsByClient.get(e.client_id)!.push(e);
-            }
-
             const userById = new Map(users.map(u => [u.id, u]));
 
             // Group engagements by the contractor's assigned project_id.
-            // Contractor without a project_id → falls back to their client's default project (client_id=engagement's client → look up).
+            // Engagements whose user has no projectId are silently dropped.
             const engagementsByProject = new Map<number, typeof estimationEngagements>();
-            const orphanEngagements: typeof estimationEngagements = [];
             for (const e of estimationEngagements) {
               const user = userById.get(e.user_id);
               const pid = user?.projectId;
               if (pid) {
                 if (!engagementsByProject.has(pid)) engagementsByProject.set(pid, []);
                 engagementsByProject.get(pid)!.push(e);
-              } else {
-                orphanEngagements.push(e);
               }
             }
             // Determine project ordering: active projects sorted by name, only those with engagements.
