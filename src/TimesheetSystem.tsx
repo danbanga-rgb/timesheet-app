@@ -30,7 +30,7 @@ import CountrySelect from './components/CountrySelect';
 import MonthRangePicker from './components/MonthRangePicker';
 import StickyScrollWrapper from './components/StickyScrollWrapper';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
-import FilterPills from './components/FilterPills';
+import FilterPills, { type FilterPillOption } from './components/FilterPills';
 import PasswordResetForm from './components/auth/PasswordResetForm';
 import MultiSelectDropdown from './components/MultiSelectDropdown';
 import ImportIntuitPaymentsXlsx from './roles/Accountant/modals/ImportIntuitPaymentsXlsx';
@@ -6678,127 +6678,125 @@ const TimesheetSystem = () => {
                 {/* Filters */}
                 <div className="bg-white rounded-lg shadow-md p-4 mb-4">
                   <div className="flex flex-col gap-3">
-                    {/* Month pills */}
-                    {invoiceMonths.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 items-center">
-                        <button onClick={() => setInvoiceMonthPreset(new Set())}
-                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoiceMonthPreset.size === 0 ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
-                          All months
-                        </button>
-                        {invoiceMonths.map(ym => {
-                          const [y, m] = ym.split('-');
-                          const label = new Date(parseInt(y), parseInt(m) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-                          const count = invoices.filter(i => i.periodEnd?.slice(0, 7) === ym).length;
-                          const active = invoiceMonthPreset.has(ym);
-                          return (
-                            <button key={ym} onClick={() => setInvoiceMonthPreset(prev => { const n = new Set(prev); active ? n.delete(ym) : n.add(ym); return n; })}
-                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
-                              {label} <span className="opacity-70">({count})</span>
-                            </button>
-                          );
-                        })}
-                        {invoiceMonthPreset.size === 1 && [...invoiceMonthPreset][0] === invoiceMonths[0] && (
-                          <span className="text-xs text-gray-400 ml-1">Loaded to latest period — select All months to see everything</span>
-                        )}
-                      </div>
-                    )}
-                    {/* Pay On Date quick pills */}
-                    {payOnDates.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 items-center">
-                        <span className="text-xs font-medium text-blue-600 mr-1">Pay On:</span>
-                        <button onClick={() => setInvoicePayOnPreset(new Set())}
-                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset.size === 0 ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'}`}>
-                          All
-                        </button>
-                        {payOnDates.map(d => {
-                          const label = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                          const count = prePayOnFiltered.filter(i => i.payOnDate === d).length;
-                          const active = invoicePayOnPreset.has(d);
-                          return (
-                            <button key={d} onClick={() => setInvoicePayOnPreset(prev => { const n = new Set(prev); active ? n.delete(d) : n.add(d); return n; })}
-                              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-blue-700 border-blue-200 hover:border-blue-400'}`}>
-                              {label} <span className="opacity-70">({count})</span>
-                            </button>
-                          );
-                        })}
-                        <button onClick={() => setInvoicePayOnPreset(prev => { const n = new Set(prev); n.has('none') ? n.delete('none') : n.add('none'); return n; })}
-                          className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePayOnPreset.has('none') ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400'}`}>
-                          Not assigned <span className="opacity-70">({prePayOnFiltered.filter(i => !i.payOnDate).length})</span>
-                        </button>
-                      </div>
-                    )}
-                    {/* Status pills */}
-                    <div className="flex flex-wrap gap-2">
-                      <button onClick={() => setAccountantInvoiceFilter(new Set())}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${accountantInvoiceFilter.size === 0 ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
-                        All <span className={`ml-1 text-xs ${accountantInvoiceFilter.size === 0 ? 'opacity-80' : 'opacity-60'}`}>({preStatusFiltered.length})</span>
-                      </button>
-                      {(['submitted','approved','paid','rejected'] as const).map(s => {
-                        const active = accountantInvoiceFilter.has(s);
-                        return (
-                          <button key={s} onClick={() => setAccountantInvoiceFilter(prev => { const n = new Set(prev); active ? n.delete(s) : n.add(s); return n; })}
-                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
-                            {s.charAt(0).toUpperCase() + s.slice(1)}
-                            <span className={`ml-1.5 text-xs ${active ? 'opacity-80' : 'opacity-60'}`}>({preStatusFiltered.filter(i => i.status === s).length})</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {/* Payment method pills */}
-                    <div className="flex flex-wrap gap-1.5 items-center">
-                      <span className="text-xs font-medium text-gray-600 mr-1">Method:</span>
-                      <button onClick={() => setInvoicePaymentMethodPreset(new Set())}
-                        className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${invoicePaymentMethodPreset.size === 0 ? 'bg-gray-700 text-white border-gray-700' : 'bg-white text-gray-600 border-gray-300 hover:border-gray-500'}`}>
-                        All
-                      </button>
-                      {(['Intuit', 'Convera'] as const).map(m => {
-                        const count = preStatusFiltered.filter(i => (accountantInvoiceFilter.size === 0 || accountantInvoiceFilter.has(i.status)) && paymentMethod(i) === m).length;
-                        const active = invoicePaymentMethodPreset.has(m);
-                        const activeColor = m === 'Intuit' ? 'bg-green-600 border-green-600 text-white' : 'bg-purple-600 border-purple-600 text-white';
-                        const inactiveColor = m === 'Intuit' ? 'bg-white text-green-700 border-green-300 hover:border-green-500' : 'bg-white text-purple-700 border-purple-300 hover:border-purple-500';
-                        return (
-                          <button key={m} onClick={() => setInvoicePaymentMethodPreset(prev => { const n = new Set(prev); active ? n.delete(m) : n.add(m); return n; })}
-                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? activeColor : inactiveColor}`}>
-                            {m} <span className="opacity-70">({count})</span>
-                          </button>
-                        );
-                      })}
-                      {(() => {
-                        const unassignedCount = preStatusFiltered.filter(i => (accountantInvoiceFilter.size === 0 || accountantInvoiceFilter.has(i.status)) && paymentMethod(i) === '').length;
-                        if (unassignedCount === 0) return null;
-                        const active = invoicePaymentMethodPreset.has('');
-                        const activeColor = 'bg-amber-600 border-amber-600 text-white';
-                        const inactiveColor = 'bg-amber-50 text-amber-700 border-amber-300 hover:border-amber-500';
-                        return (
-                          <button key="unassigned" onClick={() => setInvoicePaymentMethodPreset(prev => { const n = new Set(prev); active ? n.delete('') : n.add(''); return n; })}
-                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? activeColor : inactiveColor}`}
-                            title="Invoices without a Payment Method — click to review and assign">
-                            Unassigned <span className="opacity-70">({unassignedCount})</span>
-                          </button>
-                        );
-                      })()}
-                    </div>
-                    {/* Source pills */}
-                    <div className="flex flex-wrap gap-1.5 items-center">
-                      <span className="text-xs font-medium text-gray-600 mr-1">Source:</span>
-                      {(['all', 'contractor', 'manual'] as const).map(k => {
-                        const count = k === 'all'
-                          ? preStatusFiltered.length
-                          : k === 'manual'
-                            ? preStatusFiltered.filter(i => i.source === 'manual').length
-                            : preStatusFiltered.filter(i => i.source !== 'manual').length;
-                        const active = invoiceSourceFilter === k;
-                        const label = k === 'all' ? 'All' : k === 'contractor' ? 'Contractor' : 'Manual';
-                        const activeColor = k === 'manual' ? 'bg-amber-600 border-amber-600 text-white' : 'bg-gray-700 border-gray-700 text-white';
-                        const inactiveColor = k === 'manual' ? 'bg-white text-amber-700 border-amber-300 hover:border-amber-500' : 'bg-white text-gray-600 border-gray-300 hover:border-gray-500';
-                        return (
-                          <button key={k} onClick={() => setInvoiceSourceFilter(k)}
-                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${active ? activeColor : inactiveColor}`}>
-                            {label} <span className="opacity-70">({count})</span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {(() => {
+                      // I2: FilterPills-based Invoice pill rows. Tone consts local to this scope.
+                      const indigoActive = 'bg-indigo-600 text-white border-indigo-600';
+                      const indigoInactive = 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400';
+                      const blueActive = 'bg-blue-600 text-white border-blue-600';
+                      const blueInactive = 'bg-white text-blue-700 border-blue-200 hover:border-blue-400';
+                      const blueResetInactive = 'bg-white text-gray-600 border-gray-300 hover:border-blue-400';
+                      const grayInactiveInBlueRow = 'bg-white text-gray-500 border-gray-300 hover:border-blue-400';
+                      const grayActive = 'bg-gray-700 text-white border-gray-700';
+                      const grayInactive = 'bg-white text-gray-600 border-gray-300 hover:border-gray-500';
+                      const amberActive = 'bg-amber-600 text-white border-amber-600';
+                      const amberInactive = 'bg-amber-50 text-amber-700 border-amber-300 hover:border-amber-500';
+                      const amberInactiveSource = 'bg-white text-amber-700 border-amber-300 hover:border-amber-500';
+                      const intuitActive = 'bg-green-600 text-white border-green-600';
+                      const intuitInactive = 'bg-white text-green-700 border-green-300 hover:border-green-500';
+                      const converaActive = 'bg-purple-600 text-white border-purple-600';
+                      const converaInactive = 'bg-white text-purple-700 border-purple-300 hover:border-purple-500';
+
+                      const unassignedCount = preStatusFiltered.filter(i => (accountantInvoiceFilter.size === 0 || accountantInvoiceFilter.has(i.status)) && paymentMethod(i) === '').length;
+                      const pmOptions: FilterPillOption<string>[] = [
+                        { value: 'Intuit', label: <>Intuit <span className="opacity-70">({preStatusFiltered.filter(i => (accountantInvoiceFilter.size === 0 || accountantInvoiceFilter.has(i.status)) && paymentMethod(i) === 'Intuit').length})</span></>, activeTone: intuitActive, inactiveTone: intuitInactive },
+                        { value: 'Convera', label: <>Convera <span className="opacity-70">({preStatusFiltered.filter(i => (accountantInvoiceFilter.size === 0 || accountantInvoiceFilter.has(i.status)) && paymentMethod(i) === 'Convera').length})</span></>, activeTone: converaActive, inactiveTone: converaInactive },
+                      ];
+                      if (unassignedCount > 0) {
+                        pmOptions.push({ value: '', label: <>Unassigned <span className="opacity-70">({unassignedCount})</span></>, activeTone: amberActive, inactiveTone: amberInactive });
+                      }
+
+                      return (
+                        <>
+                          {invoiceMonths.length > 0 && (
+                            <FilterPills<string>
+                              multi
+                              shape="button"
+                              selected={invoiceMonthPreset}
+                              onChange={setInvoiceMonthPreset}
+                              resetLabel="All months"
+                              resetActiveTone={indigoActive}
+                              resetInactiveTone={indigoInactive}
+                              options={invoiceMonths.map(ym => {
+                                const [y, m] = ym.split('-');
+                                const label = new Date(parseInt(y), parseInt(m) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+                                const count = invoices.filter(i => i.periodEnd?.slice(0, 7) === ym).length;
+                                return { value: ym, label: <>{label} <span className="opacity-70">({count})</span></>, activeTone: indigoActive, inactiveTone: indigoInactive };
+                              })}
+                              extra={invoiceMonthPreset.size === 1 && [...invoiceMonthPreset][0] === invoiceMonths[0] ? (
+                                <span className="text-xs text-gray-400 ml-1">Loaded to latest period — select All months to see everything</span>
+                              ) : undefined}
+                            />
+                          )}
+                          {payOnDates.length > 0 && (
+                            <FilterPills<string>
+                              multi
+                              shape="button"
+                              selected={invoicePayOnPreset}
+                              onChange={setInvoicePayOnPreset}
+                              prefix={<span className="text-xs font-medium text-blue-600 mr-1">Pay On:</span>}
+                              resetLabel="All"
+                              resetActiveTone={blueActive}
+                              resetInactiveTone={blueResetInactive}
+                              options={[
+                                ...payOnDates.map(d => {
+                                  const label = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                                  const count = prePayOnFiltered.filter(i => i.payOnDate === d).length;
+                                  return { value: d, label: <>{label} <span className="opacity-70">({count})</span></>, activeTone: blueActive, inactiveTone: blueInactive };
+                                }),
+                                { value: 'none', label: <>Not assigned <span className="opacity-70">({prePayOnFiltered.filter(i => !i.payOnDate).length})</span></>, activeTone: blueActive, inactiveTone: grayInactiveInBlueRow },
+                              ]}
+                            />
+                          )}
+                          <FilterPills<string>
+                            multi
+                            shape="button"
+                            size="md"
+                            selected={accountantInvoiceFilter}
+                            onChange={setAccountantInvoiceFilter}
+                            resetLabel={<>All <span className={`ml-1 text-xs ${accountantInvoiceFilter.size === 0 ? 'opacity-80' : 'opacity-60'}`}>({preStatusFiltered.length})</span></>}
+                            resetActiveTone={indigoActive}
+                            resetInactiveTone={indigoInactive}
+                            options={(['submitted', 'approved', 'paid', 'rejected'] as const).map(s => {
+                              const count = preStatusFiltered.filter(i => i.status === s).length;
+                              return {
+                                value: s,
+                                label: <>{s.charAt(0).toUpperCase() + s.slice(1)}<span className={`ml-1.5 text-xs ${accountantInvoiceFilter.has(s) ? 'opacity-80' : 'opacity-60'}`}>({count})</span></>,
+                                activeTone: indigoActive,
+                                inactiveTone: indigoInactive,
+                              };
+                            })}
+                          />
+                          <FilterPills<string>
+                            multi
+                            shape="button"
+                            selected={invoicePaymentMethodPreset}
+                            onChange={setInvoicePaymentMethodPreset}
+                            prefix="Method:"
+                            resetLabel="All"
+                            resetActiveTone={grayActive}
+                            resetInactiveTone={grayInactive}
+                            options={pmOptions}
+                          />
+                          <FilterPills<'all' | 'contractor' | 'manual'>
+                            shape="button"
+                            selected={invoiceSourceFilter}
+                            onChange={setInvoiceSourceFilter}
+                            prefix="Source:"
+                            options={(['all', 'contractor', 'manual'] as const).map(k => {
+                              const count = k === 'all'
+                                ? preStatusFiltered.length
+                                : k === 'manual'
+                                  ? preStatusFiltered.filter(i => i.source === 'manual').length
+                                  : preStatusFiltered.filter(i => i.source !== 'manual').length;
+                              const label = k === 'all' ? 'All' : k === 'contractor' ? 'Contractor' : 'Manual';
+                              const activeTone = k === 'manual' ? amberActive : grayActive;
+                              const inactiveTone = k === 'manual' ? amberInactiveSource : grayInactive;
+                              return { value: k, label: <>{label} <span className="opacity-70">({count})</span></>, activeTone, inactiveTone };
+                            })}
+                          />
+                        </>
+                      );
+                    })()}
                     {/* Contractor picker */}
                     <MultiSelectDropdown
                       options={invoiceUsers.map(u => ({ id: u.id, label: u.name }))}
