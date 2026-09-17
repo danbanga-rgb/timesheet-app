@@ -3264,6 +3264,12 @@ const TimesheetSystem = () => {
       alert(`Cannot approve: ${result.reason}\n\nContractor has no default payment profile. Add one on the Payments tab first.`);
       return 'blocked';
     }
+    // Ensure the modal has vendors to choose from. qbVendorsList only loads
+    // when the accountant opens QB Automation / runs Payment Import / syncs
+    // vendors — if none of those have happened this session, the picker
+    // renders empty. Force-load before opening. (loadQbVendorsAndAccounts
+    // internally guards on empty, so this is a no-op on subsequent approvals.)
+    await loadQbVendorsAndAccounts();
     setVendorDecisionState({
       invoice,
       targetPaymentProfileId: fullLivePp.id as number,
