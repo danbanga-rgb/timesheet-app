@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { LogOut, Users, Plus, Receipt, Settings, Clock, DollarSign, Edit2, Save, X, Eye, EyeOff } from 'lucide-react';
+import { LogOut, Users, Plus, Receipt, Settings, Clock, DollarSign, Edit2, Eye, EyeOff } from 'lucide-react';
 import { parseLocalDate, formatDate, getWeekDates } from '../../lib/dates';
 import DayHourCells from '../../components/DayHourCells';
+import PaymentProfileModal from '../../components/PaymentProfileModal';
 import MonthRangePicker, { buildMonthPresets } from '../../components/MonthRangePicker';
 import { supabase } from '../../supabaseClient';
 import type {
@@ -11,6 +12,7 @@ import type {
   Invoice,
   InvoiceLine,
   PaymentProfile,
+  ProfileForm,
   TimeEntry,
 } from '../../types';
 
@@ -24,25 +26,6 @@ import type {
 // This view still renders a minimal Payment Profile modal inline (a subset of
 // the accountant's full modal). Consolidating into the shared A6 component
 // is a separate slice — see audit for candidate details.
-
-interface ProfileForm {
-  profileName: string;
-  companyName: string;
-  companyAddress: string;
-  country: string;
-  bankName: string;
-  bankAddress: string;
-  bankBranch: string;
-  accountNumber: string;
-  iban: string;
-  swift: string;
-  paymentEmail: string;
-  isDefault: boolean;
-  combinePayments: boolean | null;
-  converaBeneficiaryId: number | null;
-  converaMatchOverride: boolean;
-  qbVendorName: string | null;
-}
 
 export interface VendorManagerViewProps {
   currentUser: UserProfile;
@@ -554,41 +537,15 @@ export default function VendorManagerView({
           </div>
         )}
 
-        {/* Payment profile modal (minimal — VM-specific subset) */}
-        {showProfileModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50" onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }}>
-            <div className="bg-white rounded-t-2xl sm:rounded-lg shadow-xl w-full sm:max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-              <div className="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-center z-10">
-                <h3 className="text-lg font-bold text-gray-800">{editingProfile ? 'Edit Payment Profile' : 'New Payment Profile'}</h3>
-                <button onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }} className="text-gray-500 hover:text-gray-700"><X className="w-5 h-5" /></button>
-              </div>
-              <div className="p-6 space-y-4">
-                <div><label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Profile Label *</label>
-                  <input type="text" value={profileForm.profileName} onChange={e => setProfileForm({...profileForm, profileName: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 text-sm" placeholder="e.g. Vendor Account" /></div>
-                <div><label className="block text-xs font-medium text-gray-600 mb-1">Company Name *</label>
-                  <input type="text" value={profileForm.companyName} onChange={e => setProfileForm({...profileForm, companyName: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 text-sm" /></div>
-                <div><label className="block text-xs font-medium text-gray-600 mb-1">Bank Name *</label>
-                  <input type="text" value={profileForm.bankName} onChange={e => setProfileForm({...profileForm, bankName: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 text-sm" /></div>
-                <div><label className="block text-xs font-medium text-gray-600 mb-1">Account Number *</label>
-                  <input type="text" value={profileForm.accountNumber} onChange={e => setProfileForm({...profileForm, accountNumber: e.target.value})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 text-sm font-mono" /></div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="block text-xs font-medium text-gray-600 mb-1">IBAN</label>
-                    <input type="text" value={profileForm.iban} onChange={e => setProfileForm({...profileForm, iban: e.target.value.toUpperCase()})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 text-sm font-mono" /></div>
-                  <div><label className="block text-xs font-medium text-gray-600 mb-1">SWIFT / BIC *</label>
-                    <input type="text" value={profileForm.swift} onChange={e => setProfileForm({...profileForm, swift: e.target.value.toUpperCase()})} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 text-sm font-mono" /></div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input type="checkbox" id="vmIsDefault" checked={profileForm.isDefault} onChange={e => setProfileForm({...profileForm, isDefault: e.target.checked})} className="accent-teal-600 w-4 h-4" />
-                  <label htmlFor="vmIsDefault" className="text-sm text-gray-700 cursor-pointer">Set as default</label>
-                </div>
-                <div className="flex gap-3 pt-2">
-                  <button onClick={savePaymentProfile} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 font-medium"><Save className="w-4 h-4" /> Save Profile</button>
-                  <button onClick={() => { setShowProfileModal(false); setProfileEditUserId(null); }} className="px-4 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        <PaymentProfileModal
+          open={showProfileModal}
+          mode="basic"
+          form={profileForm}
+          setForm={setProfileForm}
+          editingProfile={editingProfile}
+          onSave={savePaymentProfile}
+          onCancel={() => { setShowProfileModal(false); setProfileEditUserId(null); }}
+        />
       </div>
     </div>
   );

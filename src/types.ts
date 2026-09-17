@@ -84,6 +84,8 @@ export interface PaymentProfile {
   qbVendorName: string | null;      // QuickBooks vendor name for IIF export; NULL = unmapped
 }
 
+export type ProfileForm = Omit<PaymentProfile, 'id' | 'userId'>;
+
 export interface ConveraBeneficiary {
   id: number;
   beneficiaryId: string;
