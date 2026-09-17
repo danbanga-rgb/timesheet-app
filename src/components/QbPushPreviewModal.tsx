@@ -396,18 +396,19 @@ export default function QbPushPreviewModal({
           {readyGroups.map(g => {
             const total = g.events.reduce((n, e) => n + e.amount, 0);
             const jobs = g.events.reduce((n, e) => n + jobsForEvent(e), 0);
-            // Bank display: Convera-source events always debit Western Union
-            // Holding at push time (converaCreateBillAndPay/converaBillPmt look
-            // it up by pattern match, ignoring event.qbBankAccountListId which
-            // may be a stale mapping-seed value pointing at Key Point Checking).
-            // Prefer the WU account when the group is pure Convera so the UI
-            // matches what actually posts to QB.
+            // Bank display: Convera-source events post to 8220 Key Point
+            // Checking (fix 7d82dfc, 2026-09-16 -- prior batches landed on
+            // Western Union Holding until the writers were corrected). Both
+            // converaCreateBillAndPay and converaBillPmt resolve the bank by
+            // substring-matching '8220 - key point checking' in qb_accounts;
+            // mirror that lookup here so the preview shows what actually posts
+            // to QB (event.qbBankAccountListId may be a stale mapping seed).
             const allConvera = g.events.length > 0 && g.events.every(e => e.source === 'convera');
-            const wuAccount = allConvera
-              ? qbAccounts.find(a => a.fullName.toLowerCase().includes('western union holding'))
+            const converaBank = allConvera
+              ? qbAccounts.find(a => a.fullName.toLowerCase().includes('8220 - key point checking'))
               : null;
             const bankId = g.events.find(e => e.qbBankAccountListId)?.qbBankAccountListId;
-            const bank = wuAccount ?? (bankId ? accountById.get(bankId) : null);
+            const bank = converaBank ?? (bankId ? accountById.get(bankId) : null);
             const isExpanded = expanded[g.action];
             const groupPushable = PUSHABLE_ACTIONS.includes(g.action);
             const groupSelectedCount = groupPushable ? g.events.filter(e => selected.has(e.id)).length : 0;
