@@ -32,6 +32,7 @@ import StickyScrollWrapper from './components/StickyScrollWrapper';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
 import FilterPills from './components/FilterPills';
 import PasswordResetForm from './components/auth/PasswordResetForm';
+import MultiSelectDropdown from './components/MultiSelectDropdown';
 import ImportIntuitPaymentsXlsx from './roles/Accountant/modals/ImportIntuitPaymentsXlsx';
 import ImportConveraBeneficiaries from './roles/Accountant/modals/ImportConveraBeneficiaries';
 import QbVendorNameEditor from './components/QbVendorNameEditor';
@@ -922,8 +923,6 @@ const TimesheetSystem = () => {
   const [profilePhone, setProfilePhone] = useState('');
   const [profilePhoneSaving, setProfilePhoneSaving] = useState(false);
   const [invoiceSelectedUsers, setInvoiceSelectedUsers] = useState<string[] | null>(null);
-  const [invoiceUserSearch, setInvoiceUserSearch] = useState('');
-  const [invoiceUserDropdownOpen, setInvoiceUserDropdownOpen] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -6801,58 +6800,14 @@ const TimesheetSystem = () => {
                       })}
                     </div>
                     {/* Contractor picker */}
-                    <div className="relative">
-                      <button
-                        onClick={() => setInvoiceUserDropdownOpen(o => !o)}
-                        className="w-full flex items-center justify-between px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm hover:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                      >
-                        <span className="text-gray-700">
-                          {effectiveInvoiceUsers.length === invoiceUsers.length
-                            ? 'All contractors'
-                            : `${effectiveInvoiceUsers.length} of ${invoiceUsers.length} contractors`}
-                        </span>
-                        <svg className={`w-4 h-4 text-gray-500 transition-transform ${invoiceUserDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                      </button>
-                      {invoiceUserDropdownOpen && (
-                        <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg">
-                          <div className="p-2 border-b border-gray-100">
-                            <input
-                              type="text"
-                              value={invoiceUserSearch}
-                              onChange={e => setInvoiceUserSearch(e.target.value)}
-                              placeholder="Search contractors..."
-                              className="w-full px-3 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                              autoFocus
-                            />
-                          </div>
-                          <div className="flex gap-2 px-3 py-1.5 border-b border-gray-100 bg-gray-50">
-                            <button onClick={() => setInvoiceSelectedUsers(null)} className="text-xs text-indigo-600 hover:underline font-medium">Select all</button>
-                            <span className="text-gray-300">|</span>
-                            <button onClick={() => setInvoiceSelectedUsers([])} className="text-xs text-gray-500 hover:underline">Clear</button>
-                          </div>
-                          <div className="max-h-60 overflow-y-auto">
-                            {invoiceUsers.filter(u => u.name.toLowerCase().includes(invoiceUserSearch.toLowerCase())).length === 0 ? (
-                              <p className="text-sm text-gray-400 text-center py-4">No contractors match</p>
-                            ) : invoiceUsers.filter(u => u.name.toLowerCase().includes(invoiceUserSearch.toLowerCase())).map(u => (
-                              <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-indigo-50 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={effectiveInvoiceUsers.includes(u.id)}
-                                  onChange={() => {
-                                    const next = effectiveInvoiceUsers.includes(u.id)
-                                      ? effectiveInvoiceUsers.filter(x => x !== u.id)
-                                      : [...effectiveInvoiceUsers, u.id];
-                                    setInvoiceSelectedUsers(next.length === invoiceUsers.length ? null : next);
-                                  }}
-                                  className="rounded text-indigo-600"
-                                />
-                                <span className="text-sm text-gray-700">{u.name}</span>
-                              </label>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    <MultiSelectDropdown
+                      options={invoiceUsers.map(u => ({ id: u.id, label: u.name }))}
+                      selected={effectiveInvoiceUsers}
+                      onChange={next => setInvoiceSelectedUsers(next.length === invoiceUsers.length ? null : next)}
+                      itemNoun="contractors"
+                      searchPlaceholder="Search contractors..."
+                      emptyLabel="No contractors match"
+                    />
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <div>
                         <span className="block text-xs font-medium text-gray-500 mb-1">Period</span>
