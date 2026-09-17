@@ -3221,65 +3221,28 @@ const TimesheetSystem = () => {
   const tryResolveVendorForApproval = async (
     invoice: Invoice,
     effectivePaymentMethod: string,
-    onAmbiguousRetry?: () => Promise<void> | void,
+    _onAmbiguousRetry?: () => Promise<void> | void,
   ): Promise<'proceed' | 'blocked'> => {
+    // Approval only blocks when the contractor has NO payment profile at all
+    // (can't route the payment anywhere). Missing QB vendor mapping does NOT
+    // block approval any more -- push time handles that via the
+    // "Needs vendor decision" panel on QB Automation + the push preview
+    // filters those invoices out until resolved (TS.tsx ~9339, ~8895).
     if (!['Intuit', 'Convera'].includes(effectivePaymentMethod)) return 'proceed';
     const { data: liveData, error } = await supabase
       .from('payment_profiles')
-      .select('id, user_id, qb_vendor_name, company_name, is_default, iban')
-      .eq('user_id', invoice.userId);
+      .select('id, user_id')
+      .eq('user_id', invoice.userId)
+      .limit(1);
     if (error) {
       alert('Cannot approve: failed to fetch payment profiles — ' + error.message);
       return 'blocked';
     }
-    const livePps: ResolverPaymentProfile[] = (liveData ?? []).map((r) => ({
-      id: r.id as number,
-      userId: r.user_id as string,
-      qbVendorName: (r.qb_vendor_name as string | null) ?? null,
-      companyName: (r.company_name as string | null) ?? null,
-      isDefault: (r.is_default as boolean | null) ?? null,
-    }));
-    const snap = invoice.paymentProfile ?? null;
-    const rawSnapId = snap && typeof snap.id !== 'undefined' ? snap.id : null;
-    const snapPpId = typeof rawSnapId === 'number' && rawSnapId > 0
-      ? rawSnapId
-      : (typeof rawSnapId === 'string' && /^\d+$/.test(rawSnapId) && Number(rawSnapId) > 0 ? Number(rawSnapId) : null);
-    const result = resolveNewProfileVendor(
-      {
-        snapPaymentProfileId: snapPpId,
-        snapQbVendorName: snap?.qbVendorName ?? null,
-        userId: invoice.userId,
-      },
-      livePps,
-    );
-    if (result.mode === 'no-action') return 'proceed';
-    // 'ambiguous' — open the picker modal. Approval halts until the accountant
-    // resolves the vendor; the modal's afterResolve callback re-runs this
-    // approval action (which will now find the pp tagged and proceed).
-    const fullLivePp = liveData?.find(r => r.id === result.targetPaymentProfileId)
-      // Legacy invoice with no snap_pp_id: fall back to the user's default pp.
-      ?? liveData?.find(r => r.is_default === true)
-      ?? null;
-    if (!fullLivePp) {
-      alert(`Cannot approve: ${result.reason}\n\nContractor has no default payment profile. Add one on the Payments tab first.`);
+    if (!liveData || liveData.length === 0) {
+      alert(`Cannot approve: contractor has no payment profile. Add one on the Payments tab first.`);
       return 'blocked';
     }
-    // Ensure the modal has vendors to choose from. qbVendorsList only loads
-    // when the accountant opens QB Automation / runs Payment Import / syncs
-    // vendors — if none of those have happened this session, the picker
-    // renders empty. Force-load before opening. (loadQbVendorsAndAccounts
-    // internally guards on empty, so this is a no-op on subsequent approvals.)
-    await loadQbVendorsAndAccounts();
-    setVendorDecisionState({
-      invoice,
-      targetPaymentProfileId: fullLivePp.id as number,
-      targetPaymentProfileCompany: (fullLivePp.company_name as string | null) ?? result.snapCompany ?? '',
-      targetPaymentProfileIban: (fullLivePp.iban as string | null) ?? null,
-      siblingVendorHint: result.siblingHint,
-      conflictNames: result.conflictNames,
-      afterResolve: onAmbiguousRetry,
-    });
-    return 'blocked';
+    return 'proceed';
   };
 
   // Opens the InvoiceDetail modal for edit/approve/mark-paid actions. Resets
