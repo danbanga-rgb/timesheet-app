@@ -30,7 +30,8 @@ import MonthRangePicker from './components/MonthRangePicker';
 import StickyScrollWrapper from './components/StickyScrollWrapper';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
 import FilterPills from './components/FilterPills';
-import { FileUploadCard } from './components/FileUploadCard';
+import ImportIntuitPaymentsXlsx from './roles/Accountant/modals/ImportIntuitPaymentsXlsx';
+import ImportConveraBeneficiaries from './roles/Accountant/modals/ImportConveraBeneficiaries';
 import QbVendorNameEditor from './components/QbVendorNameEditor';
 import SortableHeader from './components/SortableHeader';
 import CopyChip from './components/CopyChip';
@@ -759,9 +760,9 @@ const TimesheetSystem = () => {
   type BeneficiarySortKey = 'shortName' | 'vendorId' | 'bankAccount' | 'country' | 'lastUsed' | 'linked';
   const [beneficiarySort, setBeneficiarySort] = useState<{ key: BeneficiarySortKey; dir: 'asc' | 'desc' }>({ key: 'shortName', dir: 'asc' });
   // Payment import (QuickBooks XLSX + Intuit emails + Intuit XLSX + Convera Beneficiaries)
-  const [showConveraModal, setShowConveraModal] = useState(false);
-  const [converaTab, setConveraTab] = useState<'intuitXlsx' | 'beneficiaries'>('intuitXlsx');
-  const [converaError, setConveraError] = useState('');
+  const [showIntuitImport, setShowIntuitImport] = useState(false);
+  const [showConveraImport, setShowConveraImport] = useState(false);
+  const [intuitXlsxError, setIntuitXlsxError] = useState('');
   // Intuit XLSX → qb_ingest_events (Slice B of QB Automation Layer)
   const [intuitXlsxFile, setIntuitXlsxFile] = useState<File | null>(null);
   const [intuitXlsxPreview, setIntuitXlsxPreview] = useState<IntuitXlsxRow[] | null>(null);
@@ -5028,13 +5029,13 @@ const TimesheetSystem = () => {
   // ─── Intuit XLSX → qb_ingest_events (Slice B of QB Automation Layer) ────────
   const parseIntuitXlsxPreview = async () => {
     if (!intuitXlsxFile) return;
-    setConveraError('');
+    setIntuitXlsxError('');
     setIntuitXlsxResult(null);
     try {
       const buffer = await intuitXlsxFile.arrayBuffer();
       const rows = await parseIntuitXlsxBuffer(buffer);
       if (rows.length === 0) {
-        setConveraError('No payment rows found in this file. Positive-amount rows in the expense/AP account (with "Inv# XXX" memos) are what we look for.');
+        setIntuitXlsxError('No payment rows found in this file. Positive-amount rows in the expense/AP account (with "Inv# XXX" memos) are what we look for.');
         return;
       }
       // Layered invoice matcher — see matchEventsToInvoices at top of file for
@@ -5051,14 +5052,14 @@ const TimesheetSystem = () => {
       rows.forEach((r, i) => { r.matchedInvoiceIds = matchResults[i]; });
       setIntuitXlsxPreview(rows);
     } catch (e) {
-      setConveraError(`Parse failed: ${e instanceof Error ? e.message : String(e)}`);
+      setIntuitXlsxError(`Parse failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
   const commitIntuitXlsxToInbox = async () => {
     if (!intuitXlsxPreview || intuitXlsxPreview.length === 0) return;
     setIntuitXlsxImporting(true);
-    setConveraError('');
+    setIntuitXlsxError('');
     try {
       const inserts = intuitXlsxPreview.map(r => ({
         source: 'intuit_xlsx' as const,
@@ -5100,7 +5101,7 @@ const TimesheetSystem = () => {
       const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
         .filter((s): s is string => !!s);
       const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
-      setConveraError(`Import failed: ${msg}`);
+      setIntuitXlsxError(`Import failed: ${msg}`);
     } finally {
       setIntuitXlsxImporting(false);
     }
@@ -7601,7 +7602,7 @@ const TimesheetSystem = () => {
                       />
                     </label>
                     <button
-                      onClick={() => { setConveraTab('intuitXlsx'); setShowConveraModal(true); }}
+                      onClick={() => setShowIntuitImport(true)}
                       className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm"
                     >
                       <UploadCloud className="w-4 h-4" />
@@ -9973,7 +9974,7 @@ const TimesheetSystem = () => {
                   <button onClick={() => setExpandedProfileUsers(new Set(allManagedUsers.map(u => u.id)))} className="text-xs text-indigo-600 hover:underline">Expand all</button>
                   <button onClick={() => setExpandedProfileUsers(new Set())} className="text-xs text-gray-500 hover:underline">Collapse all</button>
                   <button
-                    onClick={() => { setConveraTab('beneficiaries'); setShowConveraModal(true); loadConveraBeneficiaries(); }}
+                    onClick={() => { setShowConveraImport(true); loadConveraBeneficiaries(); }}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
                   >
                     <UploadCloud className="w-3.5 h-3.5" />
@@ -11444,249 +11445,46 @@ const TimesheetSystem = () => {
             );
           })()}
 
-          {/* Payment Import Modal — Intuit Payments XLSX or Convera Beneficiaries */}
-          {showConveraModal && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => { setShowConveraModal(false); setConveraError(''); }}>
-              <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-                <div className="p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-xl font-bold text-gray-900">{converaTab === 'intuitXlsx' ? 'Import Intuit Payments' : 'Import Beneficiaries'}</h2>
-                    <button onClick={() => { setShowConveraModal(false); setConveraError(''); }} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
-                  </div>
 
-                  {/* Intuit XLSX → QB Automation Inbox (Slice B of QB Automation Layer) */}
-                  {converaTab === 'intuitXlsx' && (
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Upload the <strong>Intuit BillPay payment report</strong> (.xlsx) — the list of payments Intuit sent on your behalf. Rows land in the <strong>QB Automation Inbox</strong> for classification and push into QuickBooks.</p>
-                      <p className="text-xs text-gray-400 mb-4">Source: Intuit (not QuickBooks). Each row is a payment Intuit made; we don't require anything to be in QB yet.</p>
-                      <FileUploadCard
-                        file={intuitXlsxFile}
-                        accept=".xlsx"
-                        helpText="Click to select .xlsx file"
-                        onFileChange={f => {
-                          setIntuitXlsxFile(f);
-                          setIntuitXlsxPreview(null);
-                          if (f !== null) setIntuitXlsxResult(null);
-                        }}
-                      />
-                      {converaError && <p className="text-red-600 text-sm mb-3">{converaError}</p>}
-                      {intuitXlsxResult && (
-                        <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
-                          ✓ Imported <strong>{intuitXlsxResult.inserted}</strong> event{intuitXlsxResult.inserted === 1 ? '' : 's'} to the Inbox
-                          {intuitXlsxResult.skipped > 0 && <> · skipped <strong>{intuitXlsxResult.skipped}</strong> duplicate{intuitXlsxResult.skipped === 1 ? '' : 's'} (already ingested)</>}.
-                        </div>
-                      )}
-                      {intuitXlsxPreview && intuitXlsxPreview.length > 0 && (() => {
-                        const matched = intuitXlsxPreview.filter(r => r.matchedInvoiceIds.length > 0).length;
-                        const unmatched = intuitXlsxPreview.length - matched;
-                        return (
-                          <div className="mb-3">
-                            <div className="text-sm text-gray-700 mb-2">
-                              <strong>{intuitXlsxPreview.length}</strong> payment row{intuitXlsxPreview.length === 1 ? '' : 's'} detected · <span className="text-green-700">{matched} matched to invoices</span>{unmatched > 0 && <> · <span className="text-amber-700">{unmatched} unmatched</span></>}
-                            </div>
-                            <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto">
-                              <table className="w-full text-xs">
-                                <thead className="bg-gray-50 text-gray-600 sticky top-0">
-                                  <tr>
-                                    <th className="px-2 py-1.5 text-left">Date</th>
-                                    <th className="px-2 py-1.5 text-left">Vendor</th>
-                                    <th className="px-2 py-1.5 text-right">Amount</th>
-                                    <th className="px-2 py-1.5 text-left">Memo</th>
-                                    <th className="px-2 py-1.5 text-left">Match</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {intuitXlsxPreview.map((r, i) => (
-                                    <tr key={i} className="border-t border-gray-100">
-                                      <td className="px-2 py-1 font-mono">{r.date}</td>
-                                      <td className="px-2 py-1">{r.name}</td>
-                                      <td className="px-2 py-1 text-right font-mono">${r.amount.toFixed(2)}</td>
-                                      <td className="px-2 py-1 text-gray-600 truncate max-w-xs" title={r.memo}>{r.memo || '—'}</td>
-                                      <td className="px-2 py-1">
-                                        {r.matchedInvoiceIds.length > 0
-                                          ? <span className="text-green-700">✓ {r.matchedInvoiceIds.length} invoice{r.matchedInvoiceIds.length === 1 ? '' : 's'}</span>
-                                          : r.invoiceRefs.length > 0
-                                            ? <span className="text-amber-700">? {r.invoiceRefs.join(', ')} not found</span>
-                                            : <span className="text-gray-400">no invoice ref</span>}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        );
-                      })()}
-                      <div className="flex justify-end gap-2">
-                        {intuitXlsxPreview ? (
-                          <>
-                            <button onClick={() => setIntuitXlsxPreview(null)} className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
-                            <button onClick={commitIntuitXlsxToInbox} disabled={intuitXlsxImporting} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
-                              {intuitXlsxImporting ? 'Importing…' : `Import ${intuitXlsxPreview.length} to Inbox`}
-                            </button>
-                          </>
-                        ) : (
-                          <button onClick={parseIntuitXlsxPreview} disabled={!intuitXlsxFile} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm">
-                            <FileText className="w-4 h-4" /> Parse & Preview
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )}
+          <ImportIntuitPaymentsXlsx
+            open={showIntuitImport}
+            onClose={() => { setShowIntuitImport(false); setIntuitXlsxError(''); }}
+            file={intuitXlsxFile}
+            onFileChange={f => {
+              setIntuitXlsxFile(f);
+              setIntuitXlsxPreview(null);
+              if (f !== null) setIntuitXlsxResult(null);
+            }}
+            preview={intuitXlsxPreview}
+            onCancelPreview={() => setIntuitXlsxPreview(null)}
+            importing={intuitXlsxImporting}
+            result={intuitXlsxResult}
+            error={intuitXlsxError}
+            onParse={parseIntuitXlsxPreview}
+            onCommit={commitIntuitXlsxToInbox}
+          />
 
-                  {/* Convera Beneficiaries import */}
-                  {converaTab === 'beneficiaries' && (
-                    <div>
-                      {/* Awaiting Convera setup — profiles created from templates but not yet in Convera */}
-                      {(() => {
-                        const awaiting = paymentProfiles.filter(p => {
-                          if (p.converaBeneficiaryId) return false;
-                          if (!p.country || p.country.trim().toUpperCase() === 'US' || p.country.trim().toLowerCase() === 'united states') return false;
-                          const owner = users.find(u => u.id === p.userId);
-                          if (owner?.locationType === 'onshore') return false;
-                          return !!(p.iban && p.swift);
-                        });
-                        if (awaiting.length === 0) return null;
-                        const synFor = (p: PaymentProfile) => computeSynVendorCode(p.id, p.iban, paymentProfiles);
-                        return (
-                          <div className="mb-5 border border-amber-300 rounded-lg overflow-hidden">
-                            <div className="bg-amber-50 px-4 py-2 border-b border-amber-200 text-xs font-semibold text-amber-800 flex items-center justify-between">
-                              <span>⏳ Awaiting Convera setup — {awaiting.length} profile{awaiting.length === 1 ? '' : 's'}</span>
-                              <span className="text-[10px] text-amber-600 font-normal">Add these in Convera with the SYN vendor code shown, then re-import to link.</span>
-                            </div>
-                            <div className="divide-y divide-amber-100">
-                              {awaiting.map(p => {
-                                const owner = users.find(u => u.id === p.userId);
-                                const synCode = synFor(p);
-                                const detailLines = [
-                                  `Vendor ID: ${synCode}`,
-                                  `Full Company Name: ${p.companyName}`,
-                                  p.companyAddress && `Company Address: ${p.companyAddress}`,
-                                  p.country && `Country: ${p.country}`,
-                                  p.bankName && `Bank Name: ${p.bankName}`,
-                                  p.bankAddress && `Bank Address: ${p.bankAddress}`,
-                                  p.bankBranch && `Bank Branch: ${p.bankBranch}`,
-                                  p.accountNumber && `Account Number: ${p.accountNumber}`,
-                                  `IBAN: ${p.iban}`,
-                                  `SWIFT: ${p.swift}`,
-                                  p.paymentEmail && `Payment Email: ${p.paymentEmail}`,
-                                ].filter(Boolean).join('\n');
-                                return (
-                                  <div key={p.id} className="p-3 bg-white">
-                                    <div className="flex items-start justify-between gap-3">
-                                      <div className="min-w-0">
-                                        <div className="text-sm font-medium text-gray-800">{owner?.name || '—'}</div>
-                                        <div className="text-xs text-gray-500 mt-0.5">{p.companyName}</div>
-                                        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] font-mono text-gray-600">
-                                          <span><span className="text-amber-700 font-semibold">{synCode}</span></span>
-                                          <span>IBAN {p.iban}</span>
-                                          <span>SWIFT {p.swift}</span>
-                                          {p.country && <span>{p.country}</span>}
-                                        </div>
-                                      </div>
-                                      <button
-                                        onClick={async () => {
-                                          try { await navigator.clipboard.writeText(detailLines); } catch { /* clipboard may fail in insecure contexts */ }
-                                        }}
-                                        className="text-xs px-2 py-1 bg-indigo-100 text-indigo-700 rounded hover:bg-indigo-200 whitespace-nowrap"
-                                      >Copy details</button>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })()}
-                      <p className="text-sm text-gray-600 mb-1">Upload the Convera beneficiaries XLS export. Beneficiaries will be upserted and automatically matched to contractor payment profiles by Vendor ID (SYN code), IBAN, or name prefix.</p>
-                      <p className="text-xs text-gray-400 mb-4">In Convera: Beneficiaries &rarr; Export. Re-import anytime to refresh.</p>
-                      <FileUploadCard
-                        file={beneficiaryImportFile}
-                        accept=".xls,.tsv,.txt,.csv"
-                        helpText="Click to select beneficiaries XLS"
-                        onFileChange={f => {
-                          setBeneficiaryImportFile(f);
-                          if (f !== null) setBeneficiaryImportResult(null);
-                        }}
-                      />
-                      {beneficiaryImportResult && (
-                        <div className="mb-4">
-                          <div className="flex gap-4 mb-3">
-                            <span className="px-3 py-1 bg-green-100 text-green-800 rounded text-sm font-medium">{beneficiaryImportResult.imported} imported</span>
-                            <span className="px-3 py-1 bg-indigo-100 text-indigo-800 rounded text-sm font-medium">{beneficiaryImportResult.matched} profiles matched</span>
-                            {beneficiaryImportResult.unmatched.length > 0 && (
-                              <span className="px-3 py-1 bg-amber-100 text-amber-800 rounded text-sm font-medium">{beneficiaryImportResult.unmatched.length} unmatched</span>
-                            )}
-                          </div>
-                          {beneficiaryImportResult.unmatched.length > 0 && (
-                            <div className="border border-amber-200 rounded-lg divide-y divide-amber-100">
-                              {beneficiaryImportResult.unmatched.map(u => (
-                                <div key={u.profileId} className="bg-amber-50">
-                                  <div className="flex items-center justify-between gap-3 px-3 py-2">
-                                    <div className="min-w-0">
-                                      <div className="text-sm text-gray-700">{u.userName}</div>
-                                      {u.suggested && (
-                                        <div className="mt-0.5 text-xs text-amber-800">
-                                          Suggested ({u.suggested.level === 'iban' ? 'IBAN match' : 'name match'}):
-                                          <span className="ml-1 font-mono">{u.suggested.shortName}</span>
-                                          {u.suggested.incomingVendorId && <span className="ml-1 text-amber-600">· vendor {u.suggested.incomingVendorId}</span>}
-                                        </div>
-                                      )}
-                                    </div>
-                                    <div className="flex items-center gap-2 flex-shrink-0">
-                                      {u.suggested && beneficiaryOverrideProfileId !== u.profileId && (
-                                        <button onClick={() => setConveraOverride(u.profileId, u.suggested!.beneficiaryId)} className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700 font-medium">Confirm link</button>
-                                      )}
-                                      {beneficiaryOverrideProfileId === u.profileId
-                                        ? <button onClick={() => { setBeneficiaryOverrideProfileId(null); setBeneficiaryOverrideSearch(''); }} className="text-xs text-gray-500 hover:underline">Cancel</button>
-                                        : <button onClick={() => { setBeneficiaryOverrideProfileId(u.profileId); setBeneficiaryOverrideSearch(''); }} className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700">{u.suggested ? 'Pick different…' : 'Link manually'}</button>
-                                      }
-                                    </div>
-                                  </div>
-                                  {beneficiaryOverrideProfileId === u.profileId && (
-                                    <div className="px-3 pb-3 border-t border-amber-200 bg-indigo-50">
-                                      <input
-                                        type="text" value={beneficiaryOverrideSearch}
-                                        onChange={e => setBeneficiaryOverrideSearch(e.target.value)}
-                                        placeholder="Search Convera beneficiary…" autoFocus
-                                        className="w-full mt-2 px-3 py-1.5 border border-indigo-200 rounded text-sm mb-1 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                                      />
-                                      <div className="max-h-36 overflow-y-auto divide-y divide-indigo-100 rounded border border-indigo-100">
-                                        {converaBeneficiaries
-                                          .filter(b => beneficiaryOverrideSearch === '' || b.shortName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()) || b.beneficiaryName.toLowerCase().includes(beneficiaryOverrideSearch.toLowerCase()))
-                                          .slice(0, 20)
-                                          .map(b => (
-                                            <button key={b.id} onClick={() => setConveraOverride(u.profileId, b.id)}
-                                              className="w-full text-left px-2 py-1.5 hover:bg-indigo-100 text-sm bg-white">
-                                              <span className="font-mono text-xs text-indigo-600 mr-2">{b.shortName}</span>
-                                              <span className="text-gray-400 text-xs">{b.bankAccount}</span>
-                                            </button>
-                                          ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      <div className="flex justify-end">
-                        <button
-                          onClick={() => beneficiaryImportFile && importConveraBeneficiaries(beneficiaryImportFile)}
-                          disabled={!beneficiaryImportFile || beneficiaryImporting}
-                          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm"
-                        >
-                          {beneficiaryImporting ? <><Clock className="w-4 h-4 animate-spin" /> Importing&hellip;</> : <><UploadCloud className="w-4 h-4" /> Import &amp; Match</>}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                </div>
-              </div>
-            </div>
-          )}
+          <ImportConveraBeneficiaries
+            open={showConveraImport}
+            onClose={() => setShowConveraImport(false)}
+            file={beneficiaryImportFile}
+            onFileChange={f => {
+              setBeneficiaryImportFile(f);
+              if (f !== null) setBeneficiaryImportResult(null);
+            }}
+            importing={beneficiaryImporting}
+            result={beneficiaryImportResult}
+            paymentProfiles={paymentProfiles}
+            users={users}
+            converaBeneficiaries={converaBeneficiaries}
+            beneficiaryOverrideProfileId={beneficiaryOverrideProfileId}
+            setBeneficiaryOverrideProfileId={setBeneficiaryOverrideProfileId}
+            beneficiaryOverrideSearch={beneficiaryOverrideSearch}
+            setBeneficiaryOverrideSearch={setBeneficiaryOverrideSearch}
+            setConveraOverride={setConveraOverride}
+            computeSynVendorCode={computeSynVendorCode}
+            onImport={importConveraBeneficiaries}
+          />
 
           {/* Invoice Detail Modal (shared, also used in accountant view) */}
           {showInvoiceModal && selectedInvoice && (() => {
