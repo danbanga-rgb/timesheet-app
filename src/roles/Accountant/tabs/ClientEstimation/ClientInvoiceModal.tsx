@@ -137,7 +137,7 @@ export default function ClientInvoiceModal({ state: S, setState, onInvestmentCre
         <div style={{ color: MUTED, marginTop: 4, lineHeight: 1.5 }}>
           <div>11750 Dublin Blvd, Suite 207</div>
           <div>Dublin, CA 94568</div>
-          <div style={{ marginTop: 6 }}>www.synergiecorp.com · 510-550-1400</div>
+          <div style={{ marginTop: 6 }}>www.synergietechsolutions.com · 510-550-1400</div>
         </div>
       </div>
       <div style={{ textAlign: 'right' }}>
@@ -470,7 +470,7 @@ export default function ClientInvoiceModal({ state: S, setState, onInvestmentCre
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ textTransform: 'uppercase', fontSize: 9, letterSpacing: 1.2, fontWeight: 600, color: '#0f172a', marginBottom: 4 }}>Questions?</div>
-                <div>accounting@synergiecorp.com</div>
+                <div>accounting@synergietechsolutions.com</div>
                 <div>+1 510-550-1400</div>
               </div>
             </div>

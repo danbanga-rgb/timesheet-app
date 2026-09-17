@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Building2, ChevronLeft, ChevronRight, FileText, Download, UploadCloud, ArrowUpDown } from 'lucide-react';
+import { Building2, ChevronLeft, ChevronRight, FileText, Download, UploadCloud, ArrowUpDown, RotateCcw } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from '../../../../supabaseClient';
 import type { Project, Timesheet, UserProfile } from '../../../../types';
@@ -264,7 +264,14 @@ export default function ClientEstimationTab({ users, projects, timesheets, curre
           const engOverrides = estimationOverrides.get(e.id);
           const weekTotals = weeks.map(w => {
             const override = engOverrides?.get(w.weekStart);
-            if (override !== undefined) return { hours: override, source: 'override' as CellSource };
+            // Actuals win over override the moment any actual arrives for the week.
+            // Override is only used to fill in weeks with no actuals (e.g. imported
+            // corrections for missing timesheets). Prevents stale test imports from
+            // sticking after real hours land.
+            const weekHasActuals = w.days.some(d => (actuals[d] || 0) > 0);
+            if (override !== undefined && !weekHasActuals) {
+              return { hours: override, source: 'override' as CellSource };
+            }
             let sum = 0;
             const cells = w.days.map(d => cellFor(e.user_id, d, actuals));
             for (const c of cells) if (c.source !== 'outside') sum += c.hours;
@@ -276,6 +283,27 @@ export default function ClientEstimationTab({ users, projects, timesheets, curre
           const amount = totalH * Number(e.bill_rate);
           return { eng: e, profile, actuals, weekTotals, totalH, amount };
         }).filter(r => r.profile);
+
+        const projectOverrideCount = engs.reduce((n, e) => n + (estimationOverrides.get(e.id)?.size || 0), 0);
+        const resetProjectOverrides = async () => {
+          if (projectOverrideCount === 0) return;
+          if (!confirm(`Reset ${projectOverrideCount} imported override${projectOverrideCount === 1 ? '' : 's'} for ${client.name} (visible month range)?\n\nThis deletes the imported values so the grid shows actuals + estimates only.`)) return;
+          const pairs: Array<{ engagementId: number; weekStart: string }> = [];
+          for (const e of engs) {
+            const em = estimationOverrides.get(e.id);
+            if (!em) continue;
+            em.forEach((_v, weekStart) => pairs.push({ engagementId: e.id, weekStart }));
+          }
+          const engIds = Array.from(new Set(pairs.map(p => p.engagementId)));
+          const weekStarts = Array.from(new Set(pairs.map(p => p.weekStart)));
+          const { error } = await supabase.from('hour_overrides').delete()
+            .in('engagement_id', engIds)
+            .in('week_start', weekStarts);
+          if (error) { alert(`Failed to reset: ${error.message}`); return; }
+          const updated = new Map(estimationOverrides);
+          for (const e of engs) updated.delete(e.id);
+          setEstimationOverrides(updated);
+        };
 
         const sortMult = estimationSort.dir === 'asc' ? 1 : -1;
         rowsWithTotals.sort((a, b) => {
@@ -400,6 +428,15 @@ export default function ClientEstimationTab({ users, projects, timesheets, curre
                 >
                   <Download className="w-3 h-3" /> Export XLSX
                 </button>
+                {projectOverrideCount > 0 && (
+                  <button
+                    onClick={resetProjectOverrides}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-white border border-red-300 text-red-700 hover:bg-red-50"
+                    title={`Delete ${projectOverrideCount} imported override${projectOverrideCount === 1 ? '' : 's'} for this client (visible month)`}
+                  >
+                    <RotateCcw className="w-3 h-3" /> Reset overrides ({projectOverrideCount})
+                  </button>
+                )}
                 <label className="cursor-pointer flex items-center gap-1 px-2 py-1 rounded text-xs bg-white border border-green-300 text-green-700 hover:bg-green-50">
                   <UploadCloud className="w-3 h-3" /> Import corrected
                   <input type="file" accept=".xlsx" className="hidden" onChange={async (e) => {
@@ -471,6 +508,7 @@ export default function ClientEstimationTab({ users, projects, timesheets, curre
                       Contractor{sortIcon('name')}
                     </th>
                     <th className="text-left px-2 py-2">SOW</th>
+                    <th className="text-left px-2 py-2">Location</th>
                     <th className="text-right px-2 py-2 cursor-pointer select-none hover:bg-gray-100" onClick={() => cycleSort('rate')}>
                       Rate{sortIcon('rate')}
                     </th>
@@ -486,29 +524,58 @@ export default function ClientEstimationTab({ users, projects, timesheets, curre
                   </tr>
                 </thead>
                 <tbody>
-                  {rowsWithTotals.map(({eng: e, profile, weekTotals, totalH, amount}) => {
-                    clientTotalHours += totalH;
-                    clientTotalAmount += amount;
+                  {(() => {
+                    let onshoreHours = 0, onshoreAmount = 0;
+                    let offshoreHours = 0, offshoreAmount = 0;
+                    const rows = rowsWithTotals.map(({eng: e, profile, weekTotals, totalH, amount}) => {
+                      clientTotalHours += totalH;
+                      clientTotalAmount += amount;
+                      const loc = profile?.locationType;
+                      if (loc === 'onshore') { onshoreHours += totalH; onshoreAmount += amount; }
+                      else if (loc === 'offshore') { offshoreHours += totalH; offshoreAmount += amount; }
+                      const locLabel = loc === 'onshore' ? 'Onshore' : loc === 'offshore' ? 'Offshore' : '—';
+                      const locClass = loc === 'onshore' ? 'text-emerald-700' : loc === 'offshore' ? 'text-amber-700' : 'text-gray-400';
+                      return (
+                        <tr key={e.id} className="border-b border-gray-100 hover:bg-gray-50">
+                          <td className="px-3 py-1 sticky left-0 bg-white font-medium">{profile!.name}</td>
+                          <td className="px-2 py-1 text-gray-600">{e.sow_reference || '—'}</td>
+                          <td className={`px-2 py-1 text-xs ${locClass}`}>{locLabel}</td>
+                          <td className="px-2 py-1 text-right">${Number(e.bill_rate).toFixed(0)}</td>
+                          {weeks.map((_w, i) => (
+                            <td key={i} className={`px-2 py-1 text-right ${cellColor(weekTotals[i].source)}`}>
+                              {weekTotals[i].hours > 0 ? weekTotals[i].hours.toFixed(0) : '·'}
+                            </td>
+                          ))}
+                          <td className="px-2 py-1 text-right font-semibold border-l border-gray-300">{totalH.toFixed(0)}</td>
+                          <td className="px-2 py-1 text-right font-semibold">{currencyFmt(amount)}</td>
+                        </tr>
+                      );
+                    });
                     return (
-                      <tr key={e.id} className="border-b border-gray-100 hover:bg-gray-50">
-                        <td className="px-3 py-1 sticky left-0 bg-white font-medium">{profile!.name}</td>
-                        <td className="px-2 py-1 text-gray-600">{e.sow_reference || '—'}</td>
-                        <td className="px-2 py-1 text-right">${Number(e.bill_rate).toFixed(0)}</td>
-                        {weeks.map((_w, i) => (
-                          <td key={i} className={`px-2 py-1 text-right ${cellColor(weekTotals[i].source)}`}>
-                            {weekTotals[i].hours > 0 ? weekTotals[i].hours.toFixed(0) : '·'}
-                          </td>
-                        ))}
-                        <td className="px-2 py-1 text-right font-semibold border-l border-gray-300">{totalH.toFixed(0)}</td>
-                        <td className="px-2 py-1 text-right font-semibold">{currencyFmt(amount)}</td>
-                      </tr>
+                      <>
+                        {rows}
+                        {onshoreHours > 0 && (
+                          <tr className="bg-emerald-50 font-semibold border-t border-emerald-200">
+                            <td colSpan={4 + weeks.length} className="px-3 py-1.5 text-right text-emerald-800">Onshore Subtotal:</td>
+                            <td className="px-2 py-1.5 text-right text-emerald-800 border-l border-emerald-200">{onshoreHours.toFixed(0)}</td>
+                            <td className="px-2 py-1.5 text-right text-emerald-800">{currencyFmt(onshoreAmount)}</td>
+                          </tr>
+                        )}
+                        {offshoreHours > 0 && (
+                          <tr className="bg-amber-50 font-semibold border-t border-amber-200">
+                            <td colSpan={4 + weeks.length} className="px-3 py-1.5 text-right text-amber-800">Offshore Subtotal:</td>
+                            <td className="px-2 py-1.5 text-right text-amber-800 border-l border-amber-200">{offshoreHours.toFixed(0)}</td>
+                            <td className="px-2 py-1.5 text-right text-amber-800">{currencyFmt(offshoreAmount)}</td>
+                          </tr>
+                        )}
+                        <tr className="bg-indigo-50 font-bold border-t-2 border-indigo-200">
+                          <td colSpan={4 + weeks.length} className="px-3 py-2 text-right text-indigo-900">Client Total:</td>
+                          <td className="px-2 py-2 text-right text-indigo-900 border-l border-indigo-300">{clientTotalHours.toFixed(0)}</td>
+                          <td className="px-2 py-2 text-right text-indigo-900">{currencyFmt(clientTotalAmount)}</td>
+                        </tr>
+                      </>
                     );
-                  })}
-                  <tr className="bg-indigo-50 font-bold border-t-2 border-indigo-200">
-                    <td colSpan={3 + weeks.length} className="px-3 py-2 text-right text-indigo-900">Client Total:</td>
-                    <td className="px-2 py-2 text-right text-indigo-900 border-l border-indigo-300">{clientTotalHours.toFixed(0)}</td>
-                    <td className="px-2 py-2 text-right text-indigo-900">{currencyFmt(clientTotalAmount)}</td>
-                  </tr>
+                  })()}
                 </tbody>
               </table>
             </div>
