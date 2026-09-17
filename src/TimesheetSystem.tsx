@@ -26,6 +26,8 @@ import QbSyncPanel from './roles/AdminQbSync/QbSyncPanel';
 import { parseLocalDate, formatDate, getWeekDates, isWeekend } from './lib/dates';
 import { triggerDownload } from './lib/csv';
 import { isTestAccount } from './lib/isTestAccount';
+import { COUNTRIES as countries, countryName } from './lib/countries';
+import CountrySelect from './components/CountrySelect';
 import MonthRangePicker from './components/MonthRangePicker';
 import StickyScrollWrapper from './components/StickyScrollWrapper';
 import StatusBadge, { type BadgeTone } from './components/StatusBadge';
@@ -559,20 +561,6 @@ const TimesheetSystem = () => {
     }
   };
 
-  const countries = [
-    { code: 'US', name: 'United States', regions: ['California', 'New York', 'Texas', 'Florida'] },
-    { code: 'GB', name: 'United Kingdom', regions: ['England', 'Scotland', 'Wales'] },
-    { code: 'CA', name: 'Canada', regions: ['Ontario', 'Quebec', 'British Columbia'] },
-    { code: 'HR', name: 'Croatia', regions: ['Croatia'] },
-    { code: 'RS', name: 'Serbia', regions: ['Serbia'] },
-    { code: 'BA', name: 'Bosnia and Herzegovina', regions: ['Bosnia and Herzegovina'] },
-    { code: 'SI', name: 'Slovenia', regions: ['Slovenia'] },
-    { code: 'MK', name: 'North Macedonia', regions: ['North Macedonia'] },
-    { code: 'IN', name: 'India', regions: ['India'] },
-    { code: 'NL', name: 'Netherlands', regions: ['Netherlands'] },
-  ];
-
-  const countryName = (code: string) => countries.find(c => c.code === code)?.name || code;
   const paymentMethod = (inv: Invoice) => {
     // Older data has lowercase 'intuit'/'convera'; canonicalise so downstream === matches.
     const canonicalise = (raw: string | null | undefined): string => {
@@ -6241,17 +6229,15 @@ const TimesheetSystem = () => {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>
-                      <select
+                      <CountrySelect
                         value={userForm.country}
-                        onChange={e => {
-                          const c = countries.find(x => x.code === e.target.value);
+                        onChange={code => {
+                          const c = countries.find(x => x.code === code);
                           const autoRegion = c && c.regions.length === 1 ? c.regions[0] : '';
-                          setUserForm({...userForm, country: e.target.value, region: autoRegion});
+                          setUserForm({...userForm, country: code, region: autoRegion});
                         }}
                         className="w-full px-4 py-4 text-lg border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 bg-white"
-                      >
-                        {countries.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
-                      </select>
+                      />
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Start Date *</label>
@@ -6361,13 +6347,15 @@ const TimesheetSystem = () => {
                       </button>
                     </div>
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Country *</label>
-                      <select value={userForm.country} onChange={e => {
-                        const c = countries.find(x => x.code === e.target.value);
-                        const autoRegion = c && c.regions.length === 1 ? c.regions[0] : '';
-                        setUserForm({...userForm, country: e.target.value, region: autoRegion});
-                      }} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
-                        {countries.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
-                      </select>
+                      <CountrySelect
+                        value={userForm.country}
+                        onChange={code => {
+                          const c = countries.find(x => x.code === code);
+                          const autoRegion = c && c.regions.length === 1 ? c.regions[0] : '';
+                          setUserForm({...userForm, country: code, region: autoRegion});
+                        }}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                      />
                     </div>
                     {(countries.find(c => c.code === userForm.country)?.regions.length ?? 0) > 1 && (
                     <div><label className="block text-sm font-medium text-gray-700 mb-1">Region</label>

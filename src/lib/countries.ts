@@ -1,6 +1,29 @@
-// World countries for payment profile (excludes sanctioned countries).
-// Moved from TimesheetSystem.tsx as Slice X0 of the accountant modularization
-// arc (2026-09-16).
+// Country data shared across app.
+// WORLD_COUNTRIES: plain names for payment-profile country picker.
+// COUNTRIES: structured code+regions for user profile / auth signup / admin.
+
+export interface Country {
+  code: string;
+  name: string;
+  regions: string[];
+}
+
+export const COUNTRIES: Country[] = [
+  { code: 'US', name: 'United States', regions: ['California', 'New York', 'Texas', 'Florida'] },
+  { code: 'GB', name: 'United Kingdom', regions: ['England', 'Scotland', 'Wales'] },
+  { code: 'CA', name: 'Canada', regions: ['Ontario', 'Quebec', 'British Columbia'] },
+  { code: 'HR', name: 'Croatia', regions: ['Croatia'] },
+  { code: 'RS', name: 'Serbia', regions: ['Serbia'] },
+  { code: 'BA', name: 'Bosnia and Herzegovina', regions: ['Bosnia and Herzegovina'] },
+  { code: 'SI', name: 'Slovenia', regions: ['Slovenia'] },
+  { code: 'MK', name: 'North Macedonia', regions: ['North Macedonia'] },
+  { code: 'IN', name: 'India', regions: ['India'] },
+  { code: 'NL', name: 'Netherlands', regions: ['Netherlands'] },
+];
+
+export function countryName(code: string): string {
+  return COUNTRIES.find(c => c.code === code)?.name || code;
+}
 
 export const WORLD_COUNTRIES = [
   "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda",
