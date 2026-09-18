@@ -1,18 +1,18 @@
-regions: top=1-254, prerole=255-5076, admin+auth=5077-5881, acctWrap=5882-6002, tab:weekly=6003-6006, tab:consolidated=6007-6015, tab:client-estimation=6016-6024, tab:invoices=6025-6054, tab:timesheet-only=6055-6064, tab:payments=6065-6813, tab:qb-automation=6814-8532, tab:profiles=8533-8710, acctModals=8711-9416, tsUser=9417-10540
+regions: top=1-254, prerole=255-5076, admin+auth=5077-5881, acctWrap=5882-6002, tab:weekly=6003-6006, tab:consolidated=6007-6015, tab:client-estimation=6016-6024, tab:invoices=6025-6054, tab:timesheet-only=6055-6064, tab:payments=6065-6813, tab:qb-automation=6814-8532, tab:profiles=8533-8816, acctModals=8817-9308, tsUser=9309-10432
 
   256 currentUser                        acctModals:3  acctWrap:3  admin+auth:9  prerole:54  tab:client-estimation:1  tsUser:42
   258 loading                            prerole:11
   259 users                              acctModals:6  admin+auth:21  prerole:19  tab:client-estimation:1  tab:consolidated:1  tab:payments:1  tab:profiles:2  tab:timesheet-only:1  tab:weekly:1  tsUser:1
   260 projects                           acctModals:2  admin+auth:14  prerole:8  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:timesheet-only:1  tab:weekly:1  tsUser:5
   492 timesheets                         acctModals:2  admin+auth:9  prerole:29  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:timesheet-only:1  tab:weekly:1  tsUser:13
-  494 accountantTab                      acctModals:1  acctWrap:8  prerole:6  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:1  tab:qb-automation:1  tab:timesheet-only:1  tab:weekly:1
-  495 profileTabSearch                   acctModals:1  tab:profiles:2
-  496 profileTabFilter                   acctModals:1  tab:profiles:2
-  497 qbVendorEditingId                  acctModals:4  prerole:1  tab:profiles:2
-  498 showQbExportModal                  acctModals:5  tab:invoices:1
-  499 qbExportSelectedIds                acctModals:9  prerole:1  tab:invoices:1
-  500 qbExportSnapshot                   acctModals:1  prerole:1  tab:invoices:1
-  501 qbExportCategoryFilter             acctModals:14
+  494 accountantTab                      acctWrap:8  prerole:6  tab:client-estimation:1  tab:consolidated:1  tab:invoices:1  tab:payments:1  tab:profiles:2  tab:qb-automation:1  tab:timesheet-only:1  tab:weekly:1
+  495 profileTabSearch                   tab:profiles:3
+  496 profileTabFilter                   tab:profiles:3
+  497 qbVendorEditingId                  prerole:1  tab:profiles:6
+  498 showQbExportModal                  tab:invoices:1  tab:profiles:5
+  499 qbExportSelectedIds                prerole:1  tab:invoices:1  tab:profiles:9
+  500 qbExportSnapshot                   prerole:1  tab:invoices:1  tab:profiles:1
+  501 qbExportCategoryFilter             tab:profiles:14
   529 showConveraBatchModal              prerole:2  tab:profiles:2
   530 converaBatchGroups                 prerole:3  tab:profiles:1
   531 converaBatchCombine                prerole:2  tab:profiles:2
@@ -20,9 +20,9 @@ regions: top=1-254, prerole=255-5076, admin+auth=5077-5881, acctWrap=5882-6002, 
   537 converaBatchExcluded               prerole:1  tab:profiles:1
   540 converaBatchManualRows             prerole:2  tab:profiles:2
   541 converaBatchManualEditor           prerole:1  tab:profiles:2
-  546 showIntuitBatchModal               prerole:1  tab:profiles:4
-  547 intuitBatchInvoices                prerole:1  tab:profiles:4
-  548 copiedIntuitField                  prerole:2  tab:profiles:4
+  546 showIntuitBatchModal               prerole:1  tab:profiles:2
+  547 intuitBatchInvoices                prerole:1  tab:profiles:1
+  548 copiedIntuitField                  prerole:2  tab:profiles:2
   551 profileEditUserId                  acctWrap:1  admin+auth:1  prerole:4  tab:profiles:1
   552 loginForm                          prerole:7
   553 selectedWeek                       prerole:6  tsUser:5
@@ -46,15 +46,15 @@ regions: top=1-254, prerole=255-5076, admin+auth=5077-5881, acctWrap=5882-6002, 
   575 showWeekendHours                   prerole:3  tsUser:2
   576 showTimesheetModal                 acctModals:1  admin+auth:1  prerole:2  tsUser:1
   577 selectedTimesheetIds               admin+auth:1  prerole:7
-  578 invoices                           acctModals:3  acctWrap:4  admin+auth:4  prerole:95  tab:invoices:2  tab:payments:12  tab:profiles:1  tab:qb-automation:43  tsUser:11
-  579 paymentProfiles                    acctModals:7  acctWrap:1  admin+auth:1  prerole:21  tab:invoices:1  tab:payments:2  tab:profiles:1  tab:qb-automation:9  tsUser:4
+  578 invoices                           acctModals:2  acctWrap:4  admin+auth:4  prerole:95  tab:invoices:2  tab:payments:12  tab:profiles:3  tab:qb-automation:43  tsUser:11
+  579 paymentProfiles                    acctModals:5  acctWrap:1  admin+auth:1  prerole:21  tab:invoices:1  tab:payments:2  tab:profiles:3  tab:qb-automation:9  tsUser:4
   580 userTab                            tsUser:14
   581 invoiceView                        prerole:1  tsUser:5
   582 invoiceMonth                       prerole:4  tsUser:9
   583 invoiceRate                        prerole:2  tsUser:4
   584 invoiceCurrency                    prerole:1  tsUser:2
   585 invoiceNotes                       prerole:2  tsUser:1
-  586 invoiceNumber                      acctModals:2  acctWrap:1  prerole:21  tab:payments:7  tab:profiles:2  tab:qb-automation:8  tsUser:9
+  586 invoiceNumber                      acctModals:1  acctWrap:1  prerole:21  tab:payments:7  tab:profiles:1  tab:qb-automation:8  tsUser:9
   587 selectedPaymentProfileId           prerole:2  tsUser:2
   588 selectedInvoice                    acctModals:2  prerole:10  tab:invoices:1  tab:profiles:1  tsUser:3
   589 showInvoiceModal                   acctModals:2  prerole:2  tab:invoices:1  tab:profiles:1  tsUser:6
