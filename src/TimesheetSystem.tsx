@@ -46,6 +46,13 @@ import InvoicesTab from './roles/Accountant/tabs/Invoices';
 import { useInvoiceFilters } from './hooks/useInvoiceFilters';
 import { reconcileInvoiceLive } from './lib/reconcileInvoice';
 import InvoiceDetailModal from './roles/Accountant/modals/InvoiceDetailModal';
+import {
+  buildConveraBatchRows,
+  buildConveraBatchCsv,
+  computeConveraBatchFilename,
+  type ConveraBatchGroup,
+  type ConveraBatchManualRow,
+} from './lib/convera/batchFile';
 import TimesheetDetailModal from './components/TimesheetDetailModal';
 import ManagerView from './roles/Manager/ManagerView';
 import VendorManagerView from './roles/VendorManager/VendorManagerView';
@@ -551,16 +558,6 @@ const TimesheetSystem = () => {
   // Same-IBAN groups auto-default to combined; mixed-IBAN groups surface as candidates the accountant
   // can force-combine (e.g., Bimosoft contractors whose old IBANs are still on file but who all now
   // route through the same Convera account).
-  type InvoiceWithIban = { inv: Invoice; iban: string };
-  type ConveraBatchGroup = {
-    key: string;                  // benef.id.toString()
-    vendorId: string;
-    shortName: string;
-    fullName: string;
-    entries: InvoiceWithIban[];   // one per invoice, with the IBAN it currently routes to
-    distinctIbans: number;
-    anyIndia: boolean;
-  };
   type ConveraBatchSkip = {
     invoice: Invoice;
     reason: 'no vendor code assigned' | 'no Convera beneficiary linked' | string;  // guardrail may inject deprecation reason
@@ -594,7 +591,6 @@ const TimesheetSystem = () => {
   const [converaBatchExcluded, setConveraBatchExcluded] = useState<ConveraBatchExcluded[]>([]);
   // Manual rows appended to the batch export for beneficiaries paid outside the invoice flow
   // (e.g. Monolith, Arpit one-offs). Not persisted — cleared when the modal closes.
-  type ConveraBatchManualRow = { id: string; beneficiaryId: number; shortName: string; vendorId: string; country: string; amount: number; ref1: string };
   const [converaBatchManualRows, setConveraBatchManualRows] = useState<ConveraBatchManualRow[]>([]);
   const [converaBatchManualEditor, setConveraBatchManualEditor] = useState<{ open: boolean; search: string; benef: ConveraBeneficiary | null; amount: string; ref1: string }>({ open: false, search: '', benef: null, amount: '', ref1: '' });
   // Intuit Batch popup — copy-paste aid for accountant manually entering approved unpaid US
@@ -4965,77 +4961,14 @@ const TimesheetSystem = () => {
     setTimeout(() => setCopiedIntuitField(prev => prev === fieldKey ? null : prev), 1500);
   };
 
-  // Step 2: called by the modal's "Download CSV" button. Applies the accountant's combine
-  // choices to generate the final Convera batch CSV.
+  // Step 2: called by the modal's "Download CSV" button. Thin wrapper around
+  // src/lib/convera/batchFile.ts (behavior locked by 34 tests there).
   const downloadConveraBatchCSV = () => {
-    const csvEscape = (v: string) => /[,"\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-
-    type OutRow = { vendorId: string; beneName: string; amount: number; ref1: string; ref2: string };
-    const outRows: OutRow[] = [];
-
-    for (const g of converaBatchGroups) {
-      const combined = g.entries.length > 1 && converaBatchCombine[g.key];
-      const beneName = (g.shortName || g.fullName).slice(0, 100);
-      const ref2 = g.anyIndia ? 'PURPOSE OF FUNDS P0802' : '';
-      if (combined) {
-        const amount = g.entries.reduce((s, e) => s + e.inv.totalAmount, 0);
-        // Ref1 for a combined group: if every entry shares the same invoice_number
-        // (TEAL umbrella pattern — one invoice covers N contractors, we split by
-        // contractor for our books but Convera sees one payment), use that shared
-        // number. Otherwise fall back to "Multiple Invoices".
-        const distinctInvNums = new Set(g.entries.map(e => e.inv.invoiceNumber));
-        const ref1 = distinctInvNums.size === 1
-          ? [...distinctInvNums][0].slice(0, 100)
-          : 'Multiple Invoices';
-        outRows.push({ vendorId: g.vendorId, beneName, amount, ref1, ref2 });
-      } else {
-        for (const e of g.entries) {
-          outRows.push({ vendorId: g.vendorId, beneName, amount: e.inv.totalAmount, ref1: e.inv.invoiceNumber.slice(0, 100), ref2 });
-        }
-      }
-    }
-
-    // Manual rows (added via the "+ Add manual row" button) — indistinguishable from invoice-driven
-    // rows in the CSV; the yellow highlight in the preview was for the accountant's review only.
-    for (const r of converaBatchManualRows) {
-      outRows.push({
-        vendorId: r.vendorId,
-        beneName: r.shortName.slice(0, 100),
-        amount:   r.amount,
-        ref1:     r.ref1.slice(0, 100),
-        ref2:     r.country === 'India' ? 'PURPOSE OF FUNDS P0802' : '',
-      });
-    }
-
+    const outRows = buildConveraBatchRows(converaBatchGroups, converaBatchCombine, converaBatchManualRows);
     if (outRows.length === 0) { alert('Nothing to export.'); return; }
-
-    // Filename date = most-common pay_on_date across all invoices being included
     const allInvoices = converaBatchGroups.flatMap(g => g.entries.map(e => e.inv));
-    const dates = allInvoices.map(i => i.payOnDate).filter(Boolean) as string[];
-    const dateCounts = dates.reduce<Record<string, number>>((acc, d) => { acc[d] = (acc[d] || 0) + 1; return acc; }, {});
-    const mostCommon = Object.entries(dateCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
-    const filenameDate = (mostCommon || formatDate(new Date())).replace(/-/g, '');
-
-    // Convera format contract (learned by comparing our rejected file to their
-    // working file, 2026-07-15):
-    //   - TargetAmount integer for whole dollars, .XX only for real cents
-    //   - CRLF line endings (\r\n) not LF — Convera's parser rejects LF
-    //   - No trailing newline
-    //   - No UTF-8 BOM (their working file had none)
-    const fmtAmount = (n: number) => Number.isInteger(n) ? String(n) : n.toFixed(2);
-    const lines = ['VendorID,BeneName,TargetAmount,Ref1,Ref2,POP'];
-    for (const r of outRows) {
-      lines.push([
-        csvEscape(r.vendorId),
-        csvEscape(r.beneName),
-        fmtAmount(r.amount),
-        csvEscape(r.ref1),
-        csvEscape(r.ref2),
-        csvEscape('Trade Related'),
-      ].join(','));
-    }
-    const csv = lines.join('\r\n');
-    triggerDownload(csv, `SynergiePayments_${filenameDate}.csv`);
+    const filenameDate = computeConveraBatchFilename(allInvoices);
+    triggerDownload(buildConveraBatchCsv(outRows), `SynergiePayments_${filenameDate}.csv`);
     setShowConveraBatchModal(false);
     setConveraBatchManualRows([]);
     setConveraBatchManualEditor({ open: false, search: '', benef: null, amount: '', ref1: '' });
