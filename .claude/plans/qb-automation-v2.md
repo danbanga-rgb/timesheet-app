@@ -397,14 +397,15 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
-**S8 (2026-09-21) — spec locked, slice roadmap.**
+**S8 (2026-09-21) — spec locked, slice roadmap, Slice V1 shipped.**
 - Dan dumped directionality → Claude asked 4 rounds of follow-ups → answers locked spec.
 - Historical seed run (`scripts/one-off/qb-vendor-mapping/historical-seed.cjs`): pp is 1:1 with contractor; Teal is only true umbrella; zero drift from our 16 pushes.
 - Locked: mapping key = pp_id (Option A — wire-text fallback rejected due to drift risk); 3-tier smart mapping (exact → history → LLM Haiku); one-line Ready rows with hover-expand + click-to-edit; sync preflight order (push mappable first → sync → resolved rest); north star principle (§1 decision #7).
 - §5 populated (§5.1–§5.13). §9 slice roadmap added.
-- 3 misrouted `qb_vendor_mappings` rows confirmed on prod: NT LIMITED → Buzalko (id 81), NT LTD → Marin Purgar (id 64), Deniz D-KODE → Amra vendor (id 72). Dan holding QB push queue until Slice V1 lands.
-- Memory saved: [[qb-vendor-mapping-truths-2026-09]] (durable empirical baseline); [[qb-automation-v2-pivot]] updated with S8 decisions.
-- Next: Slice V1 next session (see §9).
+- Slice V1 SHIPPED: migration + backfill + classifier + 3 orphan splits (NT LIMITED, D-KODE Kesten, Teal Crossroads). Applied to prod. Verified via qb_mirror historical bills for Amra/Deniz (deliberate 7-month split, kept as designed).
+- Memory saved: [[qb-vendor-mapping-truths-2026-09]] (durable empirical baseline); [[qb-automation-v2-pivot]] updated. Also [[no-secret-defaults-in-scripts]] rule saved after GitHub Push Protection blocked first Slice V1 push.
+- Push queue stays held through V12 cutover (Dan's decision — no test-push needed for V1; correct mapping display is the V1 goal).
+- Next: Slice V2 (skeleton + admin gate) new session.
 
 ## §9. Slice roadmap (multi-session pickup)
 
@@ -412,8 +413,22 @@ Twelve self-contained slices. Each has: goal, files touched, acceptance, blocker
 
 Estimates are ranges; lean low per [[dont-overpad-estimates]].
 
-### Slice V1 — pp_id migration + classifier tweak (UNBLOCKS BUZALKO)
-**Est:** 2–3h. **Blocker for:** all downstream v2 work; also unblocks Dan's held push queue.
+### Slice V1 — pp_id migration + classifier tweak (UNBLOCKS BUZALKO) ✅ SHIPPED 2026-09-21
+**Est:** 2–3h. **Actual:** ~2.5h. **Applied to prod.**
+
+**Commits on branch `feature/qb-automation-v2`:**
+- `046fc90` migration + backfill script
+- `8ef7d0c` classifier (Pass 1 pp_id-first, Pass 2 pp_id seed)
+- `30d5232` TS.tsx wiring
+- `1df1b13` applied SQL package + audit artifacts
+
+**Prod change verified:** total_rows=110, pp_id_populated=55, legacy_null_kept=55. The 3 known misroutes (NT LIMITED, D-KODE Kesten, Teal Crossroads) split into per-pp rows and route correctly.
+
+**Push queue:** still held by Dan through V12 cutover (not V1). V1's purpose was correct mapping display, not enabling pushes.
+
+**Branch NOT merged to main yet** — will merge after V2+ slices land and full v2 arc is verified.
+
+**Original scope below (for reference):**
 
 **Goal:** move `qb_vendor_mappings` key from `counterparty_pattern` to `pp_id`. Classifier prefers pp_id row. Fix the 3 misrouted rows as a natural consequence.
 
