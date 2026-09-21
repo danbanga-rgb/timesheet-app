@@ -53,6 +53,7 @@ function eventOf(overrides: Partial<ClassifiableEvent> = {}): ClassifiableEvent 
 describe('classifyOne — Pass 1: explicit mapping', () => {
   it('applies bill_pmt mapping and flips status to ready', () => {
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'intuit_xlsx',
       counterpartyPattern: 'Hover cloud technologies LLC',
       qbVendorListId: 'VEND-HOVER',
@@ -71,6 +72,7 @@ describe('classifyOne — Pass 1: explicit mapping', () => {
 
   it('applies check mapping with expense account', () => {
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'intuit_xlsx',
       counterpartyPattern: 'Lucien C Pinto',
       qbVendorListId: 'VEND-LUCIEN',
@@ -88,6 +90,7 @@ describe('classifyOne — Pass 1: explicit mapping', () => {
 
   it('applies ignore mapping — status becomes ignored, vendor/bank fields patched to null only if event had them set', () => {
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'intuit_xlsx',
       counterpartyPattern: 'CLOUDYGON',
       qbVendorListId: '',
@@ -119,6 +122,7 @@ describe('classifyOne — Pass 1: explicit mapping', () => {
 
   it('bill_add_and_pmt mapping includes expense account', () => {
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'intuit_xlsx',
       counterpartyPattern: 'TechAntz Inc.',
       qbVendorListId: 'VEND-TA',
@@ -134,6 +138,7 @@ describe('classifyOne — Pass 1: explicit mapping', () => {
 
   it('mapping with different source does not apply', () => {
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'convera',   // wrong source
       counterpartyPattern: 'Hover cloud technologies LLC',
       qbVendorListId: 'VEND-HOVER',
@@ -149,6 +154,7 @@ describe('classifyOne — Pass 1: explicit mapping', () => {
 
   it('mapping with null defaultTargetKind is skipped (falls through to Pass 2)', () => {
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'intuit_xlsx',
       counterpartyPattern: 'Hover cloud technologies LLC',
       qbVendorListId: 'VEND-HOVER',
@@ -165,7 +171,7 @@ describe('classifyOne — Pass 1: explicit mapping', () => {
 
 describe('classifyOne — Pass 2: profile-chain', () => {
   it('resolves via invoice → paymentProfile.qbVendorName → qb_vendors', () => {
-    const invoice: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invoice]]) }));
     expect(r.source).toBe('profile-chain');
@@ -182,22 +188,22 @@ describe('classifyOne — Pass 2: profile-chain', () => {
   });
 
   it('case-insensitive vendor match ("hovercloud" ↔ "HOVERCLOUD")', () => {
-    const invoice: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'hovercloud' };
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'hovercloud' };
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invoice]]) }));
     expect(r.source).toBe('profile-chain');
   });
 
   it('trims whitespace on vendor name', () => {
-    const invoice: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: '  HOVERCLOUD  ' };
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: '  HOVERCLOUD  ' };
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invoice]]) }));
     expect(r.source).toBe('profile-chain');
   });
 
   it('picks the first matched invoice when multiple are matched', () => {
-    const inv100: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
-    const inv101: ClassifiableInvoice = { id: 101, paymentProfileQbVendorName: 'FLAWLESS' };  // ignored
+    const inv100: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const inv101: ClassifiableInvoice = { id: 101, paymentProfileId: 101, paymentProfileQbVendorName: 'FLAWLESS' };  // ignored
     const event = eventOf({ matchedInvoiceIds: [100, 101] });
     const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, inv100], [101, inv101]]) }));
     expect(r.source).toBe('profile-chain');
@@ -205,7 +211,7 @@ describe('classifyOne — Pass 2: profile-chain', () => {
   });
 
   it('Slice B: Convera event resolves via profile-chain and seeds a source=convera mapping', () => {
-    const invoice: ClassifiableInvoice = { id: 250, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const invoice: ClassifiableInvoice = { id: 250, paymentProfileId: 250, paymentProfileQbVendorName: 'HOVERCLOUD' };
     const event = eventOf({
       source: 'convera',
       counterpartyRaw: 'HOVERCLOUD LLC BENEFICIARY',
@@ -239,7 +245,7 @@ describe('classifyOne — Pass 2: profile-chain', () => {
   });
 
   it('skipReason when payment profile has no qbVendorName', () => {
-    const invoice: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: null };
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: null };
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invoice]]) }));
     expect(r.source).toBe(null);
@@ -247,7 +253,7 @@ describe('classifyOne — Pass 2: profile-chain', () => {
   });
 
   it('skipReason when qbVendorName does not match any qb_vendors row', () => {
-    const invoice: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'UNKNOWN VENDOR' };
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'UNKNOWN VENDOR' };
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invoice]]) }));
     expect(r.source).toBe(null);
@@ -255,7 +261,7 @@ describe('classifyOne — Pass 2: profile-chain', () => {
   });
 
   it('skipReason when bank account is missing (8220 not resolved)', () => {
-    const invoice: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({
       invoicesById: new Map([[100, invoice]]),
@@ -273,6 +279,7 @@ describe('classifyOne — precedence and guards', () => {
     // CLOUDYGON case: even though a matched invoice with a qb_vendor exists,
     // an explicit ignore mapping must win.
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'intuit_xlsx',
       counterpartyPattern: 'Hover cloud technologies LLC',
       qbVendorListId: '',
@@ -280,7 +287,7 @@ describe('classifyOne — precedence and guards', () => {
       defaultBankAccountListId: null,
       defaultExpenseAccountListId: null,
     };
-    const invoice: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
     const event = eventOf({ matchedInvoiceIds: [100] });
     const r = classifyOne(event, ctxOf({
       mappings: [mapping],
@@ -309,6 +316,7 @@ describe('classifyOne — precedence and guards', () => {
     // Idempotency: an event that's already been correctly classified but still
     // status='pending' (edge case) should produce a minimal patch — only status.
     const mapping: ClassifiableMapping = {
+      ppId: null,
       source: 'intuit_xlsx',
       counterpartyPattern: 'Hover cloud technologies LLC',
       qbVendorListId: 'VEND-HOVER',
@@ -334,7 +342,7 @@ describe('classifyOne — precedence and guards', () => {
 
 describe('classifyBatch', () => {
   it('de-dupes seed mappings across multiple events with same counterparty_raw', () => {
-    const inv: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const inv: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
     const events = [
       eventOf({ id: 1, matchedInvoiceIds: [100] }),
       eventOf({ id: 2, matchedInvoiceIds: [100] }),
@@ -350,8 +358,8 @@ describe('classifyBatch', () => {
   });
 
   it('keeps separate seeds for different counterparties', () => {
-    const invA: ClassifiableInvoice = { id: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
-    const invB: ClassifiableInvoice = { id: 200, paymentProfileQbVendorName: 'FLAWLESS' };
+    const invA: ClassifiableInvoice = { id: 100, paymentProfileId: 100, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const invB: ClassifiableInvoice = { id: 200, paymentProfileId: 200, paymentProfileQbVendorName: 'FLAWLESS' };
     const events = [
       eventOf({ id: 1, matchedInvoiceIds: [100] }),
       eventOf({ id: 2, counterpartyRaw: 'Flawless Apps LLC', matchedInvoiceIds: [200] }),
@@ -378,5 +386,148 @@ describe('resolveBankAccount', () => {
   it('accepts a custom pattern', () => {
     const acct = resolveBankAccount([ACCT_OTHER, ACCT_ADMIN], 'admin');
     expect(acct?.listId).toBe('ACCT-ADMIN');
+  });
+});
+
+// ─── v2 (Slice V1): pp_id-based mapping ──────────────────────────────────────
+//
+// Fixes the "NATIVE TEAMS LIMITED → Buzalko for everyone" bug. See
+// [[qb-vendor-mapping-truths-2026-09]] for empirical context.
+
+describe('classifyOne — v2 pp_id-scoped mapping', () => {
+  it('pp_id-scoped mapping wins over counterparty_pattern legacy row', () => {
+    // Two mappings share the wire memo but have different pp_ids. The one
+    // matching the event's resolved pp should win, NOT the legacy pattern row.
+    const legacyMapping: ClassifiableMapping = {
+      source: 'convera',
+      counterpartyPattern: 'NATIVE TEAMS LIMITED',
+      ppId: null,   // legacy pattern-only row (would win pre-v2)
+      qbVendorListId: 'VEND-WRONG-BUZALKO',   // the misroute target
+      defaultTargetKind: 'bill_pmt',
+      defaultBankAccountListId: 'ACCT-8220',
+      defaultExpenseAccountListId: null,
+    };
+    const nejraMapping: ClassifiableMapping = {
+      source: 'convera',
+      counterpartyPattern: 'NATIVE TEAMS LIMITED',
+      ppId: 500,   // Nejra's pp
+      qbVendorListId: 'VEND-NEJRA',
+      defaultTargetKind: 'bill_pmt',
+      defaultBankAccountListId: 'ACCT-8220',
+      defaultExpenseAccountListId: null,
+    };
+    const nejraInvoice: ClassifiableInvoice = {
+      id: 210,
+      paymentProfileId: 500,
+      paymentProfileQbVendorName: 'HOVERCLOUD',   // arbitrary — Pass 1 wins so Pass 2 vendor unused
+    };
+    const event = eventOf({
+      source: 'convera',
+      counterpartyRaw: 'NATIVE TEAMS LIMITED',
+      matchedInvoiceIds: [210],
+    });
+    const r = classifyOne(event, ctxOf({
+      mappings: [legacyMapping, nejraMapping],
+      invoicesById: new Map([[210, nejraInvoice]]),
+    }));
+    expect(r.source).toBe('mapping');
+    expect(r.patch.counterparty_qb_vendor_list_id).toBe('VEND-NEJRA');   // pp-scoped won
+    expect(r.patch.counterparty_qb_vendor_list_id).not.toBe('VEND-WRONG-BUZALKO');
+  });
+
+  it('legacy pp_id=null mapping still fires when no pp resolvable (fallback)', () => {
+    const legacyMapping: ClassifiableMapping = {
+      source: 'convera',
+      counterpartyPattern: 'ONE-OFF WIRE',
+      ppId: null,
+      qbVendorListId: 'VEND-HOVER',
+      defaultTargetKind: 'bill_pmt',
+      defaultBankAccountListId: 'ACCT-8220',
+      defaultExpenseAccountListId: null,
+    };
+    // No matched invoices → no pp resolvable → fallback to counterparty_pattern.
+    const event = eventOf({ source: 'convera', counterpartyRaw: 'ONE-OFF WIRE' });
+    const r = classifyOne(event, ctxOf({ mappings: [legacyMapping] }));
+    expect(r.source).toBe('mapping');
+    expect(r.patch.counterparty_qb_vendor_list_id).toBe('VEND-HOVER');
+  });
+
+  it('pp_id-scoped mapping does NOT fire for a different pp (safety)', () => {
+    const nejraMapping: ClassifiableMapping = {
+      source: 'convera',
+      counterpartyPattern: 'NATIVE TEAMS LIMITED',
+      ppId: 500,
+      qbVendorListId: 'VEND-NEJRA',
+      defaultTargetKind: 'bill_pmt',
+      defaultBankAccountListId: 'ACCT-8220',
+      defaultExpenseAccountListId: null,
+    };
+    // Different contractor (Petra, pp=501) — Nejra's mapping should NOT apply.
+    const petraInvoice: ClassifiableInvoice = {
+      id: 220,
+      paymentProfileId: 501,
+      paymentProfileQbVendorName: 'FLAWLESS',   // will drive Pass 2
+    };
+    const event = eventOf({
+      source: 'convera',
+      counterpartyRaw: 'NATIVE TEAMS LIMITED',
+      matchedInvoiceIds: [220],
+    });
+    const r = classifyOne(event, ctxOf({
+      mappings: [nejraMapping],
+      invoicesById: new Map([[220, petraInvoice]]),
+    }));
+    // Pass 1 did NOT match (pp differs); Pass 2 kicks in for Petra's vendor.
+    expect(r.source).toBe('profile-chain');
+    expect(r.patch.counterparty_qb_vendor_list_id).toBe('VEND-FLAW');
+    // And seeds a NEW row keyed by Petra's pp (503), not Nejra's.
+    expect(r.seedMapping?.pp_id).toBe(501);
+    expect(r.seedMapping?.qb_vendor_list_id).toBe('VEND-FLAW');
+  });
+
+  it('single-pp event produces seed with pp_id set (v2 seed shape)', () => {
+    const invoice: ClassifiableInvoice = { id: 100, paymentProfileId: 77, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const event = eventOf({ matchedInvoiceIds: [100] });
+    const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invoice]]) }));
+    expect(r.seedMapping).toBeDefined();
+    expect(r.seedMapping?.pp_id).toBe(77);
+    expect(r.seedMapping?.counterparty_pattern).toBe('Hover cloud technologies LLC');
+  });
+
+  it('multi-pp event (umbrella wire) does NOT seed', () => {
+    // One wire matches invoices from TWO different contractors (Bimosoft-style).
+    const invA: ClassifiableInvoice = { id: 100, paymentProfileId: 77, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const invB: ClassifiableInvoice = { id: 101, paymentProfileId: 88, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const event = eventOf({ matchedInvoiceIds: [100, 101] });
+    const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invA], [101, invB]]) }));
+    expect(r.source).toBe('profile-chain');
+    // Same vendor across both invoices, but different pps → no seed (would need one row per pp).
+    expect(r.seedMapping).toBeUndefined();
+  });
+
+  it('two events, same counterparty_raw, different pps → two distinct seeds (Buzalko-fix regression)', () => {
+    const nejraInvoice: ClassifiableInvoice = { id: 210, paymentProfileId: 500, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const petraInvoice: ClassifiableInvoice = { id: 220, paymentProfileId: 501, paymentProfileQbVendorName: 'FLAWLESS' };
+    const events = [
+      eventOf({ id: 1, source: 'convera', counterpartyRaw: 'NATIVE TEAMS LIMITED', matchedInvoiceIds: [210] }),
+      eventOf({ id: 2, source: 'convera', counterpartyRaw: 'NATIVE TEAMS LIMITED', matchedInvoiceIds: [220] }),
+    ];
+    const { seedMappings } = classifyBatch(events, ctxOf({
+      invoicesById: new Map([[210, nejraInvoice], [220, petraInvoice]]),
+    }));
+    // Two distinct pps → two seeds (not deduped as they would be pre-v2).
+    expect(seedMappings).toHaveLength(2);
+    const ppIds = seedMappings.map(s => s?.pp_id).sort();
+    expect(ppIds).toEqual([500, 501]);
+  });
+
+  it('multi-vendor umbrella event does NOT seed (existing behavior, preserved)', () => {
+    // Same wire, different invoices with different vendor names AND different pps.
+    const invA: ClassifiableInvoice = { id: 100, paymentProfileId: 77, paymentProfileQbVendorName: 'HOVERCLOUD' };
+    const invB: ClassifiableInvoice = { id: 101, paymentProfileId: 88, paymentProfileQbVendorName: 'FLAWLESS' };
+    const event = eventOf({ matchedInvoiceIds: [100, 101] });
+    const r = classifyOne(event, ctxOf({ invoicesById: new Map([[100, invA], [101, invB]]) }));
+    expect(r.source).toBe('profile-chain');
+    expect(r.seedMapping).toBeUndefined();
   });
 });

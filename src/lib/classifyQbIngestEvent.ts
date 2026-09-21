@@ -13,10 +13,15 @@
 //
 // Two-pass strategy:
 //   Pass 1 — explicit mapping wins (from qb_vendor_mappings).
+//            v2 (Slice V1, 2026-09-21): mapping lookup prefers pp_id when
+//            the event has a single resolvable payment profile; falls back
+//            to counterparty_pattern for legacy rows without pp_id.
 //   Pass 2 — profile-chain inference: event → matched invoice →
 //            paymentProfile.qbVendorName → qb_vendors.list_id.
-//            When Pass 2 fires, we also emit a seed mapping row so
-//            future events for the same counterparty_raw hit Pass 1.
+//            When Pass 2 fires with a single resolvable pp, we emit a seed
+//            mapping row KEYED BY pp_id (v2). Multi-vendor umbrella wires
+//            and pp-less events do NOT seed — that's the fix for the
+//            "NATIVE TEAMS LIMITED → Buzalko for everyone" wire-memo bug.
 // ============================================================
 
 export type QbIngestKind = 'bill_pmt' | 'bill_add_and_pmt' | 'check' | 'ignore';
@@ -39,7 +44,8 @@ export interface ClassifiableEvent {
 
 export interface ClassifiableMapping {
   source: string;
-  counterpartyPattern: string;          // exact match on counterparty_raw (for now)
+  counterpartyPattern: string;          // exact match on counterparty_raw (legacy — fallback only)
+  ppId: number | null;                  // v2 primary key. When set, this row applies to this pp regardless of counterparty_pattern.
   qbVendorListId: string;
   defaultTargetKind: QbIngestKind | null;
   defaultBankAccountListId: string | null;
@@ -48,6 +54,7 @@ export interface ClassifiableMapping {
 
 export interface ClassifiableInvoice {
   id: number;
+  paymentProfileId: number | null;             // invoice.payment_profile->>'id' as int
   paymentProfileQbVendorName: string | null;   // invoice.paymentProfile?.qbVendorName
 }
 
@@ -80,11 +87,15 @@ export interface ClassificationResult {
     status?: QbIngestStatus;
     status_updated_at?: string;
   };
-  // If Pass 2 fired, upsert this into qb_vendor_mappings so future events for
-  // the same counterparty_raw hit Pass 1. Undefined = no seed.
+  // If Pass 2 fired with a single resolvable pp, upsert this into
+  // qb_vendor_mappings so future events for the same pp hit Pass 1 fast.
+  // Keyed by pp_id (v2, Slice V1). Undefined = no seed (multi-vendor umbrella
+  // or event with no resolvable single pp — we don't seed wire-memo-only rows
+  // anymore since the same wire memo appears across many contractors).
   seedMapping?: {
     source: string;
-    counterparty_pattern: string;
+    counterparty_pattern: string;   // kept for backward compat + debug — no longer the key
+    pp_id: number;                  // primary key
     qb_vendor_list_id: string;
     default_target_kind: QbIngestKind;
     default_bank_account_list_id: string | null;
@@ -119,14 +130,50 @@ const buildPatch = (
 };
 
 // ─── Pass 1: explicit mapping ────────────────────────────────────────────────
+//
+// Lookup precedence (v2 Slice V1):
+//   1. pp_id-based: if event has EXACTLY ONE resolvable pp (single-invoice
+//      or all matched invoices share one pp), match mapping.ppId === eventPpId.
+//      Wins over any counterparty_pattern-only row.
+//   2. counterparty_pattern fallback: match mapping.counterpartyPattern ===
+//      event.counterpartyRaw AND mapping.ppId === null. Legacy rows still work.
+//
+// This kills the "one wire memo catches every contractor" bug (e.g. all
+// "NATIVE TEAMS LIMITED" wires being routed to a single seeded QB vendor).
+
+function resolveEventPpId(
+  event: ClassifiableEvent,
+  ctx: ClassifyContext,
+): number | null {
+  if (event.matchedInvoiceIds.length === 0) return null;
+  const ppSet = new Set<number>();
+  for (const invId of event.matchedInvoiceIds) {
+    const inv = ctx.invoicesById.get(invId);
+    if (!inv || inv.paymentProfileId == null) return null; // any unresolvable → bail
+    ppSet.add(inv.paymentProfileId);
+  }
+  return ppSet.size === 1 ? [...ppSet][0] : null;
+}
 
 function applyExplicitMapping(
   event: ClassifiableEvent,
   ctx: ClassifyContext,
 ): ClassificationResult | null {
-  const m = ctx.mappings.find(
-    x => x.source === event.source && x.counterpartyPattern === event.counterpartyRaw,
-  );
+  const eventPpId = resolveEventPpId(event, ctx);
+
+  // Try pp_id-scoped mapping first (v2 primary path).
+  let m: ClassifiableMapping | undefined = undefined;
+  if (eventPpId != null) {
+    m = ctx.mappings.find(x => x.source === event.source && x.ppId === eventPpId);
+  }
+  // Fall back to counterparty_pattern-only legacy rows (ppId == null).
+  if (!m) {
+    m = ctx.mappings.find(
+      x => x.source === event.source
+        && x.ppId == null
+        && x.counterpartyPattern === event.counterpartyRaw,
+    );
+  }
   if (!m || !m.defaultTargetKind) return null;
 
   const kind = m.defaultTargetKind;
@@ -157,7 +204,12 @@ function applyProfileChain(
   // umbrella wires (Bimosoft: one wire → N sub-vendors). Single-vendor:
   // classify + seed mapping. Multi-vendor: classify but DON'T seed a mapping
   // (there's no single vendor to map to; consumer fans per invoice at push).
+  //
+  // v2 (Slice V1): we ALSO track pp_ids per invoice. Seed only when single-pp
+  // resolved, so the seed is keyed by pp_id (not wire memo). Multi-pp events
+  // (umbrella wires) never seed.
   const vendorListIds = new Set<string>();
+  const ppIds = new Set<number>();
   let firstVendorListId: string | null = null;
   let firstMissingReason: string | null = null;
   for (const invId of event.matchedInvoiceIds) {
@@ -169,6 +221,7 @@ function applyProfileChain(
     if (!v) { if (!firstMissingReason) firstMissingReason = `qb_vendor "${name}" (invoice ${invId}) not in qb_vendors`; continue; }
     vendorListIds.add(v.listId);
     if (firstVendorListId == null) firstVendorListId = v.listId;
+    if (inv.paymentProfileId != null) ppIds.add(inv.paymentProfileId);
   }
   if (firstVendorListId == null) return { patch: {}, source: null, skipReason: firstMissingReason ?? 'no vendor resolvable from matched invoices' };
   if (!ctx.bankAccount) return { patch: {}, source: null, skipReason: 'bank account (8220) not found' };
@@ -176,6 +229,7 @@ function applyProfileChain(
   const kind: QbIngestKind = 'bill_pmt';
   const nextStatus: QbIngestStatus = 'ready';
   const isMultiVendor = vendorListIds.size > 1;
+  const singlePpId = ppIds.size === 1 ? [...ppIds][0] : null;
 
   // Seed default expense account for Convera-source so G7.6 create_bill has an
   // expense to attach without needing a separate bulk migration. Vendor Consultants
@@ -183,20 +237,26 @@ function applyProfileChain(
   // null — its consumer resolves expense from invoice metadata.
   const seedExpenseAccountListId = event.source === 'convera' ? '600000-1142369998' : null;
 
+  // Seed rules (v2):
+  //   - Multi-vendor umbrella → no seed (consumer fans per invoice at push time).
+  //   - Multi-pp event → no seed (would need one seed per pp; caller re-runs
+  //     for each invoice-context to seed).
+  //   - Single-vendor + single-pp → seed keyed by pp_id. Future events
+  //     matching this pp hit Pass 1 fast without polluting the wire-memo namespace.
+  const canSeed = !isMultiVendor && singlePpId != null;
+
   return {
     patch: buildPatch(event, firstVendorListId, kind, ctx.bankAccount.listId, null, nextStatus),
     source: 'profile-chain',
-    // Only seed mapping for single-vendor cases. Multi-vendor umbrella wires
-    // (Bimosoft-style) can't be represented as (source, counterparty_pattern)
-    // → single qb_vendor — the consumer fans per invoice at push time.
-    seedMapping: isMultiVendor ? undefined : {
+    seedMapping: canSeed ? {
       source: event.source,
       counterparty_pattern: event.counterpartyRaw,
+      pp_id: singlePpId!,
       qb_vendor_list_id: firstVendorListId,
       default_target_kind: kind,
       default_bank_account_list_id: ctx.bankAccount.listId,
       default_expense_account_list_id: seedExpenseAccountListId,
-    },
+    } : undefined,
   };
 }
 
@@ -236,12 +296,13 @@ export function classifyBatch(
   seedMappings: ClassificationResult['seedMapping'][];
 } {
   const results: Array<{ event: ClassifiableEvent; result: ClassificationResult }> = [];
+  // De-dupe by (source, pp_id) — the v2 mapping key.
   const seedByKey = new Map<string, NonNullable<ClassificationResult['seedMapping']>>();
   for (const e of events) {
     const r = classifyOne(e, ctx);
     results.push({ event: e, result: r });
     if (r.seedMapping) {
-      const k = `${r.seedMapping.source}||${r.seedMapping.counterparty_pattern}`;
+      const k = `${r.seedMapping.source}||pp:${r.seedMapping.pp_id}`;
       if (!seedByKey.has(k)) seedByKey.set(k, r.seedMapping);
     }
   }
