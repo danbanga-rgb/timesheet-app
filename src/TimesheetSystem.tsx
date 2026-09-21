@@ -1775,6 +1775,7 @@ const TimesheetSystem = () => {
     const invoicesById = new Map<number, ClassifiableInvoice>(
       invoices.map(i => [i.id, {
         id: i.id,
+        paymentProfileId: extractSnapPpId(i.paymentProfile),
         paymentProfileQbVendorName: resolveInvoiceQbVendorName(
           { snapPaymentProfileId: extractSnapPpId(i.paymentProfile), snapQbVendorName: i.paymentProfile?.qbVendorName ?? null, userId: i.userId },
           resolverPps,
@@ -1786,6 +1787,7 @@ const TimesheetSystem = () => {
     const mappings: ClassifiableMapping[] = mappingRows.map(r => ({
       source: (r.source as string) ?? '',
       counterpartyPattern: (r.counterparty_pattern as string) ?? '',
+      ppId: (r.pp_id as number | null) ?? null,
       qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
       defaultTargetKind: (r.default_target_kind as ClassifiableMapping['defaultTargetKind']) ?? null,
       defaultBankAccountListId: (r.default_bank_account_list_id as string | null) ?? null,
@@ -1809,7 +1811,9 @@ const TimesheetSystem = () => {
       const rows = seedMappings.filter((s): s is NonNullable<typeof s> => !!s).map(s => ({
         ...s, updated_at: new Date().toISOString(),
       }));
-      const { error } = await supabase.from('qb_vendor_mappings').upsert(rows, { onConflict: 'source,counterparty_pattern' });
+      // v2 (Slice V1): seed rows are keyed by pp_id (classifier only emits
+      // single-pp seeds now). UNIQUE(pp_id) constraint handles conflicts.
+      const { error } = await supabase.from('qb_vendor_mappings').upsert(rows, { onConflict: 'pp_id' });
       if (!error) seeded = rows.length;
       else console.warn('seed mappings upsert failed', error);
     }
@@ -2566,7 +2570,21 @@ const TimesheetSystem = () => {
         payee_list_kind: usePayeeName ? mapForm.payeeListKind : null,
         updated_at: new Date().toISOString(),
       };
-      const { error: upsertErr } = await supabase.from('qb_vendor_mappings').upsert(mappingRow, { onConflict: 'source,counterparty_pattern' });
+      // v2 (Slice V1): old UNIQUE(source, counterparty_pattern) was dropped
+      // (multiple contractors can share a wire memo). The widget path here
+      // doesn't have a pp_id (user is mapping a wire memo directly), so we
+      // write a "legacy" row with pp_id=NULL. Insert-or-update by looking up
+      // existing legacy row for this (source, counterparty_pattern) first.
+      const { data: existingLegacy } = await supabase
+        .from('qb_vendor_mappings')
+        .select('id')
+        .eq('source', source)
+        .eq('counterparty_pattern', counterparty)
+        .is('pp_id', null)
+        .maybeSingle();
+      const upsertErr = existingLegacy
+        ? (await supabase.from('qb_vendor_mappings').update(mappingRow).eq('id', existingLegacy.id)).error
+        : (await supabase.from('qb_vendor_mappings').insert(mappingRow)).error;
       if (upsertErr) throw upsertErr;
 
       // Retroactively apply to all pending AND ignored events for this
