@@ -45,6 +45,7 @@ import InvoicesTab from './roles/Accountant/tabs/Invoices';
 import { useInvoiceFilters } from './hooks/useInvoiceFilters';
 import { reconcileInvoiceLive } from './lib/reconcileInvoice';
 import InvoiceDetailModal from './roles/Accountant/modals/InvoiceDetailModal';
+import QbAutomationV2 from './features/QbAutomationV2';
 import {
   buildConveraBatchRows,
   buildConveraBatchCsv,
@@ -5182,9 +5183,15 @@ const TimesheetSystem = () => {
               <button onClick={() => setAdminView('chatactivity')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'chatactivity' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
                 <MessageSquare className="w-5 h-5" /> Chat Activity
               </button>
+              <button onClick={() => setAdminView('qbautov2')} className={'flex-1 px-6 py-4 font-medium flex items-center justify-center gap-2 ' + (adminView === 'qbautov2' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-gray-600 hover:bg-gray-50')}>
+                <UploadCloud className="w-5 h-5" /> QB Auto v2
+                <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-100 text-amber-700">PREVIEW</span>
+              </button>
 
             </div>
           </div>
+
+          {adminView === 'qbautov2' && <QbAutomationV2 />}
 
           {adminView === 'users' && (
             <div className="bg-white rounded-lg shadow-md p-6">

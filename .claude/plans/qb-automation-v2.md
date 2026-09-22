@@ -57,32 +57,39 @@
 - Claude writes the **design doc** section-by-section as answers land.
 - **No Claude questions until Dan signals ready.**
 
-## §3. Directory structure (proposed — LOCK BEFORE FIRST CODE)
+## §3. Directory structure (LOCKED — Slice V2 2026-09-22)
+
+**Role-agnostic module.** The module doesn't belong to any role — roles mount it. Slice V2 mounts it in admin view; V12 cutover mounts it in accountant view and deletes v1.
 
 ```
-src/roles/Accountant/tabs/QbAutomationV2/
-  index.tsx                    # tab entry; role gate + composition
-  Header.tsx                   # top counter + freshness + QBWC heartbeat + sync buttons
+src/features/QbAutomationV2/     # role-agnostic feature module
+  index.tsx                      # top-level composition — no role imports
+  README.md                      # module intent + status
+  Header.tsx                     # top counter + freshness + QBWC heartbeat + sync buttons (V10)
   sections/
     <TBD once §5 sections land>
   cards/
     <card components; QbExport-inspired>
   hooks/
-    useQbAutomationV2.ts       # top-level state hook (analog of QA7)
-    useQbSyncState.ts          # freshness + heartbeat (analog of QA3)
+    useQbAutomationV2.ts         # top-level state hook (V3)
+    useQbSyncState.ts            # freshness + heartbeat (V10)
     <TBD>
-  lib/
-    (nothing new here — pure fns land in src/lib/qbAutomation/ so v1 can also consume)
   tests/
     <TBD>
 
-src/lib/qbAutomation/          # NEW — shared with v1 if ever needed
-  missingBills.ts              # pure fn (was QA1)
-  inboxGroups.ts               # pure fn (was QA2)
+src/lib/qbAutomation/            # NEW — pure fns, shared with v1 if useful
+  missingBills.ts                # pure fn
+  inboxGroups.ts                 # pure fn
   <TBD>
 ```
 
-**Rationale:** anything pure moves to `src/lib/qbAutomation/` so v1 and v2 can both consume during coexistence. Anything role-specific lives in the v2 folder.
+**Rationale:**
+- Sibling to `roles/`, `lib/`, `components/` — matches the modularization arc's "plug-and-play" principle.
+- Any role can `import QbAutomationV2 from './features/QbAutomationV2'` and mount it. Admin mounts it in Slice V2; accountant will mount it at V12 cutover.
+- Empty subfolders (`sections/`, `cards/`, `hooks/`, `tests/`) are created by the slice that first needs them — cleaner history than adding `.gitkeep` stubs upfront.
+- Anything pure lands in `src/lib/qbAutomation/` so v1 can also consume during coexistence.
+
+**Path correction (2026-09-22):** original §3 draft said `src/roles/Accountant/tabs/QbAutomationV2/`. That path contradicted the "role-agnostic module" intent from §1.2 and Dan's Slice V2 clarification that "any role can use it." Moved to `src/features/QbAutomationV2/` in the Slice V2 commit.
 
 ## §4. Reuse manifest (inventory of v1 assets v2 pulls in)
 
@@ -397,6 +404,13 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S9 (2026-09-22) — Slice V2 shipped: skeleton + admin mount.**
+- Location reframed: `src/features/QbAutomationV2/` (role-agnostic) instead of `src/roles/Accountant/tabs/QbAutomationV2/`. Any role mounts the same module — matches the modularization arc's plug-and-play principle. Plan §3 updated in the same commit.
+- Admin dashboard gains "QB Auto v2 (PREVIEW)" tab as the 6th admin view (next to Chat Activity). Renders placeholder card with title + subtitle + "Slice V2 — skeleton shipped" footer.
+- Accountant view untouched. Dan compares preview vs prod side-by-side: admin session on preview URL vs accountant session (Dan has the creds) in a second browser.
+- Reused `<UploadCloud>` (already imported) for the tab icon; small amber `PREVIEW` pill next to label.
+- v1 QB Automation tab: zero changes.
+
 **S8 (2026-09-21) — spec locked, slice roadmap, Slice V1 shipped.**
 - Dan dumped directionality → Claude asked 4 rounds of follow-ups → answers locked spec.
 - Historical seed run (`scripts/one-off/qb-vendor-mapping/historical-seed.cjs`): pp is 1:1 with contractor; Teal is only true umbrella; zero drift from our 16 pushes.
@@ -467,22 +481,27 @@ Estimates are ranges; lean low per [[dont-overpad-estimates]].
 
 ---
 
-### Slice V2 — QbAutomationV2 skeleton + admin gate
-**Est:** 1–2h. **Depends on:** V1 (not strictly, but no reason to build UI until mapping is fixed).
+### Slice V2 — QbAutomationV2 skeleton + admin mount ✅ SHIPPED 2026-09-22
+**Est:** 1–2h. **Actual:** ~1h.
 
-**Goal:** create the v2 tab folder + a placeholder tab visible only to admins.
+**Location reframe:** originally proposed at `src/roles/Accountant/tabs/QbAutomationV2/` (§3 draft) — moved to `src/features/QbAutomationV2/` to match the role-agnostic module intent from §1.2. Any role mounts the same module. Admin mounts in V2; accountant mounts at V12 cutover.
 
-**Files:**
-- New: `src/roles/Accountant/tabs/QbAutomationV2/index.tsx` — renders a "coming soon" placeholder.
-- Edit: `src/TimesheetSystem.tsx` — add admin-gated tab entry alongside the existing QB Automation tab. Dan (admin) sees v2 tab; accountant sees v1 only.
-- New: `src/roles/Accountant/tabs/QbAutomationV2/README.md` — module intent + link to plan doc.
+**Shipped files:**
+- New: `src/features/QbAutomationV2/index.tsx` — centered placeholder card (title + subtitle + "Slice V2 — skeleton shipped").
+- New: `src/features/QbAutomationV2/README.md` — module intent + link to plan.
+- Edit: `src/TimesheetSystem.tsx` — imported `QbAutomationV2`; added `setAdminView('qbautov2')` button (6th admin tab, right of Chat Activity) with `UploadCloud` icon + amber `PREVIEW` pill; added `{adminView === 'qbautov2' && <QbAutomationV2 />}` block above the users block. Reused already-imported `UploadCloud`.
+- Edit: `.claude/plans/qb-automation-v2.md` — §3 path fix, §8 session log entry, this entry.
 
-**Acceptance:**
-- Dan sees "QB Automation v2 (admin preview)" tab. Accountant does not.
+**Acceptance met:**
+- Admin session shows "QB Auto v2 (PREVIEW)" tab as 6th admin view.
 - Placeholder renders cleanly.
-- No regression in v1.
+- Accountant view completely untouched (line 5900 branch never sees the new tab).
+- v1 QB Automation tab: zero regression (no diffs to accountant render block or line 6010).
+- `npm run build` green.
 
-**Rollback:** delete tab folder + revert TS.tsx tab-nav change.
+**Preview workflow:** Dan compares admin session on preview URL vs accountant session (Dan holds accountant creds) in a second browser. Side-by-side prod-vs-preview.
+
+**Rollback:** delete `src/features/QbAutomationV2/`, revert TS.tsx admin-view diff (import + tab button + render block).
 
 ---
 
