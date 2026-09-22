@@ -1,9 +1,14 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import type { ReadyRow } from '../hooks/useQbAutomationV2';
+import type { QbVendorRow } from '../../../lib/qbStateSync/types';
+import type { SaveMappingArgs } from './NeedsMappingCard';
+import InlineVendorPicker from './InlineVendorPicker';
 
 interface Props {
   rows: ReadyRow[];
+  vendors: QbVendorRow[];
+  onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
   onCancel: () => void;
   onConfirm: () => void;
   busy: boolean;
@@ -25,7 +30,10 @@ function verdictBadgeCls(v: ReadyRow['verdict']): string {
   return 'bg-blue-100 text-blue-800';
 }
 
-export default function PushPreviewModal({ rows, onCancel, onConfirm, busy }: Props) {
+export default function PushPreviewModal({ rows, vendors, onSaveMapping, onCancel, onConfirm, busy }: Props) {
+  const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
+  const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
+
   const groups = useMemo(() => {
     const pay = rows.filter(r => r.verdict === 'will_pay');
     const createPay = rows.filter(r => r.verdict === 'will_create_and_pay');
@@ -38,6 +46,30 @@ export default function PushPreviewModal({ rows, onCancel, onConfirm, busy }: Pr
   }, [rows]);
 
   const grandTotal = rows.reduce((s, r) => s + r.amount, 0);
+
+  const handleSaveVendor = async (row: ReadyRow, args: { qbVendorListId: string; qbVendorName: string }) => {
+    if (row.ppId <= 0) {
+      alert('This row has no payment profile — cannot save mapping.');
+      return;
+    }
+    setSavingRowKey(row.rowKey);
+    try {
+      await onSaveMapping({
+        eventId: row.eventId ?? null,
+        ppId: row.ppId,
+        source: row.ppSource,
+        counterpartyPattern: row.ppCounterpartyPattern,
+        qbVendorListId: args.qbVendorListId,
+        qbVendorName: args.qbVendorName,
+      });
+      setEditingRowKey(null);
+    } catch (e) {
+      console.error('preview inline saveMapping failed', e);
+      alert('Failed to save mapping: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSavingRowKey(null);
+    }
+  };
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={busy ? undefined : onCancel}>
@@ -93,7 +125,35 @@ export default function PushPreviewModal({ rows, onCancel, onConfirm, busy }: Pr
                     <td className="px-3 py-1.5 font-medium text-gray-800 whitespace-nowrap">{r.contractorName}</td>
                     <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{r.monthLabel || '—'}</td>
                     <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{r.invoiceNumber || '—'}</td>
-                    <td className="px-3 py-1.5 text-gray-700">{r.qbVendorName}</td>
+                    <td className="px-3 py-1.5 text-gray-700" style={{ minWidth: 260 }}>
+                      {editingRowKey === r.rowKey ? (
+                        <InlineVendorPicker
+                          initialValue={r.qbVendorMapped ? r.qbVendorName : ''}
+                          vendors={vendors}
+                          candidates={r.candidates}
+                          saving={savingRowKey === r.rowKey}
+                          onSave={args => handleSaveVendor(r, args)}
+                          onCancel={() => setEditingRowKey(null)}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={busy || r.ppId <= 0}
+                          onClick={() => setEditingRowKey(r.rowKey)}
+                          title={r.ppId <= 0 ? 'No payment profile — cannot re-map' : 'Click to change QB vendor mapping'}
+                          className={
+                            'text-left w-full px-1 py-0.5 rounded ' +
+                            (busy || r.ppId <= 0
+                              ? 'cursor-not-allowed opacity-60'
+                              : 'hover:bg-indigo-50 hover:ring-1 hover:ring-indigo-200 cursor-pointer')
+                          }
+                        >
+                          <span className={r.qbVendorMapped ? '' : 'text-amber-600 italic'}>
+                            {r.qbVendorName}
+                          </span>
+                        </button>
+                      )}
+                    </td>
                     <td className="px-3 py-1.5 text-right font-mono font-semibold whitespace-nowrap">
                       {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
                     </td>

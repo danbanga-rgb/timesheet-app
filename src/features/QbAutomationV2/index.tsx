@@ -223,6 +223,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
       {previewOpen && (
         <PushPreviewModal
           rows={selectedRows}
+          vendors={props.vendors}
+          onSaveMapping={props.onSaveMapping}
           busy={pushing}
           onCancel={() => setPreviewOpen(false)}
           onConfirm={handleConfirmPush}
