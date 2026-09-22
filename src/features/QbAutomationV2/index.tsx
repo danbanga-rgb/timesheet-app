@@ -28,14 +28,14 @@ type SubTab = 'inbox' | 'mapping';
 export default function QbAutomationV2(props: QbAutomationV2Props) {
   const {
     readyRows,
-    activeReadyRows,
     skippedRows,
     needsMappingRows,
     mappingRows,
-    readyGroup,
-    changeReadyGroup,
     payCount,
     createCount,
+    payTotal,
+    createTotal,
+    allCreateSelected,
     selectedKeys,
     selectionCount,
     selectionTotal,
@@ -43,6 +43,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     toggle,
     selectAll,
     clearSelection,
+    includeBillCreations,
+    excludeBillCreations,
     skip,
     unskip,
   } = useQbAutomationV2(props);
@@ -73,7 +75,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-            <p className="text-xs text-gray-500">Admin preview · Slice V5.2 (Create Bill flow + posted-only modal)</p>
+            <p className="text-xs text-gray-500">Admin preview · Slice V5.3 (unified Ready + opt-in Bill Creations)</p>
           </div>
         </div>
         {subTab === 'inbox' && <PushBar count={selectionCount} total={selectionTotal} onPush={handlePushSelected} />}
@@ -110,7 +112,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           <KpiStrip
             active={category}
             onSelect={setCategory}
-            readyCount={activeReadyRows.length}
+            readyCount={readyRows.length}
             readyTotal={readyTotal}
             needsMappingCount={needsMappingRows.length}
             skippedCount={skippedRows.length}
@@ -135,10 +137,13 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               onClearSelection={clearSelection}
               onSkip={skip}
               onUnskip={unskip}
-              readyGroup={readyGroup}
-              onChangeReadyGroup={changeReadyGroup}
               payCount={payCount}
               createCount={createCount}
+              payTotal={payTotal}
+              createTotal={createTotal}
+              allCreateSelected={allCreateSelected}
+              onIncludeBillCreations={includeBillCreations}
+              onExcludeBillCreations={excludeBillCreations}
             />
           )}
         </>

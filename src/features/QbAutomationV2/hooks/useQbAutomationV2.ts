@@ -1,18 +1,18 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Invoice, PaymentProfile, QbIngestEvent, QbVendorMapping, UserProfile } from '../../../types';
 import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types';
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
 
-export type ReadyGroup = 'pay' | 'create';   // sub-filter within Ready card
+export type ReadyGroup = 'pay' | 'create';
 
 function groupForVerdict(v: Verdict): ReadyGroup {
   return v === 'will_create_bill' ? 'create' : 'pay';
 }
 
 export interface ReadyRow {
-  rowKey: string;              // 'evt-<id>' or 'inv-<id>' — stable across renders
-  eventId: number | null;      // null when row is invoice-driven (no event yet)
+  rowKey: string;
+  eventId: number | null;
   invoiceId: number | null;
   contractorName: string;
   invoiceNumber: string;
@@ -98,7 +98,6 @@ export function useQbAutomationV2({
     const rows: ReadyRow[] = [];
     const invoiceIdsCoveredByEvents = new Set<number>();
 
-    // 1. Event-driven Ready rows (existing logic).
     for (const e of events) {
       if (e.status !== 'ready') continue;
       if (e.targetQbTxnKind !== 'bill_pmt' && e.targetQbTxnKind !== 'bill_add_and_pmt') continue;
@@ -145,10 +144,6 @@ export function useQbAutomationV2({
       });
     }
 
-    // 2. Invoice-driven "Will Create Bill" rows.
-    // Approved invoices whose payment_profile has a QB vendor mapping but
-    // no bill exists in qb_mirror yet AND no event has claimed the invoice.
-    // These push as BillAdd only (payment happens later when the wire lands).
     for (const inv of invoices) {
       if (inv.status !== 'approved') continue;
       if (invoiceIdsCoveredByEvents.has(inv.id)) continue;
@@ -270,18 +265,41 @@ export function useQbAutomationV2({
 
   const [skippedKeys, setSkippedKeys] = useState<Set<string>>(new Set());
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  const [readyGroup, setReadyGroup] = useState<ReadyGroup>('pay');
 
-  const activeReadyRows = useMemo(() => allReadyRows.filter(r => !skippedKeys.has(r.rowKey)), [allReadyRows, skippedKeys]);
+  const readyRows = useMemo(() => allReadyRows.filter(r => !skippedKeys.has(r.rowKey)), [allReadyRows, skippedKeys]);
   const skippedRows = useMemo(() => allReadyRows.filter(r => skippedKeys.has(r.rowKey)), [allReadyRows, skippedKeys]);
 
-  const payCount = useMemo(() => activeReadyRows.filter(r => r.group === 'pay').length, [activeReadyRows]);
-  const createCount = useMemo(() => activeReadyRows.filter(r => r.group === 'create').length, [activeReadyRows]);
+  const payCount = useMemo(() => readyRows.filter(r => r.group === 'pay').length, [readyRows]);
+  const createCount = useMemo(() => readyRows.filter(r => r.group === 'create').length, [readyRows]);
+  const payTotal = useMemo(() => readyRows.filter(r => r.group === 'pay').reduce((s, r) => s + r.amount, 0), [readyRows]);
+  const createTotal = useMemo(() => readyRows.filter(r => r.group === 'create').reduce((s, r) => s + r.amount, 0), [readyRows]);
 
-  const readyRows = useMemo(
-    () => activeReadyRows.filter(r => r.group === readyGroup),
-    [activeReadyRows, readyGroup],
-  );
+  // Auto-select all Pay rows on first Ready population. Once initialized,
+  // stay out of the user's way — new Pay rows arriving are auto-added; new
+  // Create rows are NOT auto-added (user opts in via includeBillCreations).
+  const initializedRef = useRef(false);
+  const prevPayKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const currentPayKeys = new Set(readyRows.filter(r => r.group === 'pay').map(r => r.rowKey));
+    if (!initializedRef.current && currentPayKeys.size > 0) {
+      setSelectedKeys(new Set(currentPayKeys));
+      initializedRef.current = true;
+      prevPayKeysRef.current = currentPayKeys;
+      return;
+    }
+    if (initializedRef.current) {
+      // Add any newly-appearing Pay rows to selection.
+      const newlyAppeared = Array.from(currentPayKeys).filter(k => !prevPayKeysRef.current.has(k));
+      if (newlyAppeared.length > 0) {
+        setSelectedKeys(prev => {
+          const next = new Set(prev);
+          newlyAppeared.forEach(k => next.add(k));
+          return next;
+        });
+      }
+      prevPayKeysRef.current = currentPayKeys;
+    }
+  }, [readyRows]);
 
   const visibleSelectedKeys = useMemo(() => {
     const visible = new Set(readyRows.map(r => r.rowKey));
@@ -305,12 +323,29 @@ export function useQbAutomationV2({
     setSelectedKeys(new Set());
   }, []);
 
-  const changeReadyGroup = useCallback((next: ReadyGroup) => {
-    setReadyGroup(next);
-    // Clear selection on sub-filter switch — mixing verdicts silently would
-    // confuse the Push CTA count. Better to force an explicit re-select.
-    setSelectedKeys(new Set());
-  }, []);
+  const includeBillCreations = useCallback(() => {
+    const createKeys = readyRows.filter(r => r.group === 'create').map(r => r.rowKey);
+    setSelectedKeys(prev => {
+      const next = new Set(prev);
+      createKeys.forEach(k => next.add(k));
+      return next;
+    });
+  }, [readyRows]);
+
+  const excludeBillCreations = useCallback(() => {
+    const createKeys = new Set(readyRows.filter(r => r.group === 'create').map(r => r.rowKey));
+    setSelectedKeys(prev => {
+      const next = new Set(prev);
+      createKeys.forEach(k => next.delete(k));
+      return next;
+    });
+  }, [readyRows]);
+
+  const createSelectedCount = useMemo(
+    () => readyRows.filter(r => r.group === 'create' && visibleSelectedKeys.has(r.rowKey)).length,
+    [readyRows, visibleSelectedKeys],
+  );
+  const allCreateSelected = createCount > 0 && createSelectedCount === createCount;
 
   const skip = useCallback((rowKey: string) => {
     setSkippedKeys(prev => {
@@ -341,18 +376,19 @@ export function useQbAutomationV2({
     return sum;
   }, [readyRows, visibleSelectedKeys]);
 
-  const readyTotal = useMemo(() => activeReadyRows.reduce((s, r) => s + r.amount, 0), [activeReadyRows]);
+  const readyTotal = useMemo(() => readyRows.reduce((s, r) => s + r.amount, 0), [readyRows]);
 
   return {
-    readyRows,             // sub-filtered by readyGroup
-    activeReadyRows,       // all non-skipped Ready rows
+    readyRows,
     skippedRows,
     needsMappingRows,
     mappingRows,
-    readyGroup,
-    changeReadyGroup,
     payCount,
     createCount,
+    payTotal,
+    createTotal,
+    createSelectedCount,
+    allCreateSelected,
     selectedKeys: visibleSelectedKeys,
     selectionCount: visibleSelectedKeys.size,
     selectionTotal,
@@ -360,6 +396,8 @@ export function useQbAutomationV2({
     toggle,
     selectAll,
     clearSelection,
+    includeBillCreations,
+    excludeBillCreations,
     skip,
     unskip,
   };

@@ -1,4 +1,4 @@
-import type { ReadyRow, ReadyGroup } from '../hooks/useQbAutomationV2';
+import type { ReadyRow } from '../hooks/useQbAutomationV2';
 import type { CategoryKey } from './KpiStrip';
 
 interface Props {
@@ -12,11 +12,14 @@ interface Props {
   onSkip: (rowKey: string) => void;
   onUnskip: (rowKey: string) => void;
 
-  // Sub-filter (only relevant when viewing 'ready' — hidden otherwise)
-  readyGroup: ReadyGroup;
-  onChangeReadyGroup: (g: ReadyGroup) => void;
+  // Group summary + Bill Creations opt-in
   payCount: number;
   createCount: number;
+  payTotal: number;
+  createTotal: number;
+  allCreateSelected: boolean;
+  onIncludeBillCreations: () => void;
+  onExcludeBillCreations: () => void;
 }
 
 function fmtMoney(n: number): string {
@@ -48,10 +51,13 @@ export default function ReadyCard(props: Props) {
     onClearSelection,
     onSkip,
     onUnskip,
-    readyGroup,
-    onChangeReadyGroup,
     payCount,
     createCount,
+    payTotal,
+    createTotal,
+    allCreateSelected,
+    onIncludeBillCreations,
+    onExcludeBillCreations,
   } = props;
 
   const isSkippedView = category === 'skipped';
@@ -59,49 +65,50 @@ export default function ReadyCard(props: Props) {
 
   const emptyMsg = isSkippedView
     ? 'No skipped rows in this session.'
-    : readyGroup === 'create'
-      ? 'No new Bills to create right now.'
-      : 'Nothing to push right now. Approve invoices in the Invoices tab to see them here.';
-
-  const groupPill = (g: ReadyGroup, label: string, count: number) => (
-    <button
-      onClick={() => onChangeReadyGroup(g)}
-      className={
-        'px-2.5 py-1 text-xs font-medium rounded-full border transition ' +
-        (readyGroup === g
-          ? g === 'create'
-            ? 'bg-purple-600 text-white border-purple-600'
-            : 'bg-emerald-600 text-white border-emerald-600'
-          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50')
-      }
-    >
-      {label} <span className="ml-1 opacity-80">{count}</span>
-    </button>
-  );
+    : 'Nothing to push right now. Approve invoices in the Invoices tab to see them here.';
 
   return (
     <div className="bg-white rounded-lg shadow-md overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <h3 className="text-base font-semibold text-gray-800">
             {isSkippedView ? 'Skipped this session' : 'Ready to Push'}
           </h3>
-          <span className="px-2 py-0.5 text-xs font-medium rounded bg-gray-100 text-gray-700 border border-gray-200">
-            {rows.length} {rows.length === 1 ? 'item' : 'items'}
-          </span>
           {!isSkippedView && (
-            <div className="flex items-center gap-2 ml-2">
-              {groupPill('pay', 'Pay / Create + Pay', payCount)}
-              {groupPill('create', 'Create Bill Only', createCount)}
+            <div className="flex items-center gap-2 text-xs">
+              <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200 font-medium">
+                {payCount} {payCount === 1 ? 'Payment' : 'Payments'}
+                {payTotal > 0 && <span className="ml-1 text-blue-600">· {fmtMoney(payTotal)}</span>}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-purple-50 text-purple-800 border border-purple-200 font-medium">
+                {createCount} Bill {createCount === 1 ? 'Creation' : 'Creations'}
+                {createTotal > 0 && <span className="ml-1 text-purple-600">· {fmtMoney(createTotal)}</span>}
+              </span>
             </div>
           )}
+          {isSkippedView && (
+            <span className="px-2 py-0.5 text-xs font-medium rounded bg-gray-100 text-gray-700 border border-gray-200">
+              {rows.length} {rows.length === 1 ? 'item' : 'items'}
+            </span>
+          )}
         </div>
-        {!isSkippedView && rows.length > 1 && (
+        {!isSkippedView && rows.length > 0 && (
           <div className="flex items-center gap-3 text-xs">
+            {createCount > 0 && (
+              allCreateSelected ? (
+                <button onClick={onExcludeBillCreations} className="text-purple-700 hover:text-purple-900 font-medium">
+                  Exclude Bill Creations
+                </button>
+              ) : (
+                <button onClick={onIncludeBillCreations} className="text-purple-700 hover:text-purple-900 font-medium">
+                  Include {createCount} Bill {createCount === 1 ? 'Creation' : 'Creations'}
+                </button>
+              )
+            )}
             {allSelected ? (
               <button onClick={onClearSelection} className="text-gray-700 hover:text-gray-900 font-medium">Clear selection</button>
             ) : (
-              <button onClick={onSelectAll} className="text-emerald-700 hover:text-emerald-900 font-medium">Select all in view</button>
+              <button onClick={onSelectAll} className="text-emerald-700 hover:text-emerald-900 font-medium">Select all</button>
             )}
           </div>
         )}
@@ -132,7 +139,9 @@ export default function ReadyCard(props: Props) {
                   ? 'text-gray-400 bg-gray-50'
                   : isChecked
                     ? 'bg-blue-50 hover:bg-blue-100'
-                    : 'hover:bg-gray-50';
+                    : r.group === 'create'
+                      ? 'bg-purple-50/40 hover:bg-purple-50'
+                      : 'hover:bg-gray-50';
                 return (
                   <tr key={r.rowKey} className={rowCls}>
                     <td className="px-2 py-1.5 text-center">
