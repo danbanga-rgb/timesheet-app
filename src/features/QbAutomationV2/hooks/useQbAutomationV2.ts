@@ -4,7 +4,6 @@ import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types'
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
 import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../../../lib/qbAutomation/vendorMappingResolver';
-import { detectDiscrepancies, type Discrepancy, type RateHistoryEntry } from '../../../lib/qbAutomation/discrepancies';
 
 export type ReadyGroup = 'pay' | 'create';
 
@@ -30,7 +29,6 @@ export interface ReadyRow {
   qbVendorMapped: boolean;
   verdict: Verdict;
   group: ReadyGroup;
-  discrepancies: Discrepancy[];
 }
 
 export interface NeedsMappingRow {
@@ -70,7 +68,6 @@ export interface UseQbAutomationV2Args {
   paymentProfiles: PaymentProfile[];
   users: UserProfile[];
   mappings: QbVendorMapping[];
-  rateHistory: RateHistoryEntry[];
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -89,7 +86,6 @@ export function useQbAutomationV2({
   paymentProfiles,
   users,
   mappings,
-  rateHistory,
 }: UseQbAutomationV2Args) {
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
@@ -100,28 +96,6 @@ export function useQbAutomationV2({
     for (const row of mappings) if (row.ppId != null) m.set(row.ppId, row);
     return m;
   }, [mappings]);
-
-  // Vendor → set of contractor userIds routed there (posted events).
-  // Feeds discrepancy rule 3 (umbrella mismap).
-  const vendorContractors = useMemo(() => {
-    const m = new Map<string, Set<string>>();
-    for (const e of events) {
-      if (e.status !== 'posted') continue;
-      if (!e.counterpartyQbVendorListId) continue;
-      const invId = e.matchedInvoiceIds[0];
-      const inv = invId != null ? invoicesById.get(invId) : null;
-      if (!inv?.userId) continue;
-      if (!m.has(e.counterpartyQbVendorListId)) m.set(e.counterpartyQbVendorListId, new Set());
-      m.get(e.counterpartyQbVendorListId)!.add(inv.userId);
-    }
-    return m;
-  }, [events, invoicesById]);
-
-  const discrepancyCtx = useMemo(() => ({
-    rateHistory,
-    vendorContractors,
-    openBills: openBills.map(b => ({ vendorListId: b.vendorListId, refNumber: b.refNumber, txnDate: b.txnDate })),
-  }), [rateHistory, vendorContractors, openBills]);
 
   const allReadyRows: ReadyRow[] = useMemo(() => {
     const rows: ReadyRow[] = [];
@@ -152,19 +126,6 @@ export function useQbAutomationV2({
 
       if (invoice) invoiceIdsCoveredByEvents.add(invoice.id);
 
-      const discrepancies = detectDiscrepancies(
-        {
-          invoiceRate: invoice?.rate ?? null,
-          invoicePeriodEnd: invoice?.periodEnd ?? '',
-          invoiceUserId: invoice?.userId ?? null,
-          vendorListId: e.counterpartyQbVendorListId,
-          vendorName: qbVendorName,
-          refNumber,
-          monthKey,
-        },
-        discrepancyCtx,
-      );
-
       rows.push({
         rowKey: `evt-${e.id}`,
         eventId: e.id,
@@ -183,7 +144,6 @@ export function useQbAutomationV2({
         qbVendorMapped: vendorMapped,
         verdict,
         group: groupForVerdict(verdict),
-        discrepancies,
       });
     }
 
@@ -210,19 +170,6 @@ export function useQbAutomationV2({
 
       const qbVendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? '(unmapped)';
 
-      const discrepancies = detectDiscrepancies(
-        {
-          invoiceRate: inv.rate,
-          invoicePeriodEnd: inv.periodEnd,
-          invoiceUserId: inv.userId,
-          vendorListId: mapping.qbVendorListId,
-          vendorName: qbVendorName,
-          refNumber: inv.invoiceNumber,
-          monthKey,
-        },
-        discrepancyCtx,
-      );
-
       rows.push({
         rowKey: `inv-${inv.id}`,
         eventId: null,
@@ -241,13 +188,12 @@ export function useQbAutomationV2({
         qbVendorMapped: true,
         verdict: 'will_create_bill',
         group: 'create',
-        discrepancies,
       });
     }
 
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, discrepancyCtx]);
+  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId]);
 
   const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
     // Build history map ONCE per render — feeds tier 2 of the resolver.
@@ -353,24 +299,22 @@ export function useQbAutomationV2({
   const payTotal = useMemo(() => readyRows.filter(r => r.group === 'pay').reduce((s, r) => s + r.amount, 0), [readyRows]);
   const createTotal = useMemo(() => readyRows.filter(r => r.group === 'create').reduce((s, r) => s + r.amount, 0), [readyRows]);
 
-  // Auto-select all clean Pay rows on first Ready population. Rows with
-  // discrepancies stay UNCHECKED per §1.4 style — user must verify. Once
-  // initialized, new clean Pay rows auto-add; Create + flagged rows never
-  // auto-add (opt-in required).
+  // Auto-select all Pay rows on first Ready population. Once initialized,
+  // stay out of the user's way — new Pay rows arriving are auto-added; new
+  // Create rows are NOT auto-added (user opts in via includeBillCreations).
   const initializedRef = useRef(false);
-  const prevCleanPayKeysRef = useRef<Set<string>>(new Set());
+  const prevPayKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const currentCleanPayKeys = new Set(
-      readyRows.filter(r => r.group === 'pay' && r.discrepancies.length === 0).map(r => r.rowKey),
-    );
-    if (!initializedRef.current && readyRows.length > 0) {
-      setSelectedKeys(new Set(currentCleanPayKeys));
+    const currentPayKeys = new Set(readyRows.filter(r => r.group === 'pay').map(r => r.rowKey));
+    if (!initializedRef.current && currentPayKeys.size > 0) {
+      setSelectedKeys(new Set(currentPayKeys));
       initializedRef.current = true;
-      prevCleanPayKeysRef.current = currentCleanPayKeys;
+      prevPayKeysRef.current = currentPayKeys;
       return;
     }
     if (initializedRef.current) {
-      const newlyAppeared = Array.from(currentCleanPayKeys).filter(k => !prevCleanPayKeysRef.current.has(k));
+      // Add any newly-appearing Pay rows to selection.
+      const newlyAppeared = Array.from(currentPayKeys).filter(k => !prevPayKeysRef.current.has(k));
       if (newlyAppeared.length > 0) {
         setSelectedKeys(prev => {
           const next = new Set(prev);
@@ -378,7 +322,7 @@ export function useQbAutomationV2({
           return next;
         });
       }
-      prevCleanPayKeysRef.current = currentCleanPayKeys;
+      prevPayKeysRef.current = currentPayKeys;
     }
   }, [readyRows]);
 
@@ -406,12 +350,8 @@ export function useQbAutomationV2({
 
   const selectGroup = useCallback((group: ReadyGroup) => {
     // Replace-semantics: selecting a group discards other selections.
-    // Also skips flagged rows — user has to verify each flag first.
-    setSelectedKeys(new Set(
-      readyRows
-        .filter(r => r.group === group && r.discrepancies.length === 0)
-        .map(r => r.rowKey),
-    ));
+    // Matches Dan's mental model — "Select Payments" = "show me only Payments in selection".
+    setSelectedKeys(new Set(readyRows.filter(r => r.group === group).map(r => r.rowKey)));
   }, [readyRows]);
 
   const skip = useCallback((rowKey: string) => {

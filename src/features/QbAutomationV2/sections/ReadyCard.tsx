@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react';
-import { AlertTriangle } from 'lucide-react';
 import type { ReadyRow, ReadyGroup } from '../hooks/useQbAutomationV2';
 import type { Verdict } from '../../../lib/qbAutomation/verdict';
 import type { CategoryKey } from './KpiStrip';
@@ -182,10 +181,6 @@ export default function ReadyCard(props: Props) {
                     : r.group === 'create'
                       ? 'bg-purple-50/40 hover:bg-purple-50'
                       : 'hover:bg-gray-50';
-                const hasDiscrepancy = r.discrepancies.length > 0;
-                const discrepancyTitle = hasDiscrepancy
-                  ? r.discrepancies.map(d => `⚠ ${d.message}\n   → ${d.resolveHint}`).join('\n\n')
-                  : undefined;
                 return (
                   <tr key={r.rowKey} className={rowCls}>
                     <td className="px-2 py-1.5 text-center">
@@ -202,14 +197,6 @@ export default function ReadyCard(props: Props) {
                       )}
                     </td>
                     <td className={'px-2 py-1.5 font-medium whitespace-nowrap ' + (isSkippedView ? '' : 'text-gray-800')}>
-                      {hasDiscrepancy && (
-                        <span
-                          className="inline-flex items-center mr-1 align-middle"
-                          title={discrepancyTitle}
-                        >
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                        </span>
-                      )}
                       {r.contractorName}
                     </td>
                     <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
