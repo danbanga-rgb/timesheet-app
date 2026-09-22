@@ -5,6 +5,7 @@ interface Props {
   onSelect: (key: CategoryKey) => void;
   readyCount: number;
   readyTotal: number;
+  needsMappingCount: number;
   skippedCount: number;
 }
 
@@ -42,7 +43,7 @@ function KpiCard(p: CardProps) {
   );
 }
 
-export default function KpiStrip({ active, onSelect, readyCount, readyTotal, skippedCount }: Props) {
+export default function KpiStrip({ active, onSelect, readyCount, readyTotal, needsMappingCount, skippedCount }: Props) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <KpiCard
@@ -58,17 +59,17 @@ export default function KpiStrip({ active, onSelect, readyCount, readyTotal, ski
         secondary={readyTotal > 0 ? fmtMoney(readyTotal) : null}
       />
       <KpiCard
-        active={false}
-        disabled
-        onClick={() => {}}
+        active={active === 'needs_mapping'}
+        disabled={needsMappingCount === 0}
+        onClick={() => onSelect('needs_mapping')}
         headBg="bg-amber-50"
         headText="text-amber-700"
         numText="text-amber-900"
         border="border-amber-200"
         activeRing="ring-amber-400"
         label="Needs Mapping"
-        value={<span className="text-amber-400">—</span>}
-        secondary="lands in Slice V4"
+        value={needsMappingCount === 0 ? <span className="text-amber-400">—</span> : needsMappingCount}
+        secondary={needsMappingCount === 0 ? 'nothing to map' : 'click to resolve'}
       />
       <KpiCard
         active={active === 'skipped'}

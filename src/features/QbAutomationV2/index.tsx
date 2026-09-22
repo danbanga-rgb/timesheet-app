@@ -5,18 +5,21 @@ import type { QbOpenBillRow, QbVendorRow } from '../../lib/qbStateSync/types';
 import { useQbAutomationV2 } from './hooks/useQbAutomationV2';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
+import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingCard';
 
 export interface QbAutomationV2Props {
   events: QbIngestEvent[];
   openBills: QbOpenBillRow[];
   vendors: QbVendorRow[];
   invoices: Invoice[];
+  onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
 }
 
 export default function QbAutomationV2(props: QbAutomationV2Props) {
   const {
     readyRows,
     skippedRows,
+    needsMappingRows,
     selectedIds,
     selectionCount,
     selectionTotal,
@@ -34,7 +37,9 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     alert('Push flow lands in Slice V8. This is the V3 skeleton — selection + preview only.');
   };
 
-  const rowsForView = category === 'skipped' ? skippedRows : readyRows;
+  const showNeedsMapping = category === 'needs_mapping';
+  const showReadyOrSkipped = category === 'ready' || category === 'skipped';
+  const rowsForReadyView = category === 'skipped' ? skippedRows : readyRows;
 
   return (
     <div className="space-y-4">
@@ -44,7 +49,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
         </div>
         <div>
           <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-          <p className="text-xs text-gray-500">Admin preview · Slice V3 (Ready card + KPIs)</p>
+          <p className="text-xs text-gray-500">Admin preview · Slice V4 (Ready + Needs Mapping)</p>
         </div>
       </div>
 
@@ -53,22 +58,33 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
         onSelect={setCategory}
         readyCount={readyRows.length}
         readyTotal={readyTotal}
+        needsMappingCount={needsMappingRows.length}
         skippedCount={skippedRows.length}
       />
 
-      <ReadyCard
-        category={category}
-        rows={rowsForView}
-        selectedIds={selectedIds}
-        selectionCount={selectionCount}
-        selectionTotal={selectionTotal}
-        onToggle={toggle}
-        onSelectAll={selectAll}
-        onClearSelection={clearSelection}
-        onPushSelected={handlePushSelected}
-        onSkip={skip}
-        onUnskip={unskip}
-      />
+      {showNeedsMapping && (
+        <NeedsMappingCard
+          rows={needsMappingRows}
+          vendors={props.vendors}
+          onSaveMapping={props.onSaveMapping}
+        />
+      )}
+
+      {showReadyOrSkipped && (
+        <ReadyCard
+          category={category}
+          rows={rowsForReadyView}
+          selectedIds={selectedIds}
+          selectionCount={selectionCount}
+          selectionTotal={selectionTotal}
+          onToggle={toggle}
+          onSelectAll={selectAll}
+          onClearSelection={clearSelection}
+          onPushSelected={handlePushSelected}
+          onSkip={skip}
+          onUnskip={unskip}
+        />
+      )}
     </div>
   );
 }

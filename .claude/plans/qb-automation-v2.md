@@ -404,6 +404,14 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S11 (2026-09-22) — Slice V4 shipped: Needs Mapping card + inline resolve.**
+- New section `src/features/QbAutomationV2/sections/NeedsMappingCard.tsx` — table with columns Contractor · Period · Payment Profile · QB Vendor (autocomplete) · Total · Action. Datalist-backed autocomplete against `qb_vendors`. `Map & Send to Ready` button commits mapping.
+- Hook extended: `needsMappingRows` filters `!counterpartyQbVendorListId && ppId > 0 && active event`. pp_id=0 snapshot artifact filtered per Slice V1 note.
+- KPI card "Needs Mapping" now live: shows real count, click-to-filter, disabled at 0.
+- Wrapper handler `onSaveMapping` in TS.tsx: pp_id-primary upsert into `qb_vendor_mappings` (`onConflict: 'pp_id'`) + immediate flip of the current event to `status='ready'` + `applyClassificationPass()` for sibling pp events + reload.
+- Default `default_target_kind='bill_add_and_pmt'` (safe default for 99% of contractor cases; classifier fallbacks handle bank + expense).
+- AI tier (V6) deferred: no suggest-chips row yet; only manual autocomplete.
+
 **S10 (2026-09-22) — Slice V3 shipped: Ready card + verdict lib.**
 - New verdict lib `src/lib/qbAutomation/verdict.ts` — pure fn `computeVerdict({kind, vendorListId, refNumber, month}, openBills) → 'will_pay' | 'will_create_and_pay' | null`. Live-truth logic: bill_add_and_pmt flips to will_pay when mirror actually has the bill. 10 unit tests (kinds, vendor filter, ref normalization, month scope, missing fields).
 - New hook `src/features/QbAutomationV2/hooks/useQbAutomationV2.ts` — takes wrapper state (events, openBills, vendors, invoices), builds `ReadyRow[]` sorted by contractor A→Z, owns selection state.
@@ -545,21 +553,28 @@ Estimates are ranges; lean low per [[dont-overpad-estimates]].
 
 ---
 
-### Slice V4 — Needs Vendor Mapping card + inline resolve
-**Est:** 3–5h. **Depends on:** V3.
+### Slice V4 — Needs Vendor Mapping card + inline resolve ✅ SHIPPED 2026-09-22
+**Est:** 3–5h. **Actual:** ~30min.
 
-**Goal:** render §5.3. No AI yet (V6 adds it) — for now, blank suggest chips + manual autocomplete.
+**Shipped files:**
+- New: `src/features/QbAutomationV2/sections/NeedsMappingCard.tsx` — table + autocomplete + save.
+- Edit: `src/features/QbAutomationV2/hooks/useQbAutomationV2.ts` — `needsMappingRows` filter, pp_id-guarded.
+- Edit: `src/features/QbAutomationV2/sections/KpiStrip.tsx` — Needs Mapping card active/disabled by count.
+- Edit: `src/features/QbAutomationV2/index.tsx` — mounts NeedsMappingCard on `category === 'needs_mapping'`.
+- Edit: `src/TimesheetSystem.tsx` — inline `onSaveMapping` handler (pp_id-primary upsert + event patch + classification + reload).
 
-**Files:**
-- New: `src/roles/Accountant/tabs/QbAutomationV2/sections/NeedsMappingCard.tsx`
-- Edit: `useQbAutomationV2.ts` — bucket events into cards.
+**Locked decisions:**
+- Default `target_kind='bill_add_and_pmt'` (safe default; classifier fills bank+expense via fallbacks).
+- Skip rows with `paymentProfile.id <= 0` (pre-launch JSONB artifact).
+- Autocomplete uses datalist over `qb_vendors`. Case-insensitive name→listId lookup. Unmatched name → alert.
+- After save: event flipped to ready immediately (real-time UX for the mapped row) + classification pass runs for sibling same-pp events.
 
-**Acceptance:**
-- Rows without a tier-1 hit surface here.
-- Manual autocomplete works; commit writes to `qb_vendor_mappings` via existing `saveQbVendorMapping` (with pp_id per V1).
-- Committing a mapping moves the row to Ready in real time.
+**Acceptance met:**
+- Rows without vendor mapping AND with a valid pp_id surface in the amber Needs Mapping card.
+- Manual autocomplete + commit works; writes to `qb_vendor_mappings` with pp_id.
+- Committing moves the row to Ready in real time (event patched + reload).
 
-**Rollback:** delete file + revert bucketing.
+**Rollback:** delete `NeedsMappingCard.tsx`, revert hook + KpiStrip + index.tsx + TS.tsx onSaveMapping.
 
 ---
 

@@ -5199,6 +5199,42 @@ const TimesheetSystem = () => {
               openBills={qbOpenBills}
               vendors={qbVendorsList}
               invoices={invoices}
+              onSaveMapping={async ({ eventId, ppId, source, counterpartyPattern, qbVendorListId }) => {
+                // pp_id-primary mapping upsert (Slice V1 architecture).
+                // default_target_kind = 'bill_add_and_pmt' — safe default for
+                // 99% of contractor cases; classifier fallbacks cover bank +
+                // expense per [[qb-expense-account-conventions]].
+                const nowIso = new Date().toISOString();
+                const { error: mapErr } = await supabase
+                  .from('qb_vendor_mappings')
+                  .upsert(
+                    {
+                      pp_id: ppId,
+                      source,
+                      counterparty_pattern: counterpartyPattern,
+                      qb_vendor_list_id: qbVendorListId,
+                      default_target_kind: 'bill_add_and_pmt',
+                      updated_at: nowIso,
+                    },
+                    { onConflict: 'pp_id' },
+                  );
+                if (mapErr) throw mapErr;
+                // Flip THIS event to ready immediately for real-time UX;
+                // sibling pp events get picked up by applyClassificationPass.
+                const { error: evtErr } = await supabase
+                  .from('qb_ingest_events')
+                  .update({
+                    counterparty_qb_vendor_list_id: qbVendorListId,
+                    target_qb_txn_kind: 'bill_add_and_pmt',
+                    status: 'ready',
+                    status_updated_at: nowIso,
+                  })
+                  .eq('id', eventId);
+                if (evtErr) throw evtErr;
+                await applyClassificationPass();
+                await loadQbIngestEvents();
+                await loadQbVendorMappings();
+              }}
             />
           )}
 

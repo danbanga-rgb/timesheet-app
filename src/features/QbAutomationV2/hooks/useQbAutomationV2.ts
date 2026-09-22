@@ -13,11 +13,25 @@ export interface ReadyRow {
   rate: number | null;
   periodStart: string;
   periodEnd: string;
-  monthKey: string;      // 'YYYY-MM'
-  monthLabel: string;    // 'Sep 2026'
-  qbVendorName: string;  // '(unmapped)' if vendorListId doesn't resolve
+  monthKey: string;
+  monthLabel: string;
+  qbVendorName: string;
   qbVendorMapped: boolean;
   verdict: Verdict;
+}
+
+export interface NeedsMappingRow {
+  eventId: number;
+  source: string;
+  counterpartyRaw: string;
+  contractorName: string;
+  invoiceNumber: string;
+  amount: number;
+  currency: string;
+  monthKey: string;
+  monthLabel: string;
+  ppLabel: string;
+  ppId: number;
 }
 
 export interface UseQbAutomationV2Args {
@@ -85,6 +99,47 @@ export function useQbAutomationV2({ events, openBills, vendors, invoices }: UseQ
     return rows;
   }, [events, invoicesById, vendorsById, openBills]);
 
+  const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
+    const rows: NeedsMappingRow[] = [];
+    for (const e of events) {
+      if (e.status === 'posted' || e.status === 'ignored') continue;
+      if (e.rawData?.__backfill) continue;
+      if (e.resolvedAction === 'already_done' || e.resolvedAction === 'pre_our_system') continue;
+      if (e.counterpartyQbVendorListId) continue;
+
+      const invoice: Invoice | null = e.matchedInvoiceIds.length > 0
+        ? (invoicesById.get(e.matchedInvoiceIds[0]) ?? null)
+        : null;
+
+      // Pre-launch snapshots have payment_profile.id === 0 — filter to real ppIds.
+      // See [[qb-automation-v2-pivot]] Slice V1 note on pp_id=0 in snapshots.
+      const ppId = invoice?.paymentProfile?.id ?? 0;
+      if (!ppId || ppId <= 0) continue;
+
+      const monthKey = invoice?.periodEnd?.slice(0, 7) ?? '';
+      const ppLabel = invoice?.paymentProfile?.companyName
+        || invoice?.paymentProfile?.bankName
+        || e.counterpartyRaw
+        || '(no pp label)';
+
+      rows.push({
+        eventId: e.id,
+        source: e.source,
+        counterpartyRaw: e.counterpartyRaw,
+        contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
+        invoiceNumber: invoice?.invoiceNumber ?? '',
+        amount: e.amount,
+        currency: invoice?.currency || 'USD',
+        monthKey,
+        monthLabel: monthLabelFromKey(monthKey),
+        ppLabel,
+        ppId,
+      });
+    }
+    rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
+    return rows;
+  }, [events, invoicesById]);
+
   const [skippedIds, setSkippedIds] = useState<Set<number>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
@@ -147,6 +202,7 @@ export function useQbAutomationV2({ events, openBills, vendors, invoices }: UseQ
   return {
     readyRows,
     skippedRows,
+    needsMappingRows,
     selectedIds: visibleSelectedIds,
     selectionCount: visibleSelectedIds.size,
     selectionTotal,
