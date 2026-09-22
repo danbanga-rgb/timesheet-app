@@ -5191,7 +5191,14 @@ const TimesheetSystem = () => {
             </div>
           </div>
 
-          {adminView === 'qbautov2' && <QbAutomationV2 />}
+          {adminView === 'qbautov2' && (
+            <QbAutomationV2
+              events={qbIngestEvents}
+              openBills={qbOpenBills}
+              vendors={qbVendorsList}
+              invoices={invoices}
+            />
+          )}
 
           {adminView === 'users' && (
             <div className="bg-white rounded-lg shadow-md p-6">

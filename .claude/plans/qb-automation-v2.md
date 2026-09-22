@@ -404,6 +404,17 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S10 (2026-09-22) — Slice V3 shipped: Ready card + verdict lib.**
+- New verdict lib `src/lib/qbAutomation/verdict.ts` — pure fn `computeVerdict({kind, vendorListId, refNumber, month}, openBills) → 'will_pay' | 'will_create_and_pay' | null`. Live-truth logic: bill_add_and_pmt flips to will_pay when mirror actually has the bill. 10 unit tests (kinds, vendor filter, ref normalization, month scope, missing fields).
+- New hook `src/features/QbAutomationV2/hooks/useQbAutomationV2.ts` — takes wrapper state (events, openBills, vendors, invoices), builds `ReadyRow[]` sorted by contractor A→Z, owns selection state.
+- New section `src/features/QbAutomationV2/sections/ReadyCard.tsx` — emerald-themed card matching §5.2 anatomy (contractor · INV · $ · month · → vendor · verdict chip). Select-All / Clear header controls; Push CTA shows `Push N items · $X,XXX`, disabled at 0, no-op alert (V8 will wire real push).
+- Contractor label per Q1 answer: `invoice.userName` from `matchedInvoiceIds[0]`, fallback to `counterpartyRaw`, fallback to '(unknown)'.
+- Month per Q2 answer: derived from `invoice.periodEnd.slice(0,7)` — formatted "Sep 2026".
+- G7.5/G7.6 shadow events per Q3 answer: deferred to V8.
+- Ready filter: `status === 'ready' && targetQbTxnKind ∈ {'bill_pmt','bill_add_and_pmt'} && !rawData.__backfill`. Excludes check, ignore, pending, already_done, backfill.
+- QbAutomationV2 grew from `() => JSX` to `(props) => JSX` — wrapper now passes `events`, `openBills`, `vendors`, `invoices`.
+- Hover-expand (Pp / Expense / Bank / Memo secondary line) deferred to V7 — pairs with discrepancy tooltip work.
+
 **S9 (2026-09-22) — Slice V2 shipped: skeleton + admin mount.**
 - Location reframed: `src/features/QbAutomationV2/` (role-agnostic) instead of `src/roles/Accountant/tabs/QbAutomationV2/`. Any role mounts the same module — matches the modularization arc's plug-and-play principle. Plan §3 updated in the same commit.
 - Admin dashboard gains "QB Auto v2 (PREVIEW)" tab as the 6th admin view (next to Chat Activity). Renders placeholder card with title + subtitle + "Slice V2 — skeleton shipped" footer.
@@ -505,26 +516,32 @@ Estimates are ranges; lean low per [[dont-overpad-estimates]].
 
 ---
 
-### Slice V3 — Ready card + row anatomy + verdict lib
-**Est:** 5–7h. **Depends on:** V2.
+### Slice V3 — Ready card + row anatomy + verdict lib ✅ SHIPPED 2026-09-22
+**Est:** 5–7h. **Actual:** ~1h (leaner scope than plan est'd — hover-expand deferred to V7).
 
-**Goal:** first real content in v2. Reads existing wrapper state; renders Ready card per §5.2.
+**Shipped files:**
+- New: `src/lib/qbAutomation/verdict.ts` — pure verdict fn.
+- New: `src/lib/qbAutomation/__tests__/verdict.test.ts` — 10 tests (2 kinds × 2 mirror states + guards).
+- New: `src/features/QbAutomationV2/hooks/useQbAutomationV2.ts` — hook.
+- New: `src/features/QbAutomationV2/sections/ReadyCard.tsx` — emerald card, §5.2 primary line.
+- Edit: `src/features/QbAutomationV2/index.tsx` — accepts props, composes ReadyCard.
+- Edit: `src/TimesheetSystem.tsx` — passes `events`, `openBills`, `vendors`, `invoices` to `<QbAutomationV2 />`.
 
-**Files:**
-- New: `src/roles/Accountant/tabs/QbAutomationV2/sections/ReadyCard.tsx`
-- New: `src/roles/Accountant/tabs/QbAutomationV2/hooks/useQbAutomationV2.ts`
-- New: `src/lib/qbAutomation/verdict.ts` — pure fn: given event + mirror state → verdict (`will_create_and_pay` | `will_pay` | ...).
-- New: `src/lib/qbAutomation/__tests__/verdict.test.ts`
-- Edit: `src/roles/Accountant/tabs/QbAutomationV2/index.tsx` — compose card.
+**Locked decisions:**
+- Contractor label: `invoice.userName` → `counterpartyRaw` → '(unknown)'.
+- Month: `invoice.periodEnd.slice(0,7)` — formatted "Sep 2026".
+- Verdict: live-truth (mirror check flips will_create_and_pay → will_pay when bill actually exists).
+- G7.5/G7.6 shadow events: deferred to V8.
+- Hover-expand: deferred to V7 (pairs with discrepancy).
 
-**Acceptance:**
-- Rows render per §5.2 anatomy.
-- Verdict chip correct on ≥ 3 sample event types (unit tests).
-- Bulk select/deselect works.
-- Push button shows correct count + amount preview.
-- Push button is wired to a no-op handler for now (V8 wires the real push).
+**Acceptance met:**
+- Rows render per §5.2 primary line (checkbox · contractor · INV · $ · month · → vendor · chip).
+- Verdict lib: 10/10 tests pass including live-truth flip case.
+- Bulk Select All / Clear.
+- Push button shows `Push N items · $X,XXX`, disabled at 0.
+- Push handler alerts "V8 wires real push" — no-op per plan.
 
-**Rollback:** delete new files; revert placeholder.
+**Rollback:** delete `src/lib/qbAutomation/verdict.ts` + `__tests__`, delete `src/features/QbAutomationV2/hooks/` + `sections/`, revert `index.tsx` back to placeholder card, revert props wiring in TS.tsx.
 
 ---
 
