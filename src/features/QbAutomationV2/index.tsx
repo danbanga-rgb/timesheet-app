@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { UploadCloud, Inbox, ListChecks } from 'lucide-react';
 import type { Invoice, PaymentProfile, QbIngestEvent, QbVendorMapping, UserProfile } from '../../types';
 import type { QbOpenBillRow, QbVendorRow } from '../../lib/qbStateSync/types';
+import type { RateHistoryEntry } from '../../lib/qbAutomation/discrepancies';
 import { useQbAutomationV2 } from './hooks/useQbAutomationV2';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
@@ -17,6 +18,7 @@ export interface QbAutomationV2Props {
   paymentProfiles: PaymentProfile[];
   users: UserProfile[];
   mappings: QbVendorMapping[];
+  rateHistory: RateHistoryEntry[];
   onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
   onUpdateMappingVendor: (args: { mappingId: number; qbVendorListId: string; qbVendorName: string }) => Promise<void>;
   onDeleteMapping: (mappingId: number) => Promise<void>;
@@ -73,7 +75,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-            <p className="text-xs text-gray-500">Admin preview · Slice V5.4 (sortable columns + group-select buttons)</p>
+            <p className="text-xs text-gray-500">Admin preview · Slice V7 (discrepancy detection + smart mapping)</p>
           </div>
         </div>
         {subTab === 'inbox' && <PushBar count={selectionCount} total={selectionTotal} onPush={handlePushSelected} />}

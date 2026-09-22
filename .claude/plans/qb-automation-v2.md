@@ -404,6 +404,17 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S14 (2026-09-22) — Slice V7 shipped: discrepancy detection (3 of 6 rules).**
+- New pure lib `src/lib/qbAutomation/discrepancies.ts` — 3 rules with 12 unit tests.
+- **Rule 1 rate_drift:** compare `invoice.rate` against current `rate_history` pay-rate for `(userId, effective_from ≤ periodEnd, effective_to > periodEnd OR null)`. Newest effective_from wins on overlap.
+- **Rule 3 umbrella_mismap:** vendor_list_id serves ≥ 2 distinct contractors historically (from posted qb_ingest_events). Flags Teal Crossroads today; auto-detects any new umbrella.
+- **Rule 4 duplicate_refnumber:** open bill exists at same (vendorListId, normalizedRefNumber) but different month. Guards against contractor invoice-number resets (Croatian pattern — see qbwrite invariants #12).
+- **DEFERRED:** rule 2 (bank drift — needs mirror-deviation history), rule 5 (AI-suggested MEDIUM — V6 doesn't auto-map from LLM), rule 6 (missing expense account — very rare, classifier fallbacks cover).
+- Wrapper adds `qbautov2RateHistory` state + lazy loader (fires on v2 tab open only).
+- Hook builds vendorContractors map from posted events; runs `detectDiscrepancies` per ReadyRow; adds `discrepancies: Discrepancy[]` to ReadyRow.
+- Auto-select logic tightened: flagged rows are NOT auto-selected (verify-first per §1.4). `selectGroup` also skips flagged rows. New Pay rows with 0 discrepancies auto-add.
+- ReadyCard renders amber ⚠ icon next to contractor name for flagged rows; hover tooltip lists each discrepancy message + resolve hint.
+
 **S13 (2026-09-22) — Slice V6 shipped: 2-tier smart mapping (history + token overlap).**
 - New pure lib `src/lib/qbAutomation/vendorMappingResolver.ts` with `resolveVendorCandidates(input, ctx, limit=3)` returning up to 3 tiered candidates. 11 unit tests cover both tiers + confidence buckets + stopword filtering + cap.
 - Tier 2 (history): if contractor has posted bills under a QB vendor, surface HIGH confidence. Uses buildHistoryByUser helper to map userId → posted vendorListIds.
@@ -657,23 +668,34 @@ Estimates are ranges; lean low per [[dont-overpad-estimates]].
 
 ---
 
-### Slice V7 — Discrepancy detection
-**Est:** 3–5h. **Depends on:** V3 (adds flags to Ready rows).
+### Slice V7 — Discrepancy detection ✅ SHIPPED 2026-09-22 (3 of 6 rules)
+**Est:** 3–5h. **Actual:** ~40min.
 
-**Goal:** §5.8 rules.
+**Scope call:** shipped 3 of 6 rules (rate_drift / umbrella_mismap / duplicate_refnumber). Rules 2, 5, 6 deferred — see §8 log for reasoning.
 
-**Files:**
-- New: `src/lib/qbAutomation/discrepancies.ts` — pure fn per rule.
-- New tests.
-- Edit: ReadyCard.tsx — render flag + tooltip + `Resolve` action.
+**Shipped files:**
+- New: `src/lib/qbAutomation/discrepancies.ts` — pure detection lib.
+- New: `src/lib/qbAutomation/__tests__/discrepancies.test.ts` — 12 tests.
+- Edit: `src/features/QbAutomationV2/hooks/useQbAutomationV2.ts` — vendorContractors map + discrepancyCtx + per-row detection.
+- Edit: `src/features/QbAutomationV2/sections/ReadyCard.tsx` — amber ⚠ icon + tooltip.
+- Edit: `src/features/QbAutomationV2/index.tsx` — rateHistory prop.
+- Edit: `src/TimesheetSystem.tsx` — `qbautov2RateHistory` state + lazy loader.
 
-**Acceptance:**
-- All 6 rules fire on synthetic test cases.
-- Real-data smoke test: 2–3 flags surface on current prod invoices.
-- Resolve action opens correct correction path.
-- Flagged rows default-unchecked; unflagging re-checks.
+**Auto-select tightened:**
+- Rows with any discrepancy stay UNCHECKED on load (per plan §1.4 verify-first style).
+- `Select Payments` / `Select Bill Creations` buttons skip flagged rows.
+- Clean rows appearing later still auto-add.
 
-**Rollback:** delete lib + revert card.
+**Tooltip only (no Resolve modal):**
+- Plan §5.8 called for a `Resolve` action link opening the correction path. V7 ships a hover tooltip with the resolve hint text instead — the actual resolve paths (edit rate in Payment Profiles / Vendor Mapping sub-tab / invoice edit) all exist as separate flows the user navigates to manually. Explicit Resolve buttons that auto-navigate are deferred to a follow-up if the tooltip proves insufficient.
+
+**Deferred (V7-B if needed):**
+- Rule 2 bank_drift (needs mirror-deviation history table).
+- Rule 5 AI_suggested_medium (V6 doesn't auto-map from LLM — currently no path to emit this).
+- Rule 6 missing_expense_account (very rare; classifier fallbacks cover per [[qb-expense-account-conventions]]).
+- Auto-navigating Resolve buttons.
+
+**Rollback:** delete `discrepancies.ts` + tests, revert hook + ReadyCard + index.tsx + TS.tsx rateHistory state/loader.
 
 ---
 

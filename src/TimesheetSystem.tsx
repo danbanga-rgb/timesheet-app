@@ -693,6 +693,11 @@ const TimesheetSystem = () => {
   const [qbVendorsList, setQbVendorsList] = useState<QbVendor[]>([]);
   const [qbAccountsList, setQbAccountsList] = useState<QbAccount[]>([]);
   const [qbVendorMappings, setQbVendorMappings] = useState<QbVendorMapping[]>([]);
+  // Rate history — used by QbAutomationV2 discrepancy detection (Slice V7).
+  // Loaded lazily on v2 tab open (see effect at line ~2427).
+  const [qbautov2RateHistory, setQbautov2RateHistory] = useState<Array<{
+    userId: string; rateKind: string; rate: number; effectiveFrom: string; effectiveTo: string | null;
+  }>>([]);
   // Widget context — carries source + event count so the widget can render
   // as a floating modal at the tab level (opened from Needs Classification
   // OR from the All Mappings management panel below).
@@ -2438,6 +2443,21 @@ const TimesheetSystem = () => {
       await loadQbBillQueryPending();
       await loadQbVendorQueryPending();
       await loadInflightPushRecords();
+      // Rate history for v2 discrepancy detection (Slice V7). Small table,
+      // one-shot fetch — only when v2 tab is active.
+      if (onAdminQbV2) {
+        const { data: rhData } = await supabase
+          .from('rate_history')
+          .select('user_id, rate_kind, rate, effective_from, effective_to')
+          .range(0, 4999);
+        setQbautov2RateHistory((rhData ?? []).map((r: Record<string, unknown>) => ({
+          userId: r.user_id as string,
+          rateKind: (r.rate_kind as string) ?? '',
+          rate: Number(r.rate ?? 0),
+          effectiveFrom: (r.effective_from as string) ?? '',
+          effectiveTo: (r.effective_to as string) ?? null,
+        })));
+      }
       // Auto-recompute matches for pending events using current invoices.
       // Guarded — skips silently if invoices state is empty (see the guard in
       // recomputeMatchesForPending). The invoices.length dependency below
@@ -5203,6 +5223,7 @@ const TimesheetSystem = () => {
               paymentProfiles={paymentProfiles}
               users={users}
               mappings={qbVendorMappings}
+              rateHistory={qbautov2RateHistory}
               onMappingChangeSubscribe={(cb) => {
                 const ch = supabase
                   .channel('qbautov2-mappings')
