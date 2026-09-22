@@ -17,15 +17,15 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry (as of 2026-09-22 EOD):**
-- Branch `feature/qb-automation-v2` tip `6cfb25a`. Not merged to main.
-- V1–V8 SHIPPED (V7 SCRAPPED). See §8 session log for full history.
+**State on entry (as of 2026-09-22 mid-arc break — S16):**
+- Branch `feature/qb-automation-v2` tip `8cba758`. Not merged to main.
+- V1–V8 SHIPPED (V7 SCRAPPED). V8-B items 1+2+3 SHIPPED this session. Items 4 (cancellation) + 5 (phase 2 re-push) remain.
 - v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
 - **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
 - v1 QB Automation tab is FROZEN — do not touch its render surface.
 - Chunk 8 in `.claude/plans/accountant-modularization.md` is SUPERSEDED.
 - Modularization arc is PAUSED. Do not resume Chunk 9/10/Phase 6 slices unless Dan asks.
-- Next planned slice: **V8-B (inline controls + preflight + cancellation)**. See §9 V8-B entry.
+- Next planned slice: **V8-B item 4 (cancellation on QbPushStatusPane).** See §9 V8-B entry for scope + design questions to resolve before coding.
 
 **Do NOT:**
 - Ask Dan clarifying questions until he signals "ready" or dumps directionality. He said "let me think and give you some directionality and then you start asking questions" (2026-09-18).
@@ -406,6 +406,13 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S16 (2026-09-22 afternoon) — V8-B items 1, 2, 3 shipped.**
+- **Item 1 (`703a743`)**: inline QB vendor override in Ready rows. Click any QB vendor cell → autocomplete with tier-2/3 suggestion chips → Save mapping. Save-as-mapping only per Dan's Option A ("pp is 1:1 with contractor; even if pp changes it normally routes to a different QB vendor; very very rare for different pp to hit same QB vendor"). Per-push override deferred. New component: `InlineVendorPicker.tsx`. `SaveMappingArgs.eventId` now nullable (invoice-driven rows have no event to flip). 10 new tests → 31/31 pass.
+- **Item 2 (`9fedc05`)**: Preview modal picks up inline vendor edits. Same click-to-edit cell in the modal row table, same InlineVendorPicker, same onSaveMapping handler. Row updates in place after save (via classifier repass → hook rebuild). Editing disabled while push is in flight (`busy`).
+- **Item 3 (`8cba758`)**: preflight banner + Sync Vendors button in Preview modal. Any selected row whose target vendor listId is not in the `qb_vendors` mirror surfaces an amber banner + row highlight + "Not synced" chip. Confirm is blocked; user can Sync Vendors (enqueues vendor_query; drains via QBWC ~15 min) OR re-map affected rows inline to a vendor already in the mirror. Banner disappears automatically when mirror refreshes. ReadyRow gained `qbVendorListId: string | null` for mirror-membership check. New prop `onSyncVendors` wired to TS.tsx `runSyncQbVendors`.
+- **Remaining in V8-B:** item 4 (cancellation on QbPushStatusPane) + item 5 (phase 2 re-push). Design questions for item 4 — see §9 V8-B "Open questions for item 4" section.
+- Push queue STILL HELD. Dan resumes at item 4 next session.
+
 **S15 EOD (2026-09-22, session pause).** Marathon session shipped V2, V3, V3.1, V4, V4.1, V5, V5.1, V5.2, V5.3, V5.4, V6, V7 (scrapped), V8. Two new memories saved: [[inline-controls-over-warnings]] (durable rule) + [[rate-history-seeded-not-populated]] (data trap). Pivot memory updated with tip commit `6cfb25a` and V8-B deferred section. Push queue STILL HELD. Dan resumes for V8-B next session — see §9 V8-B entry (dedicated) for the fresh-session pickup pointer.
 
 **S15 (2026-09-22) — Slice V8 shipped: real push flow + Preview modal + status pane.**
@@ -748,6 +755,29 @@ Original spec preserved below for archaeology.
 
 ### Slice V8-B — Inline controls + preflight + cancellation
 **Est:** 4–6h. **Depends on:** V8. **Priority:** high — Dan called this out during V7 discussion.
+
+**Progress (2026-09-22 S16):**
+- ✅ Item 1 shipped (`703a743`) — inline vendor override in Ready rows, save-as-mapping only.
+- ✅ Item 2 shipped (`9fedc05`) — Preview modal picks up the same click-to-edit + inline picker.
+- ✅ Item 3 shipped (`8cba758`) — preflight banner + Sync Vendors button + Confirm-block when any selected vendor is missing from mirror.
+- ⏳ Item 4 (cancellation) — NEXT. See "Open questions for item 4" below.
+- ⏳ Item 5 (phase 2 re-push) — deferred until item 4 lands.
+
+**Open questions for item 4 (surface before coding):**
+1. **What does "cancel" mean at the semantic level?** Options:
+   - (a) Flag pending `qb_sync_jobs` rows so QBWC skips them on next poll. Only affects rows not yet in-flight.
+   - (b) Client-only visual dismissal (remove records from `qbPushRecords` state without touching the queue). Simpler but doesn't stop QBWC from firing them.
+   - (c) Both: DB flag + client hide. Cleanest but requires new column on `qb_sync_jobs` or a status transition.
+2. **Where does the Cancel button live?** Options:
+   - (a) Per-record inline in `QbPushStatusPane` (each pending row gets a Cancel).
+   - (b) Global "Cancel remaining" button at the top of the pane, cancels ALL pending in the batch.
+   - (c) Both.
+3. **Does cancel touch `qb_ingest_events.status`?** If a `pay_bill` job is cancelled before firing, the underlying event stays in `status='ready'` — should it flip to `skipped`? Or stay ready for a retry?
+4. **QBWC race condition:** if QBWC picks up a job at second T, and Cancel writes at T+1ms, is there a guardrail? Or do we accept "cancel is best-effort — in-flight writes complete"?
+
+**Recommend Dan chooses option per Q before I code.** Per [[inline-controls-over-warnings]] — the cancel button MUST come paired with clear feedback ("cancelled 3 pending, 2 already in flight") — no ambient warnings.
+
+
 
 **Goal:** ship the actionable-controls ambition that killed V7. Every "the mapping might be wrong" or "we don't have this vendor synced yet" case gets an inline fix path in the Ready row or the Push Preview modal — no navigation, no tooltips.
 
