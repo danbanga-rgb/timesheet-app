@@ -255,6 +255,7 @@ export type QbPayeeListKind = 'Vendor' | 'OtherName' | 'Employee' | 'Customer';
 
 export interface QbVendorMapping {
   id: number;
+  ppId: number | null;                 // primary key since Slice V1 migration. NULL = legacy row.
   source: string;
   counterpartyPattern: string;
   qbVendorListId: string;              // '' when payee is not in Vendors list (OtherName etc.)

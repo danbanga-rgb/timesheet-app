@@ -2130,6 +2130,7 @@ const TimesheetSystem = () => {
     const { data } = await supabase.from('qb_vendor_mappings').select('*');
     setQbVendorMappings((data ?? []).map((r: Record<string, unknown>) => ({
       id: r.id as number,
+      ppId: (r.pp_id as number | null) ?? null,
       source: (r.source as string) ?? '',
       counterpartyPattern: (r.counterparty_pattern as string) ?? '',
       qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
@@ -5199,6 +5200,38 @@ const TimesheetSystem = () => {
               openBills={qbOpenBills}
               vendors={qbVendorsList}
               invoices={invoices}
+              paymentProfiles={paymentProfiles}
+              users={users}
+              mappings={qbVendorMappings}
+              onMappingChangeSubscribe={(cb) => {
+                const ch = supabase
+                  .channel('qbautov2-mappings')
+                  .on('postgres_changes', { event: '*', schema: 'public', table: 'qb_vendor_mappings' }, async () => {
+                    await loadQbVendorMappings();
+                    await loadQbIngestEvents();
+                    cb();
+                  })
+                  .subscribe();
+                return () => { supabase.removeChannel(ch); };
+              }}
+              onUpdateMappingVendor={async ({ mappingId, qbVendorListId }) => {
+                const { error } = await supabase
+                  .from('qb_vendor_mappings')
+                  .update({ qb_vendor_list_id: qbVendorListId, updated_at: new Date().toISOString() })
+                  .eq('id', mappingId);
+                if (error) throw error;
+                await loadQbVendorMappings();
+                // Downstream events keyed by this pp will re-resolve on next
+                // classification pass. Kick one off so Ready view reflects the
+                // edit without waiting for the next auto-run.
+                await applyClassificationPass();
+                await loadQbIngestEvents();
+              }}
+              onDeleteMapping={async (mappingId) => {
+                const { error } = await supabase.from('qb_vendor_mappings').delete().eq('id', mappingId);
+                if (error) throw error;
+                await loadQbVendorMappings();
+              }}
               onSaveMapping={async ({ eventId, ppId, source, counterpartyPattern, qbVendorListId }) => {
                 // pp_id-primary mapping upsert (Slice V1 architecture).
                 // default_target_kind = 'bill_add_and_pmt' — safe default for

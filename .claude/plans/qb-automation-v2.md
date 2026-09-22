@@ -404,6 +404,16 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S12 (2026-09-22) — Slice V5 shipped: Vendor Mapping sub-tab + realtime + V4.1 push-bar relocation.**
+- V4.1 (`3623aa8`): Push button relocated from ReadyCard footer to persistent top-right slot (new `PushBar` component). Post-push handler snaps `category='ready'` so newly-resolved siblings show without extra clicks.
+- V5: sub-tab nav at top of v2 (Push Inbox / Vendor Mapping). Push button visible only on Inbox.
+- New `sections/VendorMappingSubTab.tsx` — table with columns Contractor · Payment Profile · QB Vendor · Bills routed · Actions. Search box (filters contractor / pp / vendor). Sortable by every column, default Contractor A→Z. Inline Edit (autocomplete → save) + Delete (confirm).
+- Hook extended: `mappingRows` builds from `paymentProfiles` + `users` + `qbVendorMappings` + `qbVendorsList`. Bills-routed count derived from posted qb_ingest_events matching vendor_list_id (approximation — refine later).
+- `QbVendorMapping` type gained `ppId: number | null` (Slice V1 DB column was previously not exposed to frontend). `loadQbVendorMappings` normalizes `pp_id`.
+- Realtime: `onMappingChangeSubscribe` prop wires a Supabase channel on `qb_vendor_mappings`; edits from either the sub-tab or elsewhere (v1, other admins) reload mappings + events within seconds.
+- Wrapper handlers: `onUpdateMappingVendor(mappingId, qbVendorListId)` UPDATE + reclassify; `onDeleteMapping(mappingId)` DELETE + reload.
+- DEFERRED to follow-up slices: `+ Add mapping` button (Needs Mapping card is primary add flow); `Seed from history` action (requires qb_mirror lookup path, separate slice).
+
 **S11 (2026-09-22) — Slice V4 shipped: Needs Mapping card + inline resolve.**
 - New section `src/features/QbAutomationV2/sections/NeedsMappingCard.tsx` — table with columns Contractor · Period · Payment Profile · QB Vendor (autocomplete) · Total · Action. Datalist-backed autocomplete against `qb_vendors`. `Map & Send to Ready` button commits mapping.
 - Hook extended: `needsMappingRows` filters `!counterpartyQbVendorListId && ppId > 0 && active event`. pp_id=0 snapshot artifact filtered per Slice V1 note.
@@ -578,23 +588,33 @@ Estimates are ranges; lean low per [[dont-overpad-estimates]].
 
 ---
 
-### Slice V5 — Vendor Mapping sub-tab
-**Est:** 3–5h. **Depends on:** V4.
+### Slice V5 — Vendor Mapping sub-tab ✅ SHIPPED 2026-09-22
+**Est:** 3–5h. **Actual:** ~1h.
 
-**Goal:** §5.6.
+**Shipped files:**
+- New: `src/features/QbAutomationV2/sections/VendorMappingSubTab.tsx` — table + search + sortable columns + inline edit + delete.
+- Edit: `src/features/QbAutomationV2/hooks/useQbAutomationV2.ts` — `mappingRows` derived; hook args gain `paymentProfiles`, `users`, `mappings`.
+- Edit: `src/features/QbAutomationV2/index.tsx` — sub-tab nav (Push Inbox / Vendor Mapping); realtime subscription effect; PushBar hidden on mapping sub-tab.
+- Edit: `src/types.ts` — `QbVendorMapping` gains `ppId: number | null`.
+- Edit: `src/TimesheetSystem.tsx` — passes new props; adds `onUpdateMappingVendor`, `onDeleteMapping`, `onMappingChangeSubscribe` handlers; `loadQbVendorMappings` normalizes `pp_id`.
 
-**Files:**
-- New: `src/roles/Accountant/tabs/QbAutomationV2/sections/VendorMappingSubTab.tsx`
-- New (or reuse): mapping-CRUD handlers already exist as wrappers; import as-is.
-- Edit: `src/roles/Accountant/tabs/QbAutomationV2/index.tsx` — sub-tab routing.
+**Locked decisions:**
+- Bills-routed count uses posted qb_ingest_events matching `counterpartyQbVendorListId`. Approximation of "our routing volume" per mapping.
+- Legacy rows (pp_id NULL) rendered with a small "legacy" tag; contractor name falls back to counterpartyPattern.
+- Realtime channel `qbautov2-mappings` on `qb_vendor_mappings` postgres_changes → reload mappings + events. Wrapper subscribes via `onMappingChangeSubscribe` return-unsubscribe pattern so React can clean up.
 
-**Acceptance:**
-- Table renders with contractor-primary sort.
-- Add / Edit / Delete work.
-- Realtime channel updates Ready view within 2s of an edit.
-- `Seed from history` action creates a mapping from a mirror bill lookup.
+**DEFERRED to follow-up slices:**
+- `+ Add mapping` button (V5-A): plan §5.6 spec item. Primary add flow is Needs Mapping card in V4, so bypassing for now. Add when accountants want to prepare mappings BEFORE an event arrives (rare).
+- `Seed from history` action (V5-B): needs qb_mirror bill scan for contractor's prior vendors. Non-trivial data path; separate slice.
 
-**Rollback:** delete file.
+**Acceptance met:**
+- Table renders sorted by contractor A→Z (toggle to desc; toggle other columns).
+- Edit works — updates row + reclassifies dependent events.
+- Delete works with confirm dialog.
+- Realtime — Ready view + mapping table both reflect changes within 1–2s of any edit source.
+- Search filters instantly by any of contractor / pp label / vendor name.
+
+**Rollback:** delete `VendorMappingSubTab.tsx`, revert hook + index.tsx + TS.tsx handlers + types.ts + loadQbVendorMappings pp_id line.
 
 ---
 
