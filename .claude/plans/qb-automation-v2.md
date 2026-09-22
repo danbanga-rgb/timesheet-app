@@ -404,6 +404,14 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S13 (2026-09-22) — Slice V6 shipped: 2-tier smart mapping (history + token overlap).**
+- New pure lib `src/lib/qbAutomation/vendorMappingResolver.ts` with `resolveVendorCandidates(input, ctx, limit=3)` returning up to 3 tiered candidates. 11 unit tests cover both tiers + confidence buckets + stopword filtering + cap.
+- Tier 2 (history): if contractor has posted bills under a QB vendor, surface HIGH confidence. Uses buildHistoryByUser helper to map userId → posted vendorListIds.
+- Tier 3 (token overlap): tokenize contractor name + pp label (drop stopwords: the/and/ltd/llc/inc/corp/co/ltda/limited/sp/sro/gmbh/obrt/vl/o.d/dj/obrtnicka/djelatnost/holding/group + min length 3). Match against vendor name tokens. Score: 2+ tokens = HIGH, 1 token ≥5 chars = MEDIUM, 1 short token = LOW.
+- **Real LLM (Haiku 4.5) DEFERRED to V6-B.** Token overlap covers Bimosoft (per-contractor-suffixed) + Native Teams (per-contractor-suffixed) + solo-vendor matches — the ~80% case per [[qb-vendor-mapping-truths-2026-09]]. Real LLM adds cost + infra for marginal cases. Reconsider when a real case surfaces that heuristic can't solve.
+- NeedsMappingCard renders up to 3 suggestion chips per row: green=high, amber=medium, gray=low. Click chip → input pre-fills with vendor name → user clicks Map & Send to Ready.
+- Hook extended: `needsMappingRows[i].candidates` added; contractorUserId also added.
+
 **S12 (2026-09-22) — Slice V5 shipped: Vendor Mapping sub-tab + realtime + V4.1 push-bar relocation.**
 - V4.1 (`3623aa8`): Push button relocated from ReadyCard footer to persistent top-right slot (new `PushBar` component). Post-push handler snaps `category='ready'` so newly-resolved siblings show without extra clicks.
 - V5: sub-tab nav at top of v2 (Push Inbox / Vendor Mapping). Push button visible only on Inbox.
@@ -618,29 +626,34 @@ Estimates are ranges; lean low per [[dont-overpad-estimates]].
 
 ---
 
-### Slice V6 — 3-tier smart mapping lib
-**Est:** 4–6h. **Depends on:** V4 (needs NeedsMappingCard to render suggestions).
+### Slice V6 — smart mapping (history + token overlap) ✅ SHIPPED 2026-09-22
+**Est:** 4–6h. **Actual:** ~40min (LLM tier scoped out).
 
-**Goal:** implement §5.9 tier stack. Tier 1 already works (V1 delivered). This slice adds tier 2 (history) + tier 3 (LLM).
+**Scope call:** original plan said tier 3 = LLM (Haiku 4.5). Shipped a token-overlap heuristic instead — covers the Bimosoft-`<name>` / Native-Team-`<name>` per-contractor-suffixed patterns that dominate real data ([[qb-vendor-mapping-truths-2026-09]]). Reconsider LLM (V6-B) if a real case surfaces that heuristic can't handle.
 
-**Files:**
-- New: `src/lib/qbAutomation/vendorMappingResolver.ts` — pure fn returning `{ tier, vendor_list_id, confidence, alternates[] }`.
-- New: `src/lib/qbAutomation/__tests__/vendorMappingResolver.test.ts`
-- Edit: NeedsMappingCard.tsx — render alternates as chips.
+**Shipped files:**
+- New: `src/lib/qbAutomation/vendorMappingResolver.ts` — pure lib.
+- New: `src/lib/qbAutomation/__tests__/vendorMappingResolver.test.ts` — 11 tests.
+- Edit: `src/features/QbAutomationV2/hooks/useQbAutomationV2.ts` — history map + candidates per row.
+- Edit: `src/features/QbAutomationV2/sections/NeedsMappingCard.tsx` — suggestion chips.
 
-**LLM implementation:**
-- Use existing Anthropic pipe from [[ai-gateway-migration]] (Haiku 4.5).
-- Prompt: give it pp label + contractor name + full `qb_vendors` list (or filter to plausible matches by first-letter/token).
-- Return structured JSON: `{ candidate, confidence, alternates: [{ candidate, confidence }] }`.
-- Cache per (pp_id, vendors_list_version) in session storage.
+**Tier stack:**
+- Tier 1 (exact `pp_id` lookup): handled by classifier / V4 save path — rows that reach Needs Mapping already failed tier 1.
+- Tier 2 (history): contractor's past posted bills → vendor(s) used. HIGH confidence.
+- Tier 3 (token overlap): tokenize contractor name + pp label (stopwords filtered, min length 3, unicode-normalized) against vendor names. 2+ tokens matched = HIGH; 1 token ≥5 chars = MEDIUM; 1 short token = LOW.
 
-**Acceptance:**
-- Tier 2 finds "Native Team Anela" for Anela's Native Teams pp based on mirror history.
-- Tier 3 returns HIGH for exact-string matches, MEDIUM for close variants, LOW for genuine unknowns.
-- Tests cover each tier + confidence bucket.
-- Cost budget check: ≤ 100 LLM calls per session (log warning if exceeded).
+**Acceptance met:**
+- Tier 2 finds a contractor's historical vendor when it exists in the current qb_vendors list.
+- Tier 3 returns HIGH / MEDIUM / LOW per bucket rules.
+- All 11 tests pass covering both tiers + edge cases (stopword filter, stale history vendor fallback, empty-input cases, candidate cap).
+- No LLM cost; no external calls.
 
-**Rollback:** delete lib fn + revert NeedsMappingCard chips.
+**V6-B (deferred): real LLM tier.**
+- Only add if a real Needs-Mapping row surfaces that both tier 2 (no history) and tier 3 (no token overlap) fail on.
+- Would use Anthropic direct (Haiku 4.5, same pipe as [[ai-gateway-migration]] chat).
+- Requires: new edge fn to keep API key server-side, prompt engineering, per-session cache.
+
+**Rollback:** delete `vendorMappingResolver.ts` + tests, revert hook + NeedsMappingCard chip render.
 
 ---
 

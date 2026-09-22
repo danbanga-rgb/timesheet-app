@@ -3,6 +3,7 @@ import type { Invoice, PaymentProfile, QbIngestEvent, QbVendorMapping, UserProfi
 import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types';
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
+import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../../../lib/qbAutomation/vendorMappingResolver';
 
 export type ReadyGroup = 'pay' | 'create';
 
@@ -35,6 +36,7 @@ export interface NeedsMappingRow {
   source: string;
   counterpartyRaw: string;
   contractorName: string;
+  contractorUserId: string | null;
   invoiceNumber: string;
   amount: number;
   currency: string;
@@ -42,6 +44,7 @@ export interface NeedsMappingRow {
   monthLabel: string;
   ppLabel: string;
   ppId: number;
+  candidates: Candidate[];
 }
 
 export interface MappingRow {
@@ -193,6 +196,19 @@ export function useQbAutomationV2({
   }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId]);
 
   const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
+    // Build history map ONCE per render — feeds tier 2 of the resolver.
+    const invoiceUserIdById = new Map<number, string>();
+    for (const inv of invoices) if (inv.userId) invoiceUserIdById.set(inv.id, inv.userId);
+    const historyByUser = buildHistoryByUser(
+      events.map(e => ({
+        status: e.status,
+        counterpartyQbVendorListId: e.counterpartyQbVendorListId,
+        matchedInvoiceIds: e.matchedInvoiceIds,
+      })),
+      invoiceUserIdById,
+    );
+    const resolverVendors = vendors.map(v => ({ listId: v.listId, name: v.name }));
+
     const rows: NeedsMappingRow[] = [];
     for (const e of events) {
       if (e.status === 'posted' || e.status === 'ignored') continue;
@@ -213,11 +229,19 @@ export function useQbAutomationV2({
         || e.counterpartyRaw
         || '(no pp label)';
 
+      const contractorName = invoice?.userName || e.counterpartyRaw || '(unknown)';
+      const contractorUserId = invoice?.userId ?? null;
+      const candidates = resolveVendorCandidates(
+        { contractorName, contractorUserId, ppLabel },
+        { vendors: resolverVendors, historyByUser },
+      );
+
       rows.push({
         eventId: e.id,
         source: e.source,
         counterpartyRaw: e.counterpartyRaw,
-        contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
+        contractorName,
+        contractorUserId,
         invoiceNumber: invoice?.invoiceNumber ?? '',
         amount: e.amount,
         currency: invoice?.currency || 'USD',
@@ -225,11 +249,12 @@ export function useQbAutomationV2({
         monthLabel: monthLabelFromKey(monthKey),
         ppLabel,
         ppId,
+        candidates,
       });
     }
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoicesById]);
+  }, [events, invoices, invoicesById, vendors]);
 
   const mappingRows: MappingRow[] = useMemo(() => {
     const postedCountByVendor = new Map<string, number>();

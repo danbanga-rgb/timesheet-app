@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { NeedsMappingRow } from '../hooks/useQbAutomationV2';
 import type { QbVendorRow } from '../../../lib/qbStateSync/types';
+import type { Candidate, Confidence } from '../../../lib/qbAutomation/vendorMappingResolver';
 
 export interface SaveMappingArgs {
   eventId: number;
@@ -19,6 +20,18 @@ interface Props {
 
 function fmtMoney(n: number): string {
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function confidenceChipClass(c: Confidence): string {
+  return c === 'high'
+    ? 'bg-emerald-100 text-emerald-800 border-emerald-300 hover:bg-emerald-200'
+    : c === 'medium'
+      ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+      : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200';
+}
+
+function tierLabel(tier: Candidate['tier']): string {
+  return tier === 'history' ? 'history' : 'match';
 }
 
 export default function NeedsMappingCard({ rows, vendors, onSaveMapping }: Props) {
@@ -84,7 +97,7 @@ export default function NeedsMappingCard({ rows, vendors, onSaveMapping }: Props
                 <th className="px-2 py-2 text-left font-semibold text-gray-600">Contractor</th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Period</th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-600">Payment Profile</th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600" style={{ minWidth: 220 }}>QB Vendor</th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600" style={{ minWidth: 320 }}>QB Vendor</th>
                 <th className="px-2 py-2 text-right font-semibold text-gray-600">Total</th>
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 w-32">Action</th>
               </tr>
@@ -95,7 +108,7 @@ export default function NeedsMappingCard({ rows, vendors, onSaveMapping }: Props
                 const value = picked[r.eventId] ?? '';
                 const canSave = value.trim().length > 0 && !isSaving;
                 return (
-                  <tr key={r.eventId} className="hover:bg-gray-50">
+                  <tr key={r.eventId} className="hover:bg-gray-50 align-top">
                     <td className="px-2 py-1.5 font-medium text-gray-800 whitespace-nowrap">{r.contractorName}</td>
                     <td className="px-2 py-1.5 whitespace-nowrap text-gray-600">{r.monthLabel || '(no period)'}</td>
                     <td className="px-2 py-1.5 text-gray-700">{r.ppLabel}</td>
@@ -109,6 +122,25 @@ export default function NeedsMappingCard({ rows, vendors, onSaveMapping }: Props
                         className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-emerald-400"
                         disabled={isSaving}
                       />
+                      {r.candidates.length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap gap-1 items-center">
+                          <span className="text-[10px] uppercase text-gray-400 mr-1">Suggested:</span>
+                          {r.candidates.map(c => (
+                            <button
+                              key={c.qbVendorListId}
+                              type="button"
+                              onClick={() => setPicked(prev => ({ ...prev, [r.eventId]: c.qbVendorName }))}
+                              className={
+                                'px-2 py-0.5 text-[11px] rounded-full border cursor-pointer ' + confidenceChipClass(c.confidence)
+                              }
+                              title={`${c.reason} · ${c.confidence} (${tierLabel(c.tier)})`}
+                            >
+                              {c.qbVendorName}
+                              <span className="ml-1 opacity-70 text-[10px]">{c.confidence}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="px-2 py-1.5 text-right font-mono font-semibold whitespace-nowrap">
                       {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
