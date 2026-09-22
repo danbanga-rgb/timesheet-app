@@ -2425,8 +2425,9 @@ const TimesheetSystem = () => {
   };
 
   useEffect(() => {
-    if (accountantTab !== 'qb-automation') return;
-    if (currentUser?.role !== 'accountant') return;
+    const onAccountantQb = accountantTab === 'qb-automation' && currentUser?.role === 'accountant';
+    const onAdminQbV2 = adminView === 'qbautov2' && currentUser?.role === 'admin';
+    if (!onAccountantQb && !onAdminQbV2) return;
     (async () => {
       await loadQbIngestEvents();
       await loadQbVendorMappings();
@@ -2456,21 +2457,22 @@ const TimesheetSystem = () => {
     // the recompute when they arrive. Recompute is idempotent (only writes when
     // matches actually change) so re-firing on later invoice changes is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountantTab, currentUser?.role, invoices.length]);
+  }, [accountantTab, adminView, currentUser?.role, invoices.length]);
 
   // Slice G1 — poll qb_sync_jobs while on the QB Automation tab AND there are
   // pending bill_query jobs. 30s cadence — QBWC drains every 15 min so this
   // just tracks whether the queue is empty (=> ready to refresh snapshot).
   useEffect(() => {
-    if (accountantTab !== 'qb-automation') return;
-    if (currentUser?.role !== 'accountant') return;
+    const onAccountantQb = accountantTab === 'qb-automation' && currentUser?.role === 'accountant';
+    const onAdminQbV2 = adminView === 'qbautov2' && currentUser?.role === 'admin';
+    if (!onAccountantQb && !onAdminQbV2) return;
     // Poll every 30s regardless of current count. Background inserts (pg_cron
     // qb-delta-bills, manual probes) can appear at any time; a 0→N transition
     // needs to be visible in the UI without the accountant having to refresh.
     const iv = setInterval(() => { loadQbBillQueryPending(); loadQbVendorQueryPending(); }, 30_000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountantTab, currentUser?.role]);
+  }, [accountantTab, adminView, currentUser?.role]);
 
   // Already-done bucket row actions. These update OUR tracking (qb_ingest_events
   // + invoices), NOT QB. Bill + payment already exist in QB per the reconciler.
