@@ -33,7 +33,9 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
 
   const rows = useMemo(() => {
-    const matches = events.filter(e => e.counterpartyQbVendorListId === qbVendorListId);
+    // Only posted events — matches the "Bills pushed" column semantic.
+    // Ignored / pending events are visible in other views.
+    const matches = events.filter(e => e.counterpartyQbVendorListId === qbVendorListId && e.status === 'posted');
     return matches
       .map(e => {
         const inv = e.matchedInvoiceIds.length > 0 ? invoicesById.get(e.matchedInvoiceIds[0]) ?? null : null;
@@ -53,19 +55,31 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
       .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   }, [events, qbVendorListId, invoicesById]);
 
-  const postedCount = rows.filter(r => r.status === 'posted').length;
   const totalAmount = rows.reduce((s, r) => s + r.amount, 0);
+  const dupeInvoiceNumbers = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+      if (!r.invoiceNumber) continue;
+      counts.set(r.invoiceNumber, (counts.get(r.invoiceNumber) ?? 0) + 1);
+    }
+    return new Set(Array.from(counts.entries()).filter(([, c]) => c > 1).map(([n]) => n));
+  }, [rows]);
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white z-10">
           <div>
-            <h2 className="text-base font-bold text-gray-800">Bills routed via this mapping</h2>
+            <h2 className="text-base font-bold text-gray-800">Bills pushed to QB via this mapping</h2>
             <p className="text-xs text-gray-500 mt-0.5">
               QB Vendor: <span className="font-medium">{qbVendorName}</span>
               <span className="mx-2">·</span>
-              {rows.length} events ({postedCount} posted) · {fmtMoney(totalAmount)}
+              {rows.length} posted · {fmtMoney(totalAmount)}
+              {dupeInvoiceNumbers.size > 0 && (
+                <span className="ml-2 text-amber-700 font-semibold">
+                  ⚠ {dupeInvoiceNumbers.size} invoice # appears more than once — verify no duplicate push
+                </span>
+              )}
             </p>
           </div>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-800" aria-label="Close">
@@ -76,7 +90,7 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
         <div className="overflow-auto flex-1">
           {rows.length === 0 ? (
             <div className="px-4 py-10 text-center text-sm text-gray-500">
-              No events have been routed via this vendor yet.
+              No bills have been pushed to QB via this vendor yet.
             </div>
           ) : (
             <table className="w-full text-xs">
@@ -99,11 +113,15 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
                     : r.status === 'failed' ? 'bg-red-100 text-red-800'
                     : r.status === 'ignored' ? 'bg-gray-200 text-gray-700'
                     : 'bg-gray-100 text-gray-700';
+                  const isDupe = dupeInvoiceNumbers.has(r.invoiceNumber);
                   return (
-                    <tr key={r.eventId} className="hover:bg-gray-50">
+                    <tr key={r.eventId} className={isDupe ? 'bg-amber-50 hover:bg-amber-100' : 'hover:bg-gray-50'}>
                       <td className="px-3 py-1.5 text-gray-600 whitespace-nowrap">{fmtDate(r.date)}</td>
                       <td className="px-3 py-1.5 font-medium text-gray-800 whitespace-nowrap">{r.contractor}</td>
-                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{r.invoiceNumber || '—'}</td>
+                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                        {r.invoiceNumber || '—'}
+                        {isDupe && <span className="ml-1 text-[10px] text-amber-700">dupe?</span>}
+                      </td>
                       <td className="px-3 py-1.5 text-right font-mono font-semibold whitespace-nowrap">
                         {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
                       </td>

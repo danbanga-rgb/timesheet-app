@@ -2,7 +2,7 @@ import type { QbIngestKind } from '../../types';
 import type { QbOpenBillRow } from '../qbStateSync/types';
 import { normalizeRef } from '../intuit/reconcile';
 
-export type Verdict = 'will_create_and_pay' | 'will_pay';
+export type Verdict = 'will_create_and_pay' | 'will_pay' | 'will_create_bill';
 
 export interface VerdictInput {
   kind: QbIngestKind | null;

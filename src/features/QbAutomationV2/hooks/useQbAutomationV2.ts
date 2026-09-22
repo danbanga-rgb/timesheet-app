@@ -2,9 +2,18 @@ import { useCallback, useMemo, useState } from 'react';
 import type { Invoice, PaymentProfile, QbIngestEvent, QbVendorMapping, UserProfile } from '../../../types';
 import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types';
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
+import { normalizeRef } from '../../../lib/intuit/reconcile';
+
+export type ReadyGroup = 'pay' | 'create';   // sub-filter within Ready card
+
+function groupForVerdict(v: Verdict): ReadyGroup {
+  return v === 'will_create_bill' ? 'create' : 'pay';
+}
 
 export interface ReadyRow {
-  eventId: number;
+  rowKey: string;              // 'evt-<id>' or 'inv-<id>' — stable across renders
+  eventId: number | null;      // null when row is invoice-driven (no event yet)
+  invoiceId: number | null;
   contractorName: string;
   invoiceNumber: string;
   amount: number;
@@ -18,6 +27,7 @@ export interface ReadyRow {
   qbVendorName: string;
   qbVendorMapped: boolean;
   verdict: Verdict;
+  group: ReadyGroup;
 }
 
 export interface NeedsMappingRow {
@@ -43,7 +53,7 @@ export interface MappingRow {
   ppLabel: string;
   qbVendorListId: string;
   qbVendorName: string;
-  billsRoutedCount: number;
+  billsPushedCount: number;
   isLegacy: boolean;
 }
 
@@ -78,9 +88,17 @@ export function useQbAutomationV2({
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
   const ppById = useMemo(() => new Map(paymentProfiles.map(p => [p.id, p])), [paymentProfiles]);
   const userById = useMemo(() => new Map(users.map(u => [u.id, u])), [users]);
+  const mappingByPpId = useMemo(() => {
+    const m = new Map<number, QbVendorMapping>();
+    for (const row of mappings) if (row.ppId != null) m.set(row.ppId, row);
+    return m;
+  }, [mappings]);
 
   const allReadyRows: ReadyRow[] = useMemo(() => {
     const rows: ReadyRow[] = [];
+    const invoiceIdsCoveredByEvents = new Set<number>();
+
+    // 1. Event-driven Ready rows (existing logic).
     for (const e of events) {
       if (e.status !== 'ready') continue;
       if (e.targetQbTxnKind !== 'bill_pmt' && e.targetQbTxnKind !== 'bill_add_and_pmt') continue;
@@ -104,8 +122,12 @@ export function useQbAutomationV2({
         ? (vendorsById.get(e.counterpartyQbVendorListId!)?.name ?? '(unmapped)')
         : '(unmapped)';
 
+      if (invoice) invoiceIdsCoveredByEvents.add(invoice.id);
+
       rows.push({
+        rowKey: `evt-${e.id}`,
         eventId: e.id,
+        invoiceId: invoice?.id ?? null,
         contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
         invoiceNumber: refNumber,
         amount: e.amount,
@@ -119,11 +141,61 @@ export function useQbAutomationV2({
         qbVendorName,
         qbVendorMapped: vendorMapped,
         verdict,
+        group: groupForVerdict(verdict),
       });
     }
+
+    // 2. Invoice-driven "Will Create Bill" rows.
+    // Approved invoices whose payment_profile has a QB vendor mapping but
+    // no bill exists in qb_mirror yet AND no event has claimed the invoice.
+    // These push as BillAdd only (payment happens later when the wire lands).
+    for (const inv of invoices) {
+      if (inv.status !== 'approved') continue;
+      if (invoiceIdsCoveredByEvents.has(inv.id)) continue;
+
+      const ppId = inv.paymentProfile?.id ?? 0;
+      if (!ppId || ppId <= 0) continue;
+      const mapping = mappingByPpId.get(ppId);
+      if (!mapping?.qbVendorListId) continue;
+
+      const wantRef = normalizeRef(inv.invoiceNumber);
+      if (!wantRef) continue;
+      const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
+      if (!monthKey) continue;
+
+      const hasBill = openBills.some(b =>
+        b.vendorListId === mapping.qbVendorListId
+        && normalizeRef(b.refNumber) === wantRef
+        && (b.txnDate ?? '').slice(0, 7) === monthKey,
+      );
+      if (hasBill) continue;
+
+      const qbVendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? '(unmapped)';
+
+      rows.push({
+        rowKey: `inv-${inv.id}`,
+        eventId: null,
+        invoiceId: inv.id,
+        contractorName: inv.userName || '(unknown)',
+        invoiceNumber: inv.invoiceNumber,
+        amount: inv.totalAmount,
+        currency: inv.currency || 'USD',
+        hours: inv.totalHours,
+        rate: inv.rate,
+        periodStart: inv.periodStart,
+        periodEnd: inv.periodEnd,
+        monthKey,
+        monthLabel: monthLabelFromKey(monthKey),
+        qbVendorName,
+        qbVendorMapped: true,
+        verdict: 'will_create_bill',
+        group: 'create',
+      });
+    }
+
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoicesById, vendorsById, openBills]);
+  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId]);
 
   const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
     const rows: NeedsMappingRow[] = [];
@@ -190,78 +262,99 @@ export function useQbAutomationV2({
         ppLabel,
         qbVendorListId: m.qbVendorListId,
         qbVendorName,
-        billsRoutedCount: postedCountByVendor.get(m.qbVendorListId) ?? 0,
+        billsPushedCount: postedCountByVendor.get(m.qbVendorListId) ?? 0,
         isLegacy: m.ppId == null,
       };
     });
   }, [mappings, ppById, userById, vendorsById, events]);
 
-  const [skippedIds, setSkippedIds] = useState<Set<number>>(new Set());
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [skippedKeys, setSkippedKeys] = useState<Set<string>>(new Set());
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [readyGroup, setReadyGroup] = useState<ReadyGroup>('pay');
 
-  const readyRows = useMemo(() => allReadyRows.filter(r => !skippedIds.has(r.eventId)), [allReadyRows, skippedIds]);
-  const skippedRows = useMemo(() => allReadyRows.filter(r => skippedIds.has(r.eventId)), [allReadyRows, skippedIds]);
+  const activeReadyRows = useMemo(() => allReadyRows.filter(r => !skippedKeys.has(r.rowKey)), [allReadyRows, skippedKeys]);
+  const skippedRows = useMemo(() => allReadyRows.filter(r => skippedKeys.has(r.rowKey)), [allReadyRows, skippedKeys]);
 
-  const visibleSelectedIds = useMemo(() => {
-    const visible = new Set(readyRows.map(r => r.eventId));
-    return new Set(Array.from(selectedIds).filter(id => visible.has(id)));
-  }, [readyRows, selectedIds]);
+  const payCount = useMemo(() => activeReadyRows.filter(r => r.group === 'pay').length, [activeReadyRows]);
+  const createCount = useMemo(() => activeReadyRows.filter(r => r.group === 'create').length, [activeReadyRows]);
 
-  const toggle = useCallback((eventId: number) => {
-    setSelectedIds(prev => {
+  const readyRows = useMemo(
+    () => activeReadyRows.filter(r => r.group === readyGroup),
+    [activeReadyRows, readyGroup],
+  );
+
+  const visibleSelectedKeys = useMemo(() => {
+    const visible = new Set(readyRows.map(r => r.rowKey));
+    return new Set(Array.from(selectedKeys).filter(k => visible.has(k)));
+  }, [readyRows, selectedKeys]);
+
+  const toggle = useCallback((rowKey: string) => {
+    setSelectedKeys(prev => {
       const next = new Set(prev);
-      if (next.has(eventId)) next.delete(eventId);
-      else next.add(eventId);
+      if (next.has(rowKey)) next.delete(rowKey);
+      else next.add(rowKey);
       return next;
     });
   }, []);
 
   const selectAll = useCallback(() => {
-    setSelectedIds(new Set(readyRows.map(r => r.eventId)));
+    setSelectedKeys(new Set(readyRows.map(r => r.rowKey)));
   }, [readyRows]);
 
   const clearSelection = useCallback(() => {
-    setSelectedIds(new Set());
+    setSelectedKeys(new Set());
   }, []);
 
-  const skip = useCallback((eventId: number) => {
-    setSkippedIds(prev => {
+  const changeReadyGroup = useCallback((next: ReadyGroup) => {
+    setReadyGroup(next);
+    // Clear selection on sub-filter switch — mixing verdicts silently would
+    // confuse the Push CTA count. Better to force an explicit re-select.
+    setSelectedKeys(new Set());
+  }, []);
+
+  const skip = useCallback((rowKey: string) => {
+    setSkippedKeys(prev => {
       const next = new Set(prev);
-      next.add(eventId);
+      next.add(rowKey);
       return next;
     });
-    setSelectedIds(prev => {
-      if (!prev.has(eventId)) return prev;
+    setSelectedKeys(prev => {
+      if (!prev.has(rowKey)) return prev;
       const next = new Set(prev);
-      next.delete(eventId);
+      next.delete(rowKey);
       return next;
     });
   }, []);
 
-  const unskip = useCallback((eventId: number) => {
-    setSkippedIds(prev => {
-      if (!prev.has(eventId)) return prev;
+  const unskip = useCallback((rowKey: string) => {
+    setSkippedKeys(prev => {
+      if (!prev.has(rowKey)) return prev;
       const next = new Set(prev);
-      next.delete(eventId);
+      next.delete(rowKey);
       return next;
     });
   }, []);
 
   const selectionTotal = useMemo(() => {
     let sum = 0;
-    for (const r of readyRows) if (visibleSelectedIds.has(r.eventId)) sum += r.amount;
+    for (const r of readyRows) if (visibleSelectedKeys.has(r.rowKey)) sum += r.amount;
     return sum;
-  }, [readyRows, visibleSelectedIds]);
+  }, [readyRows, visibleSelectedKeys]);
 
-  const readyTotal = useMemo(() => readyRows.reduce((s, r) => s + r.amount, 0), [readyRows]);
+  const readyTotal = useMemo(() => activeReadyRows.reduce((s, r) => s + r.amount, 0), [activeReadyRows]);
 
   return {
-    readyRows,
+    readyRows,             // sub-filtered by readyGroup
+    activeReadyRows,       // all non-skipped Ready rows
     skippedRows,
     needsMappingRows,
     mappingRows,
-    selectedIds: visibleSelectedIds,
-    selectionCount: visibleSelectedIds.size,
+    readyGroup,
+    changeReadyGroup,
+    payCount,
+    createCount,
+    selectedKeys: visibleSelectedKeys,
+    selectionCount: visibleSelectedKeys.size,
     selectionTotal,
     readyTotal,
     toggle,

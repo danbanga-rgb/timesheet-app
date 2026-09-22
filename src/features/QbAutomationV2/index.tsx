@@ -20,7 +20,7 @@ export interface QbAutomationV2Props {
   onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
   onUpdateMappingVendor: (args: { mappingId: number; qbVendorListId: string; qbVendorName: string }) => Promise<void>;
   onDeleteMapping: (mappingId: number) => Promise<void>;
-  onMappingChangeSubscribe: (cb: () => void) => () => void;   // returns unsubscribe
+  onMappingChangeSubscribe: (cb: () => void) => () => void;
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -28,10 +28,15 @@ type SubTab = 'inbox' | 'mapping';
 export default function QbAutomationV2(props: QbAutomationV2Props) {
   const {
     readyRows,
+    activeReadyRows,
     skippedRows,
     needsMappingRows,
     mappingRows,
-    selectedIds,
+    readyGroup,
+    changeReadyGroup,
+    payCount,
+    createCount,
+    selectedKeys,
     selectionCount,
     selectionTotal,
     readyTotal,
@@ -46,10 +51,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   const [category, setCategory] = useState<CategoryKey>('ready');
 
   useEffect(() => {
-    const unsubscribe = props.onMappingChangeSubscribe(() => {
-      // Realtime hook fires when qb_vendor_mappings changes. Wrapper
-      // reloads mappings + events; v2 re-renders from fresh props.
-    });
+    const unsubscribe = props.onMappingChangeSubscribe(() => {});
     return unsubscribe;
   }, [props.onMappingChangeSubscribe]);
 
@@ -71,7 +73,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-            <p className="text-xs text-gray-500">Admin preview · Slice V5 (Vendor Mapping sub-tab)</p>
+            <p className="text-xs text-gray-500">Admin preview · Slice V5.2 (Create Bill flow + posted-only modal)</p>
           </div>
         </div>
         {subTab === 'inbox' && <PushBar count={selectionCount} total={selectionTotal} onPush={handlePushSelected} />}
@@ -108,7 +110,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           <KpiStrip
             active={category}
             onSelect={setCategory}
-            readyCount={readyRows.length}
+            readyCount={activeReadyRows.length}
             readyTotal={readyTotal}
             needsMappingCount={needsMappingRows.length}
             skippedCount={skippedRows.length}
@@ -126,13 +128,17 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             <ReadyCard
               category={category}
               rows={rowsForReadyView}
-              selectedIds={selectedIds}
+              selectedKeys={selectedKeys}
               selectionCount={selectionCount}
               onToggle={toggle}
               onSelectAll={selectAll}
               onClearSelection={clearSelection}
               onSkip={skip}
               onUnskip={unskip}
+              readyGroup={readyGroup}
+              onChangeReadyGroup={changeReadyGroup}
+              payCount={payCount}
+              createCount={createCount}
             />
           )}
         </>

@@ -43,7 +43,7 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
         case 'contractor': return a.contractorName.localeCompare(b.contractorName) * dir;
         case 'pp':         return a.ppLabel.localeCompare(b.ppLabel) * dir;
         case 'vendor':     return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
-        case 'bills':      return (a.billsRoutedCount - b.billsRoutedCount) * dir;
+        case 'bills':      return (a.billsPushedCount - b.billsPushedCount) * dir;
       }
     });
     return sorted;
@@ -128,7 +128,7 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
                   QB Vendor{sortArrow('vendor')}
                 </th>
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer whitespace-nowrap" onClick={() => clickSort('bills')}>
-                  Bills routed{sortArrow('bills')}
+                  Bills pushed{sortArrow('bills')}
                 </th>
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 w-40">Actions</th>
               </tr>
@@ -163,16 +163,16 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
                       )}
                     </td>
                     <td className="px-2 py-1.5 text-right">
-                      {row.billsRoutedCount > 0 && row.qbVendorListId ? (
+                      {row.billsPushedCount > 0 && row.qbVendorListId ? (
                         <button
                           onClick={() => setInspecting({ listId: row.qbVendorListId, name: row.qbVendorName })}
                           className="font-mono text-blue-600 hover:underline"
                           title="Click to inspect routed bills"
                         >
-                          {row.billsRoutedCount}
+                          {row.billsPushedCount}
                         </button>
                       ) : (
-                        <span className="font-mono text-gray-400">{row.billsRoutedCount}</span>
+                        <span className="font-mono text-gray-400">{row.billsPushedCount}</span>
                       )}
                     </td>
                     <td className="px-2 py-1.5 text-right whitespace-nowrap">
