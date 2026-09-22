@@ -17,13 +17,15 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry:**
-- v1 QB Automation tab in `TimesheetSystem.tsx` is FROZEN. Do not touch its render surface.
-- v2 code path does NOT EXIST YET. `src/roles/Accountant/tabs/QbAutomationV2/` is a proposed structure in §3, first materialized in Slice V2.
-- **Dan is holding the QB push queue** until Slice V1 (pp_id migration + Buzalko fix) ships. See §5.11.
-- Chunk 8 in `.claude/plans/accountant-modularization.md` is marked SUPERSEDED.
+**State on entry (as of 2026-09-22 EOD):**
+- Branch `feature/qb-automation-v2` tip `6cfb25a`. Not merged to main.
+- V1–V8 SHIPPED (V7 SCRAPPED). See §8 session log for full history.
+- v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
+- **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
+- v1 QB Automation tab is FROZEN — do not touch its render surface.
+- Chunk 8 in `.claude/plans/accountant-modularization.md` is SUPERSEDED.
 - Modularization arc is PAUSED. Do not resume Chunk 9/10/Phase 6 slices unless Dan asks.
-- TS.tsx last known: 10,431 lines, tip `fcd9ef7` (plan log). Confirm on entry via `git log --oneline -3`.
+- Next planned slice: **V8-B (inline controls + preflight + cancellation)**. See §9 V8-B entry.
 
 **Do NOT:**
 - Ask Dan clarifying questions until he signals "ready" or dumps directionality. He said "let me think and give you some directionality and then you start asking questions" (2026-09-18).
@@ -404,6 +406,8 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S15 EOD (2026-09-22, session pause).** Marathon session shipped V2, V3, V3.1, V4, V4.1, V5, V5.1, V5.2, V5.3, V5.4, V6, V7 (scrapped), V8. Two new memories saved: [[inline-controls-over-warnings]] (durable rule) + [[rate-history-seeded-not-populated]] (data trap). Pivot memory updated with tip commit `6cfb25a` and V8-B deferred section. Push queue STILL HELD. Dan resumes for V8-B next session — see §9 V8-B entry (dedicated) for the fresh-session pickup pointer.
+
 **S15 (2026-09-22) — Slice V8 shipped: real push flow + Preview modal + status pane.**
 - New `PushPreviewModal.tsx` — shows selected rows before commit with per-verdict counts + totals, Confirm/Cancel. Modal blocks background clicks while pushing.
 - New `onPushRows({eventIds, invoiceIds})` wrapper handler distills v1's TS.tsx:7660+ routing logic into a single call. Routes to 8 pushers: pushIntuitPayBill, pushIntuitCreateBill, pushIntuitInvoiceCreateBill (G7.5), pushConveraInvoiceCreateBill (G7.6), pushConveraBillPmt (C-1), pushConveraCreateBillAndPay (C-2/C-3), pushConveraCreateBillFromEvent (C-4). Invoice-driven rows (will_create_bill) route by paymentMethod → G7.5/G7.6 pushers.
@@ -736,13 +740,47 @@ Original spec preserved below for archaeology.
 - Status pane surfaces in-flight/verified rows.
 - Rows disappear from Ready after next reload as their status flips.
 
-**V8-B (deferred):**
-- Inline QB vendor override per Ready row (the actionable-controls ambition from V7 discussion — click QB Vendor cell → autocomplete → save-as-mapping or one-shot override).
-- Preflight auto-sync (auto-Sync Vendors if any selected row's target missing from mirror).
-- Cancellation.
-- Phase 2 re-push (rows newly resolved after post-push sync).
+**V8-B (deferred):** see dedicated §9 entry below.
 
 **Rollback:** delete `PushPreviewModal.tsx`, revert `index.tsx` push flow additions + status pane mount, revert `TS.tsx` onPushRows handler + pushRecords prop.
+
+---
+
+### Slice V8-B — Inline controls + preflight + cancellation
+**Est:** 4–6h. **Depends on:** V8. **Priority:** high — Dan called this out during V7 discussion.
+
+**Goal:** ship the actionable-controls ambition that killed V7. Every "the mapping might be wrong" or "we don't have this vendor synced yet" case gets an inline fix path in the Ready row or the Push Preview modal — no navigation, no tooltips.
+
+**Files to create:**
+- `src/features/QbAutomationV2/sections/InlineVendorPicker.tsx` — small inline autocomplete widget for per-row vendor override. Reuse `QbVendorNameEditor` if it fits, or build fresh.
+- Possibly: `src/features/QbAutomationV2/hooks/useQbPreflight.ts` — encapsulates missing-vendor detection + auto-sync-then-retry flow.
+
+**Files to edit:**
+- `src/features/QbAutomationV2/sections/ReadyCard.tsx` — QB Vendor column becomes click-to-edit. Two behaviors on save:
+  - **Save as mapping** (default) — writes to `qb_vendor_mappings` via existing `onSaveMapping` (pp_id-primary); rows dependent on this pp update via classification pass.
+  - **Just this push** (secondary) — session-only override, applied at push time via a `perPushVendorOverride: Map<rowKey, listId>` state.
+- `src/features/QbAutomationV2/sections/PushPreviewModal.tsx` — same inline vendor override per row before commit. Also: preflight banner if any selected row's target vendor is missing from `qb_vendors`. "Sync Vendors + retry" button.
+- `src/features/QbAutomationV2/index.tsx` — push flow honors `perPushVendorOverride` when building the eventIds/invoiceIds payload; preflight banner state.
+- `src/TimesheetSystem.tsx` — expose `runSyncQbVendors` as a prop to v2 for the preflight retry button.
+- Possibly `src/components/QbPushStatusPane.tsx` — add a Cancel action (needs new `qb_sync_jobs` cancellation semantics — separate investigation before we touch this).
+
+**Acceptance:**
+- Click on a QB Vendor cell in Ready → autocomplete opens inline. Save-as-mapping persists (updates classification for future events); Just-this-push applies only to the current selection.
+- Push Preview modal shows the (potentially overridden) vendor for each row.
+- If any selected row's target vendor is missing from `qb_vendors` mirror, preflight banner in the modal offers "Sync Vendors" — clicking runs Sync + reloads + re-evaluates.
+- Cancellation: mid-push, user can click Cancel in the status pane → any pending queue rows get flagged as cancelled (does NOT reverse in-flight QB writes — that's not possible).
+- Phase 2 re-push (nice-to-have): after post-push sync, if any Needs Mapping rows have become auto-resolvable, offer a second push in a small hint bar.
+
+**Order of operations for the coding session:**
+1. Inline vendor override in Ready rows (biggest UX unlock; unblocks the rest).
+2. PushPreviewModal picks up the override.
+3. Preflight banner + Sync retry.
+4. Cancellation.
+5. Phase 2 (if time).
+
+**Rollback:** delete new files; revert edits to ReadyCard / PushPreviewModal / index.tsx / TS.tsx.
+
+**Cold-start read order:** §0 → this entry → [[qb-automation-v2-pivot]] (V8-B deferred sub-slices section) → [[inline-controls-over-warnings]] (why this ambition exists) → §5.11 (push flow spec) → §8 session log for V8 shipped state.
 
 **Goal:** §5.11.
 
