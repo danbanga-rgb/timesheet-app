@@ -8,9 +8,15 @@ export interface ReadyRow {
   contractorName: string;
   invoiceNumber: string;
   amount: number;
-  monthKey: string;     // 'YYYY-MM'
-  monthLabel: string;   // 'Sep 2026'
-  qbVendorName: string; // '(unmapped)' if vendorListId doesn't resolve
+  currency: string;
+  hours: number | null;
+  rate: number | null;
+  periodStart: string;
+  periodEnd: string;
+  monthKey: string;      // 'YYYY-MM'
+  monthLabel: string;    // 'Sep 2026'
+  qbVendorName: string;  // '(unmapped)' if vendorListId doesn't resolve
+  qbVendorMapped: boolean;
   verdict: Verdict;
 }
 
@@ -33,7 +39,7 @@ export function useQbAutomationV2({ events, openBills, vendors, invoices }: UseQ
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
 
-  const readyRows: ReadyRow[] = useMemo(() => {
+  const allReadyRows: ReadyRow[] = useMemo(() => {
     const rows: ReadyRow[] = [];
     for (const e of events) {
       if (e.status !== 'ready') continue;
@@ -53,8 +59,9 @@ export function useQbAutomationV2({ events, openBills, vendors, invoices }: UseQ
       );
       if (!verdict) continue;
 
-      const qbVendorName = e.counterpartyQbVendorListId
-        ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(unmapped)')
+      const vendorMapped = !!e.counterpartyQbVendorListId;
+      const qbVendorName = vendorMapped
+        ? (vendorsById.get(e.counterpartyQbVendorListId!)?.name ?? '(unmapped)')
         : '(unmapped)';
 
       rows.push({
@@ -62,9 +69,15 @@ export function useQbAutomationV2({ events, openBills, vendors, invoices }: UseQ
         contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
         invoiceNumber: refNumber,
         amount: e.amount,
+        currency: invoice?.currency || 'USD',
+        hours: invoice?.totalHours ?? null,
+        rate: invoice?.rate ?? null,
+        periodStart: invoice?.periodStart ?? '',
+        periodEnd: invoice?.periodEnd ?? '',
         monthKey,
         monthLabel: monthLabelFromKey(monthKey),
         qbVendorName,
+        qbVendorMapped: vendorMapped,
         verdict,
       });
     }
@@ -72,7 +85,11 @@ export function useQbAutomationV2({ events, openBills, vendors, invoices }: UseQ
     return rows;
   }, [events, invoicesById, vendorsById, openBills]);
 
+  const [skippedIds, setSkippedIds] = useState<Set<number>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  const readyRows = useMemo(() => allReadyRows.filter(r => !skippedIds.has(r.eventId)), [allReadyRows, skippedIds]);
+  const skippedRows = useMemo(() => allReadyRows.filter(r => skippedIds.has(r.eventId)), [allReadyRows, skippedIds]);
 
   const visibleSelectedIds = useMemo(() => {
     const visible = new Set(readyRows.map(r => r.eventId));
@@ -96,19 +113,48 @@ export function useQbAutomationV2({ events, openBills, vendors, invoices }: UseQ
     setSelectedIds(new Set());
   }, []);
 
+  const skip = useCallback((eventId: number) => {
+    setSkippedIds(prev => {
+      const next = new Set(prev);
+      next.add(eventId);
+      return next;
+    });
+    setSelectedIds(prev => {
+      if (!prev.has(eventId)) return prev;
+      const next = new Set(prev);
+      next.delete(eventId);
+      return next;
+    });
+  }, []);
+
+  const unskip = useCallback((eventId: number) => {
+    setSkippedIds(prev => {
+      if (!prev.has(eventId)) return prev;
+      const next = new Set(prev);
+      next.delete(eventId);
+      return next;
+    });
+  }, []);
+
   const selectionTotal = useMemo(() => {
     let sum = 0;
     for (const r of readyRows) if (visibleSelectedIds.has(r.eventId)) sum += r.amount;
     return sum;
   }, [readyRows, visibleSelectedIds]);
 
+  const readyTotal = useMemo(() => readyRows.reduce((s, r) => s + r.amount, 0), [readyRows]);
+
   return {
     readyRows,
+    skippedRows,
     selectedIds: visibleSelectedIds,
     selectionCount: visibleSelectedIds.size,
     selectionTotal,
+    readyTotal,
     toggle,
     selectAll,
     clearSelection,
+    skip,
+    unskip,
   };
 }
