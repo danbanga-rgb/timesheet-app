@@ -323,29 +323,11 @@ export function useQbAutomationV2({
     setSelectedKeys(new Set());
   }, []);
 
-  const includeBillCreations = useCallback(() => {
-    const createKeys = readyRows.filter(r => r.group === 'create').map(r => r.rowKey);
-    setSelectedKeys(prev => {
-      const next = new Set(prev);
-      createKeys.forEach(k => next.add(k));
-      return next;
-    });
+  const selectGroup = useCallback((group: ReadyGroup) => {
+    // Replace-semantics: selecting a group discards other selections.
+    // Matches Dan's mental model — "Select Payments" = "show me only Payments in selection".
+    setSelectedKeys(new Set(readyRows.filter(r => r.group === group).map(r => r.rowKey)));
   }, [readyRows]);
-
-  const excludeBillCreations = useCallback(() => {
-    const createKeys = new Set(readyRows.filter(r => r.group === 'create').map(r => r.rowKey));
-    setSelectedKeys(prev => {
-      const next = new Set(prev);
-      createKeys.forEach(k => next.delete(k));
-      return next;
-    });
-  }, [readyRows]);
-
-  const createSelectedCount = useMemo(
-    () => readyRows.filter(r => r.group === 'create' && visibleSelectedKeys.has(r.rowKey)).length,
-    [readyRows, visibleSelectedKeys],
-  );
-  const allCreateSelected = createCount > 0 && createSelectedCount === createCount;
 
   const skip = useCallback((rowKey: string) => {
     setSkippedKeys(prev => {
@@ -387,17 +369,14 @@ export function useQbAutomationV2({
     createCount,
     payTotal,
     createTotal,
-    createSelectedCount,
-    allCreateSelected,
     selectedKeys: visibleSelectedKeys,
     selectionCount: visibleSelectedKeys.size,
     selectionTotal,
     readyTotal,
     toggle,
     selectAll,
+    selectGroup,
     clearSelection,
-    includeBillCreations,
-    excludeBillCreations,
     skip,
     unskip,
   };

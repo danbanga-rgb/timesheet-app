@@ -1,4 +1,6 @@
-import type { ReadyRow } from '../hooks/useQbAutomationV2';
+import { useMemo, useState } from 'react';
+import type { ReadyRow, ReadyGroup } from '../hooks/useQbAutomationV2';
+import type { Verdict } from '../../../lib/qbAutomation/verdict';
 import type { CategoryKey } from './KpiStrip';
 
 interface Props {
@@ -8,25 +10,31 @@ interface Props {
   selectionCount: number;
   onToggle: (rowKey: string) => void;
   onSelectAll: () => void;
+  onSelectGroup: (group: ReadyGroup) => void;
   onClearSelection: () => void;
   onSkip: (rowKey: string) => void;
   onUnskip: (rowKey: string) => void;
 
-  // Group summary + Bill Creations opt-in
   payCount: number;
   createCount: number;
   payTotal: number;
   createTotal: number;
-  allCreateSelected: boolean;
-  onIncludeBillCreations: () => void;
-  onExcludeBillCreations: () => void;
 }
+
+type SortKey = 'contractor' | 'period' | 'vendor' | 'hrs' | 'rate' | 'total' | 'status';
+type SortDir = 'asc' | 'desc';
+
+const verdictOrder: Record<Verdict, number> = {
+  will_pay: 0,
+  will_create_and_pay: 1,
+  will_create_bill: 2,
+};
 
 function fmtMoney(n: number): string {
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function verdictBadge(v: ReadyRow['verdict']) {
+function verdictBadge(v: Verdict) {
   if (v === 'will_create_and_pay') {
     return <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">Will Create + Pay</span>;
   }
@@ -48,6 +56,7 @@ export default function ReadyCard(props: Props) {
     selectionCount,
     onToggle,
     onSelectAll,
+    onSelectGroup,
     onClearSelection,
     onSkip,
     onUnskip,
@@ -55,13 +64,35 @@ export default function ReadyCard(props: Props) {
     createCount,
     payTotal,
     createTotal,
-    allCreateSelected,
-    onIncludeBillCreations,
-    onExcludeBillCreations,
   } = props;
 
+  const [sortKey, setSortKey] = useState<SortKey>('contractor');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+
   const isSkippedView = category === 'skipped';
-  const allSelected = rows.length > 0 && selectionCount === rows.length;
+
+  const clickSort = (key: SortKey) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('asc'); }
+  };
+  const sortArrow = (key: SortKey) => sortKey !== key ? '' : sortDir === 'asc' ? ' ▲' : ' ▼';
+
+  const sortedRows = useMemo(() => {
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const rowsCopy = [...rows];
+    rowsCopy.sort((a, b) => {
+      switch (sortKey) {
+        case 'contractor': return a.contractorName.localeCompare(b.contractorName) * dir;
+        case 'period':     return (a.monthKey || '').localeCompare(b.monthKey || '') * dir;
+        case 'vendor':     return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
+        case 'hrs':        return ((a.hours ?? -1) - (b.hours ?? -1)) * dir;
+        case 'rate':       return ((a.rate ?? -1) - (b.rate ?? -1)) * dir;
+        case 'total':      return (a.amount - b.amount) * dir;
+        case 'status':     return (verdictOrder[a.verdict] - verdictOrder[b.verdict]) * dir;
+      }
+    });
+    return rowsCopy;
+  }, [rows, sortKey, sortDir]);
 
   const emptyMsg = isSkippedView
     ? 'No skipped rows in this session.'
@@ -94,22 +125,16 @@ export default function ReadyCard(props: Props) {
         </div>
         {!isSkippedView && rows.length > 0 && (
           <div className="flex items-center gap-3 text-xs">
+            <button onClick={onSelectAll} className="text-emerald-700 hover:text-emerald-900 font-medium">Select all</button>
+            {payCount > 0 && (
+              <button onClick={() => onSelectGroup('pay')} className="text-blue-700 hover:text-blue-900 font-medium">Select Payments</button>
+            )}
             {createCount > 0 && (
-              allCreateSelected ? (
-                <button onClick={onExcludeBillCreations} className="text-purple-700 hover:text-purple-900 font-medium">
-                  Exclude Bill Creations
-                </button>
-              ) : (
-                <button onClick={onIncludeBillCreations} className="text-purple-700 hover:text-purple-900 font-medium">
-                  Include {createCount} Bill {createCount === 1 ? 'Creation' : 'Creations'}
-                </button>
-              )
+              <button onClick={() => onSelectGroup('create')} className="text-purple-700 hover:text-purple-900 font-medium">Select Bill Creations</button>
             )}
-            {allSelected ? (
-              <button onClick={onClearSelection} className="text-gray-700 hover:text-gray-900 font-medium">Clear selection</button>
-            ) : (
-              <button onClick={onSelectAll} className="text-emerald-700 hover:text-emerald-900 font-medium">Select all</button>
-            )}
+            <button onClick={onClearSelection} disabled={selectionCount === 0} className={selectionCount === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-900 font-medium'}>
+              Clear selection
+            </button>
           </div>
         )}
       </div>
@@ -122,18 +147,32 @@ export default function ReadyCard(props: Props) {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-2 py-2 text-center font-semibold text-gray-600 w-10">Inc</th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600">Contractor</th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Period</th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600">QB Vendor</th>
-                <th className="px-2 py-2 text-right font-semibold text-gray-600">Hrs</th>
-                <th className="px-2 py-2 text-right font-semibold text-gray-600">Rate</th>
-                <th className="px-2 py-2 text-right font-semibold text-gray-600">Total</th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600">Status</th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('contractor')}>
+                  Contractor{sortArrow('contractor')}
+                </th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('period')}>
+                  Period{sortArrow('period')}
+                </th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('vendor')}>
+                  QB Vendor{sortArrow('vendor')}
+                </th>
+                <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('hrs')}>
+                  Hrs{sortArrow('hrs')}
+                </th>
+                <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('rate')}>
+                  Rate{sortArrow('rate')}
+                </th>
+                <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('total')}>
+                  Total{sortArrow('total')}
+                </th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('status')}>
+                  Status{sortArrow('status')}
+                </th>
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 w-20">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {rows.map(r => {
+              {sortedRows.map(r => {
                 const isChecked = selectedKeys.has(r.rowKey);
                 const rowCls = isSkippedView
                   ? 'text-gray-400 bg-gray-50'

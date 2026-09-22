@@ -35,16 +35,14 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     createCount,
     payTotal,
     createTotal,
-    allCreateSelected,
     selectedKeys,
     selectionCount,
     selectionTotal,
     readyTotal,
     toggle,
     selectAll,
+    selectGroup,
     clearSelection,
-    includeBillCreations,
-    excludeBillCreations,
     skip,
     unskip,
   } = useQbAutomationV2(props);
@@ -75,7 +73,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-            <p className="text-xs text-gray-500">Admin preview · Slice V5.3 (unified Ready + opt-in Bill Creations)</p>
+            <p className="text-xs text-gray-500">Admin preview · Slice V5.4 (sortable columns + group-select buttons)</p>
           </div>
         </div>
         {subTab === 'inbox' && <PushBar count={selectionCount} total={selectionTotal} onPush={handlePushSelected} />}
@@ -134,6 +132,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               selectionCount={selectionCount}
               onToggle={toggle}
               onSelectAll={selectAll}
+              onSelectGroup={selectGroup}
               onClearSelection={clearSelection}
               onSkip={skip}
               onUnskip={unskip}
@@ -141,9 +140,6 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               createCount={createCount}
               payTotal={payTotal}
               createTotal={createTotal}
-              allCreateSelected={allCreateSelected}
-              onIncludeBillCreations={includeBillCreations}
-              onExcludeBillCreations={excludeBillCreations}
             />
           )}
         </>
