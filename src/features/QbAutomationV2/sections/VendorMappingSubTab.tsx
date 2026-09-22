@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react';
+import type { Invoice, QbIngestEvent } from '../../../types';
 import type { MappingRow } from '../hooks/useQbAutomationV2';
 import type { QbVendorRow } from '../../../lib/qbStateSync/types';
 import type { SaveMappingArgs } from './NeedsMappingCard';
+import BillsRoutedModal from './BillsRoutedModal';
 
 type SortKey = 'contractor' | 'pp' | 'vendor' | 'bills';
 type SortDir = 'asc' | 'desc';
@@ -9,12 +11,15 @@ type SortDir = 'asc' | 'desc';
 interface Props {
   rows: MappingRow[];
   vendors: QbVendorRow[];
+  events: QbIngestEvent[];
+  invoices: Invoice[];
   onUpdateVendor: (args: { mappingId: number; qbVendorListId: string; qbVendorName: string }) => Promise<void>;
   onDelete: (mappingId: number) => Promise<void>;
   onAddLikeNeeds: (args: SaveMappingArgs) => Promise<void>;   // future — currently unused; kept for API symmetry
 }
 
-export default function VendorMappingSubTab({ rows, vendors, onUpdateVendor, onDelete }: Props) {
+export default function VendorMappingSubTab({ rows, vendors, events, invoices, onUpdateVendor, onDelete }: Props) {
+  const [inspecting, setInspecting] = useState<{ listId: string; name: string } | null>(null);
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('contractor');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -157,7 +162,19 @@ export default function VendorMappingSubTab({ rows, vendors, onUpdateVendor, onD
                         </span>
                       )}
                     </td>
-                    <td className="px-2 py-1.5 text-right font-mono text-gray-700">{row.billsRoutedCount}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      {row.billsRoutedCount > 0 && row.qbVendorListId ? (
+                        <button
+                          onClick={() => setInspecting({ listId: row.qbVendorListId, name: row.qbVendorName })}
+                          className="font-mono text-blue-600 hover:underline"
+                          title="Click to inspect routed bills"
+                        >
+                          {row.billsRoutedCount}
+                        </button>
+                      ) : (
+                        <span className="font-mono text-gray-400">{row.billsRoutedCount}</span>
+                      )}
+                    </td>
                     <td className="px-2 py-1.5 text-right whitespace-nowrap">
                       {isEditing ? (
                         <>
@@ -195,6 +212,16 @@ export default function VendorMappingSubTab({ rows, vendors, onUpdateVendor, onD
             </tbody>
           </table>
         </div>
+      )}
+
+      {inspecting && (
+        <BillsRoutedModal
+          qbVendorListId={inspecting.listId}
+          qbVendorName={inspecting.name}
+          events={events}
+          invoices={invoices}
+          onClose={() => setInspecting(null)}
+        />
       )}
     </div>
   );

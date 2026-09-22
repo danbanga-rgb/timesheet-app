@@ -142,6 +142,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
         <VendorMappingSubTab
           rows={mappingRows}
           vendors={props.vendors}
+          events={props.events}
+          invoices={props.invoices}
           onUpdateVendor={props.onUpdateMappingVendor}
           onDelete={props.onDeleteMapping}
           onAddLikeNeeds={props.onSaveMapping}
