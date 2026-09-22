@@ -191,6 +191,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               onClearSelection={clearSelection}
               onSkip={skip}
               onUnskip={unskip}
+              vendors={props.vendors}
+              onSaveMapping={props.onSaveMapping}
               payCount={payCount}
               createCount={createCount}
               payTotal={payTotal}

@@ -16,6 +16,7 @@ export interface ReadyRow {
   eventId: number | null;
   invoiceId: number | null;
   contractorName: string;
+  contractorUserId: string | null;
   invoiceNumber: string;
   amount: number;
   currency: string;
@@ -29,6 +30,14 @@ export interface ReadyRow {
   qbVendorMapped: boolean;
   verdict: Verdict;
   group: ReadyGroup;
+  // For inline vendor override (V8-B): pp_id keys the mapping upsert; source
+  // + counterpartyPattern are needed by the SaveMappingArgs contract;
+  // ppLabel drives the tier-3 token-overlap candidate resolver.
+  ppId: number;
+  ppLabel: string;
+  ppSource: string;
+  ppCounterpartyPattern: string;
+  candidates: Candidate[];
 }
 
 export interface NeedsMappingRow {
@@ -97,6 +106,26 @@ export function useQbAutomationV2({
     return m;
   }, [mappings]);
 
+  // Build once per render; used by both allReadyRows (V8-B inline override
+  // candidate chips) and needsMappingRows (existing tier-2 history tier).
+  const historyByUser = useMemo(() => {
+    const invoiceUserIdById = new Map<number, string>();
+    for (const inv of invoices) if (inv.userId) invoiceUserIdById.set(inv.id, inv.userId);
+    return buildHistoryByUser(
+      events.map(e => ({
+        status: e.status,
+        counterpartyQbVendorListId: e.counterpartyQbVendorListId,
+        matchedInvoiceIds: e.matchedInvoiceIds,
+      })),
+      invoiceUserIdById,
+    );
+  }, [events, invoices]);
+
+  const resolverVendors = useMemo(
+    () => vendors.map(v => ({ listId: v.listId, name: v.name })),
+    [vendors],
+  );
+
   const allReadyRows: ReadyRow[] = useMemo(() => {
     const rows: ReadyRow[] = [];
     const invoiceIdsCoveredByEvents = new Set<number>();
@@ -126,11 +155,26 @@ export function useQbAutomationV2({
 
       if (invoice) invoiceIdsCoveredByEvents.add(invoice.id);
 
+      const ppId = invoice?.paymentProfile?.id ?? 0;
+      const ppLabel = invoice?.paymentProfile?.companyName
+        || invoice?.paymentProfile?.bankName
+        || e.counterpartyRaw
+        || '';
+      const contractorName = invoice?.userName || e.counterpartyRaw || '(unknown)';
+      const contractorUserId = invoice?.userId ?? null;
+      const candidates = ppId > 0
+        ? resolveVendorCandidates(
+            { contractorName, contractorUserId, ppLabel },
+            { vendors: resolverVendors, historyByUser },
+          )
+        : [];
+
       rows.push({
         rowKey: `evt-${e.id}`,
         eventId: e.id,
         invoiceId: invoice?.id ?? null,
-        contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
+        contractorName,
+        contractorUserId,
         invoiceNumber: refNumber,
         amount: e.amount,
         currency: invoice?.currency || 'USD',
@@ -144,6 +188,11 @@ export function useQbAutomationV2({
         qbVendorMapped: vendorMapped,
         verdict,
         group: groupForVerdict(verdict),
+        ppId,
+        ppLabel,
+        ppSource: e.source,
+        ppCounterpartyPattern: e.counterpartyRaw,
+        candidates,
       });
     }
 
@@ -169,12 +218,22 @@ export function useQbAutomationV2({
       if (hasBill) continue;
 
       const qbVendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? '(unmapped)';
+      const ppLabel = inv.paymentProfile?.companyName
+        || inv.paymentProfile?.bankName
+        || '';
+      const contractorName = inv.userName || '(unknown)';
+      const contractorUserId = inv.userId ?? null;
+      const candidates = resolveVendorCandidates(
+        { contractorName, contractorUserId, ppLabel },
+        { vendors: resolverVendors, historyByUser },
+      );
 
       rows.push({
         rowKey: `inv-${inv.id}`,
         eventId: null,
         invoiceId: inv.id,
-        contractorName: inv.userName || '(unknown)',
+        contractorName,
+        contractorUserId,
         invoiceNumber: inv.invoiceNumber,
         amount: inv.totalAmount,
         currency: inv.currency || 'USD',
@@ -188,27 +247,19 @@ export function useQbAutomationV2({
         qbVendorMapped: true,
         verdict: 'will_create_bill',
         group: 'create',
+        ppId,
+        ppLabel,
+        ppSource: mapping.source || 'invoice',
+        ppCounterpartyPattern: mapping.counterpartyPattern || ppLabel,
+        candidates,
       });
     }
 
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId]);
+  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser]);
 
   const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
-    // Build history map ONCE per render — feeds tier 2 of the resolver.
-    const invoiceUserIdById = new Map<number, string>();
-    for (const inv of invoices) if (inv.userId) invoiceUserIdById.set(inv.id, inv.userId);
-    const historyByUser = buildHistoryByUser(
-      events.map(e => ({
-        status: e.status,
-        counterpartyQbVendorListId: e.counterpartyQbVendorListId,
-        matchedInvoiceIds: e.matchedInvoiceIds,
-      })),
-      invoiceUserIdById,
-    );
-    const resolverVendors = vendors.map(v => ({ listId: v.listId, name: v.name }));
-
     const rows: NeedsMappingRow[] = [];
     for (const e of events) {
       if (e.status === 'posted' || e.status === 'ignored') continue;
@@ -254,7 +305,7 @@ export function useQbAutomationV2({
     }
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoices, invoicesById, vendors]);
+  }, [events, invoices, invoicesById, resolverVendors, historyByUser]);
 
   const mappingRows: MappingRow[] = useMemo(() => {
     const postedCountByVendor = new Map<string, number>();

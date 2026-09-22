@@ -5374,16 +5374,20 @@ const TimesheetSystem = () => {
                 if (mapErr) throw mapErr;
                 // Flip THIS event to ready immediately for real-time UX;
                 // sibling pp events get picked up by applyClassificationPass.
-                const { error: evtErr } = await supabase
-                  .from('qb_ingest_events')
-                  .update({
-                    counterparty_qb_vendor_list_id: qbVendorListId,
-                    target_qb_txn_kind: 'bill_add_and_pmt',
-                    status: 'ready',
-                    status_updated_at: nowIso,
-                  })
-                  .eq('id', eventId);
-                if (evtErr) throw evtErr;
+                // eventId is null for V8-B Ready-row inline overrides on
+                // invoice-driven rows (no event exists); mapping alone is enough.
+                if (eventId != null) {
+                  const { error: evtErr } = await supabase
+                    .from('qb_ingest_events')
+                    .update({
+                      counterparty_qb_vendor_list_id: qbVendorListId,
+                      target_qb_txn_kind: 'bill_add_and_pmt',
+                      status: 'ready',
+                      status_updated_at: nowIso,
+                    })
+                    .eq('id', eventId);
+                  if (evtErr) throw evtErr;
+                }
                 await applyClassificationPass();
                 await loadQbIngestEvents();
                 await loadQbVendorMappings();

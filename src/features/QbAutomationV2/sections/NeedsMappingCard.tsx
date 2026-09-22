@@ -4,7 +4,11 @@ import type { QbVendorRow } from '../../../lib/qbStateSync/types';
 import type { Candidate, Confidence } from '../../../lib/qbAutomation/vendorMappingResolver';
 
 export interface SaveMappingArgs {
-  eventId: number;
+  // null when saving from a Ready row that has no event (invoice-driven rows
+  // in the "will_create_bill" verdict). Wrapper handler skips the event-flip
+  // step in that case; the mapping upsert still runs and future events
+  // pick up the new vendor via classifier.
+  eventId: number | null;
   ppId: number;
   source: string;
   counterpartyPattern: string;

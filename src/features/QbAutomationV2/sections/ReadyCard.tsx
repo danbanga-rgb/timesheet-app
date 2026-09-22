@@ -2,6 +2,9 @@ import { useMemo, useState } from 'react';
 import type { ReadyRow, ReadyGroup } from '../hooks/useQbAutomationV2';
 import type { Verdict } from '../../../lib/qbAutomation/verdict';
 import type { CategoryKey } from './KpiStrip';
+import type { QbVendorRow } from '../../../lib/qbStateSync/types';
+import type { SaveMappingArgs } from './NeedsMappingCard';
+import InlineVendorPicker from './InlineVendorPicker';
 
 interface Props {
   category: CategoryKey;
@@ -14,6 +17,10 @@ interface Props {
   onClearSelection: () => void;
   onSkip: (rowKey: string) => void;
   onUnskip: (rowKey: string) => void;
+  // V8-B: inline vendor override. Reuses the pp_id-primary onSaveMapping
+  // wrapper — same handler NeedsMappingCard uses.
+  vendors: QbVendorRow[];
+  onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
 
   payCount: number;
   createCount: number;
@@ -60,6 +67,8 @@ export default function ReadyCard(props: Props) {
     onClearSelection,
     onSkip,
     onUnskip,
+    vendors,
+    onSaveMapping,
     payCount,
     createCount,
     payTotal,
@@ -68,8 +77,34 @@ export default function ReadyCard(props: Props) {
 
   const [sortKey, setSortKey] = useState<SortKey>('contractor');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
+  const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
 
   const isSkippedView = category === 'skipped';
+
+  const handleSaveVendor = async (row: ReadyRow, args: { qbVendorListId: string; qbVendorName: string }) => {
+    if (row.ppId <= 0) {
+      alert('This row has no payment profile — cannot save mapping.');
+      return;
+    }
+    setSavingRowKey(row.rowKey);
+    try {
+      await onSaveMapping({
+        eventId: row.eventId ?? null,
+        ppId: row.ppId,
+        source: row.ppSource,
+        counterpartyPattern: row.ppCounterpartyPattern,
+        qbVendorListId: args.qbVendorListId,
+        qbVendorName: args.qbVendorName,
+      });
+      setEditingRowKey(null);
+    } catch (e) {
+      console.error('inline saveMapping failed', e);
+      alert('Failed to save mapping: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSavingRowKey(null);
+    }
+  };
 
   const clickSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -200,10 +235,34 @@ export default function ReadyCard(props: Props) {
                       {r.contractorName}
                     </td>
                     <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
-                    <td className="px-2 py-1.5">
-                      <span className={r.qbVendorMapped ? '' : 'text-amber-600 italic'}>
-                        {r.qbVendorName}
-                      </span>
+                    <td className="px-2 py-1.5" style={{ minWidth: 260 }}>
+                      {editingRowKey === r.rowKey ? (
+                        <InlineVendorPicker
+                          initialValue={r.qbVendorMapped ? r.qbVendorName : ''}
+                          vendors={vendors}
+                          candidates={r.candidates}
+                          saving={savingRowKey === r.rowKey}
+                          onSave={args => handleSaveVendor(r, args)}
+                          onCancel={() => setEditingRowKey(null)}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isSkippedView || r.ppId <= 0}
+                          onClick={() => setEditingRowKey(r.rowKey)}
+                          title={r.ppId <= 0 ? 'No payment profile — cannot re-map' : 'Click to change QB vendor mapping'}
+                          className={
+                            'text-left w-full px-1 py-0.5 rounded ' +
+                            (r.ppId <= 0
+                              ? 'cursor-not-allowed opacity-60'
+                              : 'hover:bg-indigo-50 hover:ring-1 hover:ring-indigo-200 cursor-pointer')
+                          }
+                        >
+                          <span className={r.qbVendorMapped ? '' : 'text-amber-600 italic'}>
+                            {r.qbVendorName}
+                          </span>
+                        </button>
+                      )}
                     </td>
                     <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{r.hours ?? '—'}</td>
                     <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{r.rate != null ? `$${r.rate}` : '—'}</td>
