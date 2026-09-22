@@ -5203,6 +5203,126 @@ const TimesheetSystem = () => {
               paymentProfiles={paymentProfiles}
               users={users}
               mappings={qbVendorMappings}
+              pushRecords={qbPushRecords}
+              supabase={supabase}
+              onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
+              onPushRows={async ({ eventIds, invoiceIds }) => {
+                // Route selected event/invoice IDs to the 8 v1 pushers based on
+                // source + resolvedAction + bill-state. Same logic as v1's
+                // TS.tsx:7660+ push handler, distilled for v2's clean inputs.
+                const eventById = new Map(qbIngestEvents.map(e => [e.id, e]));
+                const events = eventIds.map(id => eventById.get(id)).filter((e): e is QbIngestEvent => !!e);
+
+                const intuitPay = events
+                  .filter(e => e.source === 'intuit_xlsx' && e.resolvedAction === 'pay_existing_bill')
+                  .map(e => e.id);
+                const intuitCreate = events
+                  .filter(e => e.source === 'intuit_xlsx' && e.resolvedAction === 'create_bill_then_pay')
+                  .map(e => e.id);
+
+                const converaBillPmtCandidates = events.filter(e =>
+                  e.source === 'convera'
+                  && e.targetQbTxnKind === 'bill_pmt'
+                  && (e.matchedInvoiceIds ?? []).length > 0
+                );
+                const converaBillExists = converaBillPmtCandidates.filter(e => {
+                  const ids = e.matchedInvoiceIds ?? [];
+                  return ids.length === 1 && ids.every(iid => invoices.find(inv => inv.id === iid)?.qbBillTxnId);
+                }).map(e => e.id);
+                const converaMissingBills = converaBillPmtCandidates
+                  .filter(e => !converaBillExists.includes(e.id))
+                  .map(e => e.id);
+                const converaOrphan = events.filter(e =>
+                  e.source === 'convera'
+                  && (e.targetQbTxnKind === 'bill_add_and_pmt' || e.targetQbTxnKind === 'bill_pmt')
+                  && (e.matchedInvoiceIds ?? []).length === 0
+                ).map(e => e.id);
+
+                const g75Ids: number[] = [];
+                const g76Ids: number[] = [];
+                for (const invId of invoiceIds) {
+                  const inv = invoices.find(i => i.id === invId);
+                  if (!inv) continue;
+                  const pm = paymentMethod(inv);
+                  if (pm === 'Intuit') g75Ids.push(invId);
+                  else if (pm === 'Convera') g76Ids.push(invId);
+                }
+
+                const [payRes, createRes, g75Res, g76Res, converaPayRes, converaCreatePayRes, converaOrphanRes] = await Promise.all([
+                  intuitPay.length ? pushIntuitPayBill(supabase, intuitPay) : Promise.resolve(null),
+                  intuitCreate.length ? pushIntuitCreateBill(supabase, intuitCreate) : Promise.resolve(null),
+                  g75Ids.length ? pushIntuitInvoiceCreateBill(supabase, g75Ids) : Promise.resolve(null),
+                  g76Ids.length ? pushConveraInvoiceCreateBill(supabase, g76Ids) : Promise.resolve(null),
+                  converaBillExists.length ? pushConveraBillPmt(supabase, converaBillExists) : Promise.resolve(null),
+                  converaMissingBills.length ? pushConveraCreateBillAndPay(supabase, converaMissingBills) : Promise.resolve(null),
+                  converaOrphan.length ? pushConveraCreateBillFromEvent(supabase, converaOrphan) : Promise.resolve(null),
+                ]);
+
+                const merged = {
+                  jobIds: [payRes, createRes, g75Res, g76Res, converaPayRes, converaCreatePayRes, converaOrphanRes]
+                    .flatMap(r => (r?.jobIds ?? []) as (number | null)[]).filter((x): x is number => x != null),
+                  rejected: [payRes, createRes, g75Res, g76Res, converaPayRes, converaCreatePayRes, converaOrphanRes]
+                    .flatMap(r => (r?.rejected ?? []) as unknown[]),
+                  skippedDuplicate: [payRes, createRes, g75Res, g76Res, converaPayRes, converaCreatePayRes, converaOrphanRes]
+                    .flatMap(r => (r?.skippedDuplicate ?? []) as unknown[]),
+                  skippedIneligible: [payRes, createRes, g75Res, g76Res, converaPayRes, converaCreatePayRes, converaOrphanRes]
+                    .flatMap(r => (r?.skippedIneligible ?? []) as unknown[]),
+                };
+
+                // Build status-pane records for the pay-bill jobs (Intuit + all 3
+                // Convera pay paths). bill_add-only pushes (Create-Bill verdict,
+                // g75/g76) don't get pane records — the pane's state machine
+                // models pay+verify only. Same policy as v1 (see TS.tsx:7735).
+                const vendorByListId = new Map(qbVendorsList.map(v => [v.listId, v]));
+                const newRecords: PushRecord[] = [];
+                const buildFor = (
+                  pushRes: { jobIds: (number | null)[]; rejected: Array<{ intent?: { kind?: string; sourceIngestEventId?: number } }>; skippedDuplicate: Array<{ intent?: { kind?: string; sourceIngestEventId?: number } }>; skippedIneligible: Array<{ eventId?: number }>; verifyJobIdByPayJobId?: Record<number, number> } | null,
+                  requestedIds: number[],
+                ) => {
+                  if (!pushRes) return;
+                  const inelig = new Set((pushRes.skippedIneligible ?? []).map(s => s.eventId));
+                  const rej = new Set((pushRes.rejected ?? [])
+                    .map(rj => rj.intent?.kind === 'pay_bill' ? rj.intent.sourceIngestEventId : undefined)
+                    .filter((x): x is number => x != null));
+                  const dup = new Set((pushRes.skippedDuplicate ?? [])
+                    .map(s => s.intent?.kind === 'pay_bill' ? s.intent.sourceIngestEventId : undefined)
+                    .filter((x): x is number => x != null));
+                  const eligibleInOrder = requestedIds.filter(id => !inelig.has(id) && !rej.has(id) && !dup.has(id));
+                  (pushRes.jobIds ?? []).forEach((jobId, i) => {
+                    if (jobId == null) return;
+                    const eventId = eligibleInOrder[i];
+                    if (eventId == null) return;
+                    const event = eventById.get(eventId);
+                    if (!event) return;
+                    const vendor = event.counterpartyQbVendorListId ? vendorByListId.get(event.counterpartyQbVendorListId) : null;
+                    newRecords.push({
+                      eventId,
+                      payJobId: jobId,
+                      verifyJobId: pushRes.verifyJobIdByPayJobId?.[jobId] ?? null,
+                      billTxnId: event.resolvedBillTxnId ?? '',
+                      expectedAmount: event.amount,
+                      expectedVendor: vendor?.name ?? event.counterpartyRaw,
+                      pushedAt: new Date().toISOString(),
+                      kind: 'pay_bill',
+                    });
+                  });
+                };
+                buildFor(payRes as never, intuitPay);
+                buildFor(converaPayRes as never, converaBillExists);
+                buildFor(converaCreatePayRes as never, converaMissingBills);
+                buildFor(converaOrphanRes as never, converaOrphan);
+                if (newRecords.length > 0) setQbPushRecords(prev => [...prev, ...newRecords]);
+
+                await loadQbIngestEvents();
+                await loadQbOpenBills();
+
+                return {
+                  pushed: merged.jobIds.length,
+                  rejected: merged.rejected.length,
+                  skippedDuplicate: merged.skippedDuplicate.length,
+                  skippedIneligible: merged.skippedIneligible.length,
+                };
+              }}
               onMappingChangeSubscribe={(cb) => {
                 const ch = supabase
                   .channel('qbautov2-mappings')

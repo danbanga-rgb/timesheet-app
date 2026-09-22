@@ -1,13 +1,30 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { UploadCloud, Inbox, ListChecks } from 'lucide-react';
 import type { Invoice, PaymentProfile, QbIngestEvent, QbVendorMapping, UserProfile } from '../../types';
 import type { QbOpenBillRow, QbVendorRow } from '../../lib/qbStateSync/types';
+import type { PushRecord } from '../../components/QbPushStatusPane';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import QbPushStatusPane from '../../components/QbPushStatusPane';
 import { useQbAutomationV2 } from './hooks/useQbAutomationV2';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
 import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingCard';
 import PushBar from './sections/PushBar';
 import VendorMappingSubTab from './sections/VendorMappingSubTab';
+import PushPreviewModal from './sections/PushPreviewModal';
+
+export interface PushRowsArgs {
+  eventIds: number[];
+  invoiceIds: number[];
+}
+
+export interface PushRowsResult {
+  pushed: number;
+  rejected: number;
+  skippedDuplicate: number;
+  skippedIneligible: number;
+  alerts?: string[];
+}
 
 export interface QbAutomationV2Props {
   events: QbIngestEvent[];
@@ -17,10 +34,14 @@ export interface QbAutomationV2Props {
   paymentProfiles: PaymentProfile[];
   users: UserProfile[];
   mappings: QbVendorMapping[];
+  pushRecords: PushRecord[];
+  supabase: SupabaseClient;
   onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
   onUpdateMappingVendor: (args: { mappingId: number; qbVendorListId: string; qbVendorName: string }) => Promise<void>;
   onDeleteMapping: (mappingId: number) => Promise<void>;
   onMappingChangeSubscribe: (cb: () => void) => () => void;
+  onPushRows: (args: PushRowsArgs) => Promise<PushRowsResult>;
+  onDismissPushRecord: (eventId: number) => void;
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -49,15 +70,49 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
 
   const [subTab, setSubTab] = useState<SubTab>('inbox');
   const [category, setCategory] = useState<CategoryKey>('ready');
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [pushing, setPushing] = useState(false);
 
   useEffect(() => {
     const unsubscribe = props.onMappingChangeSubscribe(() => {});
     return unsubscribe;
   }, [props.onMappingChangeSubscribe]);
 
+  const selectedRows = useMemo(
+    () => readyRows.filter(r => selectedKeys.has(r.rowKey)),
+    [readyRows, selectedKeys],
+  );
+
   const handlePushSelected = () => {
-    alert('Push flow lands in Slice V8. This is the current skeleton — selection + preview only.');
-    setCategory('ready');
+    if (selectedRows.length === 0) return;
+    setPreviewOpen(true);
+  };
+
+  const handleConfirmPush = async () => {
+    if (selectedRows.length === 0) return;
+    setPushing(true);
+    try {
+      const eventIds: number[] = [];
+      const invoiceIds: number[] = [];
+      for (const r of selectedRows) {
+        if (r.eventId != null) eventIds.push(r.eventId);
+        else if (r.invoiceId != null) invoiceIds.push(r.invoiceId);
+      }
+      const result = await props.onPushRows({ eventIds, invoiceIds });
+      const parts: string[] = [];
+      if (result.pushed > 0) parts.push(`${result.pushed} jobs enqueued`);
+      if (result.rejected > 0) parts.push(`${result.rejected} rejected`);
+      if (result.skippedDuplicate > 0) parts.push(`${result.skippedDuplicate} duplicate-skipped`);
+      if (result.skippedIneligible > 0) parts.push(`${result.skippedIneligible} ineligible`);
+      alert(parts.length > 0 ? parts.join(' · ') : 'Push complete.');
+      clearSelection();
+      setPreviewOpen(false);
+      setCategory('ready');
+    } catch (e) {
+      alert('Push failed: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setPushing(false);
+    }
   };
 
   const showNeedsMapping = category === 'needs_mapping';
@@ -73,7 +128,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-            <p className="text-xs text-gray-500">Admin preview · Slice V5.4 (sortable columns + group-select buttons)</p>
+            <p className="text-xs text-gray-500">Admin preview · Slice V8 (push flow + preview)</p>
           </div>
         </div>
         {subTab === 'inbox' && <PushBar count={selectionCount} total={selectionTotal} onPush={handlePushSelected} />}
@@ -142,6 +197,12 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               createTotal={createTotal}
             />
           )}
+
+          <QbPushStatusPane
+            supabase={props.supabase}
+            records={props.pushRecords}
+            onDismiss={props.onDismissPushRecord}
+          />
         </>
       )}
 
@@ -154,6 +215,15 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           onUpdateVendor={props.onUpdateMappingVendor}
           onDelete={props.onDeleteMapping}
           onAddLikeNeeds={props.onSaveMapping}
+        />
+      )}
+
+      {previewOpen && (
+        <PushPreviewModal
+          rows={selectedRows}
+          busy={pushing}
+          onCancel={() => setPreviewOpen(false)}
+          onConfirm={handleConfirmPush}
         />
       )}
     </div>

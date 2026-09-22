@@ -404,6 +404,21 @@ Concrete gates to flip the admin gate and delete v1:
 - Memory saved: [[qb-automation-v2-pivot]]. [[qb-automation-stop-gate]] marked RESOLVED.
 - Next: Dan gives directionality → Claude asks questions → §5 sections + flows populated → v2 spec locks → code starts.
 
+**S15 (2026-09-22) — Slice V8 shipped: real push flow + Preview modal + status pane.**
+- New `PushPreviewModal.tsx` — shows selected rows before commit with per-verdict counts + totals, Confirm/Cancel. Modal blocks background clicks while pushing.
+- New `onPushRows({eventIds, invoiceIds})` wrapper handler distills v1's TS.tsx:7660+ routing logic into a single call. Routes to 8 pushers: pushIntuitPayBill, pushIntuitCreateBill, pushIntuitInvoiceCreateBill (G7.5), pushConveraInvoiceCreateBill (G7.6), pushConveraBillPmt (C-1), pushConveraCreateBillAndPay (C-2/C-3), pushConveraCreateBillFromEvent (C-4). Invoice-driven rows (will_create_bill) route by paymentMethod → G7.5/G7.6 pushers.
+- QbPushStatusPane mounted inside v2 inbox view. Shares session-level `qbPushRecords` state with v1 — both surfaces see the same in-flight/verified/failed rows. Consistent audit trail.
+- Push flow: select rows → PushBar → Preview modal → Confirm → parallel pusher fan-out → merged result → alert summary + status pane records → clearSelection + snap to Ready + reload events + openBills.
+- Only pay_bill jobs get status-pane records (v1 policy; bill_add-only pushes track via event.resolved_bill_txn_id flip + recompute).
+
+**V8 deferred to V8-B:**
+- Inline QB vendor override per Ready row (autocomplete + save-as-mapping) — the actionable-controls ambition from the V7 discussion.
+- Preflight auto-sync (Sync Vendors if missing).
+- Cancellation (mid-push stop).
+- Phase 2 re-push (rows newly resolved by phase 1's sync).
+
+**S14 (2026-09-22) — Slice V7 SCRAPPED.** See §9 V7 entry for reasoning + revert commit `b030f01`.
+
 **S13 (2026-09-22) — Slice V6 shipped: 2-tier smart mapping (history + token overlap).**
 - New pure lib `src/lib/qbAutomation/vendorMappingResolver.ts` with `resolveVendorCandidates(input, ctx, limit=3)` returning up to 3 tiered candidates. 11 unit tests cover both tiers + confidence buckets + stopword filtering + cap.
 - Tier 2 (history): if contractor has posted bills under a QB vendor, surface HIGH confidence. Uses buildHistoryByUser helper to map userId → posted vendorListIds.
@@ -695,8 +710,39 @@ Original spec preserved below for archaeology.
 
 ---
 
-### Slice V8 — Push flow + preflight + inline controls
-**Est:** 4–6h. **Depends on:** V3 (Ready card renders).
+### Slice V8 — Push flow + Preview modal + status pane ✅ SHIPPED 2026-09-22
+**Est:** 4–6h. **Actual:** ~50min for the core; V8-B holds the inline-controls ambition.
+
+**Shipped files:**
+- New: `src/features/QbAutomationV2/sections/PushPreviewModal.tsx` — preview + Confirm/Cancel.
+- Edit: `src/features/QbAutomationV2/index.tsx` — modal state + push handler wiring + status pane mount.
+- Edit: `src/TimesheetSystem.tsx` — `onPushRows` inline handler (routes to 8 pushers) + push records prop.
+
+**Push routing (mirrors v1 TS.tsx:7660+):**
+- Intuit XLSX events by resolvedAction → pushIntuitPayBill / pushIntuitCreateBill / pushIntuitCheck (check excluded by Ready filter, so unused here).
+- Convera events: 1-invoice + bill exists → pushConveraBillPmt; >1 invoice or missing bill → pushConveraCreateBillAndPay; orphan (no invoice) → pushConveraCreateBillFromEvent.
+- Invoice-driven rows (will_create_bill) → G7.5/G7.6 pushers by paymentMethod (Intuit vs Convera).
+- All 8 fire in parallel via `Promise.all`, results merged.
+
+**Post-push:**
+- Alert with counts (pushed / rejected / duplicate-skipped / ineligible).
+- Status-pane records added for pay_bill jobs; bill_add-only pushes are observable via event resolved_bill_txn_id flip.
+- clearSelection + setCategory('ready') + reload qbIngestEvents + qbOpenBills.
+
+**Acceptance met:**
+- Push CTA opens preview.
+- Preview shows per-verdict counts + amounts + row table.
+- Confirm fires real pushes via existing v1 handlers.
+- Status pane surfaces in-flight/verified rows.
+- Rows disappear from Ready after next reload as their status flips.
+
+**V8-B (deferred):**
+- Inline QB vendor override per Ready row (the actionable-controls ambition from V7 discussion — click QB Vendor cell → autocomplete → save-as-mapping or one-shot override).
+- Preflight auto-sync (auto-Sync Vendors if any selected row's target missing from mirror).
+- Cancellation.
+- Phase 2 re-push (rows newly resolved after post-push sync).
+
+**Rollback:** delete `PushPreviewModal.tsx`, revert `index.tsx` push flow additions + status pane mount, revert `TS.tsx` onPushRows handler + pushRecords prop.
 
 **Goal:** §5.11.
 
