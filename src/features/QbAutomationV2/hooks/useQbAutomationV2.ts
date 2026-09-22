@@ -28,6 +28,7 @@ export interface ReadyRow {
   monthLabel: string;
   qbVendorName: string;
   qbVendorMapped: boolean;
+  qbVendorListId: string | null;
   verdict: Verdict;
   group: ReadyGroup;
   // For inline vendor override (V8-B): pp_id keys the mapping upsert; source
@@ -186,6 +187,7 @@ export function useQbAutomationV2({
         monthLabel: monthLabelFromKey(monthKey),
         qbVendorName,
         qbVendorMapped: vendorMapped,
+        qbVendorListId: e.counterpartyQbVendorListId ?? null,
         verdict,
         group: groupForVerdict(verdict),
         ppId,
@@ -245,6 +247,7 @@ export function useQbAutomationV2({
         monthLabel: monthLabelFromKey(monthKey),
         qbVendorName,
         qbVendorMapped: true,
+        qbVendorListId: mapping.qbVendorListId,
         verdict: 'will_create_bill',
         group: 'create',
         ppId,

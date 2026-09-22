@@ -5206,6 +5206,7 @@ const TimesheetSystem = () => {
               pushRecords={qbPushRecords}
               supabase={supabase}
               onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
+              onSyncVendors={runSyncQbVendors}
               onPushRows={async ({ eventIds, invoiceIds }) => {
                 // Route selected event/invoice IDs to the 8 v1 pushers based on
                 // source + resolvedAction + bill-state. Same logic as v1's

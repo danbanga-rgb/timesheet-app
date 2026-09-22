@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { X } from 'lucide-react';
+import { X, AlertTriangle, RefreshCw } from 'lucide-react';
 import type { ReadyRow } from '../hooks/useQbAutomationV2';
 import type { QbVendorRow } from '../../../lib/qbStateSync/types';
 import type { SaveMappingArgs } from './NeedsMappingCard';
@@ -9,6 +9,7 @@ interface Props {
   rows: ReadyRow[];
   vendors: QbVendorRow[];
   onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
+  onSyncVendors: () => Promise<void>;
   onCancel: () => void;
   onConfirm: () => void;
   busy: boolean;
@@ -30,9 +31,31 @@ function verdictBadgeCls(v: ReadyRow['verdict']): string {
   return 'bg-blue-100 text-blue-800';
 }
 
-export default function PushPreviewModal({ rows, vendors, onSaveMapping, onCancel, onConfirm, busy }: Props) {
+export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncVendors, onCancel, onConfirm, busy }: Props) {
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
   const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
+
+  // Preflight: any selected row whose target vendor listId is set but not
+  // present in the qb_vendors mirror. Cause: vendor added to QB but not
+  // synced to our mirror yet. Push would fall through vendor resolution.
+  const missingVendorRows = useMemo(
+    () => rows.filter(r => r.qbVendorListId != null && !vendorsById.has(r.qbVendorListId)),
+    [rows, vendorsById],
+  );
+
+  const handleSyncVendors = async () => {
+    setSyncing(true);
+    try {
+      await onSyncVendors();
+    } catch (e) {
+      console.error('preflight sync vendors failed', e);
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const groups = useMemo(() => {
     const pay = rows.filter(r => r.verdict === 'will_pay');
@@ -86,6 +109,32 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onCance
           </button>
         </div>
 
+        {missingVendorRows.length > 0 && (
+          <div className="px-4 py-3 border-b border-amber-200 bg-amber-50 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
+            <div className="flex-1 text-xs">
+              <div className="font-semibold text-amber-900 mb-1">
+                {missingVendorRows.length} {missingVendorRows.length === 1 ? 'row targets a QB vendor' : 'rows target QB vendors'} that {missingVendorRows.length === 1 ? 'is' : 'are'} not in the local mirror yet
+              </div>
+              <div className="text-amber-800 mb-1">
+                {missingVendorRows.slice(0, 5).map(r => r.contractorName).join(', ')}
+                {missingVendorRows.length > 5 && ` +${missingVendorRows.length - 5} more`}
+              </div>
+              <div className="text-amber-700 mb-2">
+                Push is blocked until the vendor list refreshes. Click Sync Vendors, then wait for QBWC to drain (~15 min). This banner disappears once the missing vendors appear in the mirror. Alternatively, re-map any affected row to a vendor already in your mirror.
+              </div>
+              <button
+                onClick={handleSyncVendors}
+                disabled={syncing || busy}
+                className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <RefreshCw className={'w-3.5 h-3.5 ' + (syncing ? 'animate-spin' : '')} />
+                {syncing ? 'Enqueueing…' : 'Sync Vendors'}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="px-4 py-3 border-b border-gray-100 grid grid-cols-3 gap-3 text-xs">
           <div className="rounded border border-blue-200 bg-blue-50 p-2">
             <div className="uppercase font-semibold text-blue-700">Will Pay</div>
@@ -120,8 +169,10 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onCance
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {rows.map(r => (
-                  <tr key={r.rowKey} className="hover:bg-gray-50">
+                {rows.map(r => {
+                  const missing = r.qbVendorListId != null && !vendorsById.has(r.qbVendorListId);
+                  return (
+                  <tr key={r.rowKey} className={missing ? 'bg-amber-50 hover:bg-amber-100' : 'hover:bg-gray-50'}>
                     <td className="px-3 py-1.5 font-medium text-gray-800 whitespace-nowrap">{r.contractorName}</td>
                     <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{r.monthLabel || '—'}</td>
                     <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{r.invoiceNumber || '—'}</td>
@@ -161,9 +212,15 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onCance
                       <span className={'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ' + verdictBadgeCls(r.verdict)}>
                         {verdictLabel(r.verdict)}
                       </span>
+                      {missing && (
+                        <span className="ml-1 inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-200 text-amber-900" title="This vendor listId is not in the local qb_vendors mirror yet — Sync Vendors to refresh">
+                          Not synced
+                        </span>
+                      )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -179,10 +236,11 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onCance
           </button>
           <button
             onClick={onConfirm}
-            disabled={busy || rows.length === 0}
+            disabled={busy || rows.length === 0 || missingVendorRows.length > 0}
+            title={missingVendorRows.length > 0 ? 'Sync missing vendors before pushing' : undefined}
             className={
               'px-4 py-2 text-sm font-medium rounded ' +
-              (busy || rows.length === 0
+              (busy || rows.length === 0 || missingVendorRows.length > 0
                 ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                 : 'bg-emerald-600 text-white hover:bg-emerald-700')
             }

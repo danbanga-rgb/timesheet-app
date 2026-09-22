@@ -42,6 +42,7 @@ export interface QbAutomationV2Props {
   onMappingChangeSubscribe: (cb: () => void) => () => void;
   onPushRows: (args: PushRowsArgs) => Promise<PushRowsResult>;
   onDismissPushRecord: (eventId: number) => void;
+  onSyncVendors: () => Promise<void>;
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -225,6 +226,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           rows={selectedRows}
           vendors={props.vendors}
           onSaveMapping={props.onSaveMapping}
+          onSyncVendors={props.onSyncVendors}
           busy={pushing}
           onCancel={() => setPreviewOpen(false)}
           onConfirm={handleConfirmPush}
