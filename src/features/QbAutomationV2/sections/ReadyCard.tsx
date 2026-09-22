@@ -6,11 +6,9 @@ interface Props {
   rows: ReadyRow[];
   selectedIds: Set<number>;
   selectionCount: number;
-  selectionTotal: number;
   onToggle: (eventId: number) => void;
   onSelectAll: () => void;
   onClearSelection: () => void;
-  onPushSelected: () => void;
   onSkip: (eventId: number) => void;
   onUnskip: (eventId: number) => void;
 }
@@ -36,11 +34,9 @@ export default function ReadyCard(props: Props) {
     rows,
     selectedIds,
     selectionCount,
-    selectionTotal,
     onToggle,
     onSelectAll,
     onClearSelection,
-    onPushSelected,
     onSkip,
     onUnskip,
   } = props;
@@ -147,24 +143,6 @@ export default function ReadyCard(props: Props) {
         </div>
       )}
 
-      {!isSkippedView && rows.length > 0 && (
-        <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-end bg-gray-50">
-          <button
-            onClick={onPushSelected}
-            disabled={selectionCount === 0}
-            className={
-              'px-4 py-2 text-sm font-medium rounded ' +
-              (selectionCount === 0
-                ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                : 'bg-emerald-600 text-white hover:bg-emerald-700')
-            }
-          >
-            {selectionCount === 0
-              ? 'Select rows to push'
-              : `Push ${selectionCount} ${selectionCount === 1 ? 'item' : 'items'} · ${fmtMoney(selectionTotal)}`}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

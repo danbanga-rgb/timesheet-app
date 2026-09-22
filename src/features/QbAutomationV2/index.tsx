@@ -6,6 +6,7 @@ import { useQbAutomationV2 } from './hooks/useQbAutomationV2';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
 import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingCard';
+import PushBar from './sections/PushBar';
 
 export interface QbAutomationV2Props {
   events: QbIngestEvent[];
@@ -34,7 +35,10 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   const [category, setCategory] = useState<CategoryKey>('ready');
 
   const handlePushSelected = () => {
-    alert('Push flow lands in Slice V8. This is the V3 skeleton — selection + preview only.');
+    alert('Push flow lands in Slice V8. This is the current skeleton — selection + preview only.');
+    // After push (V8 will wire this for real): snap back to Ready so newly-
+    // resolved sibling events are visible in the same view.
+    setCategory('ready');
   };
 
   const showNeedsMapping = category === 'needs_mapping';
@@ -43,14 +47,17 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-3">
-        <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-indigo-50">
-          <UploadCloud className="w-5 h-5 text-indigo-600" />
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-indigo-50">
+            <UploadCloud className="w-5 h-5 text-indigo-600" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
+            <p className="text-xs text-gray-500">Admin preview · Slice V4 (Ready + Needs Mapping)</p>
+          </div>
         </div>
-        <div>
-          <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-          <p className="text-xs text-gray-500">Admin preview · Slice V4 (Ready + Needs Mapping)</p>
-        </div>
+        <PushBar count={selectionCount} total={selectionTotal} onPush={handlePushSelected} />
       </div>
 
       <KpiStrip
@@ -76,11 +83,9 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           rows={rowsForReadyView}
           selectedIds={selectedIds}
           selectionCount={selectionCount}
-          selectionTotal={selectionTotal}
           onToggle={toggle}
           onSelectAll={selectAll}
           onClearSelection={clearSelection}
-          onPushSelected={handlePushSelected}
           onSkip={skip}
           onUnskip={unskip}
         />
