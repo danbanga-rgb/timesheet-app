@@ -17,9 +17,9 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry (as of 2026-09-23 S17 pause):**
-- Branch `feature/qb-automation-v2` tip `a5e3d20`. Not merged to main.
-- V1–V8 SHIPPED (V7 SCRAPPED). V8-B items 1+2+3+4 SHIPPED. Item 5 (phase 2 re-push) remains.
+**State on entry (as of 2026-09-23 S17 close):**
+- Branch `feature/qb-automation-v2` tip `e37aeda`. Not merged to main.
+- V1–V8 SHIPPED (V7 SCRAPPED). **V8-B CLOSED — all 5 items shipped.** Next up: V9 (Skipped + Pushed today cards).
 - v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
 - **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
 - v1 QB Automation tab is FROZEN — do not touch its render surface.
@@ -398,8 +398,19 @@ Concrete gates to flip the admin gate and delete v1:
 
 ## §8. Session log
 
-**S17 (2026-09-23, morning) — V8-B item 4 shipped: cancel pending pushes.**
-- **Item 4 (`a5e3d20`)**: per-row + batch Cancel on QbPushStatusPane. New `src/lib/qbAutomation/cancelPushJobs.ts` — flips `qb_sync_jobs` pending→skipped with pending-only guard (so QBWC in-flight writes are never touched), then reverts event-sourced `qb_ingest_events.status` to 'ready' when the pay job was actually cancelled. Invoice-sourced G7.5 records skip the event revert.
+**S17 (2026-09-23, morning) — V8-B items 4 + 5 shipped. V8-B CLOSES.**
+
+**Item 5 (`e37aeda`) — post-push sync + refresh hint.**
+- After successful push, v2 fires a silent `enqueueVendorQuery` (no user-facing alert) so QBWC picks up any newly-referenced vendors on its next drain. A hint bar appears above the KPI strip: "Vendor sync is running in the background (~15 min). Refresh once QBWC drains to pick up any newly-resolved rows." Refresh button reloads events + open bills.
+- Design tradeoffs settled with Dan first:
+  - **Q1 = (a) auto-run Sync Vendors + Sync Mirror after push.** Per §5.11 step 5; matches item 3 pattern. Called silently via new `onPostPushSync` prop.
+  - **Q2 = (a) hint bar, kept minimal.** Dan pushed back on aggressive auto-select-and-reopen-modal because new resolvables are rare with our contractor pool. Hint's only action is Refresh — no snapshot-diff, no delta detection, no auto-selection. Cheap, obvious, dismissable.
+  - **Q3 approved as-designed** (would have been snapshot-diff — replaced by simpler refresh model).
+- Two new props: `onPostPushSync: () => Promise<void>` (fire-and-forget) + `onRefreshInbox: () => Promise<void>` (parent-owned reload). TS.tsx wires them to `enqueueVendorQuery` and `loadQbIngestEvents + loadQbOpenBills`.
+- No new tests needed — the hint is pure render logic gated on `showPostPushHint` state.
+
+**Item 4 (`a5e3d20`) — cancel pending pushes.**
+- Per-row + batch Cancel on QbPushStatusPane. New `src/lib/qbAutomation/cancelPushJobs.ts` — flips `qb_sync_jobs` pending→skipped with pending-only guard (so QBWC in-flight writes are never touched), then reverts event-sourced `qb_ingest_events.status` to 'ready' when the pay job was actually cancelled. Invoice-sourced G7.5 records skip the event revert.
 - Design decisions locked with Dan first (Q1–Q4 from S16):
   - **Q1 = (c) both** — DB flag + client hide. Uses existing `'skipped'` enum value; no migration.
   - **Q2 = (c) both** — per-row `cancel` link + batch `Cancel remaining (N)` header button.
@@ -772,7 +783,7 @@ Original spec preserved below for archaeology.
 - ✅ Item 2 shipped (`9fedc05`) — Preview modal picks up the same click-to-edit + inline picker.
 - ✅ Item 3 shipped (`8cba758`) — preflight banner + Sync Vendors button + Confirm-block when any selected vendor is missing from mirror.
 - ✅ Item 4 shipped (`a5e3d20`, S17 2026-09-23) — per-row + batch Cancel on QbPushStatusPane. Backed by `src/lib/qbAutomation/cancelPushJobs.ts` (pending-only guard on `qb_sync_jobs`; revert event to 'ready' when pay job cancelled; invoice-source records skip event revert). 8 new tests → 39/39 pass. Design Qs 1–4 resolved per S17 log entry above.
-- ⏳ Item 5 (phase 2 re-push) — NEXT.
+- ✅ Item 5 shipped (`e37aeda`, S17 2026-09-23) — post-push silent Sync Vendors + refresh hint bar. `onPostPushSync` fire-and-forget prop + `onRefreshInbox` reload prop wired from TS.tsx. Simplified per Dan's guidance ("new resolvable rows rare with our userbase") — no snapshot-diff, no auto-select. V8-B CLOSES.
 
 **Open questions for item 4 (surface before coding):**
 1. **What does "cancel" mean at the semantic level?** Options:
