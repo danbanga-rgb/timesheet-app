@@ -196,6 +196,7 @@ function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
 }
 
 import { sanitizeIban, ibanChecksumValid, checkIbanLength } from './lib/iban';
+import { computeMissingPpMappings } from './lib/qbAutomation/ppMappingReconciler';
 
 // Deterministic vendor code Dan enters in Convera when creating a beneficiary.
 // Shared-IBAN groups (Bimosoft, etc.) share ONE code so Dan only enters one SYN
@@ -2157,8 +2158,7 @@ const TimesheetSystem = () => {
   };
 
   const loadQbVendorMappings = async () => {
-    const { data } = await supabase.from('qb_vendor_mappings').select('*');
-    setQbVendorMappings((data ?? []).map((r: Record<string, unknown>) => ({
+    const normalise = (r: Record<string, unknown>) => ({
       id: r.id as number,
       ppId: (r.pp_id as number | null) ?? null,
       source: (r.source as string) ?? '',
@@ -2169,7 +2169,33 @@ const TimesheetSystem = () => {
       defaultExpenseAccountListId: (r.default_expense_account_list_id as string) ?? null,
       payeeFullName: (r.payee_full_name as string) ?? null,
       payeeListKind: (r.payee_list_kind as QbPayeeListKind | null) ?? null,
-    })));
+    });
+    const { data } = await supabase.from('qb_vendor_mappings').select('*');
+    const mappings = (data ?? []).map(normalise);
+    setQbVendorMappings(mappings);
+
+    // Self-healing reconciler: any pp with qb_vendor_name matching a known
+    // qb_vendors row but no mapping row gets one auto-inserted. Fixes the
+    // "approved invoice invisible in v2 Ready" class discovered 2026-09-23
+    // (Harun + 8 others). No-op after the first heal — subsequent loads
+    // find nothing to insert. Skips if pps or vendors haven't loaded yet.
+    if (paymentProfiles.length > 0 && qbVendorsList.length > 0) {
+      const missing = computeMissingPpMappings({
+        paymentProfiles: paymentProfiles.map(p => ({ id: p.id, qbVendorName: p.qbVendorName, companyName: p.companyName })),
+        mappings: mappings.map(m => ({ ppId: m.ppId })),
+        vendors: qbVendorsList.map(v => ({ listId: v.listId, name: v.name })),
+      });
+      if (missing.length > 0) {
+        console.log(`[pp-mapping-reconciler] auto-seeding ${missing.length} missing mappings`);
+        const { error } = await supabase.from('qb_vendor_mappings').upsert(missing, { onConflict: 'pp_id', ignoreDuplicates: true });
+        if (error) {
+          console.warn('[pp-mapping-reconciler] upsert failed', error);
+        } else {
+          const { data: refreshed } = await supabase.from('qb_vendor_mappings').select('*');
+          setQbVendorMappings((refreshed ?? []).map(normalise));
+        }
+      }
+    }
   };
   const loadQbVendorsAndAccounts = async () => {
     // Lists rarely change during a session — only fetch if empty.
