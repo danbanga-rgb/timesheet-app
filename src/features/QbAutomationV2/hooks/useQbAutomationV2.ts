@@ -4,7 +4,8 @@ import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types'
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
 import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../../../lib/qbAutomation/vendorMappingResolver';
-import { buildUmbrellaVendorSet, getEffectiveMatchedInvoiceIds, isUmbrellaEvent, isUmbrellaVendor } from '../../../lib/qbAutomation/umbrella';
+import { getEffectiveMatchedInvoiceIds, isUmbrellaEvent } from '../../../lib/qbAutomation/umbrella';
+import { isTestAccount } from '../../../lib/isTestAccount';
 
 export type ReadyGroup = 'pay' | 'create';
 
@@ -60,8 +61,17 @@ export interface ReadyRow {
   distinctVendorCount?: number;      // > 1 for multi-vendor umbrella (Bimosoft/NT)
 }
 
+export type NeedsMappingReason =
+  | 'event_needs_vendor'          // pending/ready event, counterparty_qb_vendor_list_id null
+  | 'invoice_pp_no_qb_vendor'     // approved invoice, pp has no qb_vendor_name
+  | 'invoice_pp_vendor_not_synced' // pp has qb_vendor_name but not in qb_vendors mirror
+  | 'invoice_no_pp';               // approved invoice, no pp snapshot
+
 export interface NeedsMappingRow {
-  eventId: number;
+  rowKey: string;
+  reason: NeedsMappingReason;
+  eventId: number | null;
+  invoiceId: number | null;
   source: string;
   counterpartyRaw: string;
   contractorName: string;
@@ -73,6 +83,7 @@ export interface NeedsMappingRow {
   monthLabel: string;
   ppLabel: string;
   ppId: number;
+  ppQbVendorName: string | null;   // for invoice_pp_vendor_not_synced
   candidates: Candidate[];
 }
 
@@ -90,29 +101,6 @@ export interface PushedTodayRow {
   checkTxnId: string | null;
   postedSource: string | null;
   statusUpdatedAt: string;
-}
-
-export type NeedsAttentionReason =
-  | 'waiting_for_wire'          // approved umbrella-vendor invoice, no event yet
-  | 'no_qb_vendor_on_pp'        // approved invoice, pp has no qb_vendor_name → reconciler can't heal
-  | 'qb_vendor_not_in_mirror'   // pp has qb_vendor_name but doesn't resolve to qb_vendors → Sync Vendors
-  | 'no_pp_on_invoice';         // approved invoice, no pp snapshot at all
-
-export interface NeedsAttentionRow {
-  rowKey: string;
-  invoiceId: number;
-  contractorName: string;
-  contractorUserId: string | null;
-  invoiceNumber: string;
-  amount: number;
-  currency: string;
-  monthKey: string;
-  monthLabel: string;
-  reason: NeedsAttentionReason;
-  ppId: number;                 // 0 for no_pp_on_invoice
-  ppLabel: string;
-  ppQbVendorName: string | null;
-  currentVendorGuess: string | null;  // e.g. "Teal Crossroads" for waiting_for_wire
 }
 
 export interface MappingRow {
@@ -256,11 +244,6 @@ export function useQbAutomationV2({
   const resolverVendors = useMemo(
     () => vendors.map(v => ({ listId: v.listId, name: v.name })),
     [vendors],
-  );
-
-  const umbrellaVendors = useMemo(
-    () => buildUmbrellaVendorSet(mappings.map(m => ({ qbVendorListId: m.qbVendorListId, ppId: m.ppId }))),
-    [mappings],
   );
 
   const allReadyRows: ReadyRow[] = useMemo(() => {
@@ -435,20 +418,21 @@ export function useQbAutomationV2({
       });
     }
 
+    // Loose-invoice loop: collect eligible approved invoices, then group by
+    // (qbVendorListId, monthKey) so pre-wire umbrella (Teal 8 contractors,
+    // Faruk-covers-Ajdin) surfaces as a single group row instead of N solo
+    // rows. Single-vendor-single-invoice cases stay as solo rows.
+    interface LooseCandidate { inv: Invoice; ppId: number; mapping: QbVendorMapping; monthKey: string; qbVendorName: string; qbVendorListId: string; ppLabel: string; contractorName: string; contractorUserId: string | null; }
+    const looseCandidates: LooseCandidate[] = [];
     for (const inv of invoices) {
       if (inv.status !== 'approved') continue;
       if (invoiceIdsCoveredByEvents.has(inv.id)) continue;
+      if (isTestAccount(inv.userName || '')) continue;
 
       const ppId = inv.paymentProfile?.id ?? 0;
       if (!ppId || ppId <= 0) continue;
       const mapping = mappingByPpId.get(ppId);
       if (!mapping?.qbVendorListId) continue;
-      // V9.5: skip invoice-driven "Will Create Bill" when the vendor is
-      // umbrella (Teal, Faruk-covers-Ajdin). Pre-creating a bill for one slice
-      // before the wire lands is semantically wrong — QB books one Bill for
-      // the wire total. The row will surface as an umbrella group after the
-      // Convera event arrives and gets classified.
-      if (isUmbrellaVendor(mapping.qbVendorListId, umbrellaVendors)) continue;
 
       const wantRef = normalizeRef(inv.invoiceNumber);
       if (!wantRef) continue;
@@ -463,49 +447,108 @@ export function useQbAutomationV2({
       if (hasBill) continue;
 
       const qbVendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? '(unmapped)';
-      const ppLabel = inv.paymentProfile?.companyName
-        || inv.paymentProfile?.bankName
-        || '';
+      const ppLabel = inv.paymentProfile?.companyName || inv.paymentProfile?.bankName || '';
       const contractorName = inv.userName || '(unknown)';
       const contractorUserId = inv.userId ?? null;
-      const candidates = resolveVendorCandidates(
-        { contractorName, contractorUserId, ppLabel },
-        { vendors: resolverVendors, historyByUser },
-      );
+      looseCandidates.push({ inv, ppId, mapping, monthKey, qbVendorName, qbVendorListId: mapping.qbVendorListId, ppLabel, contractorName, contractorUserId });
+    }
 
-      rows.push({
-        rowKey: `inv-${inv.id}`,
-        eventId: null,
-        invoiceId: inv.id,
-        contractorName,
-        contractorUserId,
-        invoiceNumber: inv.invoiceNumber,
-        amount: inv.totalAmount,
-        currency: inv.currency || 'USD',
-        hours: inv.totalHours,
-        rate: inv.rate,
-        periodStart: inv.periodStart,
-        periodEnd: inv.periodEnd,
-        monthKey,
-        monthLabel: monthLabelFromKey(monthKey),
-        qbVendorName,
-        qbVendorMapped: true,
-        qbVendorListId: mapping.qbVendorListId,
-        verdict: 'will_create_bill',
-        group: 'create',
-        ppId,
-        ppLabel,
-        ppSource: mapping.source || 'invoice',
-        ppCounterpartyPattern: mapping.counterpartyPattern || ppLabel,
-        candidates,
-      });
+    // Group by (qbVendorListId, monthKey). Bucket size > 1 → group row.
+    const looseByVendorMonth = new Map<string, LooseCandidate[]>();
+    for (const c of looseCandidates) {
+      const key = `${c.qbVendorListId}::${c.monthKey}`;
+      const bucket = looseByVendorMonth.get(key);
+      if (bucket) bucket.push(c);
+      else looseByVendorMonth.set(key, [c]);
+    }
+
+    for (const bucket of looseByVendorMonth.values()) {
+      if (bucket.length === 1) {
+        const { inv, ppId, mapping, monthKey, qbVendorName, qbVendorListId, ppLabel, contractorName, contractorUserId } = bucket[0];
+        const candidates = resolveVendorCandidates(
+          { contractorName, contractorUserId, ppLabel },
+          { vendors: resolverVendors, historyByUser },
+        );
+        rows.push({
+          rowKey: `inv-${inv.id}`,
+          eventId: null,
+          invoiceId: inv.id,
+          contractorName,
+          contractorUserId,
+          invoiceNumber: inv.invoiceNumber,
+          amount: inv.totalAmount,
+          currency: inv.currency || 'USD',
+          hours: inv.totalHours,
+          rate: inv.rate,
+          periodStart: inv.periodStart,
+          periodEnd: inv.periodEnd,
+          monthKey,
+          monthLabel: monthLabelFromKey(monthKey),
+          qbVendorName,
+          qbVendorMapped: true,
+          qbVendorListId,
+          verdict: 'will_create_bill',
+          group: 'create',
+          ppId,
+          ppLabel,
+          ppSource: mapping.source || 'invoice',
+          ppCounterpartyPattern: mapping.counterpartyPattern || ppLabel,
+          candidates,
+        });
+      } else {
+        // Pre-wire umbrella group row.
+        const first = bucket[0];
+        const childRows: UmbrellaChildRow[] = bucket.map(c => ({
+          invoiceId: c.inv.id,
+          contractorName: c.contractorName,
+          contractorUserId: c.contractorUserId,
+          invoiceNumber: c.inv.invoiceNumber,
+          hours: c.inv.totalHours ?? null,
+          rate: c.inv.rate ?? null,
+          currency: c.inv.currency || 'USD',
+          share: c.inv.totalAmount,
+          shareSource: 'invoice_total',
+          qbVendorName: c.qbVendorName,
+          qbVendorListId: c.qbVendorListId,
+        }));
+        childRows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
+        const totalAmount = bucket.reduce((s, c) => s + c.inv.totalAmount, 0);
+        rows.push({
+          rowKey: `inv-group-${first.qbVendorListId}-${first.monthKey}`,
+          eventId: null,
+          invoiceId: null,
+          contractorName: first.qbVendorName,
+          contractorUserId: null,
+          invoiceNumber: '',
+          amount: totalAmount,
+          currency: first.inv.currency || 'USD',
+          hours: null,
+          rate: null,
+          periodStart: first.inv.periodStart,
+          periodEnd: first.inv.periodEnd,
+          monthKey: first.monthKey,
+          monthLabel: monthLabelFromKey(first.monthKey),
+          qbVendorName: first.qbVendorName,
+          qbVendorMapped: true,
+          qbVendorListId: first.qbVendorListId,
+          verdict: 'will_create_bill',
+          group: 'create',
+          ppId: 0,
+          ppLabel: '',
+          ppSource: 'invoice',
+          ppCounterpartyPattern: '',
+          candidates: [],
+          children: childRows,
+          distinctVendorCount: 1,
+        });
+      }
     }
 
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares, umbrellaVendors]);
+  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares]);
 
-  // Vendor lookup by lowercase name — used by needsAttentionRows to detect
+  // Vendor lookup by lowercase name — used by needsMappingRows to detect
   // "pp has qb_vendor_name but doesn't resolve to a qb_vendors row" (needs
   // Sync Vendors).
   const vendorByLowerName = useMemo(() => {
@@ -514,76 +557,10 @@ export function useQbAutomationV2({
     return m;
   }, [vendors]);
 
-  const needsAttentionRows: NeedsAttentionRow[] = useMemo(() => {
-    const readyEventInvoiceIds = new Set<number>();
-    for (const e of events) {
-      if (e.status !== 'ready') continue;
-      for (const id of e.matchedInvoiceIds) readyEventInvoiceIds.add(id);
-    }
-    const rows: NeedsAttentionRow[] = [];
-    for (const inv of invoices) {
-      if (inv.status !== 'approved') continue;
-      if (inv.qbBillTxnId) continue;
-      const pm = inv.paymentMethodOverride;
-      if (pm !== 'Convera' && pm !== 'Intuit') continue;
-
-      const ppId = inv.paymentProfile?.id ?? 0;
-      const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
-      const monthLabel = monthLabelFromKey(monthKey);
-      const base = {
-        rowKey: `attn-inv-${inv.id}`,
-        invoiceId: inv.id,
-        contractorName: inv.userName || '(unknown)',
-        contractorUserId: inv.userId ?? null,
-        invoiceNumber: inv.invoiceNumber,
-        amount: inv.totalAmount,
-        currency: inv.currency || 'USD',
-        monthKey,
-        monthLabel,
-        ppLabel: inv.paymentProfile?.companyName || inv.paymentProfile?.bankName || '',
-        ppId,
-      };
-
-      // Category: no pp snapshot at all → InvoiceDetailModal has cross-contractor picker.
-      if (ppId <= 0) {
-        rows.push({ ...base, reason: 'no_pp_on_invoice', ppQbVendorName: null, currentVendorGuess: null });
-        continue;
-      }
-      const pp = ppById.get(ppId);
-      const mapping = mappingByPpId.get(ppId);
-
-      // Category: pp has qb_vendor_name but it doesn't resolve to a qb_vendors row.
-      if (!mapping && pp?.qbVendorName && !vendorByLowerName.has(pp.qbVendorName.toLowerCase().trim())) {
-        rows.push({ ...base, reason: 'qb_vendor_not_in_mirror', ppQbVendorName: pp.qbVendorName, currentVendorGuess: pp.qbVendorName });
-        continue;
-      }
-
-      // Category: no mapping AND pp has no qb_vendor_name — reconciler can't heal.
-      if (!mapping && !pp?.qbVendorName) {
-        rows.push({ ...base, reason: 'no_qb_vendor_on_pp', ppQbVendorName: null, currentVendorGuess: null });
-        continue;
-      }
-
-      // Category: mapping exists AND vendor is umbrella-vendor AND no ready event covers this invoice.
-      if (mapping?.qbVendorListId
-          && isUmbrellaVendor(mapping.qbVendorListId, umbrellaVendors)
-          && !readyEventInvoiceIds.has(inv.id)) {
-        const vendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? '(unknown)';
-        rows.push({ ...base, reason: 'waiting_for_wire', ppQbVendorName: pp?.qbVendorName ?? null, currentVendorGuess: vendorName });
-        continue;
-      }
-    }
-    rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
-    return rows;
-  }, [events, invoices, ppById, mappingByPpId, umbrellaVendors, vendorsById, vendorByLowerName]);
-
-  const needsAttentionTotal = useMemo(
-    () => needsAttentionRows.reduce((s, r) => s + r.amount, 0),
-    [needsAttentionRows],
-  );
-
   const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
     const rows: NeedsMappingRow[] = [];
+
+    // Reason 1: events with no counterparty_qb_vendor_list_id (unclassified).
     for (const e of events) {
       if (e.status === 'posted' || e.status === 'ignored') continue;
       if (e.rawData?.__backfill) continue;
@@ -597,13 +574,13 @@ export function useQbAutomationV2({
       const ppId = invoice?.paymentProfile?.id ?? 0;
       if (!ppId || ppId <= 0) continue;
 
+      const contractorName = invoice?.userName || e.counterpartyRaw || '(unknown)';
+      if (isTestAccount(contractorName)) continue;
+
       const monthKey = invoice?.periodEnd?.slice(0, 7) ?? '';
       const ppLabel = invoice?.paymentProfile?.companyName
         || invoice?.paymentProfile?.bankName
-        || e.counterpartyRaw
-        || '(no pp label)';
-
-      const contractorName = invoice?.userName || e.counterpartyRaw || '(unknown)';
+        || e.counterpartyRaw || '(no pp label)';
       const contractorUserId = invoice?.userId ?? null;
       const candidates = resolveVendorCandidates(
         { contractorName, contractorUserId, ppLabel },
@@ -611,7 +588,10 @@ export function useQbAutomationV2({
       );
 
       rows.push({
+        rowKey: `nm-evt-${e.id}`,
+        reason: 'event_needs_vendor',
         eventId: e.id,
+        invoiceId: invoice?.id ?? null,
         source: e.source,
         counterpartyRaw: e.counterpartyRaw,
         contractorName,
@@ -623,12 +603,74 @@ export function useQbAutomationV2({
         monthLabel: monthLabelFromKey(monthKey),
         ppLabel,
         ppId,
+        ppQbVendorName: null,
         candidates,
       });
     }
+
+    // Reasons 2/3/4: approved invoices that can't reach Ready due to a data gap.
+    for (const inv of invoices) {
+      if (inv.status !== 'approved') continue;
+      if (inv.qbBillTxnId) continue;
+      const pm = inv.paymentMethodOverride;
+      if (pm !== 'Convera' && pm !== 'Intuit') continue;
+      if (isTestAccount(inv.userName || '')) continue;
+
+      const ppId = inv.paymentProfile?.id ?? 0;
+      const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
+      const monthLabel = monthLabelFromKey(monthKey);
+      const contractorName = inv.userName || '(unknown)';
+      const contractorUserId = inv.userId ?? null;
+      const ppLabel = inv.paymentProfile?.companyName || inv.paymentProfile?.bankName || '';
+      const base = {
+        rowKey: `nm-inv-${inv.id}`,
+        eventId: null,
+        invoiceId: inv.id,
+        source: 'invoice',
+        counterpartyRaw: '',
+        contractorName,
+        contractorUserId,
+        invoiceNumber: inv.invoiceNumber,
+        amount: inv.totalAmount,
+        currency: inv.currency || 'USD',
+        monthKey,
+        monthLabel,
+        ppLabel,
+        ppId,
+        candidates: [] as Candidate[],
+      };
+
+      // Reason 4: no pp snapshot at all → InvoiceDetailModal cross-contractor picker.
+      if (ppId <= 0) {
+        rows.push({ ...base, reason: 'invoice_no_pp', ppQbVendorName: null });
+        continue;
+      }
+      const pp = ppById.get(ppId);
+      const mapping = mappingByPpId.get(ppId);
+      if (mapping?.qbVendorListId) continue; // Already ready-eligible; handled in Ready loop.
+
+      // Reason 3: pp has qb_vendor_name but doesn't resolve to a qb_vendors row → Sync Vendors.
+      if (pp?.qbVendorName && !vendorByLowerName.has(pp.qbVendorName.toLowerCase().trim())) {
+        rows.push({ ...base, reason: 'invoice_pp_vendor_not_synced', ppQbVendorName: pp.qbVendorName });
+        continue;
+      }
+
+      // Reason 2: no mapping AND pp has no qb_vendor_name → inline picker → reconciler heals.
+      const candidates = resolveVendorCandidates(
+        { contractorName, contractorUserId, ppLabel },
+        { vendors: resolverVendors, historyByUser },
+      );
+      rows.push({ ...base, reason: 'invoice_pp_no_qb_vendor', ppQbVendorName: null, candidates });
+    }
+
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoices, invoicesById, resolverVendors, historyByUser]);
+  }, [events, invoices, invoicesById, ppById, mappingByPpId, vendorByLowerName, resolverVendors, historyByUser]);
+
+  const needsMappingTotal = useMemo(
+    () => needsMappingRows.reduce((s, r) => s + r.amount, 0),
+    [needsMappingRows],
+  );
 
   const mappingRows: MappingRow[] = useMemo(() => {
     const postedCountByVendor = new Map<string, number>();
@@ -772,8 +814,7 @@ export function useQbAutomationV2({
     readyRows,
     skippedRows,
     needsMappingRows,
-    needsAttentionRows,
-    needsAttentionTotal,
+    needsMappingTotal,
     mappingRows,
     pushedTodayRows,
     pushedTodayTotal,

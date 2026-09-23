@@ -1,19 +1,17 @@
-// Umbrella detection heuristics for QB Automation v2.
+// Umbrella detection for QB Automation v2.
 //
-// Two independent signals:
+// isUmbrellaEvent — the wire event's matched invoices span >1 distinct
+// contractor (userId). Triggers group-row rendering in Ready + Preview
+// so the accountant sees the full breakdown, not just matchedInvoiceIds[0].
+// Fires for Teal, Bimosoft, Native Teams, and Faruk-covers-Ajdin wires
+// once they land as events.
 //
-//   isUmbrellaEvent — the wire event's matched invoices span >1 distinct
-//     contractor (userId). Triggers group-row rendering in Ready + Preview
-//     so the accountant sees the full breakdown, not just matchedInvoiceIds[0].
-//     Fires for Teal, Bimosoft, Native Teams, and one-off cases like
-//     "Faruk paying self + Ajdin."
-//
-//   isUmbrellaVendor — the QB vendor is referenced by >1 payment_profile in
-//     `qb_vendor_mappings`. Triggers hiding invoice-driven "Will Create Bill"
-//     rows whose vendor is umbrella (Teal): pre-creating a bill for a slice
-//     before the wire lands is semantically wrong (QB books one Bill for the
-//     wire total). Does NOT fire for Bimosoft/Native Teams per-contractor
-//     vendors (each Bimosoft-<X> vendor is referenced by exactly one pp).
+// Pre-wire umbrella grouping (approved invoices before the wire arrives)
+// is handled directly in useQbAutomationV2 by grouping loose invoices
+// on (qbVendorListId, monthKey). The old `isUmbrellaVendor` filter that
+// hid umbrella-vendor slices from Ready pre-wire was scope creep and got
+// deleted in V9.8 — Dan's model is "if it's approved and mapped, it's
+// Ready."
 
 interface EventLike {
   id: number;
@@ -24,10 +22,6 @@ interface InvoiceLike {
   userId: string | null;
 }
 
-interface MappingLike {
-  qbVendorListId: string;
-  ppId: number | null;
-}
 
 // Union of matched_invoice_ids and umbrella-share-derived invoice IDs.
 // The classifier's matched_invoice_ids can be a strict subset when the
@@ -76,25 +70,3 @@ export function isUmbrellaEvent(
   return false;
 }
 
-export function buildUmbrellaVendorSet(mappings: MappingLike[]): Set<string> {
-  const ppsByVendor = new Map<string, Set<number>>();
-  for (const m of mappings) {
-    if (m.ppId == null) continue;
-    let set = ppsByVendor.get(m.qbVendorListId);
-    if (!set) { set = new Set(); ppsByVendor.set(m.qbVendorListId, set); }
-    set.add(m.ppId);
-  }
-  const umbrella = new Set<string>();
-  for (const [vendor, pps] of ppsByVendor) {
-    if (pps.size > 1) umbrella.add(vendor);
-  }
-  return umbrella;
-}
-
-export function isUmbrellaVendor(
-  qbVendorListId: string | null,
-  umbrellaVendors: Set<string>,
-): boolean {
-  if (!qbVendorListId) return false;
-  return umbrellaVendors.has(qbVendorListId);
-}

@@ -14,7 +14,6 @@ import PushBar from './sections/PushBar';
 import VendorMappingSubTab from './sections/VendorMappingSubTab';
 import PushPreviewModal from './sections/PushPreviewModal';
 import PushedTodayCard from './sections/PushedTodayCard';
-import NeedsAttentionCard from './sections/NeedsAttentionCard';
 
 export interface PushRowsArgs {
   eventIds: number[];
@@ -74,8 +73,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     readyRows,
     skippedRows,
     needsMappingRows,
-    needsAttentionRows,
-    needsAttentionTotal,
+    needsMappingTotal,
     mappingRows,
     pushedTodayRows,
     pushedTodayTotal,
@@ -161,7 +159,6 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   };
 
   const showNeedsMapping = category === 'needs_mapping';
-  const showNeedsAttention = category === 'needs_attention';
   const showReadyOrSkipped = category === 'ready' || category === 'skipped';
   const showPushedToday = category === 'pushed_today';
   const rowsForReadyView = category === 'skipped' ? skippedRows : readyRows;
@@ -239,8 +236,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             readyCount={readyRows.length}
             readyTotal={readyTotal}
             needsMappingCount={needsMappingRows.length}
-            needsAttentionCount={needsAttentionRows.length}
-            needsAttentionTotal={needsAttentionTotal}
+            needsMappingTotal={needsMappingTotal}
             skippedCount={skippedRows.length}
             pushedTodayCount={pushedTodayRows.length}
             pushedTodayTotal={pushedTodayTotal}
@@ -251,16 +247,9 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               rows={needsMappingRows}
               vendors={props.vendors}
               onSaveMapping={props.onSaveMapping}
-            />
-          )}
-
-          {showNeedsAttention && (
-            <NeedsAttentionCard
-              rows={needsAttentionRows}
-              vendors={props.vendors}
               onSaveQbVendorName={props.onSaveQbVendorName}
-              onOpenInvoiceModal={props.onOpenInvoiceModal}
               onSyncVendors={props.onSyncVendors}
+              onOpenInvoiceModal={props.onOpenInvoiceModal}
             />
           )}
 
