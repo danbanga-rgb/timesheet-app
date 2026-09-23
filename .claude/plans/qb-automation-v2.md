@@ -17,9 +17,13 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry (as of 2026-09-23 S17 close):**
-- Branch `feature/qb-automation-v2` tip `4d9259c`. Not merged to main.
-- V1–V9 + V9.5 SHIPPED (V7 SCRAPPED). V8-B CLOSED. Next up: reclassify sweep for historical mismap + V10 (Sync surface + freshness pills).
+**State on entry (as of 2026-09-23 S17 EOD break):**
+- Branch `feature/qb-automation-v2` tip `8746b2d`. Not merged to main.
+- V1–V9.8 SHIPPED (V7 SCRAPPED; V9.7 shipped-then-killed by V9.8). V8-B CLOSED.
+- **Three-bucket model locked** per [[three-bucket-lifecycle]]: Needs Mapping → Ready → Pushed. Anything else is scope creep.
+- Reconciler self-heals pp→vendor mappings on data load.
+- Two S17-morning hotfixes (#13, #14) merged to main and back-merged into v2.
+- Next up: **V9.9** (5 items — see V9.9 scope in §8 log). Then **V9.10** (Add Columns). Then **V10** (Sync surface + freshness pills).
 - v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
 - **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
 - v1 QB Automation tab is FROZEN — do not touch its render surface.
@@ -397,6 +401,42 @@ Concrete gates to flip the admin gate and delete v1:
 - `.claude/plans/accountant-modularization.md` — parent arc; Chunk 8 SUPERSEDED by this doc.
 
 ## §8. Session log
+
+**S17 EOD (2026-09-23) — V9.5c/d, V9.6/b, V9.7 (killed by V9.8), V9.8 shipped. Break called.**
+
+**V9.8 (`8746b2d`) — collapse to Dan's three-bucket lifecycle.** After V9.7 shipped a NeedsAttention KPI + card, Dan pushed back hard: "over engineering," "vague/inconsistent," "why is this so hard." The right model per [[three-bucket-lifecycle]]: `Needs Mapping → Ready → Pushed`. Nothing else.
+- Deleted `buildUmbrellaVendorSet` + `isUmbrellaVendor` + "hide slice pre-wire" filter (V9.5 Part B was scope creep). False positives on Davor (3 pps → AFTER SEVEN), Boris (2 pps → LION TESTING LABS), Branimir (2 pps → OKTAXART) were the tell.
+- Deleted NeedsAttentionCard + KPI tile + NeedsAttentionRow type. Actionable sub-reasons folded into NeedsMapping with per-reason inline fix.
+- Ready loose-invoice loop groups by `(qbVendorListId, monthKey)`. Bucket >1 → pre-wire umbrella group row. Bucket ==1 → solo row.
+- Test-account filter (`isTestAccount`) applied to Ready + Needs Mapping.
+- KpiStrip: 5 → 4 tiles.
+- [[umbrella-two-signal-design]] marked partially obsolete.
+
+**V9.7 (`d4cafe3`) — SHIPPED THEN KILLED.** NeedsAttention KPI + card with 4 reasons. Whole slice reverted by V9.8. Kept in git as archaeology of what NOT to do.
+
+**V9.6b (`723f3e1`) — reconciler timing fix.** V9.6 gated inside `loadQbVendorMappings` on `paymentProfiles.length > 0 && qbVendorsList.length > 0`. Fires before state populates → guard skips → reconciler never runs. Hoisted to `useEffect` keyed on `[paymentProfiles, qbVendorMappings.length, qbVendorsList.length]`.
+
+**V9.6 (`e35a7d4`) — self-healing pp→vendor mapping reconciler.** `src/lib/qbAutomation/ppMappingReconciler.ts` + tests. Detects pps with `qb_vendor_name` set matching a real `qb_vendors` row but no mapping. Auto-inserts. Fixes Harun + 26 others invisible in Ready.
+
+**V9.5d (`d39fa72`) — don't drop umbrella group when verdict input is thin.** Group row used `refNumber=''` → `computeVerdict` returned null → skip. Fixed with first-child ref + `?? 'will_create_and_pay'` fallback.
+
+**V9.5c (`f010d79`) — TS.tsx umbrellaShares data feed.** V9.5b hook was right; TS.tsx build filtered through `matched_invoice_ids` before writing to the Map, silently dropping siblings. Fixed: iterate ALL `convera_transaction_invoices` rows.
+
+**Hotfixes to main during S17:**
+- PR #13 (`7a130ec`) — approve trusts `invoice.paymentProfile` snapshot + SWIFT optional + invoice-edit trigger migration.
+- PR #14 (`ae3cd4a`) — cross-contractor payment profile picker in InvoiceDetailModal.
+- Reclassify sweep applied (Nejra/Predrag/Deniz).
+- Iskra pp 102 Teal mapping backfilled.
+- Ajdin invoice #306 backfilled with Faruk's snapshot.
+
+**V9.9 scope (agreed at break):**
+1. Drop `*` marker on pre-wire umbrella children (no convera link possible pre-wire; marker means nothing).
+2. Add **Inv #** column to Ready (dedicated column between Period and QB Vendor). Solo rows show the number; group parent rows show `—`.
+3. Persistent Skip via `invoices.qb_export_status = 'skipped'` (v1 pattern via `saveInvoiceExportStatus`; current v2 uses session-local state — a regression).
+4. Pushed history month-grouping (v1-style rollup for older rows). One combined `Pushed` bucket, not separate today+historical.
+5. Failed-push badge on Ready rows: read `qb_sync_jobs.status='error'` linked to event/invoice → red pill "Last push failed — [reason]" with retry.
+
+**V9.10 (deferred):** Add Columns dropdown for user-customizable Ready column set (Provenance, Src, Payment method, QB Ref, Push status, etc). LocalStorage persistence.
 
 **S17 (2026-09-23, morning) — V8-B items 4 + 5 shipped. V8-B CLOSES. V9 shipped. V9.5 shipped (umbrella group rendering).**
 
