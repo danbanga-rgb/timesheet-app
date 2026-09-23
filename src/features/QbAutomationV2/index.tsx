@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { UploadCloud, Inbox, ListChecks } from 'lucide-react';
+import { UploadCloud, Inbox, ListChecks, RefreshCw, X } from 'lucide-react';
 import type { Invoice, PaymentProfile, QbIngestEvent, QbVendorMapping, UserProfile } from '../../types';
 import type { QbOpenBillRow, QbVendorRow } from '../../lib/qbStateSync/types';
 import type { PushRecord } from '../../components/QbPushStatusPane';
@@ -44,6 +44,14 @@ export interface QbAutomationV2Props {
   onPushRows: (args: PushRowsArgs) => Promise<PushRowsResult>;
   onDismissPushRecord: (eventId: number) => void;
   onSyncVendors: () => Promise<void>;
+  /** Fire-and-forget silent vendor_query enqueue. Called after a successful
+   *  push so any newly-classified rows have a fresh mirror once QBWC drains
+   *  (~15 min). Errors are swallowed; the hint bar tells the user to refresh
+   *  later. */
+  onPostPushSync: () => Promise<void>;
+  /** Reload events + open bills from Supabase. Called by the post-push hint's
+   *  Refresh button when the user comes back after QBWC drain. */
+  onRefreshInbox: () => Promise<void>;
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -74,6 +82,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   const [category, setCategory] = useState<CategoryKey>('ready');
   const [previewOpen, setPreviewOpen] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [showPostPushHint, setShowPostPushHint] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     const unsubscribe = props.onMappingChangeSubscribe(() => {});
@@ -110,10 +120,26 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
       clearSelection();
       setPreviewOpen(false);
       setCategory('ready');
+      // Item 5: fire silent Sync Vendors so QBWC picks up any missing vendors
+      // during its next drain (~15 min); when the user returns, the hint bar
+      // Refresh button pulls the freshly-classified rows into Ready.
+      void props.onPostPushSync();
+      setShowPostPushHint(true);
     } catch (e) {
       alert('Push failed: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setPushing(false);
+    }
+  };
+
+  const handleRefreshInbox = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await props.onRefreshInbox();
+      setShowPostPushHint(false);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -164,6 +190,30 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
 
       {subTab === 'inbox' && (
         <>
+          {showPostPushHint && (
+            <div className="border border-indigo-200 rounded-lg bg-indigo-50/40 px-4 py-2 flex items-center justify-between gap-3 text-sm">
+              <span className="text-indigo-900">
+                Vendor sync is running in the background (~15 min). Refresh once QBWC drains to pick up any newly-resolved rows.
+              </span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => void handleRefreshInbox()}
+                  disabled={refreshing}
+                  className="text-xs font-medium px-2 py-1 border border-indigo-300 text-indigo-800 rounded hover:bg-indigo-100 disabled:opacity-50 flex items-center gap-1"
+                >
+                  <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} /> Refresh
+                </button>
+                <button
+                  onClick={() => setShowPostPushHint(false)}
+                  className="text-indigo-400 hover:text-indigo-700"
+                  aria-label="Dismiss hint"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
           <KpiStrip
             active={category}
             onSelect={setCategory}

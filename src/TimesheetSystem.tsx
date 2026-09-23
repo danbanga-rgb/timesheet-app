@@ -5207,6 +5207,16 @@ const TimesheetSystem = () => {
               supabase={supabase}
               onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
               onSyncVendors={runSyncQbVendors}
+              onPostPushSync={async () => {
+                try {
+                  await enqueueVendorQuery(supabase, 'v2-post-push-sync');
+                } catch (e) {
+                  console.warn('v2 post-push vendor sync enqueue failed', e);
+                }
+              }}
+              onRefreshInbox={async () => {
+                await Promise.all([loadQbIngestEvents(), loadQbOpenBills()]);
+              }}
               onPushRows={async ({ eventIds, invoiceIds }) => {
                 // Route selected event/invoice IDs to the 8 v1 pushers based on
                 // source + resolvedAction + bill-state. Same logic as v1's
