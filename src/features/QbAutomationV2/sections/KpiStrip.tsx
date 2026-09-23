@@ -1,4 +1,4 @@
-export type CategoryKey = 'ready' | 'needs_mapping' | 'skipped' | 'pushed_today';
+export type CategoryKey = 'ready' | 'needs_mapping' | 'needs_attention' | 'skipped' | 'pushed_today';
 
 interface Props {
   active: CategoryKey;
@@ -6,6 +6,8 @@ interface Props {
   readyCount: number;
   readyTotal: number;
   needsMappingCount: number;
+  needsAttentionCount: number;
+  needsAttentionTotal: number;
   skippedCount: number;
   pushedTodayCount: number;
   pushedTodayTotal: number;
@@ -45,9 +47,9 @@ function KpiCard(p: CardProps) {
   );
 }
 
-export default function KpiStrip({ active, onSelect, readyCount, readyTotal, needsMappingCount, skippedCount, pushedTodayCount, pushedTodayTotal }: Props) {
+export default function KpiStrip({ active, onSelect, readyCount, readyTotal, needsMappingCount, needsAttentionCount, needsAttentionTotal, skippedCount, pushedTodayCount, pushedTodayTotal }: Props) {
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
       <KpiCard
         active={active === 'ready'}
         onClick={() => onSelect('ready')}
@@ -72,6 +74,19 @@ export default function KpiStrip({ active, onSelect, readyCount, readyTotal, nee
         label="Needs Mapping"
         value={needsMappingCount === 0 ? <span className="text-amber-400">—</span> : needsMappingCount}
         secondary={needsMappingCount === 0 ? 'nothing to map' : 'click to resolve'}
+      />
+      <KpiCard
+        active={active === 'needs_attention'}
+        disabled={needsAttentionCount === 0}
+        onClick={() => onSelect('needs_attention')}
+        headBg="bg-orange-50"
+        headText="text-orange-700"
+        numText="text-orange-900"
+        border="border-orange-200"
+        activeRing="ring-orange-400"
+        label="Needs Attention"
+        value={needsAttentionCount === 0 ? <span className="text-orange-400">—</span> : needsAttentionCount}
+        secondary={needsAttentionCount === 0 ? 'all rows accounted for' : (needsAttentionTotal > 0 ? fmtMoney(needsAttentionTotal) : 'click to view')}
       />
       <KpiCard
         active={active === 'skipped'}

@@ -14,6 +14,7 @@ import PushBar from './sections/PushBar';
 import VendorMappingSubTab from './sections/VendorMappingSubTab';
 import PushPreviewModal from './sections/PushPreviewModal';
 import PushedTodayCard from './sections/PushedTodayCard';
+import NeedsAttentionCard from './sections/NeedsAttentionCard';
 
 export interface PushRowsArgs {
   eventIds: number[];
@@ -57,6 +58,13 @@ export interface QbAutomationV2Props {
   /** Reload events + open bills from Supabase. Called by the post-push hint's
    *  Refresh button when the user comes back after QBWC drain. */
   onRefreshInbox: () => Promise<void>;
+  /** V9.7 Needs Attention: writes qb_vendor_name to payment_profiles. The
+   *  self-healing reconciler then creates the mapping row on the next tick. */
+  onSaveQbVendorName: (ppId: number, vendorName: string) => Promise<void>;
+  /** V9.7 Needs Attention: opens the Invoice Detail modal for a specific
+   *  invoice — used by "no pp on invoice" (cross-contractor picker) and
+   *  "waiting for wire" (change routing if needed). */
+  onOpenInvoiceModal: (invoiceId: number) => void;
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -66,6 +74,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     readyRows,
     skippedRows,
     needsMappingRows,
+    needsAttentionRows,
+    needsAttentionTotal,
     mappingRows,
     pushedTodayRows,
     pushedTodayTotal,
@@ -151,6 +161,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   };
 
   const showNeedsMapping = category === 'needs_mapping';
+  const showNeedsAttention = category === 'needs_attention';
   const showReadyOrSkipped = category === 'ready' || category === 'skipped';
   const showPushedToday = category === 'pushed_today';
   const rowsForReadyView = category === 'skipped' ? skippedRows : readyRows;
@@ -228,6 +239,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             readyCount={readyRows.length}
             readyTotal={readyTotal}
             needsMappingCount={needsMappingRows.length}
+            needsAttentionCount={needsAttentionRows.length}
+            needsAttentionTotal={needsAttentionTotal}
             skippedCount={skippedRows.length}
             pushedTodayCount={pushedTodayRows.length}
             pushedTodayTotal={pushedTodayTotal}
@@ -238,6 +251,16 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               rows={needsMappingRows}
               vendors={props.vendors}
               onSaveMapping={props.onSaveMapping}
+            />
+          )}
+
+          {showNeedsAttention && (
+            <NeedsAttentionCard
+              rows={needsAttentionRows}
+              vendors={props.vendors}
+              onSaveQbVendorName={props.onSaveQbVendorName}
+              onOpenInvoiceModal={props.onOpenInvoiceModal}
+              onSyncVendors={props.onSyncVendors}
             />
           )}
 

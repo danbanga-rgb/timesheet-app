@@ -5289,6 +5289,17 @@ const TimesheetSystem = () => {
               onRefreshInbox={async () => {
                 await Promise.all([loadQbIngestEvents(), loadQbOpenBills()]);
               }}
+              onSaveQbVendorName={async (ppId, vendorName) => {
+                await saveQbVendorName(ppId, vendorName);
+                // Reconciler useEffect will pick up the pp change and create the mapping row.
+              }}
+              onOpenInvoiceModal={(invoiceId) => {
+                const inv = invoices.find(i => i.id === invoiceId);
+                if (inv) {
+                  setSelectedInvoice(inv);
+                  setShowInvoiceModal(true);
+                }
+              }}
               onPushRows={async ({ eventIds, invoiceIds }) => {
                 // Route selected event/invoice IDs to the 8 v1 pushers based on
                 // source + resolvedAction + bill-state. Same logic as v1's

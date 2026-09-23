@@ -92,6 +92,29 @@ export interface PushedTodayRow {
   statusUpdatedAt: string;
 }
 
+export type NeedsAttentionReason =
+  | 'waiting_for_wire'          // approved umbrella-vendor invoice, no event yet
+  | 'no_qb_vendor_on_pp'        // approved invoice, pp has no qb_vendor_name → reconciler can't heal
+  | 'qb_vendor_not_in_mirror'   // pp has qb_vendor_name but doesn't resolve to qb_vendors → Sync Vendors
+  | 'no_pp_on_invoice';         // approved invoice, no pp snapshot at all
+
+export interface NeedsAttentionRow {
+  rowKey: string;
+  invoiceId: number;
+  contractorName: string;
+  contractorUserId: string | null;
+  invoiceNumber: string;
+  amount: number;
+  currency: string;
+  monthKey: string;
+  monthLabel: string;
+  reason: NeedsAttentionReason;
+  ppId: number;                 // 0 for no_pp_on_invoice
+  ppLabel: string;
+  ppQbVendorName: string | null;
+  currentVendorGuess: string | null;  // e.g. "Teal Crossroads" for waiting_for_wire
+}
+
 export interface MappingRow {
   mappingId: number;
   ppId: number | null;
@@ -482,6 +505,83 @@ export function useQbAutomationV2({
     return rows;
   }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares, umbrellaVendors]);
 
+  // Vendor lookup by lowercase name — used by needsAttentionRows to detect
+  // "pp has qb_vendor_name but doesn't resolve to a qb_vendors row" (needs
+  // Sync Vendors).
+  const vendorByLowerName = useMemo(() => {
+    const m = new Map<string, QbVendorRow>();
+    for (const v of vendors) m.set(v.name.toLowerCase().trim(), v);
+    return m;
+  }, [vendors]);
+
+  const needsAttentionRows: NeedsAttentionRow[] = useMemo(() => {
+    const readyEventInvoiceIds = new Set<number>();
+    for (const e of events) {
+      if (e.status !== 'ready') continue;
+      for (const id of e.matchedInvoiceIds) readyEventInvoiceIds.add(id);
+    }
+    const rows: NeedsAttentionRow[] = [];
+    for (const inv of invoices) {
+      if (inv.status !== 'approved') continue;
+      if (inv.qbBillTxnId) continue;
+      const pm = inv.paymentMethodOverride;
+      if (pm !== 'Convera' && pm !== 'Intuit') continue;
+
+      const ppId = inv.paymentProfile?.id ?? 0;
+      const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
+      const monthLabel = monthLabelFromKey(monthKey);
+      const base = {
+        rowKey: `attn-inv-${inv.id}`,
+        invoiceId: inv.id,
+        contractorName: inv.userName || '(unknown)',
+        contractorUserId: inv.userId ?? null,
+        invoiceNumber: inv.invoiceNumber,
+        amount: inv.totalAmount,
+        currency: inv.currency || 'USD',
+        monthKey,
+        monthLabel,
+        ppLabel: inv.paymentProfile?.companyName || inv.paymentProfile?.bankName || '',
+        ppId,
+      };
+
+      // Category: no pp snapshot at all → InvoiceDetailModal has cross-contractor picker.
+      if (ppId <= 0) {
+        rows.push({ ...base, reason: 'no_pp_on_invoice', ppQbVendorName: null, currentVendorGuess: null });
+        continue;
+      }
+      const pp = ppById.get(ppId);
+      const mapping = mappingByPpId.get(ppId);
+
+      // Category: pp has qb_vendor_name but it doesn't resolve to a qb_vendors row.
+      if (!mapping && pp?.qbVendorName && !vendorByLowerName.has(pp.qbVendorName.toLowerCase().trim())) {
+        rows.push({ ...base, reason: 'qb_vendor_not_in_mirror', ppQbVendorName: pp.qbVendorName, currentVendorGuess: pp.qbVendorName });
+        continue;
+      }
+
+      // Category: no mapping AND pp has no qb_vendor_name — reconciler can't heal.
+      if (!mapping && !pp?.qbVendorName) {
+        rows.push({ ...base, reason: 'no_qb_vendor_on_pp', ppQbVendorName: null, currentVendorGuess: null });
+        continue;
+      }
+
+      // Category: mapping exists AND vendor is umbrella-vendor AND no ready event covers this invoice.
+      if (mapping?.qbVendorListId
+          && isUmbrellaVendor(mapping.qbVendorListId, umbrellaVendors)
+          && !readyEventInvoiceIds.has(inv.id)) {
+        const vendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? '(unknown)';
+        rows.push({ ...base, reason: 'waiting_for_wire', ppQbVendorName: pp?.qbVendorName ?? null, currentVendorGuess: vendorName });
+        continue;
+      }
+    }
+    rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
+    return rows;
+  }, [events, invoices, ppById, mappingByPpId, umbrellaVendors, vendorsById, vendorByLowerName]);
+
+  const needsAttentionTotal = useMemo(
+    () => needsAttentionRows.reduce((s, r) => s + r.amount, 0),
+    [needsAttentionRows],
+  );
+
   const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
     const rows: NeedsMappingRow[] = [];
     for (const e of events) {
@@ -672,6 +772,8 @@ export function useQbAutomationV2({
     readyRows,
     skippedRows,
     needsMappingRows,
+    needsAttentionRows,
+    needsAttentionTotal,
     mappingRows,
     pushedTodayRows,
     pushedTodayTotal,
