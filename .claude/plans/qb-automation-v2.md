@@ -17,9 +17,9 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry (as of 2026-09-22 mid-arc break — S16):**
-- Branch `feature/qb-automation-v2` tip `8cba758`. Not merged to main.
-- V1–V8 SHIPPED (V7 SCRAPPED). V8-B items 1+2+3 SHIPPED this session. Items 4 (cancellation) + 5 (phase 2 re-push) remain.
+**State on entry (as of 2026-09-23 S17 pause):**
+- Branch `feature/qb-automation-v2` tip `a5e3d20`. Not merged to main.
+- V1–V8 SHIPPED (V7 SCRAPPED). V8-B items 1+2+3+4 SHIPPED. Item 5 (phase 2 re-push) remains.
 - v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
 - **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
 - v1 QB Automation tab is FROZEN — do not touch its render surface.
@@ -398,6 +398,17 @@ Concrete gates to flip the admin gate and delete v1:
 
 ## §8. Session log
 
+**S17 (2026-09-23, morning) — V8-B item 4 shipped: cancel pending pushes.**
+- **Item 4 (`a5e3d20`)**: per-row + batch Cancel on QbPushStatusPane. New `src/lib/qbAutomation/cancelPushJobs.ts` — flips `qb_sync_jobs` pending→skipped with pending-only guard (so QBWC in-flight writes are never touched), then reverts event-sourced `qb_ingest_events.status` to 'ready' when the pay job was actually cancelled. Invoice-sourced G7.5 records skip the event revert.
+- Design decisions locked with Dan first (Q1–Q4 from S16):
+  - **Q1 = (c) both** — DB flag + client hide. Uses existing `'skipped'` enum value; no migration.
+  - **Q2 = (c) both** — per-row `cancel` link + batch `Cancel remaining (N)` header button.
+  - **Q3 = flip to 'ready'** — cancelled = "not now, not never." Event re-appears in Ready card; no orphaned 'queued' rows. Guard skips events already in 'ready'/'posted'.
+  - **Q4 = best-effort + pending-only SQL guard** — cancel is a no-op if QBWC already flipped the row to 'in_flight'. UX banner reports the split: `Cancelled N pending · M already in flight (will complete)`. Per [[inline-controls-over-warnings]].
+- 8 new tests in `src/lib/qbAutomation/__tests__/cancelPushJobs.test.ts` — covers empty input, pay+verify job cancel, in-flight guard, event revert logic across 3 states (queued/ready/posted), invoice source non-touch, missing verify job, event ID dedup, DB error propagation. Total 39/39 pass.
+- Only wired into v2 (`onCancel` prop is optional; v1 pane render unchanged).
+- Push queue STILL HELD. Dan verifies on preview → next session picks up item 5 (phase 2 re-push after post-push sync).
+
 **S7 (2026-09-18, PM) — pivot session.**
 - STOP GATE reached at end of S6 after IB slice merged (`801b080`).
 - Dan chose Path 3 (rebuild UI, keep plumbing).
@@ -760,8 +771,8 @@ Original spec preserved below for archaeology.
 - ✅ Item 1 shipped (`703a743`) — inline vendor override in Ready rows, save-as-mapping only.
 - ✅ Item 2 shipped (`9fedc05`) — Preview modal picks up the same click-to-edit + inline picker.
 - ✅ Item 3 shipped (`8cba758`) — preflight banner + Sync Vendors button + Confirm-block when any selected vendor is missing from mirror.
-- ⏳ Item 4 (cancellation) — NEXT. See "Open questions for item 4" below.
-- ⏳ Item 5 (phase 2 re-push) — deferred until item 4 lands.
+- ✅ Item 4 shipped (`a5e3d20`, S17 2026-09-23) — per-row + batch Cancel on QbPushStatusPane. Backed by `src/lib/qbAutomation/cancelPushJobs.ts` (pending-only guard on `qb_sync_jobs`; revert event to 'ready' when pay job cancelled; invoice-source records skip event revert). 8 new tests → 39/39 pass. Design Qs 1–4 resolved per S17 log entry above.
+- ⏳ Item 5 (phase 2 re-push) — NEXT.
 
 **Open questions for item 4 (surface before coding):**
 1. **What does "cancel" mean at the semantic level?** Options:
