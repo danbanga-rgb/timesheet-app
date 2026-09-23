@@ -183,23 +183,48 @@ export default function InvoiceDetailModal(props: InvoiceDetailModalProps) {
           {(() => {
             const contractorProfiles = paymentProfiles.filter(p => p.userId === inv.userId);
             const selectedId = inv.paymentProfile?.id ?? 0;
-            const snapshotMissingFromList = inv.paymentProfile && !contractorProfiles.find(p => p.id === selectedId);
+            // Cross-contractor picker (2026-09-23): when the invoice's own
+            // contractor has no profile (e.g. Faruk-covers-Ajdin, Teal),
+            // surface profiles from siblings in the same group_key. If no
+            // group_key, fall back to all other-contractor profiles as a
+            // safety net so the accountant can always link something.
+            const siblingUserIds = new Set(
+              inv.groupKey
+                ? invoices.filter(i => i.groupKey === inv.groupKey && i.userId !== inv.userId).map(i => i.userId)
+                : []
+            );
+            const siblingProfiles = paymentProfiles.filter(p => siblingUserIds.has(p.userId));
+            const otherProfiles = (!inv.groupKey && contractorProfiles.length === 0)
+              ? paymentProfiles.filter(p => p.userId !== inv.userId)
+              : [];
+            const userNameById = new Map(users.map(u => [u.id, u.name]));
+            const nameForProfile = (p: PaymentProfile) => userNameById.get(p.userId) ?? '(unknown)';
+            const allPickable: PaymentProfile[] = [...contractorProfiles, ...siblingProfiles, ...otherProfiles];
+            const snapshotMissingFromList = inv.paymentProfile && !allPickable.find(p => p.id === selectedId);
+            const showPicker = allPickable.length > 0 || !!inv.paymentProfile;
+
             const accent = inv.paymentProfile ? 'green' : 'amber';
             const headerText = inv.paymentProfile
               ? `💳 Payment Details — ${inv.paymentProfile.profileName}`
-              : (contractorProfiles.length > 0 ? '⚠ No payment profile attached — pick one' : '⚠ No payment profile and no saved options for this contractor');
+              : contractorProfiles.length > 0
+                ? '⚠ No payment profile attached — pick one'
+                : siblingProfiles.length > 0
+                  ? '⚠ No profile for this contractor — pick a sibling contractor profile below'
+                  : otherProfiles.length > 0
+                    ? '⚠ No profile for this contractor — pick any profile below'
+                    : '⚠ No payment profile and no saved options';
             return (
               <div className={`mb-5 border border-${accent}-200 rounded-lg overflow-hidden`}>
                 <div className={`bg-${accent}-50 px-4 py-2 border-b border-${accent}-200`}>
                   <span className={`font-semibold text-${accent}-800 text-sm`}>{headerText}</span>
                 </div>
-                {contractorProfiles.length > 0 && (
+                {showPicker && (
                   <div className="px-4 py-3 bg-white border-b border-gray-100 flex items-center gap-2">
                     <label className="text-xs text-gray-600 whitespace-nowrap">Profile:</label>
                     <select
                       value={selectedId || ''}
                       onChange={e => {
-                        const p = contractorProfiles.find(pp => pp.id === Number(e.target.value));
+                        const p = allPickable.find(pp => pp.id === Number(e.target.value));
                         if (p) switchInvoicePaymentProfile(inv.id, p);
                       }}
                       className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:ring-2 focus:ring-indigo-500"
@@ -208,9 +233,27 @@ export default function InvoiceDetailModal(props: InvoiceDetailModalProps) {
                       {snapshotMissingFromList && inv.paymentProfile && (
                         <option value={selectedId}>(detached) {inv.paymentProfile.profileName}{inv.paymentProfile.iban ? ` · ···${inv.paymentProfile.iban.slice(-6)}` : ''}</option>
                       )}
-                      {contractorProfiles.map(p => (
-                        <option key={p.id} value={p.id}>{p.profileName}{p.iban ? ` · ···${p.iban.slice(-6)}` : ''}</option>
-                      ))}
+                      {contractorProfiles.length > 0 && (
+                        <optgroup label="This contractor">
+                          {contractorProfiles.map(p => (
+                            <option key={p.id} value={p.id}>{p.profileName}{p.iban ? ` · ···${p.iban.slice(-6)}` : ''}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {siblingProfiles.length > 0 && (
+                        <optgroup label="Cross-contractor (same PDF)">
+                          {siblingProfiles.map(p => (
+                            <option key={p.id} value={p.id}>{nameForProfile(p)} · {p.profileName}{p.iban ? ` · ···${p.iban.slice(-6)}` : ''}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {otherProfiles.length > 0 && (
+                        <optgroup label="Other contractors">
+                          {otherProfiles.map(p => (
+                            <option key={p.id} value={p.id}>{nameForProfile(p)} · {p.profileName}{p.iban ? ` · ···${p.iban.slice(-6)}` : ''}</option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                     {inv.paymentProfile && contractorProfiles.find(p => p.id === selectedId) && (
                       <button
