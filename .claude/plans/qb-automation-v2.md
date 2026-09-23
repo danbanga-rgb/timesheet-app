@@ -18,8 +18,8 @@
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
 **State on entry (as of 2026-09-23 S17 close):**
-- Branch `feature/qb-automation-v2` tip `bb64388`. Not merged to main.
-- V1–V9 SHIPPED (V7 SCRAPPED). V8-B CLOSED. Next up: V10 (Sync surface + freshness pills).
+- Branch `feature/qb-automation-v2` tip `4d9259c`. Not merged to main.
+- V1–V9 + V9.5 SHIPPED (V7 SCRAPPED). V8-B CLOSED. Next up: reclassify sweep for historical mismap + V10 (Sync surface + freshness pills).
 - v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
 - **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
 - v1 QB Automation tab is FROZEN — do not touch its render surface.
@@ -398,7 +398,28 @@ Concrete gates to flip the admin gate and delete v1:
 
 ## §8. Session log
 
-**S17 (2026-09-23, morning) — V8-B items 4 + 5 shipped. V8-B CLOSES. V9 shipped.**
+**S17 (2026-09-23, morning) — V8-B items 4 + 5 shipped. V8-B CLOSES. V9 shipped. V9.5 shipped (umbrella group rendering).**
+
+**V9.5 (`4d9259c`) — Umbrella group rendering + hide slice-invoice for umbrella vendors.**
+- Fixes two related bugs Dan surfaced from preview screenshots:
+  - Teal Crossroads $37,400 wire attributed only to Strahinja (`matchedInvoiceIds[0]` — other 7 slices invisible).
+  - Strahinja's Aug slice showing standalone "Will Create Bill" before the wire lands (semantically wrong — QB books one Bill for wire total).
+- New `src/lib/qbAutomation/umbrella.ts` with two independent detection signals, documented in [[umbrella-two-signal-design]]:
+  - `isUmbrellaEvent(event, invoicesById)` — matched invoices span >1 distinct userId → group render.
+  - `buildUmbrellaVendorSet(mappings)` — vendor mapped by >1 pp → hide invoice slice.
+- Impact-checked cases (Dan explicitly asked to verify):
+  - Teal (1 vendor, 8 pps): both signals fire. ✅ group render + Aug hidden.
+  - Bimosoft (N per-contractor vendors): event-only fires. ✅ group render for wire, per-contractor "Will Create Bill" preserved.
+  - Native Teams: same as Bimosoft. ✅
+  - Faruk-covers-Ajdin (2 contractors): event-level always fires; vendor-level fires only if Ajdin has separate pp. ✅ either way group render is correct.
+- Group row structure: parent shows wire total + vendor (or "N vendors" for multi-vendor umbrellas) + contractor-count chip + verdict. Sub-rows on expand show per-contractor invoice #, hrs, rate, share (from `convera_transaction_invoices.amount_share`, fallback to invoice total with `*` marker). Selection + Skip parent-level only.
+- Preview modal defaults groups to expanded so accountant sees full breakdown before confirming.
+- TS.tsx: new `qbUmbrellaShares` Map loaded in `loadQbIngestEvents` by joining events → convera_transaction_id → convera_transaction_invoices.
+- 16 new tests around umbrella detection. Total 64/64 pass.
+- **Separate memory saved:** [[classifier-pending-only-guard]] — discovered while diagnosing the Nejra Jul row. `classifyOne` only runs on `status='pending'`, so historical mapping fixes don't propagate to already-classified 'ready' events. Motivates the reclassify sweep next.
+- Next: reclassify sweep script for Nejra/Predrag/Deniz stale event classifications, then V10.
+
+**V9 (`bb64388`) — Pushed Today card + KPI tile enabled.**
 
 **V9 (`bb64388`) — Pushed Today card + KPI tile enabled.**
 - New `sections/PushedTodayCard.tsx` — sortable table of today's `qb_ingest_events` with `status='posted'` filtered by `statusUpdatedAt` >= local midnight. Sorted newest first; TxnID badges (Bill / Pmt / Chk) are click-to-copy; posted_source tag visible.
