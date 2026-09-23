@@ -3062,6 +3062,11 @@ const TimesheetSystem = () => {
     // "Needs vendor decision" panel on QB Automation + the push preview
     // filters those invoices out until resolved (TS.tsx ~9339, ~8895).
     if (!['Intuit', 'Convera'].includes(effectivePaymentMethod)) return 'proceed';
+    // Snapshot on the invoice is the authoritative routing key for this
+    // payment. Trust it when present — handles cross-contractor invoicing
+    // (Faruk-covers-Ajdin) where Ajdin has no live pp of his own but the
+    // invoice's snapshot points to Faruk's pp.
+    if (invoice.paymentProfile?.id) return 'proceed';
     const { data: liveData, error } = await supabase
       .from('payment_profiles')
       .select('id, user_id')
@@ -3584,9 +3589,10 @@ const TimesheetSystem = () => {
   const saveTemplateProfile = async () => {
     if (!templateProfilePreview || !templateProfileUserId) return;
     const p = templateProfilePreview;
-    // Minimum required per feature spec: Company + IBAN + SWIFT.
-    if (!p.companyName || !p.iban || !p.swift) {
-      setTemplateProfileError('Company Name, IBAN, and SWIFT are required. Fill in any missing fields before saving.');
+    // Company + IBAN are the routing minimum. SWIFT is often absent for
+    // IBAN-only EU bene, US ACH, UK BACS — accountant can fill in later.
+    if (!p.companyName || !p.iban) {
+      setTemplateProfileError('Company Name and IBAN are required. Fill in any missing fields before saving.');
       return;
     }
     setTemplateProfileSaving(true);
