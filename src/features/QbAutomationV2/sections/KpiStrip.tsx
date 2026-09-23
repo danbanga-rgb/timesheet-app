@@ -7,6 +7,8 @@ interface Props {
   readyTotal: number;
   needsMappingCount: number;
   skippedCount: number;
+  pushedTodayCount: number;
+  pushedTodayTotal: number;
 }
 
 function fmtMoney(n: number): string {
@@ -43,7 +45,7 @@ function KpiCard(p: CardProps) {
   );
 }
 
-export default function KpiStrip({ active, onSelect, readyCount, readyTotal, needsMappingCount, skippedCount }: Props) {
+export default function KpiStrip({ active, onSelect, readyCount, readyTotal, needsMappingCount, skippedCount, pushedTodayCount, pushedTodayTotal }: Props) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <KpiCard
@@ -85,17 +87,17 @@ export default function KpiStrip({ active, onSelect, readyCount, readyTotal, nee
         secondary={skippedCount === 0 ? 'session-scoped' : 'click to view'}
       />
       <KpiCard
-        active={false}
-        disabled
-        onClick={() => {}}
+        active={active === 'pushed_today'}
+        disabled={pushedTodayCount === 0}
+        onClick={() => onSelect('pushed_today')}
         headBg="bg-indigo-50"
         headText="text-indigo-700"
         numText="text-indigo-900"
         border="border-indigo-200"
         activeRing="ring-indigo-400"
         label="Pushed today"
-        value={<span className="text-indigo-400">—</span>}
-        secondary="lands in Slice V9"
+        value={pushedTodayCount === 0 ? <span className="text-indigo-400">—</span> : pushedTodayCount}
+        secondary={pushedTodayCount === 0 ? 'nothing yet today' : (pushedTodayTotal > 0 ? fmtMoney(pushedTodayTotal) : 'click to view')}
       />
     </div>
   );

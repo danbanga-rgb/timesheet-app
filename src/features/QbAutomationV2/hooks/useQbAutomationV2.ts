@@ -57,6 +57,22 @@ export interface NeedsMappingRow {
   candidates: Candidate[];
 }
 
+export interface PushedTodayRow {
+  eventId: number;
+  contractorName: string;
+  invoiceNumber: string;
+  amount: number;
+  currency: string;
+  monthKey: string;
+  monthLabel: string;
+  qbVendorName: string;
+  billTxnId: string | null;
+  billPmtTxnId: string | null;
+  checkTxnId: string | null;
+  postedSource: string | null;
+  statusUpdatedAt: string;
+}
+
 export interface MappingRow {
   mappingId: number;
   ppId: number | null;
@@ -86,6 +102,74 @@ function monthLabelFromKey(key: string): string {
   const idx = Number(m) - 1;
   if (!y || Number.isNaN(idx) || idx < 0 || idx > 11) return key;
   return `${MONTH_NAMES[idx]} ${y}`;
+}
+
+// Returns "today" as a YYYY-MM-DD string in local time. Used to bucket
+// qb_ingest_events into "Pushed today" — statusUpdatedAt is compared
+// prefix-wise against this.
+export function todayLocalDateKey(now: Date = new Date()): string {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+// Local ISO date prefix of an ISO timestamp (e.g. "2026-09-23T14:22:00Z" →
+// "2026-09-23" in the browser's local zone). Two-step conversion because
+// server timestamps are UTC but "today" is a local-day concept.
+export function localDateKeyOfIso(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  void now;
+  return todayLocalDateKey(d);
+}
+
+export function derivePushedTodayRows(
+  events: QbIngestEvent[],
+  invoicesById: Map<number, Invoice>,
+  vendorsById: Map<string, QbVendorRow>,
+  now: Date = new Date(),
+): PushedTodayRow[] {
+  const today = todayLocalDateKey(now);
+  const rows: PushedTodayRow[] = [];
+  for (const e of events) {
+    if (e.status !== 'posted') continue;
+    if (!e.statusUpdatedAt) continue;
+    if (localDateKeyOfIso(e.statusUpdatedAt) !== today) continue;
+
+    const invoice = e.matchedInvoiceIds.length > 0
+      ? (invoicesById.get(e.matchedInvoiceIds[0]) ?? null)
+      : null;
+    const monthKey = invoice?.periodEnd?.slice(0, 7) ?? '';
+    const qbVendorName = e.counterpartyQbVendorListId
+      ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(unmapped)')
+      : '(unmapped)';
+    const refs = (e.postedQbRefs ?? {}) as Record<string, unknown>;
+    const billTxnId = (typeof refs.bill === 'string' ? refs.bill : null)
+      ?? e.resolvedBillTxnId
+      ?? null;
+    const billPmtTxnId = typeof refs.bill_pmt === 'string' ? refs.bill_pmt : null;
+    const checkTxnId = typeof refs.check === 'string' ? refs.check : null;
+    const postedSource = typeof refs.posted_source === 'string' ? refs.posted_source : null;
+
+    rows.push({
+      eventId: e.id,
+      contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
+      invoiceNumber: invoice?.invoiceNumber ?? '',
+      amount: e.amount,
+      currency: invoice?.currency || 'USD',
+      monthKey,
+      monthLabel: monthLabelFromKey(monthKey),
+      qbVendorName,
+      billTxnId,
+      billPmtTxnId,
+      checkTxnId,
+      postedSource,
+      statusUpdatedAt: e.statusUpdatedAt,
+    });
+  }
+  rows.sort((a, b) => (b.statusUpdatedAt || '').localeCompare(a.statusUpdatedAt || ''));
+  return rows;
 }
 
 export function useQbAutomationV2({
@@ -439,11 +523,22 @@ export function useQbAutomationV2({
 
   const readyTotal = useMemo(() => readyRows.reduce((s, r) => s + r.amount, 0), [readyRows]);
 
+  const pushedTodayRows = useMemo(
+    () => derivePushedTodayRows(events, invoicesById, vendorsById),
+    [events, invoicesById, vendorsById],
+  );
+  const pushedTodayTotal = useMemo(
+    () => pushedTodayRows.reduce((s, r) => s + r.amount, 0),
+    [pushedTodayRows],
+  );
+
   return {
     readyRows,
     skippedRows,
     needsMappingRows,
     mappingRows,
+    pushedTodayRows,
+    pushedTodayTotal,
     payCount,
     createCount,
     payTotal,

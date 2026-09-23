@@ -13,6 +13,7 @@ import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingC
 import PushBar from './sections/PushBar';
 import VendorMappingSubTab from './sections/VendorMappingSubTab';
 import PushPreviewModal from './sections/PushPreviewModal';
+import PushedTodayCard from './sections/PushedTodayCard';
 
 export interface PushRowsArgs {
   eventIds: number[];
@@ -62,6 +63,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     skippedRows,
     needsMappingRows,
     mappingRows,
+    pushedTodayRows,
+    pushedTodayTotal,
     payCount,
     createCount,
     payTotal,
@@ -145,6 +148,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
 
   const showNeedsMapping = category === 'needs_mapping';
   const showReadyOrSkipped = category === 'ready' || category === 'skipped';
+  const showPushedToday = category === 'pushed_today';
   const rowsForReadyView = category === 'skipped' ? skippedRows : readyRows;
 
   return (
@@ -221,6 +225,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             readyTotal={readyTotal}
             needsMappingCount={needsMappingRows.length}
             skippedCount={skippedRows.length}
+            pushedTodayCount={pushedTodayRows.length}
+            pushedTodayTotal={pushedTodayTotal}
           />
 
           {showNeedsMapping && (
@@ -229,6 +235,10 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               vendors={props.vendors}
               onSaveMapping={props.onSaveMapping}
             />
+          )}
+
+          {showPushedToday && (
+            <PushedTodayCard rows={pushedTodayRows} total={pushedTodayTotal} />
           )}
 
           {showReadyOrSkipped && (
