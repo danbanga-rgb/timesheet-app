@@ -338,7 +338,7 @@ export function TemplateProfileModal({
                   ['Bank Branch', 'bankBranch'],
                   ['Account Number', 'accountNumber'],
                   ['IBAN / IFSC *', 'iban'],
-                  ['SWIFT *', 'swift'],
+                  ['SWIFT', 'swift'],
                   ['Payment Email', 'paymentEmail'],
                 ] as const).map(([label, key]) => (
                   <label key={key} className="block">

@@ -174,6 +174,7 @@ async function tryResolveVendorForApproval(
   effectivePaymentMethod: string
 ): Promise<'proceed' | 'blocked'> {
   if (!['Intuit', 'Convera'].includes(effectivePaymentMethod)) return 'proceed';
+  if ((invoice as Invoice & { paymentProfile?: { id?: number } }).paymentProfile?.id) return 'proceed';
   const { data: liveData, error } = await deps.supabase
     .from('payment_profiles')
     .select('id, user_id')
@@ -330,6 +331,17 @@ describe('tryResolveVendorForApproval', () => {
     expect(result).toBe('blocked');
     expect(deps.alertMock).toHaveBeenCalledTimes(1);
     expect(deps.alertMock.mock.calls[0][0]).toMatch(/no payment profile/);
+  });
+
+  it('Convera + invoice has paymentProfile snapshot → proceed (cross-contractor Faruk-covers-Ajdin case)', async () => {
+    // Ajdin has no live pp of his own; the invoice snapshot points to
+    // Faruk's pp. Approval must trust the snapshot.
+    const { client } = makeMockSupabase({ payment_profiles: [] });
+    const deps = makeDeps({ supabase: client });
+    const inv = { ...invoice(), paymentProfile: { id: 42 } } as unknown as Invoice;
+    const result = await tryResolveVendorForApproval(deps, inv, 'Convera');
+    expect(result).toBe('proceed');
+    expect(deps.alertMock).not.toHaveBeenCalled();
   });
 
   it('supabase error → blocked + alert', async () => {
