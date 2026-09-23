@@ -18,8 +18,8 @@
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
 **State on entry (as of 2026-09-23 S17 close):**
-- Branch `feature/qb-automation-v2` tip `e37aeda`. Not merged to main.
-- V1–V8 SHIPPED (V7 SCRAPPED). **V8-B CLOSED — all 5 items shipped.** Next up: V9 (Skipped + Pushed today cards).
+- Branch `feature/qb-automation-v2` tip `bb64388`. Not merged to main.
+- V1–V9 SHIPPED (V7 SCRAPPED). V8-B CLOSED. Next up: V10 (Sync surface + freshness pills).
 - v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
 - **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
 - v1 QB Automation tab is FROZEN — do not touch its render surface.
@@ -398,7 +398,18 @@ Concrete gates to flip the admin gate and delete v1:
 
 ## §8. Session log
 
-**S17 (2026-09-23, morning) — V8-B items 4 + 5 shipped. V8-B CLOSES.**
+**S17 (2026-09-23, morning) — V8-B items 4 + 5 shipped. V8-B CLOSES. V9 shipped.**
+
+**V9 (`bb64388`) — Pushed Today card + KPI tile enabled.**
+- New `sections/PushedTodayCard.tsx` — sortable table of today's `qb_ingest_events` with `status='posted'` filtered by `statusUpdatedAt` >= local midnight. Sorted newest first; TxnID badges (Bill / Pmt / Chk) are click-to-copy; posted_source tag visible.
+- New `derivePushedTodayRows` pure fn + `todayLocalDateKey` / `localDateKeyOfIso` helpers in the hook — 9 new tests around filter, sort, fallback, and DST-safe local-date bucketing. Total 48/48 pass.
+- KpiStrip tile enabled with real count + total; click jumps to the card.
+- **Simplifications from the §9 spec:**
+  - SkippedCard.tsx extraction skipped — Skipped view already routes to `ReadyCard` with `category==='skipped'` and passes the acceptance criterion (Skip/Unskip roundtrip works). Per [[reusability-lens]] — no net LOC win from extracting for symmetry alone.
+  - Failed-rows subsection deferred per [[small-userbase-pragma]] — QbPushStatusPane already surfaces session-level failures with error text; failed rows stay in Ready for retry (event status doesn't flip to 'failed' on job error, per QBWC edge fn behavior). Persistent failure history can land later if the accountant asks.
+- **Next:** V10 (Sync surface + freshness pills) per §9 roadmap.
+
+
 
 **Item 5 (`e37aeda`) — post-push sync + refresh hint.**
 - After successful push, v2 fires a silent `enqueueVendorQuery` (no user-facing alert) so QBWC picks up any newly-referenced vendors on its next drain. A hint bar appears above the KPI strip: "Vendor sync is running in the background (~15 min). Refresh once QBWC drains to pick up any newly-resolved rows." Refresh button reloads events + open bills.
