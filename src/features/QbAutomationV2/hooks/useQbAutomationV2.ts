@@ -301,11 +301,17 @@ export function useQbAutomationV2({
         }
         childRows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
 
+        // Verdict for a group row: use the first child's invoice number as
+        // the mirror lookup key; if that yields null (e.g. empty refNumber
+        // path), fall back to 'will_create_and_pay' — the default for any
+        // umbrella event we haven't already booked. Never skip a group row
+        // just because the verdict input is thin, or the whole umbrella
+        // event disappears from Ready.
+        const firstChildRef = childRows[0]?.invoiceNumber ?? '';
         const verdict = computeVerdict(
-          { kind: e.targetQbTxnKind, vendorListId: e.counterpartyQbVendorListId, refNumber: '', month: monthKey },
+          { kind: e.targetQbTxnKind, vendorListId: e.counterpartyQbVendorListId, refNumber: firstChildRef, month: monthKey },
           openBills,
-        );
-        if (!verdict) continue;
+        ) ?? 'will_create_and_pay';
 
         const parentVendorName = distinctVendorListIds.size === 1
           ? (vendorsById.get([...distinctVendorListIds][0])?.name ?? '(unmapped)')
