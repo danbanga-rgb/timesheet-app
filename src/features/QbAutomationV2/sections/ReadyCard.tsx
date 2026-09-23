@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, Fragment } from 'react';
+import { ChevronRight, ChevronDown, Users } from 'lucide-react';
 import type { ReadyRow, ReadyGroup } from '../hooks/useQbAutomationV2';
 import type { Verdict } from '../../../lib/qbAutomation/verdict';
 import type { CategoryKey } from './KpiStrip';
@@ -79,6 +80,16 @@ export default function ReadyCard(props: Props) {
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
   const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
+  const [expandedRowKeys, setExpandedRowKeys] = useState<Set<string>>(new Set());
+
+  const toggleExpanded = (rowKey: string) => {
+    setExpandedRowKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(rowKey)) next.delete(rowKey);
+      else next.add(rowKey);
+      return next;
+    });
+  };
 
   const isSkippedView = category === 'skipped';
 
@@ -209,77 +220,124 @@ export default function ReadyCard(props: Props) {
             <tbody className="divide-y divide-gray-100">
               {sortedRows.map(r => {
                 const isChecked = selectedKeys.has(r.rowKey);
+                const isGroup = !!r.children && r.children.length > 0;
+                const isExpanded = expandedRowKeys.has(r.rowKey);
                 const rowCls = isSkippedView
                   ? 'text-gray-400 bg-gray-50'
                   : isChecked
                     ? 'bg-blue-50 hover:bg-blue-100'
-                    : r.group === 'create'
-                      ? 'bg-purple-50/40 hover:bg-purple-50'
-                      : 'hover:bg-gray-50';
+                    : isGroup
+                      ? 'bg-teal-50/40 hover:bg-teal-50'
+                      : r.group === 'create'
+                        ? 'bg-purple-50/40 hover:bg-purple-50'
+                        : 'hover:bg-gray-50';
                 return (
-                  <tr key={r.rowKey} className={rowCls}>
-                    <td className="px-2 py-1.5 text-center">
-                      {isSkippedView ? (
-                        <span className="text-gray-300">—</span>
-                      ) : (
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => onToggle(r.rowKey)}
-                          className="rounded"
-                          aria-label={`Select ${r.contractorName}`}
-                        />
-                      )}
-                    </td>
-                    <td className={'px-2 py-1.5 font-medium whitespace-nowrap ' + (isSkippedView ? '' : 'text-gray-800')}>
-                      {r.contractorName}
-                    </td>
-                    <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
-                    <td className="px-2 py-1.5" style={{ minWidth: 260 }}>
-                      {editingRowKey === r.rowKey ? (
-                        <InlineVendorPicker
-                          initialValue={r.qbVendorMapped ? r.qbVendorName : ''}
-                          vendors={vendors}
-                          candidates={r.candidates}
-                          saving={savingRowKey === r.rowKey}
-                          onSave={args => handleSaveVendor(r, args)}
-                          onCancel={() => setEditingRowKey(null)}
-                        />
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={isSkippedView || r.ppId <= 0}
-                          onClick={() => setEditingRowKey(r.rowKey)}
-                          title={r.ppId <= 0 ? 'No payment profile — cannot re-map' : 'Click to change QB vendor mapping'}
-                          className={
-                            'text-left w-full px-1 py-0.5 rounded ' +
-                            (r.ppId <= 0
-                              ? 'cursor-not-allowed opacity-60'
-                              : 'hover:bg-indigo-50 hover:ring-1 hover:ring-indigo-200 cursor-pointer')
-                          }
-                        >
-                          <span className={r.qbVendorMapped ? '' : 'text-amber-600 italic'}>
-                            {r.qbVendorName}
+                  <Fragment key={r.rowKey}>
+                    <tr className={rowCls}>
+                      <td className="px-2 py-1.5 text-center">
+                        {isSkippedView ? (
+                          <span className="text-gray-300">—</span>
+                        ) : (
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => onToggle(r.rowKey)}
+                            className="rounded"
+                            aria-label={`Select ${r.contractorName}`}
+                          />
+                        )}
+                      </td>
+                      <td className={'px-2 py-1.5 font-medium whitespace-nowrap ' + (isSkippedView ? '' : 'text-gray-800')}>
+                        {isGroup ? (
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(r.rowKey)}
+                            className="inline-flex items-center gap-1 hover:text-teal-800"
+                            aria-expanded={isExpanded}
+                            aria-label={isExpanded ? 'Collapse contractors' : 'Expand contractors'}
+                          >
+                            {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                            <Users className="w-3.5 h-3.5 text-teal-700" />
+                            <span>{r.contractorName}</span>
+                            <span className="text-[10px] font-normal text-teal-800 bg-teal-100 border border-teal-200 rounded px-1 py-0.5 ml-1">
+                              {r.children!.length} contractors
+                            </span>
+                          </button>
+                        ) : (
+                          r.contractorName
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
+                      <td className="px-2 py-1.5" style={{ minWidth: 260 }}>
+                        {isGroup ? (
+                          <span className="text-gray-700">
+                            {r.distinctVendorCount && r.distinctVendorCount > 1
+                              ? <span className="text-teal-800">{r.distinctVendorCount} vendors <span className="text-[10px] text-teal-600">(expand for detail)</span></span>
+                              : r.qbVendorName}
                           </span>
-                        </button>
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{r.hours ?? '—'}</td>
-                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{r.rate != null ? `$${r.rate}` : '—'}</td>
-                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
-                      {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
-                    </td>
-                    <td className="px-2 py-1.5 whitespace-nowrap">
-                      {isSkippedView ? skippedBadge() : verdictBadge(r.verdict)}
-                    </td>
-                    <td className="px-2 py-1.5 text-right whitespace-nowrap">
-                      {isSkippedView ? (
-                        <button onClick={() => onUnskip(r.rowKey)} className="text-xs text-blue-600 hover:underline">Unskip</button>
-                      ) : (
-                        <button onClick={() => onSkip(r.rowKey)} className="text-xs text-gray-600 hover:text-red-700 hover:underline">Skip</button>
-                      )}
-                    </td>
-                  </tr>
+                        ) : editingRowKey === r.rowKey ? (
+                          <InlineVendorPicker
+                            initialValue={r.qbVendorMapped ? r.qbVendorName : ''}
+                            vendors={vendors}
+                            candidates={r.candidates}
+                            saving={savingRowKey === r.rowKey}
+                            onSave={args => handleSaveVendor(r, args)}
+                            onCancel={() => setEditingRowKey(null)}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isSkippedView || r.ppId <= 0}
+                            onClick={() => setEditingRowKey(r.rowKey)}
+                            title={r.ppId <= 0 ? 'No payment profile — cannot re-map' : 'Click to change QB vendor mapping'}
+                            className={
+                              'text-left w-full px-1 py-0.5 rounded ' +
+                              (r.ppId <= 0
+                                ? 'cursor-not-allowed opacity-60'
+                                : 'hover:bg-indigo-50 hover:ring-1 hover:ring-indigo-200 cursor-pointer')
+                            }
+                          >
+                            <span className={r.qbVendorMapped ? '' : 'text-amber-600 italic'}>
+                              {r.qbVendorName}
+                            </span>
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{r.hours ?? '—'}</td>
+                      <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{r.rate != null ? `$${r.rate}` : '—'}</td>
+                      <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
+                        {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap">
+                        {isSkippedView ? skippedBadge() : verdictBadge(r.verdict)}
+                      </td>
+                      <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                        {isSkippedView ? (
+                          <button onClick={() => onUnskip(r.rowKey)} className="text-xs text-blue-600 hover:underline">Unskip</button>
+                        ) : (
+                          <button onClick={() => onSkip(r.rowKey)} className="text-xs text-gray-600 hover:text-red-700 hover:underline">Skip</button>
+                        )}
+                      </td>
+                    </tr>
+                    {isGroup && isExpanded && r.children!.map(c => (
+                      <tr key={`${r.rowKey}-child-${c.invoiceId}`} className="bg-teal-50/20 text-xs text-gray-700">
+                        <td className="px-2 py-1"></td>
+                        <td className="px-2 py-1 pl-8 whitespace-nowrap italic">{c.contractorName}</td>
+                        <td className="px-2 py-1 text-gray-500 font-mono">{c.invoiceNumber}</td>
+                        <td className="px-2 py-1">{c.qbVendorName}</td>
+                        <td className="px-2 py-1 text-right font-mono">{c.hours ?? '—'}</td>
+                        <td className="px-2 py-1 text-right font-mono">{c.rate != null ? `$${c.rate}` : '—'}</td>
+                        <td className="px-2 py-1 text-right font-mono">
+                          {fmtMoney(c.share)}{' '}
+                          {c.shareSource === 'invoice_total' && (
+                            <span title="Share from convera_transaction_invoices not available — using invoice total as fallback" className="text-amber-600">*</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1"></td>
+                        <td className="px-2 py-1"></td>
+                      </tr>
+                    ))}
+                  </Fragment>
                 );
               })}
             </tbody>

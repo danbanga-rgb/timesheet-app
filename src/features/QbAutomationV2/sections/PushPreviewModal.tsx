@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { X, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Fragment, useMemo, useState } from 'react';
+import { X, AlertTriangle, RefreshCw, ChevronDown, ChevronRight, Users } from 'lucide-react';
 import type { ReadyRow } from '../hooks/useQbAutomationV2';
 import type { QbVendorRow } from '../../../lib/qbStateSync/types';
 import type { SaveMappingArgs } from './NeedsMappingCard';
@@ -35,6 +35,17 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
   const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  // Umbrella group rows in the modal default to expanded so the accountant
+  // sees the full breakdown before confirming (per Dan 2026-09-23).
+  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Set<string>>(new Set());
+  const toggleGroup = (rowKey: string) => {
+    setCollapsedGroupKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(rowKey)) next.delete(rowKey);
+      else next.add(rowKey);
+      return next;
+    });
+  };
 
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
 
@@ -171,13 +182,38 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
               <tbody className="divide-y divide-gray-100">
                 {rows.map(r => {
                   const missing = r.qbVendorListId != null && !vendorsById.has(r.qbVendorListId);
+                  const isGroup = !!r.children && r.children.length > 0;
+                  const isExpanded = isGroup && !collapsedGroupKeys.has(r.rowKey);
                   return (
-                  <tr key={r.rowKey} className={missing ? 'bg-amber-50 hover:bg-amber-100' : 'hover:bg-gray-50'}>
-                    <td className="px-3 py-1.5 font-medium text-gray-800 whitespace-nowrap">{r.contractorName}</td>
+                  <Fragment key={r.rowKey}>
+                  <tr className={missing ? 'bg-amber-50 hover:bg-amber-100' : isGroup ? 'bg-teal-50/40 hover:bg-teal-50' : 'hover:bg-gray-50'}>
+                    <td className="px-3 py-1.5 font-medium text-gray-800 whitespace-nowrap">
+                      {isGroup ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleGroup(r.rowKey)}
+                          className="inline-flex items-center gap-1 hover:text-teal-800"
+                          aria-expanded={isExpanded}
+                        >
+                          {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                          <Users className="w-3.5 h-3.5 text-teal-700" />
+                          <span>{r.contractorName}</span>
+                          <span className="text-[10px] font-normal text-teal-800 bg-teal-100 border border-teal-200 rounded px-1 py-0.5 ml-1">
+                            {r.children!.length} contractors
+                          </span>
+                        </button>
+                      ) : (
+                        r.contractorName
+                      )}
+                    </td>
                     <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{r.monthLabel || '—'}</td>
-                    <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{r.invoiceNumber || '—'}</td>
+                    <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{isGroup ? '—' : (r.invoiceNumber || '—')}</td>
                     <td className="px-3 py-1.5 text-gray-700" style={{ minWidth: 260 }}>
-                      {editingRowKey === r.rowKey ? (
+                      {isGroup ? (
+                        r.distinctVendorCount && r.distinctVendorCount > 1
+                          ? <span className="text-teal-800">{r.distinctVendorCount} vendors <span className="text-[10px] text-teal-600">(expand for detail)</span></span>
+                          : r.qbVendorName
+                      ) : editingRowKey === r.rowKey ? (
                         <InlineVendorPicker
                           initialValue={r.qbVendorMapped ? r.qbVendorName : ''}
                           vendors={vendors}
@@ -219,6 +255,24 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
                       )}
                     </td>
                   </tr>
+                  {isGroup && isExpanded && r.children!.map(c => (
+                    <tr key={`${r.rowKey}-child-${c.invoiceId}`} className="bg-teal-50/20 text-xs text-gray-700">
+                      <td className="px-3 py-1 pl-10 italic whitespace-nowrap">{c.contractorName}</td>
+                      <td className="px-3 py-1"></td>
+                      <td className="px-3 py-1 font-mono text-gray-500 whitespace-nowrap">{c.invoiceNumber}</td>
+                      <td className="px-3 py-1">{c.qbVendorName}</td>
+                      <td className="px-3 py-1 text-right font-mono">
+                        {fmtMoney(c.share)}{' '}
+                        {c.shareSource === 'invoice_total' && (
+                          <span title="Share from convera_transaction_invoices not available — using invoice total as fallback" className="text-amber-600">*</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1 text-[10px] text-gray-500">
+                        {c.hours != null && `${c.hours}h`}{c.hours != null && c.rate != null && ' · '}{c.rate != null && `$${c.rate}`}
+                      </td>
+                    </tr>
+                  ))}
+                  </Fragment>
                   );
                 })}
               </tbody>

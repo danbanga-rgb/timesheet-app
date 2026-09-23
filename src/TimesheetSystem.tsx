@@ -643,6 +643,9 @@ const TimesheetSystem = () => {
   // synthetic posted rows so accountant sees Convera proactive-create pushes
   // in the same posted bucket. MULTI-YYYY-MM pushes carry N invoice ids each.
   const [qbG76PostedInvoiceIds, setQbG76PostedInvoiceIds] = useState<Set<number>>(new Set());
+  // V9.5: per-invoice share for umbrella Convera wires, keyed by
+  // `${eventId}::${invoiceId}` → amount_share. Loaded alongside events.
+  const [qbUmbrellaShares, setQbUmbrellaShares] = useState<Map<string, number>>(new Map());
   // Slice 2: VendorDecisionModal state. Opened by the approval flow when
   // the resolver returns 'ambiguous', or by the Slice 3 "Needs vendor
   // decision" bucket's Resolve button. `afterResolve` re-runs the caller's
@@ -1642,13 +1645,16 @@ const TimesheetSystem = () => {
   // Load QB Automation Inbox lazily when tab is opened
   const loadQbIngestEvents = async () => {
     setQbIngestLoading(true);
-    const [eventsRes, proactiveJobsRes] = await Promise.all([
+    const [eventsRes, proactiveJobsRes, umbrellaSharesRes] = await Promise.all([
       supabase.from('qb_ingest_events').select('*').order('ingested_at', { ascending: false }),
       // Slice A + G7.6: identify proactive-create pushes so the posted bucket
       // can include them alongside event-driven posts. Two audit-tag prefixes:
       //   'intuit-invoice-create-bill'   → G7.5 (Intuit invoices)
       //   'convera-invoice-create-bill'  → G7.6 (Convera invoices)
       supabase.from('qb_sync_jobs').select('payload, status').eq('kind', 'bill_add').eq('status', 'done'),
+      // V9.5: per-invoice share for umbrella wires. Feeds v2's group-row
+      // sub-row rendering (Teal 8-contractor wires, Faruk-covers-Ajdin, etc.).
+      supabase.from('convera_transaction_invoices').select('transaction_id, invoice_id, amount_share'),
     ]);
     if (!eventsRes.error) setQbIngestEvents((eventsRes.data ?? []).map(normaliseQbIngestEvent));
     if (!proactiveJobsRes.error) {
@@ -1665,6 +1671,26 @@ const TimesheetSystem = () => {
       }
       setQbG75PostedInvoiceIds(g75Ids);
       setQbG76PostedInvoiceIds(g76Ids);
+    }
+    if (!umbrellaSharesRes.error) {
+      // Build (eventId, invoiceId) → share by joining events → transaction_id.
+      const shareByTxnKey = new Map<string, number>();
+      for (const row of (umbrellaSharesRes.data ?? []) as Array<{ transaction_id: number; invoice_id: number; amount_share: number | null }>) {
+        if (row.amount_share != null && row.amount_share > 0) {
+          shareByTxnKey.set(`${row.transaction_id}::${row.invoice_id}`, Number(row.amount_share));
+        }
+      }
+      const sharesByEventInvoice = new Map<string, number>();
+      for (const e of (eventsRes.data ?? []) as Array<Record<string, unknown>>) {
+        const txnId = (e.raw_data as { convera_transaction_id?: number } | null)?.convera_transaction_id;
+        if (txnId == null) continue;
+        const matched = (e.matched_invoice_ids as number[] | null) ?? [];
+        for (const invId of matched) {
+          const share = shareByTxnKey.get(`${txnId}::${invId}`);
+          if (share != null) sharesByEventInvoice.set(`${e.id}::${invId}`, share);
+        }
+      }
+      setQbUmbrellaShares(sharesByEventInvoice);
     }
     setQbIngestLoading(false);
   };
@@ -5203,6 +5229,7 @@ const TimesheetSystem = () => {
               paymentProfiles={paymentProfiles}
               users={users}
               mappings={qbVendorMappings}
+              umbrellaShares={qbUmbrellaShares}
               pushRecords={qbPushRecords}
               supabase={supabase}
               onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}

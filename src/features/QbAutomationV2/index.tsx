@@ -36,6 +36,10 @@ export interface QbAutomationV2Props {
   paymentProfiles: PaymentProfile[];
   users: UserProfile[];
   mappings: QbVendorMapping[];
+  /** V9.5: per-invoice share for umbrella wires, keyed by `${eventId}::${invoiceId}`.
+   *  Passed straight into `useQbAutomationV2` for sub-row rendering. Empty
+   *  map is safe — children fall back to invoice total with a warning marker. */
+  umbrellaShares?: Map<string, number>;
   pushRecords: PushRecord[];
   supabase: SupabaseClient;
   onSaveMapping: (args: SaveMappingArgs) => Promise<void>;

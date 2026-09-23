@@ -4,11 +4,26 @@ import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types'
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
 import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../../../lib/qbAutomation/vendorMappingResolver';
+import { buildUmbrellaVendorSet, isUmbrellaEvent, isUmbrellaVendor } from '../../../lib/qbAutomation/umbrella';
 
 export type ReadyGroup = 'pay' | 'create';
 
 function groupForVerdict(v: Verdict): ReadyGroup {
   return v === 'will_create_bill' ? 'create' : 'pay';
+}
+
+export interface UmbrellaChildRow {
+  invoiceId: number;
+  contractorName: string;
+  contractorUserId: string | null;
+  invoiceNumber: string;
+  hours: number | null;
+  rate: number | null;
+  currency: string;
+  share: number;                    // amount_share from convera_transaction_invoices, or invoice total as fallback
+  shareSource: 'convera_link' | 'invoice_total';
+  qbVendorName: string;              // per-child (multi-vendor umbrellas like Bimosoft)
+  qbVendorListId: string | null;
 }
 
 export interface ReadyRow {
@@ -39,6 +54,10 @@ export interface ReadyRow {
   ppSource: string;
   ppCounterpartyPattern: string;
   candidates: Candidate[];
+  // V9.5: umbrella event → children present. Parent shows aggregate; expand
+  // to see per-contractor slices. Push is atomic per wire.
+  children?: UmbrellaChildRow[];
+  distinctVendorCount?: number;      // > 1 for multi-vendor umbrella (Bimosoft/NT)
 }
 
 export interface NeedsMappingRow {
@@ -94,6 +113,10 @@ export interface UseQbAutomationV2Args {
   paymentProfiles: PaymentProfile[];
   users: UserProfile[];
   mappings: QbVendorMapping[];
+  /** Per-invoice share for umbrella wires, keyed by `${eventId}::${invoiceId}`.
+   *  Populated from convera_transaction_invoices.amount_share. Empty map is
+   *  fine — children fall back to invoice total with shareSource='invoice_total'. */
+  umbrellaShares?: Map<string, number>;
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -180,6 +203,7 @@ export function useQbAutomationV2({
   paymentProfiles,
   users,
   mappings,
+  umbrellaShares,
 }: UseQbAutomationV2Args) {
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
@@ -211,6 +235,11 @@ export function useQbAutomationV2({
     [vendors],
   );
 
+  const umbrellaVendors = useMemo(
+    () => buildUmbrellaVendorSet(mappings.map(m => ({ qbVendorListId: m.qbVendorListId, ppId: m.ppId }))),
+    [mappings],
+  );
+
   const allReadyRows: ReadyRow[] = useMemo(() => {
     const rows: ReadyRow[] = [];
     const invoiceIdsCoveredByEvents = new Set<number>();
@@ -219,6 +248,97 @@ export function useQbAutomationV2({
       if (e.status !== 'ready') continue;
       if (e.targetQbTxnKind !== 'bill_pmt' && e.targetQbTxnKind !== 'bill_add_and_pmt') continue;
       if (e.rawData?.__backfill) continue;
+
+      // ── V9.5: umbrella wire → group row + children ─────────────────────────
+      if (isUmbrellaEvent(e, invoicesById)) {
+        const childRows: UmbrellaChildRow[] = [];
+        const distinctVendorListIds = new Set<string>();
+        let periodStart = '';
+        let periodEnd = '';
+        let monthKey = '';
+        let currency = 'USD';
+
+        for (const invId of e.matchedInvoiceIds) {
+          const inv = invoicesById.get(invId);
+          if (!inv) continue;
+          const childPpId = inv.paymentProfile?.id ?? 0;
+          const childMapping = childPpId > 0 ? mappingByPpId.get(childPpId) : undefined;
+          const childVendorListId = childMapping?.qbVendorListId ?? null;
+          const childVendorName = childVendorListId
+            ? (vendorsById.get(childVendorListId)?.name ?? '(unmapped)')
+            : '(unmapped)';
+          if (childVendorListId) distinctVendorListIds.add(childVendorListId);
+
+          const shareKey = `${e.id}::${inv.id}`;
+          const linkedShare = umbrellaShares?.get(shareKey);
+          const share = linkedShare != null && linkedShare > 0 ? linkedShare : inv.totalAmount;
+          const shareSource: UmbrellaChildRow['shareSource'] = linkedShare != null && linkedShare > 0
+            ? 'convera_link'
+            : 'invoice_total';
+
+          childRows.push({
+            invoiceId: inv.id,
+            contractorName: inv.userName || '(unknown)',
+            contractorUserId: inv.userId ?? null,
+            invoiceNumber: inv.invoiceNumber,
+            hours: inv.totalHours ?? null,
+            rate: inv.rate ?? null,
+            currency: inv.currency || 'USD',
+            share,
+            shareSource,
+            qbVendorName: childVendorName,
+            qbVendorListId: childVendorListId,
+          });
+          invoiceIdsCoveredByEvents.add(inv.id);
+          if (!periodStart && inv.periodStart) periodStart = inv.periodStart;
+          if (!periodEnd && inv.periodEnd) periodEnd = inv.periodEnd;
+          if (!monthKey && inv.periodEnd) monthKey = inv.periodEnd.slice(0, 7);
+          if (inv.currency) currency = inv.currency;
+        }
+        childRows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
+
+        const verdict = computeVerdict(
+          { kind: e.targetQbTxnKind, vendorListId: e.counterpartyQbVendorListId, refNumber: '', month: monthKey },
+          openBills,
+        );
+        if (!verdict) continue;
+
+        const parentVendorName = distinctVendorListIds.size === 1
+          ? (vendorsById.get([...distinctVendorListIds][0])?.name ?? '(unmapped)')
+          : (e.counterpartyQbVendorListId
+              ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(multi-vendor)')
+              : '(multi-vendor)');
+
+        rows.push({
+          rowKey: `evt-${e.id}`,
+          eventId: e.id,
+          invoiceId: null,
+          contractorName: parentVendorName,
+          contractorUserId: null,
+          invoiceNumber: '',
+          amount: e.amount,
+          currency,
+          hours: null,
+          rate: null,
+          periodStart,
+          periodEnd,
+          monthKey,
+          monthLabel: monthLabelFromKey(monthKey),
+          qbVendorName: parentVendorName,
+          qbVendorMapped: distinctVendorListIds.size >= 1 || !!e.counterpartyQbVendorListId,
+          qbVendorListId: distinctVendorListIds.size === 1 ? [...distinctVendorListIds][0] : (e.counterpartyQbVendorListId ?? null),
+          verdict,
+          group: groupForVerdict(verdict),
+          ppId: 0,                          // no single pp — inline vendor override disabled at parent
+          ppLabel: '',
+          ppSource: e.source,
+          ppCounterpartyPattern: e.counterpartyRaw,
+          candidates: [],
+          children: childRows,
+          distinctVendorCount: distinctVendorListIds.size,
+        });
+        continue;
+      }
 
       const invoice: Invoice | null = e.matchedInvoiceIds.length > 0
         ? (invoicesById.get(e.matchedInvoiceIds[0]) ?? null)
@@ -290,6 +410,12 @@ export function useQbAutomationV2({
       if (!ppId || ppId <= 0) continue;
       const mapping = mappingByPpId.get(ppId);
       if (!mapping?.qbVendorListId) continue;
+      // V9.5: skip invoice-driven "Will Create Bill" when the vendor is
+      // umbrella (Teal, Faruk-covers-Ajdin). Pre-creating a bill for one slice
+      // before the wire lands is semantically wrong — QB books one Bill for
+      // the wire total. The row will surface as an umbrella group after the
+      // Convera event arrives and gets classified.
+      if (isUmbrellaVendor(mapping.qbVendorListId, umbrellaVendors)) continue;
 
       const wantRef = normalizeRef(inv.invoiceNumber);
       if (!wantRef) continue;
@@ -344,7 +470,7 @@ export function useQbAutomationV2({
 
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     return rows;
-  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser]);
+  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares, umbrellaVendors]);
 
   const needsMappingRows: NeedsMappingRow[] = useMemo(() => {
     const rows: NeedsMappingRow[] = [];
