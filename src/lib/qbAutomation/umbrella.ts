@@ -16,6 +16,7 @@
 //     vendors (each Bimosoft-<X> vendor is referenced by exactly one pp).
 
 interface EventLike {
+  id: number;
   matchedInvoiceIds: number[];
 }
 
@@ -28,13 +29,46 @@ interface MappingLike {
   ppId: number | null;
 }
 
+// Union of matched_invoice_ids and umbrella-share-derived invoice IDs.
+// The classifier's matched_invoice_ids can be a strict subset when the
+// per-invoice matcher only found one contractor's invoice but the
+// convera_transaction_invoices reconciler linked several. Group rendering
+// and child-row building must reflect the full umbrella. Discovered
+// 2026-09-23 on event 451 (Teal Jul wire — matched_invoice_ids=[227] but
+// convera_transaction_invoices has 6 slices summing to $37,400).
+export function getEffectiveMatchedInvoiceIds(
+  event: EventLike,
+  umbrellaShares?: Map<string, number>,
+): number[] {
+  const seen = new Set<number>();
+  const out: number[] = [];
+  for (const id of event.matchedInvoiceIds) {
+    if (!seen.has(id)) { seen.add(id); out.push(id); }
+  }
+  if (umbrellaShares) {
+    const prefix = `${event.id}::`;
+    for (const key of umbrellaShares.keys()) {
+      if (key.startsWith(prefix)) {
+        const invId = Number(key.slice(prefix.length));
+        if (Number.isFinite(invId) && !seen.has(invId)) {
+          seen.add(invId);
+          out.push(invId);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 export function isUmbrellaEvent(
   event: EventLike,
   invoicesById: Map<number, InvoiceLike>,
+  umbrellaShares?: Map<string, number>,
 ): boolean {
-  if (event.matchedInvoiceIds.length <= 1) return false;
+  const ids = getEffectiveMatchedInvoiceIds(event, umbrellaShares);
+  if (ids.length <= 1) return false;
   const userIds = new Set<string>();
-  for (const id of event.matchedInvoiceIds) {
+  for (const id of ids) {
     const inv = invoicesById.get(id);
     if (inv?.userId) userIds.add(inv.userId);
     if (userIds.size > 1) return true;

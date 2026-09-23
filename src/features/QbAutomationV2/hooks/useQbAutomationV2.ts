@@ -4,7 +4,7 @@ import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types'
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
 import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../../../lib/qbAutomation/vendorMappingResolver';
-import { buildUmbrellaVendorSet, isUmbrellaEvent, isUmbrellaVendor } from '../../../lib/qbAutomation/umbrella';
+import { buildUmbrellaVendorSet, getEffectiveMatchedInvoiceIds, isUmbrellaEvent, isUmbrellaVendor } from '../../../lib/qbAutomation/umbrella';
 
 export type ReadyGroup = 'pay' | 'create';
 
@@ -250,7 +250,7 @@ export function useQbAutomationV2({
       if (e.rawData?.__backfill) continue;
 
       // ── V9.5: umbrella wire → group row + children ─────────────────────────
-      if (isUmbrellaEvent(e, invoicesById)) {
+      if (isUmbrellaEvent(e, invoicesById, umbrellaShares)) {
         const childRows: UmbrellaChildRow[] = [];
         const distinctVendorListIds = new Set<string>();
         let periodStart = '';
@@ -258,7 +258,11 @@ export function useQbAutomationV2({
         let monthKey = '';
         let currency = 'USD';
 
-        for (const invId of e.matchedInvoiceIds) {
+        // Use effective invoice ids (matched_invoice_ids ∪ umbrella-share
+        // invoice ids) so slices only reconciled via convera_transaction_invoices
+        // still surface as child rows.
+        const effectiveInvoiceIds = getEffectiveMatchedInvoiceIds(e, umbrellaShares);
+        for (const invId of effectiveInvoiceIds) {
           const inv = invoicesById.get(invId);
           if (!inv) continue;
           const childPpId = inv.paymentProfile?.id ?? 0;
