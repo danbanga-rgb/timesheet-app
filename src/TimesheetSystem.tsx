@@ -198,6 +198,21 @@ function normaliseQbIngestEvent(r: Record<string, unknown>): QbIngestEvent {
 import { sanitizeIban, ibanChecksumValid, checkIbanLength } from './lib/iban';
 import { computeMissingPpMappings } from './lib/qbAutomation/ppMappingReconciler';
 
+function normaliseQbVendorMapping(r: Record<string, unknown>): QbVendorMapping {
+  return {
+    id: r.id as number,
+    ppId: (r.pp_id as number | null) ?? null,
+    source: (r.source as string) ?? '',
+    counterpartyPattern: (r.counterparty_pattern as string) ?? '',
+    qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
+    defaultTargetKind: (r.default_target_kind as QbIngestKind | null) ?? null,
+    defaultBankAccountListId: (r.default_bank_account_list_id as string) ?? null,
+    defaultExpenseAccountListId: (r.default_expense_account_list_id as string) ?? null,
+    payeeFullName: (r.payee_full_name as string) ?? null,
+    payeeListKind: (r.payee_list_kind as QbPayeeListKind | null) ?? null,
+  };
+}
+
 // Deterministic vendor code Dan enters in Convera when creating a beneficiary.
 // Shared-IBAN groups (Bimosoft, etc.) share ONE code so Dan only enters one SYN
 // in Convera; on beneficiary import the matcher then SYN-links whichever profile's
@@ -2158,45 +2173,39 @@ const TimesheetSystem = () => {
   };
 
   const loadQbVendorMappings = async () => {
-    const normalise = (r: Record<string, unknown>) => ({
-      id: r.id as number,
-      ppId: (r.pp_id as number | null) ?? null,
-      source: (r.source as string) ?? '',
-      counterpartyPattern: (r.counterparty_pattern as string) ?? '',
-      qbVendorListId: (r.qb_vendor_list_id as string) ?? '',
-      defaultTargetKind: (r.default_target_kind as QbIngestKind | null) ?? null,
-      defaultBankAccountListId: (r.default_bank_account_list_id as string) ?? null,
-      defaultExpenseAccountListId: (r.default_expense_account_list_id as string) ?? null,
-      payeeFullName: (r.payee_full_name as string) ?? null,
-      payeeListKind: (r.payee_list_kind as QbPayeeListKind | null) ?? null,
-    });
     const { data } = await supabase.from('qb_vendor_mappings').select('*');
-    const mappings = (data ?? []).map(normalise);
-    setQbVendorMappings(mappings);
-
-    // Self-healing reconciler: any pp with qb_vendor_name matching a known
-    // qb_vendors row but no mapping row gets one auto-inserted. Fixes the
-    // "approved invoice invisible in v2 Ready" class discovered 2026-09-23
-    // (Harun + 8 others). No-op after the first heal — subsequent loads
-    // find nothing to insert. Skips if pps or vendors haven't loaded yet.
-    if (paymentProfiles.length > 0 && qbVendorsList.length > 0) {
-      const missing = computeMissingPpMappings({
-        paymentProfiles: paymentProfiles.map(p => ({ id: p.id, qbVendorName: p.qbVendorName, companyName: p.companyName })),
-        mappings: mappings.map(m => ({ ppId: m.ppId })),
-        vendors: qbVendorsList.map(v => ({ listId: v.listId, name: v.name })),
-      });
-      if (missing.length > 0) {
-        console.log(`[pp-mapping-reconciler] auto-seeding ${missing.length} missing mappings`);
-        const { error } = await supabase.from('qb_vendor_mappings').upsert(missing, { onConflict: 'pp_id', ignoreDuplicates: true });
-        if (error) {
-          console.warn('[pp-mapping-reconciler] upsert failed', error);
-        } else {
-          const { data: refreshed } = await supabase.from('qb_vendor_mappings').select('*');
-          setQbVendorMappings((refreshed ?? []).map(normalise));
-        }
-      }
-    }
+    setQbVendorMappings((data ?? []).map(normaliseQbVendorMapping));
   };
+
+  // Self-healing reconciler: fires when paymentProfiles, mappings, and
+  // qbVendorsList are all populated. Runs regardless of tab-open timing —
+  // even if loadQbVendorMappings fired before pps/vendors loaded, this
+  // effect catches up on the next state change. Silent no-op when nothing
+  // to insert. First run after deploy heals retroactive gaps
+  // (Harun + 26 others discovered 2026-09-23).
+  useEffect(() => {
+    if (paymentProfiles.length === 0 || qbVendorsList.length === 0) return;
+    const missing = computeMissingPpMappings({
+      paymentProfiles: paymentProfiles.map(p => ({ id: p.id, qbVendorName: p.qbVendorName, companyName: p.companyName })),
+      mappings: qbVendorMappings.map(m => ({ ppId: m.ppId })),
+      vendors: qbVendorsList.map(v => ({ listId: v.listId, name: v.name })),
+    });
+    if (missing.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      console.log(`[pp-mapping-reconciler] auto-seeding ${missing.length} missing mappings`);
+      const { error } = await supabase.from('qb_vendor_mappings').upsert(missing, { onConflict: 'pp_id', ignoreDuplicates: true });
+      if (cancelled) return;
+      if (error) {
+        console.warn('[pp-mapping-reconciler] upsert failed', error);
+        return;
+      }
+      const { data: refreshed } = await supabase.from('qb_vendor_mappings').select('*');
+      if (!cancelled) setQbVendorMappings((refreshed ?? []).map(normaliseQbVendorMapping));
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paymentProfiles, qbVendorMappings.length, qbVendorsList.length]);
   const loadQbVendorsAndAccounts = async () => {
     // Lists rarely change during a session — only fetch if empty.
     // .range(0, 4999) — qb_vendors is 1165+ rows and PostgREST default cap is
