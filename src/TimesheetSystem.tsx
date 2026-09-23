@@ -1673,21 +1673,25 @@ const TimesheetSystem = () => {
       setQbG76PostedInvoiceIds(g76Ids);
     }
     if (!umbrellaSharesRes.error) {
-      // Build (eventId, invoiceId) → share by joining events → transaction_id.
-      const shareByTxnKey = new Map<string, number>();
-      for (const row of (umbrellaSharesRes.data ?? []) as Array<{ transaction_id: number; invoice_id: number; amount_share: number | null }>) {
-        if (row.amount_share != null && row.amount_share > 0) {
-          shareByTxnKey.set(`${row.transaction_id}::${row.invoice_id}`, Number(row.amount_share));
-        }
-      }
-      const sharesByEventInvoice = new Map<string, number>();
+      // Build (eventId, invoiceId) → share for EVERY row in
+      // convera_transaction_invoices whose transaction_id resolves to an
+      // event. Do NOT filter by matched_invoice_ids — that filter is what
+      // caused V9.5b to silently skip the very umbrella siblings we want
+      // to surface (event 451 Teal wire).
+      const eventIdsByTxn = new Map<number, number[]>();
       for (const e of (eventsRes.data ?? []) as Array<Record<string, unknown>>) {
         const txnId = (e.raw_data as { convera_transaction_id?: number } | null)?.convera_transaction_id;
         if (txnId == null) continue;
-        const matched = (e.matched_invoice_ids as number[] | null) ?? [];
-        for (const invId of matched) {
-          const share = shareByTxnKey.get(`${txnId}::${invId}`);
-          if (share != null) sharesByEventInvoice.set(`${e.id}::${invId}`, share);
+        const bucket = eventIdsByTxn.get(txnId);
+        if (bucket) bucket.push(e.id as number);
+        else eventIdsByTxn.set(txnId, [e.id as number]);
+      }
+      const sharesByEventInvoice = new Map<string, number>();
+      for (const row of (umbrellaSharesRes.data ?? []) as Array<{ transaction_id: number; invoice_id: number; amount_share: number | null }>) {
+        if (row.amount_share == null || row.amount_share <= 0) continue;
+        const evIds = eventIdsByTxn.get(row.transaction_id) ?? [];
+        for (const evId of evIds) {
+          sharesByEventInvoice.set(`${evId}::${row.invoice_id}`, Number(row.amount_share));
         }
       }
       setQbUmbrellaShares(sharesByEventInvoice);
