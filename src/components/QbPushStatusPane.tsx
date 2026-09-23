@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { CheckCircle, AlertTriangle, Clock, X, Copy } from 'lucide-react';
+import { CheckCircle, AlertTriangle, Clock, X, Copy, Ban } from 'lucide-react';
 
 export interface PushRecord {
   /** React key + poll dispatch id. For source='event' this is qb_ingest_events.id.
@@ -96,16 +96,53 @@ function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | n
   };
 }
 
+export interface CancelPushResult {
+  cancelledJobIds: number[];
+  alreadyInFlightJobIds: number[];
+  revertedEventIds: number[];
+  cancelledPayJobIds: number[];
+}
+
 interface Props {
   supabase: SupabaseClient;
   records: PushRecord[];
   onDismiss: (eventId: number) => void;
+  /** Optional cancel handler. When present, per-row + batch Cancel buttons appear
+   *  for records whose overall state is still `awaiting-drain`. Handler is
+   *  expected to flip qb_sync_jobs pending→skipped (pending-only guard) and
+   *  return the tallies for user feedback. Records with cancelled pay jobs are
+   *  dismissed automatically after the handler resolves. */
+  onCancel?: (records: PushRecord[]) => Promise<CancelPushResult>;
   pollIntervalMs?: number;
 }
 
-export default function QbPushStatusPane({ supabase, records, onDismiss, pollIntervalMs = 10_000 }: Props) {
+export default function QbPushStatusPane({ supabase, records, onDismiss, onCancel, pollIntervalMs = 10_000 }: Props) {
   const [liveByEventId, setLiveByEventId] = useState<Map<number, LiveState>>(new Map());
   const [voidFor, setVoidFor] = useState<PushRecord | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelNotice, setCancelNotice] = useState<string | null>(null);
+
+  const runCancel = useCallback(async (targets: PushRecord[]) => {
+    if (!onCancel || targets.length === 0 || cancelBusy) return;
+    setCancelBusy(true);
+    setCancelNotice(null);
+    try {
+      const result = await onCancel(targets);
+      const parts: string[] = [];
+      parts.push(`Cancelled ${result.cancelledPayJobIds.length} pending`);
+      const inFlight = result.alreadyInFlightJobIds.length;
+      if (inFlight > 0) parts.push(`${inFlight} already in flight (will complete)`);
+      setCancelNotice(parts.join(' · '));
+      const cancelledPaySet = new Set(result.cancelledPayJobIds);
+      for (const rec of targets) {
+        if (cancelledPaySet.has(rec.payJobId)) onDismiss(rec.eventId);
+      }
+    } catch (e) {
+      setCancelNotice('Cancel failed: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setCancelBusy(false);
+    }
+  }, [onCancel, onDismiss, cancelBusy]);
 
   const poll = useCallback(async () => {
     if (records.length === 0) return;
@@ -179,15 +216,38 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
 
   if (records.length === 0) return null;
 
+  const pendingRecords = onCancel
+    ? records.filter(r => (liveByEventId.get(r.eventId)?.overall ?? 'awaiting-drain') === 'awaiting-drain')
+    : [];
+
   return (
     <div className="mb-4 border border-indigo-200 rounded-lg overflow-hidden bg-indigo-50/30">
-      <div className="px-4 py-2 bg-indigo-50 border-b border-indigo-200 text-sm font-semibold text-indigo-900">
-        Push status — this session ({records.length})
+      <div className="px-4 py-2 bg-indigo-50 border-b border-indigo-200 text-sm font-semibold text-indigo-900 flex items-center justify-between gap-3">
+        <span>Push status — this session ({records.length})</span>
+        {pendingRecords.length > 0 && (
+          <button
+            onClick={() => void runCancel(pendingRecords)}
+            disabled={cancelBusy}
+            className="text-xs font-medium px-2 py-1 border border-indigo-300 text-indigo-800 rounded hover:bg-indigo-100 disabled:opacity-50 flex items-center gap-1"
+            title="Skip all pending queue rows (does not affect in-flight writes)"
+          >
+            <Ban className="w-3 h-3" /> Cancel remaining ({pendingRecords.length})
+          </button>
+        )}
       </div>
+      {cancelNotice && (
+        <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-xs text-amber-900 flex items-center justify-between gap-3">
+          <span>{cancelNotice}</span>
+          <button onClick={() => setCancelNotice(null)} className="text-amber-700 hover:text-amber-900" aria-label="Dismiss notice">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
       <ul className="divide-y divide-indigo-100">
         {records.map(rec => {
           const live = liveByEventId.get(rec.eventId);
           const overall = live?.overall ?? 'awaiting-drain';
+          const canCancel = onCancel != null && overall === 'awaiting-drain';
           return (
             <li key={rec.eventId} className="px-4 py-2 text-sm flex items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
@@ -221,6 +281,16 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, pollInt
                 )}
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
+                {canCancel && (
+                  <button
+                    onClick={() => void runCancel([rec])}
+                    disabled={cancelBusy}
+                    className="text-xs text-amber-800 hover:text-amber-900 hover:underline disabled:opacity-50 flex items-center gap-0.5"
+                    title="Skip this pending queue row (does not affect in-flight writes)"
+                  >
+                    <Ban className="w-3 h-3" /> cancel
+                  </button>
+                )}
                 {rec.sourceKind !== 'invoice' && (overall === 'verified-ok' || overall === 'silent-drop' || overall === 'pay-failed' || overall === 'verify-failed') && (
                   <button
                     onClick={() => setVoidFor(rec)}

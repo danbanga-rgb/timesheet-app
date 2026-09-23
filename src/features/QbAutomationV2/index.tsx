@@ -5,6 +5,7 @@ import type { QbOpenBillRow, QbVendorRow } from '../../lib/qbStateSync/types';
 import type { PushRecord } from '../../components/QbPushStatusPane';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import QbPushStatusPane from '../../components/QbPushStatusPane';
+import { cancelPushJobs } from '../../lib/qbAutomation/cancelPushJobs';
 import { useQbAutomationV2 } from './hooks/useQbAutomationV2';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
@@ -205,6 +206,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             supabase={props.supabase}
             records={props.pushRecords}
             onDismiss={props.onDismissPushRecord}
+            onCancel={targets => cancelPushJobs({ supabase: props.supabase, records: targets })}
           />
         </>
       )}
