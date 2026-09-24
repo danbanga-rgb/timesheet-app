@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Invoice, PaymentProfile, QbIngestEvent, QbVendorMapping, UserProfile } from '../../../types';
+import type { Invoice, PaymentProfile, QbIngestEvent, QbResolvedAction, QbVendorMapping, UserProfile } from '../../../types';
 import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types';
+import type { MatchProvenance } from '../../../lib/matchProvenance';
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
 import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../../../lib/qbAutomation/vendorMappingResolver';
 import { getEffectiveMatchedInvoiceIds, isUmbrellaEvent } from '../../../lib/qbAutomation/umbrella';
+import { derivePushedRowDisplay, deriveSyntheticPushedRowDisplay } from '../../../lib/qbAutomation/pushedRowDerivation';
 import { isTestAccount } from '../../../lib/isTestAccount';
 
 export type ReadyGroup = 'pay' | 'create';
@@ -118,7 +120,11 @@ export interface PushedRow {
   billTxnId: string | null;
   billPmtTxnId: string | null;
   checkTxnId: string | null;
-  postedSource: string | null;
+  // Two-axis display fields lifted from V1 via pushedRowDerivation.
+  resolvedAction: QbResolvedAction | null;
+  resolvedRefLabel: string | null;   // "INV 51" when known — feeds action label
+  isG75Source: boolean;              // affects create_bill_then_pay wording
+  matchProvenance: MatchProvenance | null;
   statusUpdatedAt: string;
 }
 
@@ -204,6 +210,7 @@ function buildPushedRow(
   e: QbIngestEvent,
   invoicesById: Map<number, Invoice>,
   vendorsById: Map<string, QbVendorRow>,
+  billByTxnId: Map<string, QbOpenBillRow>,
 ): PushedRow | null {
   if (!e.statusUpdatedAt) return null;
   const invoice = e.matchedInvoiceIds.length > 0
@@ -219,7 +226,10 @@ function buildPushedRow(
     ?? null;
   const billPmtTxnId = typeof refs.bill_pmt === 'string' ? refs.bill_pmt : null;
   const checkTxnId = typeof refs.check === 'string' ? refs.check : null;
-  const postedSource = typeof refs.posted_source === 'string' ? refs.posted_source : null;
+  const display = derivePushedRowDisplay(
+    { resolvedAction: e.resolvedAction, resolvedBillTxnId: e.resolvedBillTxnId, matchProvenance: e.matchProvenance, source: e.source },
+    billByTxnId,
+  );
   return {
     eventId: e.id,
     contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
@@ -232,7 +242,10 @@ function buildPushedRow(
     billTxnId,
     billPmtTxnId,
     checkTxnId,
-    postedSource,
+    resolvedAction: display.resolvedAction,
+    resolvedRefLabel: display.resolvedRefLabel,
+    isG75Source: display.isG75Source,
+    matchProvenance: display.matchProvenance,
     statusUpdatedAt: e.statusUpdatedAt,
   };
 }
@@ -259,6 +272,7 @@ export function derivePushedByMonth(
   invoices: Invoice[],
   invoicesById: Map<number, Invoice>,
   vendorsById: Map<string, QbVendorRow>,
+  billByTxnId: Map<string, QbOpenBillRow>,
   g75PostedInvoiceIds: Set<number>,
   g76PostedInvoiceIds: Set<number>,
 ): PushedMonthGroup[] {
@@ -266,7 +280,7 @@ export function derivePushedByMonth(
   for (const e of events) {
     if (e.status !== 'posted') continue;
     if (!e.statusUpdatedAt) continue;
-    const row = buildPushedRow(e, invoicesById, vendorsById);
+    const row = buildPushedRow(e, invoicesById, vendorsById, billByTxnId);
     if (!row) continue;
     const mk = localMonthKeyOfIso(e.statusUpdatedAt);
     if (!mk) continue;
@@ -290,12 +304,7 @@ export function derivePushedByMonth(
     if (!when) continue;
     const mk = localMonthKeyOfIso(when) || (inv.periodEnd?.slice(0, 7) ?? '');
     if (!mk) continue;
-    // Synthetic rows are, by definition, our create pushes — WE pushed the
-    // bill, so label is always 'push' regardless of what the accountant did
-    // on the payment side. push_paid_outside is only meaningful for real
-    // events where the reconciler proves we created but did NOT push a
-    // payment that mirror shows exists. See [[intuit-double-booking-finding]].
-    const postedSource = 'push';
+    const display = deriveSyntheticPushedRowDisplay(isG75 ? 'g75' : 'g76', inv.invoiceNumber || null);
     const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
     const monthLabel = monthLabelFromKey(monthKey);
     const row: PushedRow = {
@@ -310,7 +319,10 @@ export function derivePushedByMonth(
       billTxnId: inv.qbBillTxnId,
       billPmtTxnId: null,
       checkTxnId: null,
-      postedSource,
+      resolvedAction: display.resolvedAction,
+      resolvedRefLabel: display.resolvedRefLabel,
+      isG75Source: display.isG75Source,
+      matchProvenance: display.matchProvenance,
       statusUpdatedAt: when,
     };
     const bucket = byMonth.get(mk);
@@ -343,6 +355,7 @@ export function useQbAutomationV2({
 }: UseQbAutomationV2Args) {
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
+  const billByTxnId = useMemo(() => new Map(openBills.map(b => [b.txnId, b])), [openBills]);
   const ppById = useMemo(() => new Map(paymentProfiles.map(p => [p.id, p])), [paymentProfiles]);
   const userById = useMemo(() => new Map(users.map(u => [u.id, u])), [users]);
   const mappingByPpId = useMemo(() => {
@@ -1000,10 +1013,11 @@ export function useQbAutomationV2({
       invoices,
       invoicesById,
       vendorsById,
+      billByTxnId,
       g75PostedInvoiceIds ?? new Set(),
       g76PostedInvoiceIds ?? new Set(),
     ),
-    [events, invoices, invoicesById, vendorsById, g75PostedInvoiceIds, g76PostedInvoiceIds],
+    [events, invoices, invoicesById, vendorsById, billByTxnId, g75PostedInvoiceIds, g76PostedInvoiceIds],
   );
   const pushedCount = useMemo(
     () => pushedByMonth.reduce((s, g) => s + g.rows.length, 0),

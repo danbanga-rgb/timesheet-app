@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Invoice, QbIngestEvent } from '../../../../types';
-import type { QbVendorRow } from '../../../../lib/qbStateSync/types';
+import type { QbOpenBillRow, QbVendorRow } from '../../../../lib/qbStateSync/types';
 import { derivePushedByMonth, todayLocalDateKey } from '../useQbAutomationV2';
 
 function event(overrides: Partial<QbIngestEvent> = {}): QbIngestEvent {
@@ -66,14 +66,15 @@ function vendor(overrides: Partial<QbVendorRow> = {}): QbVendorRow {
 describe('derivePushedByMonth', () => {
   const invById = new Map<number, Invoice>([[42, invoice()]]);
   const venById = new Map<string, QbVendorRow>([['80000001-1', vendor()]]);
+  const billById = new Map<string, QbOpenBillRow>();
 
   it('returns empty when no events are posted', () => {
-    const groups = derivePushedByMonth([event({ status: 'ready' })], [], invById, venById, new Set(), new Set());
+    const groups = derivePushedByMonth([event({ status: 'ready' })], [], invById, venById, billById, new Set(), new Set());
     expect(groups).toEqual([]);
   });
 
   it('groups a single posted event by push-month', () => {
-    const groups = derivePushedByMonth([event()], [], invById, venById, new Set(), new Set());
+    const groups = derivePushedByMonth([event()], [], invById, venById, billById, new Set(), new Set());
     expect(groups).toHaveLength(1);
     expect(groups[0].rows).toHaveLength(1);
     expect(groups[0].rows[0]).toMatchObject({
@@ -82,7 +83,6 @@ describe('derivePushedByMonth', () => {
       qbVendorName: 'Anela Kaltak',
       billTxnId: 'TXN-BILL-1',
       billPmtTxnId: 'TXN-PMT-1',
-      postedSource: 'v2-push',
     });
     expect(groups[0].total).toBe(2400);
   });
@@ -93,6 +93,7 @@ describe('derivePushedByMonth', () => {
       [],
       invById,
       venById,
+      billById,
       new Set(),
       new Set(),
     );
@@ -105,6 +106,7 @@ describe('derivePushedByMonth', () => {
       [],
       invById,
       venById,
+      billById,
       new Set(),
       new Set(),
     );
@@ -114,7 +116,7 @@ describe('derivePushedByMonth', () => {
   it('buckets events into multiple months, newest month first', () => {
     const augEvent = event({ id: 10, statusUpdatedAt: '2026-08-15T12:00:00Z', amount: 100 });
     const sepEvent = event({ id: 11, statusUpdatedAt: '2026-09-05T12:00:00Z', amount: 200 });
-    const groups = derivePushedByMonth([augEvent, sepEvent], [], invById, venById, new Set(), new Set());
+    const groups = derivePushedByMonth([augEvent, sepEvent], [], invById, venById, billById, new Set(), new Set());
     expect(groups.map(g => g.monthKey)).toEqual(['2026-09', '2026-08']);
     expect(groups[0].total).toBe(200);
     expect(groups[1].total).toBe(100);
@@ -123,7 +125,7 @@ describe('derivePushedByMonth', () => {
   it('sorts rows within a month newest first', () => {
     const early = event({ id: 10, statusUpdatedAt: '2026-09-24T08:00:00Z' });
     const late = event({ id: 11, statusUpdatedAt: '2026-09-24T14:00:00Z' });
-    const groups = derivePushedByMonth([early, late], [], invById, venById, new Set(), new Set());
+    const groups = derivePushedByMonth([early, late], [], invById, venById, billById, new Set(), new Set());
     expect(groups[0].rows.map(r => r.eventId)).toEqual([11, 10]);
   });
 
@@ -133,38 +135,65 @@ describe('derivePushedByMonth', () => {
       [],
       invById,
       venById,
+      billById,
       new Set(),
       new Set(),
     );
     expect(groups[0]?.rows[0]?.qbVendorName).toBe('(unmapped)');
   });
 
-  it('includes synthetic G7.5/G7.6 rows from invoice sets', () => {
+  it('carries resolvedAction and matchProvenance from real events', () => {
+    const groups = derivePushedByMonth(
+      [event({ resolvedAction: 'pay_existing_bill', resolvedBillTxnId: 'TXN-BILL-9', matchProvenance: 'exact-txn' })],
+      [],
+      invById,
+      venById,
+      new Map([['TXN-BILL-9', { txnId: 'TXN-BILL-9', refNumber: 'INV 58', vendorListId: '80000001-1', vendorName: 'Anela', txnDate: '2026-09-01', dueDate: null, amount: 2400, openAmount: 0, isPaid: true, queriedAt: '2026-09-24T10:00:00Z' }]]),
+      new Set(),
+      new Set(),
+    );
+    const row = groups[0]?.rows[0];
+    expect(row?.resolvedAction).toBe('pay_existing_bill');
+    expect(row?.resolvedRefLabel).toBe('INV 58');
+    expect(row?.matchProvenance).toBe('exact-txn');
+    expect(row?.isG75Source).toBe(false);
+  });
+
+  it('includes synthetic G7.5/G7.6 rows from invoice sets with exact-ref provenance', () => {
     const inv: Invoice = invoice({ id: 500, invoiceNumber: 'INV 500', qbBillTxnId: 'TXN-BILL-500', qbExportStatusAt: '2026-09-20T10:00:00Z' } as Partial<Invoice>);
     const groups = derivePushedByMonth(
       [],
       [inv],
       new Map([[inv.id, inv]]),
       venById,
+      billById,
       new Set([inv.id]),
       new Set(),
     );
     expect(groups).toHaveLength(1);
-    expect(groups[0].rows[0].billTxnId).toBe('TXN-BILL-500');
-    expect(groups[0].rows[0].postedSource).toBe('push');
+    const row = groups[0].rows[0];
+    expect(row.billTxnId).toBe('TXN-BILL-500');
+    expect(row.resolvedAction).toBe('create_bill_then_pay');
+    expect(row.resolvedRefLabel).toBe('INV 500');
+    expect(row.matchProvenance).toBe('exact-ref');
+    expect(row.isG75Source).toBe(true);
   });
 
-  it('always marks synthetic G7.5/G7.6 rows as push', () => {
+  it('synthetic G7.6 (Convera) rows carry isG75Source=false', () => {
     const inv: Invoice = invoice({ id: 501, invoiceNumber: 'INV 501', qbBillTxnId: 'TXN-BILL-501', qbExportStatusAt: '2026-09-20T10:00:00Z', status: 'paid' } as Partial<Invoice>);
     const groups = derivePushedByMonth(
       [],
       [inv],
       new Map([[inv.id, inv]]),
       venById,
+      billById,
       new Set(),
       new Set([inv.id]),
     );
-    expect(groups[0].rows[0].postedSource).toBe('push');
+    const row = groups[0].rows[0];
+    expect(row.resolvedAction).toBe('create_bill_then_pay');
+    expect(row.isG75Source).toBe(false);
+    expect(row.matchProvenance).toBe('exact-ref');
   });
 
   it('does NOT dedupe synthetic G7.5 rows against covering events (matches V1 count)', () => {
@@ -178,6 +207,7 @@ describe('derivePushedByMonth', () => {
       [inv],
       new Map([[inv.id, inv]]),
       venById,
+      billById,
       new Set([inv.id]),
       new Set(),
     );

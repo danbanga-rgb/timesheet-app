@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
 import type { PushedMonthGroup, PushedRow } from '../hooks/useQbAutomationV2';
+import { formatActionLabel, formatProvenanceBadge } from '../../../lib/qbAutomation/pushedRowDerivation';
 
 interface Props {
   byMonth: PushedMonthGroup[];
@@ -8,7 +9,7 @@ interface Props {
   count: number;
 }
 
-type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'total' | 'when';
+type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'total' | 'when' | 'action' | 'match';
 type SortDir = 'asc' | 'desc';
 
 function fmtMoney(n: number): string {
@@ -21,21 +22,40 @@ function fmtWhen(iso: string): string {
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
-// posted_source taxonomy → user-facing chip. Pushed by definition only
-// contains status='posted' rows. Three variants:
-//  - 'push'                → Pushed (we did everything)
-//  - 'push_paid_outside'   → Pushed + paid outside (we created the bill,
-//                            payment came from a source we didn't push)
-//  - anything else         → Manual (accountant did it in QB;
-//                            includes 'qb_probe', 'manual_accept_fuzzy', null)
-function sourceChip(postedSource: string | null) {
-  if (postedSource === 'push') {
-    return <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">Pushed</span>;
+// Action chip: what actually happened in QB (created bill, paid, wrote
+// check). Green when populated; V1 uses green-100 for all posted actions.
+function actionChip(row: PushedRow) {
+  const label = formatActionLabel({
+    resolvedAction: row.resolvedAction,
+    resolvedRefLabel: row.resolvedRefLabel,
+    isG75Source: row.isG75Source,
+    matchProvenance: row.matchProvenance,
+  });
+  if (!label) {
+    return <span className="text-gray-300">—</span>;
   }
-  if (postedSource === 'push_paid_outside') {
-    return <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-200" title="We created the bill; payment came from outside our push queue">Pushed + paid outside</span>;
-  }
-  return <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 border border-slate-200">Manual</span>;
+  return (
+    <span
+      className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700 border border-green-200"
+      title={row.billTxnId ? `QB TxnID: ${row.billTxnId}` : undefined}
+    >
+      {label}
+    </span>
+  );
+}
+
+// Match chip: how we linked our event to the QB record. Palette + copy
+// lifted from V1 via pushedRowDerivation.formatProvenanceBadge.
+function matchChip(row: PushedRow) {
+  const b = formatProvenanceBadge(row.matchProvenance);
+  return (
+    <span
+      className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${b.bg} ${b.fg} border border-gray-200`}
+      title={b.tooltip}
+    >
+      {b.text}
+    </span>
+  );
 }
 
 function useSortedRows(rows: PushedRow[], sortKey: SortKey, sortDir: SortDir): PushedRow[] {
@@ -50,6 +70,8 @@ function useSortedRows(rows: PushedRow[], sortKey: SortKey, sortDir: SortDir): P
         case 'vendor':     return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
         case 'total':      return (a.amount - b.amount) * dir;
         case 'when':       return (a.statusUpdatedAt || '').localeCompare(b.statusUpdatedAt || '') * dir;
+        case 'action':     return (a.resolvedAction || '').localeCompare(b.resolvedAction || '') * dir;
+        case 'match':      return (a.matchProvenance || '').localeCompare(b.matchProvenance || '') * dir;
       }
     });
     return copy;
@@ -111,7 +133,12 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('total')}>
                   Total{sortArrow('total')}
                 </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600">Source</th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('action')}>
+                  Action{sortArrow('action')}
+                </th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('match')}>
+                  Match{sortArrow('match')}
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -125,7 +152,8 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                   <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
                     {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
                   </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">{sourceChip(r.postedSource)}</td>
+                  <td className="px-2 py-1.5 whitespace-nowrap">{actionChip(r)}</td>
+                  <td className="px-2 py-1.5 whitespace-nowrap">{matchChip(r)}</td>
                 </tr>
               ))}
             </tbody>
