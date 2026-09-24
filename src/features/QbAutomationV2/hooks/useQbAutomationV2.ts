@@ -164,6 +164,94 @@ export function localDateKeyOfIso(iso: string, now: Date = new Date()): string {
   return todayLocalDateKey(d);
 }
 
+// Local month prefix ("YYYY-MM") of an ISO timestamp. Used to bucket
+// older pushed rows into month rollups (v1 month-rollup pattern).
+export function localMonthKeyOfIso(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+function buildPushedRow(
+  e: QbIngestEvent,
+  invoicesById: Map<number, Invoice>,
+  vendorsById: Map<string, QbVendorRow>,
+): PushedTodayRow | null {
+  if (!e.statusUpdatedAt) return null;
+  const invoice = e.matchedInvoiceIds.length > 0
+    ? (invoicesById.get(e.matchedInvoiceIds[0]) ?? null)
+    : null;
+  const monthKey = invoice?.periodEnd?.slice(0, 7) ?? '';
+  const qbVendorName = e.counterpartyQbVendorListId
+    ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(unmapped)')
+    : '(unmapped)';
+  const refs = (e.postedQbRefs ?? {}) as Record<string, unknown>;
+  const billTxnId = (typeof refs.bill === 'string' ? refs.bill : null)
+    ?? e.resolvedBillTxnId
+    ?? null;
+  const billPmtTxnId = typeof refs.bill_pmt === 'string' ? refs.bill_pmt : null;
+  const checkTxnId = typeof refs.check === 'string' ? refs.check : null;
+  const postedSource = typeof refs.posted_source === 'string' ? refs.posted_source : null;
+  return {
+    eventId: e.id,
+    contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
+    invoiceNumber: invoice?.invoiceNumber ?? '',
+    amount: e.amount,
+    currency: invoice?.currency || 'USD',
+    monthKey,
+    monthLabel: monthLabelFromKey(monthKey),
+    qbVendorName,
+    billTxnId,
+    billPmtTxnId,
+    checkTxnId,
+    postedSource,
+    statusUpdatedAt: e.statusUpdatedAt,
+  };
+}
+
+export interface PushedOlderMonthGroup {
+  monthKey: string;         // YYYY-MM of statusUpdatedAt (local)
+  monthLabel: string;       // "Aug 2026"
+  rows: PushedTodayRow[];   // sorted desc by statusUpdatedAt
+  total: number;
+}
+
+// V9.9 item 4: older pushed rows grouped by push-month (statusUpdatedAt).
+// Complements derivePushedTodayRows; rendered as a collapsible "Older"
+// section under Pushed today. Matches the v1 month-rollup pattern from
+// the QB Automation UX contract.
+export function derivePushedOlderByMonth(
+  events: QbIngestEvent[],
+  invoicesById: Map<number, Invoice>,
+  vendorsById: Map<string, QbVendorRow>,
+  now: Date = new Date(),
+): PushedOlderMonthGroup[] {
+  const today = todayLocalDateKey(now);
+  const byMonth = new Map<string, PushedTodayRow[]>();
+  for (const e of events) {
+    if (e.status !== 'posted') continue;
+    if (!e.statusUpdatedAt) continue;
+    if (localDateKeyOfIso(e.statusUpdatedAt) === today) continue;
+    const row = buildPushedRow(e, invoicesById, vendorsById);
+    if (!row) continue;
+    const mk = localMonthKeyOfIso(e.statusUpdatedAt);
+    if (!mk) continue;
+    const bucket = byMonth.get(mk);
+    if (bucket) bucket.push(row);
+    else byMonth.set(mk, [row]);
+  }
+  const groups: PushedOlderMonthGroup[] = [];
+  for (const [monthKey, rows] of byMonth) {
+    rows.sort((a, b) => (b.statusUpdatedAt || '').localeCompare(a.statusUpdatedAt || ''));
+    const total = rows.reduce((s, r) => s + r.amount, 0);
+    groups.push({ monthKey, monthLabel: monthLabelFromKey(monthKey), rows, total });
+  }
+  groups.sort((a, b) => b.monthKey.localeCompare(a.monthKey));
+  return groups;
+}
+
 export function derivePushedTodayRows(
   events: QbIngestEvent[],
   invoicesById: Map<number, Invoice>,
@@ -176,37 +264,8 @@ export function derivePushedTodayRows(
     if (e.status !== 'posted') continue;
     if (!e.statusUpdatedAt) continue;
     if (localDateKeyOfIso(e.statusUpdatedAt) !== today) continue;
-
-    const invoice = e.matchedInvoiceIds.length > 0
-      ? (invoicesById.get(e.matchedInvoiceIds[0]) ?? null)
-      : null;
-    const monthKey = invoice?.periodEnd?.slice(0, 7) ?? '';
-    const qbVendorName = e.counterpartyQbVendorListId
-      ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(unmapped)')
-      : '(unmapped)';
-    const refs = (e.postedQbRefs ?? {}) as Record<string, unknown>;
-    const billTxnId = (typeof refs.bill === 'string' ? refs.bill : null)
-      ?? e.resolvedBillTxnId
-      ?? null;
-    const billPmtTxnId = typeof refs.bill_pmt === 'string' ? refs.bill_pmt : null;
-    const checkTxnId = typeof refs.check === 'string' ? refs.check : null;
-    const postedSource = typeof refs.posted_source === 'string' ? refs.posted_source : null;
-
-    rows.push({
-      eventId: e.id,
-      contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
-      invoiceNumber: invoice?.invoiceNumber ?? '',
-      amount: e.amount,
-      currency: invoice?.currency || 'USD',
-      monthKey,
-      monthLabel: monthLabelFromKey(monthKey),
-      qbVendorName,
-      billTxnId,
-      billPmtTxnId,
-      checkTxnId,
-      postedSource,
-      statusUpdatedAt: e.statusUpdatedAt,
-    });
+    const row = buildPushedRow(e, invoicesById, vendorsById);
+    if (row) rows.push(row);
   }
   rows.sort((a, b) => (b.statusUpdatedAt || '').localeCompare(a.statusUpdatedAt || ''));
   return rows;
@@ -856,6 +915,10 @@ export function useQbAutomationV2({
     () => pushedTodayRows.reduce((s, r) => s + r.amount, 0),
     [pushedTodayRows],
   );
+  const pushedOlderByMonth = useMemo(
+    () => derivePushedOlderByMonth(events, invoicesById, vendorsById),
+    [events, invoicesById, vendorsById],
+  );
 
   return {
     readyRows,
@@ -865,6 +928,7 @@ export function useQbAutomationV2({
     mappingRows,
     pushedTodayRows,
     pushedTodayTotal,
+    pushedOlderByMonth,
     payCount,
     createCount,
     payTotal,

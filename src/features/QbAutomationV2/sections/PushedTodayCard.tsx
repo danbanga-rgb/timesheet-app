@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
-import { CheckCircle2, Copy } from 'lucide-react';
-import type { PushedTodayRow } from '../hooks/useQbAutomationV2';
+import { CheckCircle2, ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import type { PushedOlderMonthGroup, PushedTodayRow } from '../hooks/useQbAutomationV2';
 
 interface Props {
   rows: PushedTodayRow[];
   total: number;
+  olderByMonth?: PushedOlderMonthGroup[];
 }
 
 type SortKey = 'contractor' | 'period' | 'vendor' | 'total' | 'when';
@@ -37,7 +38,16 @@ function TxnBadge({ label, txnId, cls }: { label: string; txnId: string; cls: st
   );
 }
 
-export default function PushedTodayCard({ rows, total }: Props) {
+export default function PushedTodayCard({ rows, total, olderByMonth = [] }: Props) {
+  const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set());
+  const toggleMonth = (monthKey: string) => {
+    setExpandedMonths(prev => {
+      const next = new Set(prev);
+      if (next.has(monthKey)) next.delete(monthKey);
+      else next.add(monthKey);
+      return next;
+    });
+  };
   const [sortKey, setSortKey] = useState<SortKey>('when');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
@@ -76,9 +86,13 @@ export default function PushedTodayCard({ rows, total }: Props) {
         <span className="text-xs text-gray-500">Session failures live in the status pane above.</span>
       </div>
 
-      {rows.length === 0 ? (
+      {rows.length === 0 && olderByMonth.length === 0 ? (
         <div className="px-4 py-10 text-center text-sm text-gray-500">
           Nothing has been pushed today. Successful pushes appear here after QBWC drains.
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="px-4 py-6 text-center text-sm text-gray-500">
+          Nothing pushed today yet. Older months below.
         </div>
       ) : (
         <div className="overflow-auto">
@@ -133,6 +147,82 @@ export default function PushedTodayCard({ rows, total }: Props) {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {olderByMonth.length > 0 && (
+        <div className="border-t border-gray-200">
+          <div className="px-4 py-2 bg-gray-50 text-xs font-semibold text-gray-600 uppercase tracking-wide">
+            Older
+          </div>
+          {olderByMonth.map(group => {
+            const isOpen = expandedMonths.has(group.monthKey);
+            return (
+              <div key={group.monthKey} className="border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => toggleMonth(group.monthKey)}
+                  className="w-full px-4 py-2 flex items-center justify-between text-left hover:bg-gray-50"
+                  aria-expanded={isOpen}
+                >
+                  <span className="flex items-center gap-2 text-sm font-medium text-gray-800">
+                    {isOpen ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    {group.monthLabel}
+                    <span className="text-xs font-normal text-gray-500">
+                      {group.rows.length} {group.rows.length === 1 ? 'row' : 'rows'} · {fmtMoney(group.total)}
+                    </span>
+                  </span>
+                </button>
+                {isOpen && (
+                  <div className="overflow-auto border-t border-gray-100">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50/60">
+                        <tr>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-500">When</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Contractor</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-500 whitespace-nowrap">Period</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-500">QB Vendor</th>
+                          <th className="px-2 py-1.5 text-right font-semibold text-gray-500">Total</th>
+                          <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Actuals</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {group.rows.map(r => (
+                          <tr key={r.eventId} className="hover:bg-emerald-50/40">
+                            <td className="px-2 py-1.5 whitespace-nowrap text-gray-600">
+                              {new Date(r.statusUpdatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                            </td>
+                            <td className="px-2 py-1.5 whitespace-nowrap font-medium text-gray-800">{r.contractorName}</td>
+                            <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
+                            <td className="px-2 py-1.5">{r.qbVendorName}</td>
+                            <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
+                              {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <div className="flex flex-wrap items-center gap-1">
+                                {r.billTxnId && (
+                                  <TxnBadge label="Bill" txnId={r.billTxnId} cls="bg-blue-50 text-blue-800 border-blue-200" />
+                                )}
+                                {r.billPmtTxnId && (
+                                  <TxnBadge label="Pmt" txnId={r.billPmtTxnId} cls="bg-emerald-50 text-emerald-800 border-emerald-200" />
+                                )}
+                                {r.checkTxnId && (
+                                  <TxnBadge label="Chk" txnId={r.checkTxnId} cls="bg-purple-50 text-purple-800 border-purple-200" />
+                                )}
+                                {r.postedSource && (
+                                  <span className="text-[10px] text-gray-500 font-mono">{r.postedSource}</span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

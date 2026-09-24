@@ -80,6 +80,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     mappingRows,
     pushedTodayRows,
     pushedTodayTotal,
+    pushedOlderByMonth,
     payCount,
     createCount,
     payTotal,
@@ -257,7 +258,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           )}
 
           {showPushedToday && (
-            <PushedTodayCard rows={pushedTodayRows} total={pushedTodayTotal} />
+            <PushedTodayCard rows={pushedTodayRows} total={pushedTodayTotal} olderByMonth={pushedOlderByMonth} />
           )}
 
           {showReadyOrSkipped && (
