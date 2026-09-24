@@ -131,6 +131,9 @@ export interface UseQbAutomationV2Args {
    *  Populated from convera_transaction_invoices.amount_share. Empty map is
    *  fine — children fall back to invoice total with shareSource='invoice_total'. */
   umbrellaShares?: Map<string, number>;
+  /** V9.9 item 3: persist Skip to invoices.qb_export_status via the v1
+   *  wrapper. Called with all invoice IDs belonging to the row. */
+  onSaveInvoiceExportStatus?: (invoiceIds: number[], next: 'skipped' | 'not_exported') => Promise<void>;
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -218,6 +221,7 @@ export function useQbAutomationV2({
   users,
   mappings,
   umbrellaShares,
+  onSaveInvoiceExportStatus,
 }: UseQbAutomationV2Args) {
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
@@ -707,11 +711,33 @@ export function useQbAutomationV2({
     });
   }, [mappings, ppById, userById, vendorsById, events]);
 
-  const [skippedKeys, setSkippedKeys] = useState<Set<string>>(new Set());
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
-  const readyRows = useMemo(() => allReadyRows.filter(r => !skippedKeys.has(r.rowKey)), [allReadyRows, skippedKeys]);
-  const skippedRows = useMemo(() => allReadyRows.filter(r => skippedKeys.has(r.rowKey)), [allReadyRows, skippedKeys]);
+  // V9.9 item 3: Skip persists via invoices.qb_export_status='skipped'
+  // (v1 pattern via saveInvoiceExportStatus). A row is skipped iff every
+  // underlying invoice it represents is skipped — atomic on push, atomic
+  // on skip. Falls back to false when the row has no invoice ids (rare
+  // edge case; skip becomes a no-op there).
+  const skippedInvoiceIds = useMemo(() => {
+    const s = new Set<number>();
+    for (const inv of invoices) if (inv.qbExportStatus === 'skipped') s.add(inv.id);
+    return s;
+  }, [invoices]);
+
+  const getRowInvoiceIds = useCallback((r: ReadyRow): number[] => {
+    if (r.children && r.children.length > 0) return r.children.map(c => c.invoiceId);
+    if (r.invoiceId != null) return [r.invoiceId];
+    return [];
+  }, []);
+
+  const isRowSkipped = useCallback((r: ReadyRow): boolean => {
+    const ids = getRowInvoiceIds(r);
+    if (ids.length === 0) return false;
+    return ids.every(id => skippedInvoiceIds.has(id));
+  }, [getRowInvoiceIds, skippedInvoiceIds]);
+
+  const readyRows = useMemo(() => allReadyRows.filter(r => !isRowSkipped(r)), [allReadyRows, isRowSkipped]);
+  const skippedRows = useMemo(() => allReadyRows.filter(r => isRowSkipped(r)), [allReadyRows, isRowSkipped]);
 
   const payCount = useMemo(() => readyRows.filter(r => r.group === 'pay').length, [readyRows]);
   const createCount = useMemo(() => readyRows.filter(r => r.group === 'create').length, [readyRows]);
@@ -773,28 +799,46 @@ export function useQbAutomationV2({
     setSelectedKeys(new Set(readyRows.filter(r => r.group === group).map(r => r.rowKey)));
   }, [readyRows]);
 
-  const skip = useCallback((rowKey: string) => {
-    setSkippedKeys(prev => {
-      const next = new Set(prev);
-      next.add(rowKey);
-      return next;
-    });
-    setSelectedKeys(prev => {
-      if (!prev.has(rowKey)) return prev;
-      const next = new Set(prev);
-      next.delete(rowKey);
-      return next;
-    });
-  }, []);
+  const skip = useCallback(async (rowKey: string) => {
+    const row = allReadyRows.find(r => r.rowKey === rowKey);
+    if (!row) return;
+    const ids = getRowInvoiceIds(row);
+    if (ids.length === 0) {
+      alert('This row has no persistent invoice to skip.');
+      return;
+    }
+    if (!onSaveInvoiceExportStatus) {
+      console.warn('skip: onSaveInvoiceExportStatus not wired');
+      return;
+    }
+    try {
+      await onSaveInvoiceExportStatus(ids, 'skipped');
+      setSelectedKeys(prev => {
+        if (!prev.has(rowKey)) return prev;
+        const next = new Set(prev);
+        next.delete(rowKey);
+        return next;
+      });
+    } catch (e) {
+      alert('Failed to skip: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  }, [allReadyRows, getRowInvoiceIds, onSaveInvoiceExportStatus]);
 
-  const unskip = useCallback((rowKey: string) => {
-    setSkippedKeys(prev => {
-      if (!prev.has(rowKey)) return prev;
-      const next = new Set(prev);
-      next.delete(rowKey);
-      return next;
-    });
-  }, []);
+  const unskip = useCallback(async (rowKey: string) => {
+    const row = allReadyRows.find(r => r.rowKey === rowKey);
+    if (!row) return;
+    const ids = getRowInvoiceIds(row);
+    if (ids.length === 0) return;
+    if (!onSaveInvoiceExportStatus) {
+      console.warn('unskip: onSaveInvoiceExportStatus not wired');
+      return;
+    }
+    try {
+      await onSaveInvoiceExportStatus(ids, 'not_exported');
+    } catch (e) {
+      alert('Failed to unskip: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  }, [allReadyRows, getRowInvoiceIds, onSaveInvoiceExportStatus]);
 
   const selectionTotal = useMemo(() => {
     let sum = 0;

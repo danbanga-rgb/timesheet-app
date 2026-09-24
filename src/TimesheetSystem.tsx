@@ -5300,6 +5300,9 @@ const TimesheetSystem = () => {
                   setShowInvoiceModal(true);
                 }
               }}
+              onSaveInvoiceExportStatus={async (invoiceIds, next) => {
+                for (const id of invoiceIds) await saveInvoiceExportStatus(id, next);
+              }}
               onPushRows={async ({ eventIds, invoiceIds }) => {
                 // Route selected event/invoice IDs to the 8 v1 pushers based on
                 // source + resolvedAction + bill-state. Same logic as v1's

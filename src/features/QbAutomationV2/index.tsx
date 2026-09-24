@@ -64,6 +64,9 @@ export interface QbAutomationV2Props {
    *  invoice — used by "no pp on invoice" (cross-contractor picker) and
    *  "waiting for wire" (change routing if needed). */
   onOpenInvoiceModal: (invoiceId: number) => void;
+  /** V9.9 item 3: persist Skip. v1 wrapper writes invoices.qb_export_status
+   *  and mutates parent state so Ready/Skipped view re-derives naturally. */
+  onSaveInvoiceExportStatus: (invoiceIds: number[], next: 'skipped' | 'not_exported') => Promise<void>;
 }
 
 type SubTab = 'inbox' | 'mapping';
