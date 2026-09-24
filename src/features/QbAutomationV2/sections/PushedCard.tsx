@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
 import type { PushedMonthGroup, PushedRow } from '../hooks/useQbAutomationV2';
 
 interface Props {
@@ -8,7 +8,7 @@ interface Props {
   count: number;
 }
 
-type SortKey = 'contractor' | 'period' | 'vendor' | 'total' | 'when';
+type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'total' | 'when';
 type SortDir = 'asc' | 'desc';
 
 function fmtMoney(n: number): string {
@@ -21,21 +21,15 @@ function fmtWhen(iso: string): string {
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
-function TxnBadge({ label, txnId, cls }: { label: string; txnId: string; cls: string }) {
-  const short = txnId.length > 12 ? `${txnId.slice(0, 12)}…` : txnId;
-  const copy = () => { void navigator.clipboard.writeText(txnId); };
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      title={`${label} TxnID · click to copy full`}
-      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px] border ${cls} hover:brightness-95`}
-    >
-      <span className="font-semibold">{label}</span>
-      <span>{short}</span>
-      <Copy className="w-2.5 h-2.5 opacity-60" />
-    </button>
-  );
+// posted_source taxonomy → user-facing chip. Pushed by definition only
+// contains status='posted' rows, so the split is binary: our push vs a
+// human update in QB (mirror sync discovered it, or accountant matched
+// an existing bill via reconcile UI).
+function inQbChip(postedSource: string | null) {
+  const isPushed = postedSource === 'push';
+  return isPushed
+    ? <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">In QB (pushed)</span>
+    : <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 border border-slate-200">In QB (manual)</span>;
 }
 
 function useSortedRows(rows: PushedRow[], sortKey: SortKey, sortDir: SortDir): PushedRow[] {
@@ -46,6 +40,7 @@ function useSortedRows(rows: PushedRow[], sortKey: SortKey, sortDir: SortDir): P
       switch (sortKey) {
         case 'contractor': return a.contractorName.localeCompare(b.contractorName) * dir;
         case 'period':     return (a.monthKey || '').localeCompare(b.monthKey || '') * dir;
+        case 'inv':        return (a.invoiceNumber || '').localeCompare(b.invoiceNumber || '', undefined, { numeric: true }) * dir;
         case 'vendor':     return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
         case 'total':      return (a.amount - b.amount) * dir;
         case 'when':       return (a.statusUpdatedAt || '').localeCompare(b.statusUpdatedAt || '') * dir;
@@ -101,13 +96,16 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('period')}>
                   Period{sortArrow('period')}
                 </th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('inv')}>
+                  Inv #{sortArrow('inv')}
+                </th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('vendor')}>
                   QB Vendor{sortArrow('vendor')}
                 </th>
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('total')}>
                   Total{sortArrow('total')}
                 </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600">Actuals</th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600">In QB</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -116,26 +114,12 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                   <td className="px-2 py-1.5 whitespace-nowrap text-gray-600">{fmtWhen(r.statusUpdatedAt)}</td>
                   <td className="px-2 py-1.5 whitespace-nowrap font-medium text-gray-800">{r.contractorName}</td>
                   <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
+                  <td className="px-2 py-1.5 whitespace-nowrap font-mono text-gray-600">{r.invoiceNumber || '—'}</td>
                   <td className="px-2 py-1.5">{r.qbVendorName}</td>
                   <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
                     {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
                   </td>
-                  <td className="px-2 py-1.5">
-                    <div className="flex flex-wrap items-center gap-1">
-                      {r.billTxnId && (
-                        <TxnBadge label="Bill" txnId={r.billTxnId} cls="bg-blue-50 text-blue-800 border-blue-200" />
-                      )}
-                      {r.billPmtTxnId && (
-                        <TxnBadge label="Pmt" txnId={r.billPmtTxnId} cls="bg-emerald-50 text-emerald-800 border-emerald-200" />
-                      )}
-                      {r.checkTxnId && (
-                        <TxnBadge label="Chk" txnId={r.checkTxnId} cls="bg-purple-50 text-purple-800 border-purple-200" />
-                      )}
-                      {r.postedSource && (
-                        <span className="text-[10px] text-gray-500 font-mono">{r.postedSource}</span>
-                      )}
-                    </div>
-                  </td>
+                  <td className="px-2 py-1.5 whitespace-nowrap">{inQbChip(r.postedSource)}</td>
                 </tr>
               ))}
             </tbody>
