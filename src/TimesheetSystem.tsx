@@ -2430,22 +2430,26 @@ const TimesheetSystem = () => {
   // Sync Vendors button handler. Enqueues one vendor_query job (dedup lives in
   // enqueueVendorQuery — at most one pending/in-flight at a time). QBWC drains
   // on next poll; refreshQbVendors runs on drain-to-zero.
-  const runSyncQbVendors = async () => {
+  const runSyncQbVendors = async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
     setQbSyncingVendors(true);
     try {
-      const result = await enqueueVendorQuery(supabase, 'manual-sync-vendors');
+      const result = await enqueueVendorQuery(supabase, silent ? 'v2-auto-sync-vendors' : 'manual-sync-vendors');
       await loadQbVendorQueryPending();
-      if (result.jobIds.length === 0) {
-        alert('A vendor_query is already pending/in-flight. Wait for it to drain (~15 min).');
-      } else {
-        alert('Enqueued vendor_query. QBWC drains on next poll (~15 min). Vendors list refreshes automatically when complete.');
+      if (!silent) {
+        if (result.jobIds.length === 0) {
+          alert('A vendor_query is already pending/in-flight. Wait for it to drain (~15 min).');
+        } else {
+          alert('Enqueued vendor_query. QBWC drains on next poll (~15 min). Vendors list refreshes automatically when complete.');
+        }
       }
     } catch (e) {
       const err = e as { message?: string; details?: string; hint?: string; code?: string };
       const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
         .filter((s): s is string => !!s);
       const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
-      alert('Sync Vendors failed: ' + msg);
+      if (!silent) alert('Sync Vendors failed: ' + msg);
+      else console.warn('Silent sync vendors failed:', msg);
     } finally {
       setQbSyncingVendors(false);
     }
@@ -2457,7 +2461,8 @@ const TimesheetSystem = () => {
   //   (b) any event-resolvable vendor (via mapping or profile chain).
   // Then filter out vendors that already have a fresh snapshot (< 1h) or an
   // in-flight bill_query job (dedup lives in enqueueBillQuery).
-  const runSyncQbBills = async () => {
+  const runSyncQbBills = async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
     setQbSyncingBills(true);
     try {
       const vendorsByLowerName = new Map(qbVendorsList.map(v => [v.name.toLowerCase().trim(), v]));
@@ -2496,7 +2501,7 @@ const TimesheetSystem = () => {
 
       const allVendorNames = Array.from(new Set([...profileVendorNames, ...eventVendorNames])).sort();
       if (allVendorNames.length === 0) {
-        alert('No vendors need syncing — no payment profiles have qb_vendor_name set and no events resolve to a QB vendor.');
+        if (!silent) alert('No vendors need syncing — no payment profiles have qb_vendor_name set and no events resolve to a QB vendor.');
         return;
       }
 
@@ -2513,7 +2518,7 @@ const TimesheetSystem = () => {
         .filter(v => v.name !== '');
       // If nothing is stale, we're up-to-date — no-op with a helpful message.
       if (staleVendors.length === 0) {
-        alert(`All ${allVendorNames.length} vendors have fresh snapshots (< 1h). Nothing to enqueue.`);
+        if (!silent) alert(`All ${allVendorNames.length} vendors have fresh snapshots (< 1h). Nothing to enqueue.`);
         return;
       }
 
@@ -2524,15 +2529,17 @@ const TimesheetSystem = () => {
         auditTag: 'slice-g1-manual-sync',
       });
       await loadQbBillQueryPending();  // update pending counter immediately
-      const deltaCount = Object.values(result.deltaCursorsUsed).filter(c => c !== 'none').length;
-      alert(
-        `Enqueued ${result.jobIds.length} bill_query job${result.jobIds.length === 1 ? '' : 's'} `
-        + `across ${staleVendors.length} vendor${staleVendors.length === 1 ? '' : 's'} `
-        + `(${deltaCount} delta / ${staleVendors.length - deltaCount} full-history)`
-        + (result.skippedInFlight.length > 0 ? `; skipped ${result.skippedInFlight.length} already in flight` : '')
-        + `. QBWC drains the full queue in one session; wait up to 15 min for the next poll, then ~${Math.max(1, Math.ceil(result.jobIds.length * 1 / 60))} min of drain time. `
-        + `This UI updates automatically as they complete.`,
-      );
+      if (!silent) {
+        const deltaCount = Object.values(result.deltaCursorsUsed).filter(c => c !== 'none').length;
+        alert(
+          `Enqueued ${result.jobIds.length} bill_query job${result.jobIds.length === 1 ? '' : 's'} `
+          + `across ${staleVendors.length} vendor${staleVendors.length === 1 ? '' : 's'} `
+          + `(${deltaCount} delta / ${staleVendors.length - deltaCount} full-history)`
+          + (result.skippedInFlight.length > 0 ? `; skipped ${result.skippedInFlight.length} already in flight` : '')
+          + `. QBWC drains the full queue in one session; wait up to 15 min for the next poll, then ~${Math.max(1, Math.ceil(result.jobIds.length * 1 / 60))} min of drain time. `
+          + `This UI updates automatically as they complete.`,
+        );
+      }
     } catch (e) {
       // Supabase errors come as { message, details, hint, code } — String(e)
       // renders these as "[object Object]" (session-2026-08-19 post-mortem #4).
@@ -2540,7 +2547,8 @@ const TimesheetSystem = () => {
       const parts = [err?.message, err?.details, err?.hint, err?.code ? `(code ${err.code})` : null]
         .filter((s): s is string => !!s);
       const msg = parts.length ? parts.join(' — ') : (e instanceof Error ? e.message : JSON.stringify(e));
-      alert('Sync failed: ' + msg);
+      if (!silent) alert('Sync failed: ' + msg);
+      else console.warn('Silent sync bills failed:', msg);
     } finally {
       setQbSyncingBills(false);
     }
@@ -5403,9 +5411,9 @@ const TimesheetSystem = () => {
               qbBillQueryPending={qbBillQueryPending}
               qbVendorQueryPending={qbVendorQueryPending}
               pendingJobs={qbPendingJobDetails.map(j => ({ id: j.id, kind: j.kind, createdAt: j.created_at, payload: j.payload }))}
-              onSyncMirror={runSyncQbBills}
+              onSyncMirror={() => runSyncQbBills({ silent: true })}
               onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
-              onSyncVendors={runSyncQbVendors}
+              onSyncVendors={() => runSyncQbVendors({ silent: true })}
               onPostPushSync={async () => {
                 try {
                   await enqueueVendorQuery(supabase, 'v2-post-push-sync');
@@ -7618,7 +7626,7 @@ const TimesheetSystem = () => {
                               {snapshotStale && '⚠ '}{snapshotLabel}
                             </span>
                             <button
-                              onClick={syncPending ? () => setShowPendingJobsPopup(true) : runSyncQbBills}
+                              onClick={syncPending ? () => setShowPendingJobsPopup(true) : () => runSyncQbBills()}
                               disabled={qbSyncingBills}
                               className={qbSyncingBills
                                 ? 'text-gray-400 cursor-not-allowed'
@@ -7633,7 +7641,7 @@ const TimesheetSystem = () => {
                             </button>
                             <span className="text-gray-300">·</span>
                             <button
-                              onClick={runSyncQbVendors}
+                              onClick={() => runSyncQbVendors()}
                               disabled={vendorSyncDisabled}
                               className={vendorSyncDisabled
                                 ? 'text-gray-400 cursor-not-allowed'
