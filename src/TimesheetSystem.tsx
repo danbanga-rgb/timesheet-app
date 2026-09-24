@@ -2075,21 +2075,48 @@ const TimesheetSystem = () => {
     //   - 'push_paid_outside' — we drained a bill_add (create-only), mirror
     //     shows the bill settled (someone paid it outside our push)
     //   - 'qb_probe' — no push jobs at all; mirror discovered a pre-existing bill
-    // See the reconciler decision block below for the mapping.
-    const allEventJobIds = new Set<number>();
-    for (const r of (rows ?? []) as Array<{ qb_sync_job_ids: number[] | null }>) {
-      for (const id of r.qb_sync_job_ids ?? []) allEventJobIds.add(id);
+    //
+    // Two link paths to check per event, because bill_add's write side
+    // differs by push origin:
+    //   1. event-driven: payload.sourceIngestEventId = event.id
+    //      (orphan bill_add; bill_pmt_add; check_add — appends to
+    //      event.qb_sync_job_ids at drain time)
+    //   2. invoice-driven: payload.sourceInvoiceIds overlaps
+    //      event.matched_invoice_ids (G7.5 Intuit / G7.6 Convera create-bill;
+    //      writes to invoices at drain, NOT to event.qb_sync_job_ids)
+    // Missing path #2 = missing the entire G7.5/G7.6 push fleet.
+    const allInvoiceIds = new Set<number>();
+    for (const r of (rows ?? []) as Array<{ matched_invoice_ids: number[] | null }>) {
+      for (const id of r.matched_invoice_ids ?? []) allInvoiceIds.add(id);
     }
-    const jobKindsById = new Map<number, string>();
-    if (allEventJobIds.size > 0) {
+    const eventIdsInBatch = (rows ?? []).map(r => (r as { id: number }).id);
+    interface PushJobHit { kind: 'bill_add' | 'bill_pmt_add' | 'check_add'; sourceIngestEventId: number | null; sourceInvoiceIds: number[] }
+    const pushJobHits: PushJobHit[] = [];
+    if (eventIdsInBatch.length > 0 || allInvoiceIds.size > 0) {
       const { data: jobRows } = await supabase
         .from('qb_sync_jobs')
-        .select('id, kind')
-        .in('id', Array.from(allEventJobIds))
+        .select('id, kind, payload')
         .eq('status', 'done')
         .in('kind', ['bill_add', 'bill_pmt_add', 'check_add']);
-      for (const jr of (jobRows ?? []) as Array<{ id: number; kind: string }>) {
-        jobKindsById.set(jr.id, jr.kind);
+      for (const jr of (jobRows ?? []) as Array<{ id: number; kind: PushJobHit['kind']; payload: Record<string, unknown> | null }>) {
+        const p = jr.payload ?? {};
+        const evId = typeof p.sourceIngestEventId === 'number' ? p.sourceIngestEventId : null;
+        const invIds = Array.isArray(p.sourceInvoiceIds) ? (p.sourceInvoiceIds as number[]).filter(n => typeof n === 'number') : [];
+        pushJobHits.push({ kind: jr.kind, sourceIngestEventId: evId, sourceInvoiceIds: invIds });
+      }
+    }
+    // Per-event: what push job kinds hit this event?
+    const jobKindsByEventId = new Map<number, Set<string>>();
+    const record = (evId: number, kind: string) => {
+      const bucket = jobKindsByEventId.get(evId) ?? new Set<string>();
+      bucket.add(kind);
+      jobKindsByEventId.set(evId, bucket);
+    };
+    for (const r of (rows ?? []) as Array<{ id: number; matched_invoice_ids: number[] | null }>) {
+      const invSet = new Set<number>(r.matched_invoice_ids ?? []);
+      for (const hit of pushJobHits) {
+        if (hit.sourceIngestEventId === r.id) record(r.id, hit.kind);
+        else if (hit.kind === 'bill_add' && hit.sourceInvoiceIds.some(i => invSet.has(i))) record(r.id, hit.kind);
       }
     }
 
@@ -2174,13 +2201,11 @@ const TimesheetSystem = () => {
       const autoCloseEligible = result.action === 'already_done' && nextProvenance === 'exact-txn';
       if (autoCloseEligible && event.status !== 'posted') {
         // Decide posted_source from push job history + mirror settlement.
-        // Signal is authoritative (job existence) rather than trusting the
-        // edge fn to have written posted_source consistently across all
-        // push paths (Convera bill_pmt_add writes to link table, not events).
-        const evJobIds = (currentRow?.qb_sync_job_ids as number[] | null) ?? [];
-        const evJobKinds = evJobIds.map(id => jobKindsById.get(id)).filter((k): k is string => !!k);
-        const hasPayJob = evJobKinds.some(k => k === 'bill_pmt_add' || k === 'check_add');
-        const hasCreateJob = evJobKinds.some(k => k === 'bill_add');
+        // Uses the per-event kinds set built above from BOTH link paths
+        // (payload.sourceIngestEventId AND payload.sourceInvoiceIds).
+        const kinds = jobKindsByEventId.get(event.id) ?? new Set<string>();
+        const hasPayJob = kinds.has('bill_pmt_add') || kinds.has('check_add');
+        const hasCreateJob = kinds.has('bill_add');
         let postedSource: 'push' | 'push_paid_outside' | 'qb_probe' = 'qb_probe';
         if (hasPayJob) {
           postedSource = 'push';
