@@ -1,5 +1,5 @@
 import { useMemo, useState, Fragment } from 'react';
-import { ChevronRight, ChevronDown, Users } from 'lucide-react';
+import { AlertTriangle, ChevronRight, ChevronDown, Users, X } from 'lucide-react';
 import type { ReadyRow, ReadyGroup } from '../hooks/useQbAutomationV2';
 import type { Verdict } from '../../../lib/qbAutomation/verdict';
 import type { CategoryKey } from './KpiStrip';
@@ -22,6 +22,9 @@ interface Props {
   // wrapper — same handler NeedsMappingCard uses.
   vendors: QbVendorRow[];
   onSaveMapping: (args: SaveMappingArgs) => Promise<void>;
+  // V9.9 item 5: retry a failed push for a single row. Fires onPushRows
+  // for just this row's identifiers.
+  onRetryRow?: (row: ReadyRow) => Promise<void>;
 
   payCount: number;
   createCount: number;
@@ -70,6 +73,7 @@ export default function ReadyCard(props: Props) {
     onUnskip,
     vendors,
     onSaveMapping,
+    onRetryRow,
     payCount,
     createCount,
     payTotal,
@@ -81,6 +85,8 @@ export default function ReadyCard(props: Props) {
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
   const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
   const [expandedRowKeys, setExpandedRowKeys] = useState<Set<string>>(new Set());
+  const [openFailureKey, setOpenFailureKey] = useState<string | null>(null);
+  const [retryingKey, setRetryingKey] = useState<string | null>(null);
 
   const toggleExpanded = (rowKey: string) => {
     setExpandedRowKeys(prev => {
@@ -92,6 +98,17 @@ export default function ReadyCard(props: Props) {
   };
 
   const isSkippedView = category === 'skipped';
+
+  const handleRetry = async (row: ReadyRow) => {
+    if (!onRetryRow) return;
+    setRetryingKey(row.rowKey);
+    try {
+      await onRetryRow(row);
+      setOpenFailureKey(null);
+    } finally {
+      setRetryingKey(null);
+    }
+  };
 
   const handleSaveVendor = async (row: ReadyRow, args: { qbVendorListId: string; qbVendorName: string }) => {
     if (row.ppId <= 0) {
@@ -316,7 +333,51 @@ export default function ReadyCard(props: Props) {
                         {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
                       </td>
                       <td className="px-2 py-1.5 whitespace-nowrap">
-                        {isSkippedView ? skippedBadge() : verdictBadge(r.verdict)}
+                        <div className="flex items-center gap-1 relative">
+                          {isSkippedView ? skippedBadge() : verdictBadge(r.verdict)}
+                          {!isSkippedView && r.lastFailedPush && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => setOpenFailureKey(prev => prev === r.rowKey ? null : r.rowKey)}
+                                title={`Last push failed — ${r.lastFailedPush.errorMsg}`}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-800 border border-red-200 hover:bg-red-200"
+                              >
+                                <AlertTriangle className="w-3 h-3" />
+                                Last push failed
+                              </button>
+                              {openFailureKey === r.rowKey && (
+                                <div className="absolute z-20 top-full mt-1 left-0 w-80 bg-white border border-red-200 rounded-lg shadow-lg p-3 text-xs text-left whitespace-normal">
+                                  <div className="flex items-start justify-between gap-2 mb-2">
+                                    <span className="font-semibold text-red-900">Push failure</span>
+                                    <button onClick={() => setOpenFailureKey(null)} className="text-gray-400 hover:text-gray-700" aria-label="Close">
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                  <div className="text-gray-500 font-mono mb-1">
+                                    Job #{r.lastFailedPush.jobId} · {r.lastFailedPush.kind}
+                                    {r.lastFailedPush.completedAt && (
+                                      <> · {new Date(r.lastFailedPush.completedAt).toLocaleString()}</>
+                                    )}
+                                  </div>
+                                  <div className="text-red-800 font-mono text-[11px] bg-red-50 border border-red-100 rounded px-2 py-1 mb-2 break-words">
+                                    {r.lastFailedPush.errorMsg || '(no error message)'}
+                                  </div>
+                                  {onRetryRow && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleRetry(r)}
+                                      disabled={retryingKey === r.rowKey}
+                                      className="w-full text-xs font-medium px-2 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+                                    >
+                                      {retryingKey === r.rowKey ? 'Retrying…' : 'Retry push'}
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
                       </td>
                       <td className="px-2 py-1.5 text-right whitespace-nowrap">
                         {isSkippedView ? (

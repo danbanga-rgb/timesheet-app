@@ -62,6 +62,10 @@ export interface ReadyRow {
   // to see per-contractor slices. Push is atomic per wire.
   children?: UmbrellaChildRow[];
   distinctVendorCount?: number;      // > 1 for multi-vendor umbrella (Bimosoft/NT)
+  // V9.9 item 5: attached when a recent qb_sync_jobs row for this source
+  // finished with status='failed'. Card renders a red pill; the row is
+  // still selectable + pushable (retry = re-select and push).
+  lastFailedPush?: FailedPushJob;
 }
 
 export type NeedsMappingReason =
@@ -88,6 +92,18 @@ export interface NeedsMappingRow {
   ppId: number;
   ppQbVendorName: string | null;   // for invoice_pp_vendor_not_synced
   candidates: Candidate[];
+}
+
+// V9.9 item 5: recent failed push job, surfaced as a red pill on the
+// affected Ready row. The pill click opens a small diagnostic with the
+// error text + a Retry button.
+export interface FailedPushJob {
+  jobId: number;
+  kind: string;                       // 'bill_pmt_add' | 'bill_add' | 'check_add'
+  errorMsg: string;
+  completedAt: string | null;
+  sourceIngestEventId: number | null;
+  sourceInvoiceId: number | null;
 }
 
 export interface PushedTodayRow {
@@ -134,6 +150,9 @@ export interface UseQbAutomationV2Args {
   /** V9.9 item 3: persist Skip to invoices.qb_export_status via the v1
    *  wrapper. Called with all invoice IDs belonging to the row. */
   onSaveInvoiceExportStatus?: (invoiceIds: number[], next: 'skipped' | 'not_exported') => Promise<void>;
+  /** V9.9 item 5: recent failed qb_sync_jobs (status='failed'), scoped
+   *  by the parent to the last ~30 days. Loaded once alongside events. */
+  failedPushJobs?: FailedPushJob[];
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -281,6 +300,7 @@ export function useQbAutomationV2({
   mappings,
   umbrellaShares,
   onSaveInvoiceExportStatus,
+  failedPushJobs,
 }: UseQbAutomationV2Args) {
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
@@ -312,9 +332,36 @@ export function useQbAutomationV2({
     [vendors],
   );
 
+  // V9.9 item 5: index recent failed pushes by source. Prefer the most
+  // recent failure per source (jobs sorted by completedAt desc first).
+  const { failedByEventId, failedByInvoiceId } = useMemo(() => {
+    const byEvent = new Map<number, FailedPushJob>();
+    const byInvoice = new Map<number, FailedPushJob>();
+    const sorted = [...(failedPushJobs ?? [])].sort((a, b) => (b.completedAt ?? '').localeCompare(a.completedAt ?? ''));
+    for (const j of sorted) {
+      if (j.sourceIngestEventId != null && !byEvent.has(j.sourceIngestEventId)) byEvent.set(j.sourceIngestEventId, j);
+      if (j.sourceInvoiceId != null && !byInvoice.has(j.sourceInvoiceId)) byInvoice.set(j.sourceInvoiceId, j);
+    }
+    return { failedByEventId: byEvent, failedByInvoiceId: byInvoice };
+  }, [failedPushJobs]);
+
   const allReadyRows: ReadyRow[] = useMemo(() => {
     const rows: ReadyRow[] = [];
     const invoiceIdsCoveredByEvents = new Set<number>();
+
+    const attachFailure = (row: ReadyRow): ReadyRow => {
+      let hit: FailedPushJob | undefined;
+      if (row.eventId != null) hit = failedByEventId.get(row.eventId);
+      if (!hit && row.invoiceId != null) hit = failedByInvoiceId.get(row.invoiceId);
+      if (!hit && row.children) {
+        for (const c of row.children) {
+          hit = failedByInvoiceId.get(c.invoiceId);
+          if (hit) break;
+        }
+      }
+      if (hit) row.lastFailedPush = hit;
+      return row;
+    };
 
     for (const e of events) {
       if (e.status !== 'ready') continue;
@@ -611,8 +658,9 @@ export function useQbAutomationV2({
     }
 
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
+    for (const r of rows) attachFailure(r);
     return rows;
-  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares]);
+  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares, failedByEventId, failedByInvoiceId]);
 
   // Vendor lookup by lowercase name — used by needsMappingRows to detect
   // "pp has qb_vendor_name but doesn't resolve to a qb_vendors row" (needs

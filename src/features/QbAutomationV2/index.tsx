@@ -6,7 +6,7 @@ import type { PushRecord } from '../../components/QbPushStatusPane';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import QbPushStatusPane from '../../components/QbPushStatusPane';
 import { cancelPushJobs } from '../../lib/qbAutomation/cancelPushJobs';
-import { useQbAutomationV2 } from './hooks/useQbAutomationV2';
+import { useQbAutomationV2, type FailedPushJob, type ReadyRow } from './hooks/useQbAutomationV2';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
 import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingCard';
@@ -67,6 +67,10 @@ export interface QbAutomationV2Props {
   /** V9.9 item 3: persist Skip. v1 wrapper writes invoices.qb_export_status
    *  and mutates parent state so Ready/Skipped view re-derives naturally. */
   onSaveInvoiceExportStatus: (invoiceIds: number[], next: 'skipped' | 'not_exported') => Promise<void>;
+  /** V9.9 item 5: recent qb_sync_jobs rows with status='failed', keyed
+   *  back to Ready rows via payload.sourceIngestEventId /
+   *  payload.sourceInvoiceId. Loaded once by the parent. */
+  failedPushJobs?: FailedPushJob[];
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -275,6 +279,15 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               onUnskip={unskip}
               vendors={props.vendors}
               onSaveMapping={props.onSaveMapping}
+              onRetryRow={async (row: ReadyRow) => {
+                const eventIds: number[] = row.eventId != null ? [row.eventId] : [];
+                const invoiceIds: number[] = row.invoiceId != null
+                  ? [row.invoiceId]
+                  : (row.children?.map(c => c.invoiceId) ?? []);
+                if (eventIds.length === 0 && invoiceIds.length === 0) return;
+                await props.onPushRows({ eventIds, invoiceIds });
+                await props.onRefreshInbox();
+              }}
               payCount={payCount}
               createCount={createCount}
               payTotal={payTotal}

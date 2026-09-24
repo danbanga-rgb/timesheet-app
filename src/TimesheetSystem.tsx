@@ -696,6 +696,13 @@ const TimesheetSystem = () => {
   // Slice G1 — qbStateSync mirror of QB open bills
   const [qbOpenBills, setQbOpenBills] = useState<QbOpenBillRow[]>([]);
   const [qbSyncingBills, setQbSyncingBills] = useState(false);
+  // V9.9 item 5 (v2): recent failed qb_sync_jobs surfaced as red pills on
+  // Ready rows. Loaded alongside events on every ingest refresh; capped at
+  // 200 rows over the last 30 days to keep the query cheap.
+  const [qbFailedPushJobs, setQbFailedPushJobs] = useState<Array<{
+    jobId: number; kind: string; errorMsg: string; completedAt: string | null;
+    sourceIngestEventId: number | null; sourceInvoiceId: number | null;
+  }>>([]);
   // Slice G1 — QBWC heartbeat: most recent qb_wc_sessions.last_seen_at
   const [qbWcLastSeen, setQbWcLastSeen] = useState<string | null>(null);
   // Slice G1 — count of in-flight bill_query jobs (pending or in_flight status).
@@ -1661,7 +1668,8 @@ const TimesheetSystem = () => {
   // Load QB Automation Inbox lazily when tab is opened
   const loadQbIngestEvents = async () => {
     setQbIngestLoading(true);
-    const [eventsRes, proactiveJobsRes, umbrellaSharesRes] = await Promise.all([
+    const thirtyDaysAgoIso = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    const [eventsRes, proactiveJobsRes, umbrellaSharesRes, failedJobsRes] = await Promise.all([
       supabase.from('qb_ingest_events').select('*').order('ingested_at', { ascending: false }),
       // Slice A + G7.6: identify proactive-create pushes so the posted bucket
       // can include them alongside event-driven posts. Two audit-tag prefixes:
@@ -1671,6 +1679,13 @@ const TimesheetSystem = () => {
       // V9.5: per-invoice share for umbrella wires. Feeds v2's group-row
       // sub-row rendering (Teal 8-contractor wires, Faruk-covers-Ajdin, etc.).
       supabase.from('convera_transaction_invoices').select('transaction_id, invoice_id, amount_share'),
+      // V9.9 item 5 (v2): recent failed pushes for the red pill in Ready.
+      supabase.from('qb_sync_jobs')
+        .select('id, kind, error_msg, completed_at, payload')
+        .eq('status', 'failed')
+        .gte('completed_at', thirtyDaysAgoIso)
+        .order('completed_at', { ascending: false })
+        .limit(200),
     ]);
     if (!eventsRes.error) setQbIngestEvents((eventsRes.data ?? []).map(normaliseQbIngestEvent));
     if (!proactiveJobsRes.error) {
@@ -1711,6 +1726,24 @@ const TimesheetSystem = () => {
         }
       }
       setQbUmbrellaShares(sharesByEventInvoice);
+    }
+    if (!failedJobsRes.error) {
+      const rows = (failedJobsRes.data ?? []) as Array<{
+        id: number; kind: string; error_msg: string | null; completed_at: string | null;
+        payload: { sourceIngestEventId?: number; sourceInvoiceId?: number; sourceInvoiceIds?: number[] } | null;
+      }>;
+      const mapped = rows.map(r => ({
+        jobId: r.id,
+        kind: r.kind,
+        errorMsg: r.error_msg ?? '',
+        completedAt: r.completed_at,
+        sourceIngestEventId: r.payload?.sourceIngestEventId ?? null,
+        // sourceInvoiceId (singular) is pay_bill's convention; some
+        // bill_add jobs carry sourceInvoiceIds[] instead — take the first
+        // to attach the failure to at least one row.
+        sourceInvoiceId: r.payload?.sourceInvoiceId ?? r.payload?.sourceInvoiceIds?.[0] ?? null,
+      }));
+      setQbFailedPushJobs(mapped);
     }
     setQbIngestLoading(false);
   };
@@ -5275,6 +5308,7 @@ const TimesheetSystem = () => {
               users={users}
               mappings={qbVendorMappings}
               umbrellaShares={qbUmbrellaShares}
+              failedPushJobs={qbFailedPushJobs}
               pushRecords={qbPushRecords}
               supabase={supabase}
               onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
