@@ -13,7 +13,7 @@ import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingC
 import PushBar from './sections/PushBar';
 import VendorMappingSubTab from './sections/VendorMappingSubTab';
 import PushPreviewModal from './sections/PushPreviewModal';
-import PushedTodayCard from './sections/PushedTodayCard';
+import PushedCard from './sections/PushedCard';
 
 export interface PushRowsArgs {
   eventIds: number[];
@@ -82,9 +82,9 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     needsMappingRows,
     needsMappingTotal,
     mappingRows,
-    pushedTodayRows,
-    pushedTodayTotal,
-    pushedOlderByMonth,
+    pushedByMonth,
+    pushedCount,
+    pushedTotal,
     payCount,
     createCount,
     payTotal,
@@ -168,7 +168,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
 
   const showNeedsMapping = category === 'needs_mapping';
   const showReadyOrSkipped = category === 'ready' || category === 'skipped';
-  const showPushedToday = category === 'pushed_today';
+  const showPushed = category === 'pushed';
   const rowsForReadyView = category === 'skipped' ? skippedRows : readyRows;
 
   return (
@@ -246,8 +246,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             needsMappingCount={needsMappingRows.length}
             needsMappingTotal={needsMappingTotal}
             skippedCount={skippedRows.length}
-            pushedTodayCount={pushedTodayRows.length}
-            pushedTodayTotal={pushedTodayTotal}
+            pushedCount={pushedCount}
+            pushedTotal={pushedTotal}
           />
 
           {showNeedsMapping && (
@@ -261,8 +261,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             />
           )}
 
-          {showPushedToday && (
-            <PushedTodayCard rows={pushedTodayRows} total={pushedTodayTotal} olderByMonth={pushedOlderByMonth} />
+          {showPushed && (
+            <PushedCard byMonth={pushedByMonth} total={pushedTotal} count={pushedCount} />
           )}
 
           {showReadyOrSkipped && (

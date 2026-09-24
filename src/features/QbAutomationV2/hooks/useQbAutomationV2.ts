@@ -106,7 +106,7 @@ export interface FailedPushJob {
   sourceInvoiceId: number | null;
 }
 
-export interface PushedTodayRow {
+export interface PushedRow {
   eventId: number;
   contractorName: string;
   invoiceNumber: string;
@@ -197,7 +197,7 @@ function buildPushedRow(
   e: QbIngestEvent,
   invoicesById: Map<number, Invoice>,
   vendorsById: Map<string, QbVendorRow>,
-): PushedTodayRow | null {
+): PushedRow | null {
   if (!e.statusUpdatedAt) return null;
   const invoice = e.matchedInvoiceIds.length > 0
     ? (invoicesById.get(e.matchedInvoiceIds[0]) ?? null)
@@ -230,29 +230,26 @@ function buildPushedRow(
   };
 }
 
-export interface PushedOlderMonthGroup {
+export interface PushedMonthGroup {
   monthKey: string;         // YYYY-MM of statusUpdatedAt (local)
   monthLabel: string;       // "Aug 2026"
-  rows: PushedTodayRow[];   // sorted desc by statusUpdatedAt
+  rows: PushedRow[];        // sorted desc by statusUpdatedAt
   total: number;
 }
 
-// V9.9 item 4: older pushed rows grouped by push-month (statusUpdatedAt).
-// Complements derivePushedTodayRows; rendered as a collapsible "Older"
-// section under Pushed today. Matches the v1 month-rollup pattern from
-// the QB Automation UX contract.
-export function derivePushedOlderByMonth(
+// V9.9 item 4 + Dan's follow-up: unified "Pushed" card. All posted
+// events grouped by push-month (statusUpdatedAt), newest month first.
+// Today's rows naturally fall into the current-month bucket; no
+// separate "today" concept.
+export function derivePushedByMonth(
   events: QbIngestEvent[],
   invoicesById: Map<number, Invoice>,
   vendorsById: Map<string, QbVendorRow>,
-  now: Date = new Date(),
-): PushedOlderMonthGroup[] {
-  const today = todayLocalDateKey(now);
-  const byMonth = new Map<string, PushedTodayRow[]>();
+): PushedMonthGroup[] {
+  const byMonth = new Map<string, PushedRow[]>();
   for (const e of events) {
     if (e.status !== 'posted') continue;
     if (!e.statusUpdatedAt) continue;
-    if (localDateKeyOfIso(e.statusUpdatedAt) === today) continue;
     const row = buildPushedRow(e, invoicesById, vendorsById);
     if (!row) continue;
     const mk = localMonthKeyOfIso(e.statusUpdatedAt);
@@ -261,7 +258,7 @@ export function derivePushedOlderByMonth(
     if (bucket) bucket.push(row);
     else byMonth.set(mk, [row]);
   }
-  const groups: PushedOlderMonthGroup[] = [];
+  const groups: PushedMonthGroup[] = [];
   for (const [monthKey, rows] of byMonth) {
     rows.sort((a, b) => (b.statusUpdatedAt || '').localeCompare(a.statusUpdatedAt || ''));
     const total = rows.reduce((s, r) => s + r.amount, 0);
@@ -269,25 +266,6 @@ export function derivePushedOlderByMonth(
   }
   groups.sort((a, b) => b.monthKey.localeCompare(a.monthKey));
   return groups;
-}
-
-export function derivePushedTodayRows(
-  events: QbIngestEvent[],
-  invoicesById: Map<number, Invoice>,
-  vendorsById: Map<string, QbVendorRow>,
-  now: Date = new Date(),
-): PushedTodayRow[] {
-  const today = todayLocalDateKey(now);
-  const rows: PushedTodayRow[] = [];
-  for (const e of events) {
-    if (e.status !== 'posted') continue;
-    if (!e.statusUpdatedAt) continue;
-    if (localDateKeyOfIso(e.statusUpdatedAt) !== today) continue;
-    const row = buildPushedRow(e, invoicesById, vendorsById);
-    if (row) rows.push(row);
-  }
-  rows.sort((a, b) => (b.statusUpdatedAt || '').localeCompare(a.statusUpdatedAt || ''));
-  return rows;
 }
 
 export function useQbAutomationV2({
@@ -955,17 +933,17 @@ export function useQbAutomationV2({
 
   const readyTotal = useMemo(() => readyRows.reduce((s, r) => s + r.amount, 0), [readyRows]);
 
-  const pushedTodayRows = useMemo(
-    () => derivePushedTodayRows(events, invoicesById, vendorsById),
+  const pushedByMonth = useMemo(
+    () => derivePushedByMonth(events, invoicesById, vendorsById),
     [events, invoicesById, vendorsById],
   );
-  const pushedTodayTotal = useMemo(
-    () => pushedTodayRows.reduce((s, r) => s + r.amount, 0),
-    [pushedTodayRows],
+  const pushedCount = useMemo(
+    () => pushedByMonth.reduce((s, g) => s + g.rows.length, 0),
+    [pushedByMonth],
   );
-  const pushedOlderByMonth = useMemo(
-    () => derivePushedOlderByMonth(events, invoicesById, vendorsById),
-    [events, invoicesById, vendorsById],
+  const pushedTotal = useMemo(
+    () => pushedByMonth.reduce((s, g) => s + g.total, 0),
+    [pushedByMonth],
   );
 
   return {
@@ -974,9 +952,9 @@ export function useQbAutomationV2({
     needsMappingRows,
     needsMappingTotal,
     mappingRows,
-    pushedTodayRows,
-    pushedTodayTotal,
-    pushedOlderByMonth,
+    pushedByMonth,
+    pushedCount,
+    pushedTotal,
     payCount,
     createCount,
     payTotal,

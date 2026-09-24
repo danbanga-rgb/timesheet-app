@@ -1,4 +1,4 @@
-export type CategoryKey = 'ready' | 'needs_mapping' | 'skipped' | 'pushed_today';
+export type CategoryKey = 'ready' | 'needs_mapping' | 'skipped' | 'pushed';
 
 interface Props {
   active: CategoryKey;
@@ -8,8 +8,8 @@ interface Props {
   needsMappingCount: number;
   needsMappingTotal: number;
   skippedCount: number;
-  pushedTodayCount: number;
-  pushedTodayTotal: number;
+  pushedCount: number;
+  pushedTotal: number;
 }
 
 function fmtMoney(n: number): string {
@@ -46,7 +46,7 @@ function KpiCard(p: CardProps) {
   );
 }
 
-export default function KpiStrip({ active, onSelect, readyCount, readyTotal, needsMappingCount, needsMappingTotal, skippedCount, pushedTodayCount, pushedTodayTotal }: Props) {
+export default function KpiStrip({ active, onSelect, readyCount, readyTotal, needsMappingCount, needsMappingTotal, skippedCount, pushedCount, pushedTotal }: Props) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <KpiCard
@@ -88,17 +88,17 @@ export default function KpiStrip({ active, onSelect, readyCount, readyTotal, nee
         secondary={skippedCount === 0 ? 'session-scoped' : 'click to view'}
       />
       <KpiCard
-        active={active === 'pushed_today'}
-        disabled={pushedTodayCount === 0}
-        onClick={() => onSelect('pushed_today')}
+        active={active === 'pushed'}
+        disabled={pushedCount === 0}
+        onClick={() => onSelect('pushed')}
         headBg="bg-indigo-50"
         headText="text-indigo-700"
         numText="text-indigo-900"
         border="border-indigo-200"
         activeRing="ring-indigo-400"
-        label="Pushed today"
-        value={pushedTodayCount === 0 ? <span className="text-indigo-400">—</span> : pushedTodayCount}
-        secondary={pushedTodayCount === 0 ? 'nothing yet today' : (pushedTodayTotal > 0 ? fmtMoney(pushedTodayTotal) : 'click to view')}
+        label="Pushed"
+        value={pushedCount === 0 ? <span className="text-indigo-400">—</span> : pushedCount}
+        secondary={pushedCount === 0 ? 'nothing pushed yet' : (pushedTotal > 0 ? fmtMoney(pushedTotal) : 'click to view')}
       />
     </div>
   );

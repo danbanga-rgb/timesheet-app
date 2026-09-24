@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Invoice, QbIngestEvent } from '../../../../types';
-import type { QbOpenBillRow, QbVendorRow } from '../../../../lib/qbStateSync/types';
-import { derivePushedTodayRows, todayLocalDateKey } from '../useQbAutomationV2';
+import type { QbVendorRow } from '../../../../lib/qbStateSync/types';
+import { derivePushedByMonth, todayLocalDateKey } from '../useQbAutomationV2';
 
 function event(overrides: Partial<QbIngestEvent> = {}): QbIngestEvent {
   return {
@@ -29,7 +29,7 @@ function event(overrides: Partial<QbIngestEvent> = {}): QbIngestEvent {
     resolvedReason: null,
     reconciledAt: null,
     matchProvenance: null,
-    statusUpdatedAt: new Date().toISOString(),
+    statusUpdatedAt: '2026-09-24T09:00:00Z',
     ...overrides,
   } as QbIngestEvent;
 }
@@ -63,82 +63,71 @@ function vendor(overrides: Partial<QbVendorRow> = {}): QbVendorRow {
   } as QbVendorRow;
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────────
-
-describe('derivePushedTodayRows', () => {
+describe('derivePushedByMonth', () => {
   const invById = new Map<number, Invoice>([[42, invoice()]]);
   const venById = new Map<string, QbVendorRow>([['80000001-1', vendor()]]);
 
   it('returns empty when no events are posted', () => {
-    const rows = derivePushedTodayRows([event({ status: 'ready' })], invById, venById);
-    expect(rows).toEqual([]);
+    const groups = derivePushedByMonth([event({ status: 'ready' })], invById, venById);
+    expect(groups).toEqual([]);
   });
 
-  it('includes posted events with statusUpdatedAt today', () => {
-    const rows = derivePushedTodayRows([event()], invById, venById);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
+  it('groups a single posted event by push-month', () => {
+    const groups = derivePushedByMonth([event()], invById, venById);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].rows).toHaveLength(1);
+    expect(groups[0].rows[0]).toMatchObject({
       eventId: 1,
       contractorName: 'Anela Kaltak',
       qbVendorName: 'Anela Kaltak',
       billTxnId: 'TXN-BILL-1',
       billPmtTxnId: 'TXN-PMT-1',
       postedSource: 'v2-push',
-      amount: 2400,
     });
-  });
-
-  it('excludes posted events from a prior day', () => {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const rows = derivePushedTodayRows(
-      [event({ statusUpdatedAt: yesterday.toISOString() })],
-      invById,
-      venById,
-    );
-    expect(rows).toEqual([]);
+    expect(groups[0].total).toBe(2400);
   });
 
   it('excludes events with null statusUpdatedAt', () => {
-    const rows = derivePushedTodayRows(
+    const groups = derivePushedByMonth(
       [event({ statusUpdatedAt: null })],
       invById,
       venById,
     );
-    expect(rows).toEqual([]);
+    expect(groups).toEqual([]);
   });
 
   it('falls back to resolvedBillTxnId when postedQbRefs.bill is missing', () => {
-    const rows = derivePushedTodayRows(
+    const groups = derivePushedByMonth(
       [event({ postedQbRefs: { bill_pmt: 'TXN-PMT-2' }, resolvedBillTxnId: 'TXN-BILL-RESOLVED' })],
       invById,
       venById,
     );
-    expect(rows[0]?.billTxnId).toBe('TXN-BILL-RESOLVED');
+    expect(groups[0]?.rows[0]?.billTxnId).toBe('TXN-BILL-RESOLVED');
   });
 
-  it('sorts newest first', () => {
-    const early = event({ id: 10, statusUpdatedAt: '2026-09-23T08:00:00Z' });
-    const late = event({ id: 11, statusUpdatedAt: '2026-09-23T14:00:00Z' });
-    const now = new Date('2026-09-23T20:00:00Z');
-    const rows = derivePushedTodayRows([early, late], invById, venById, now);
-    // Both are "today" if today (local) matches 2026-09-23 — but statusUpdatedAt
-    // filter uses the browser's actual today, not the `now` arg for that check.
-    // So this test uses local-today; if run past midnight UTC in a west zone
-    // this may drift. Sort order is what we verify.
-    const ids = rows.map(r => r.eventId);
-    if (ids.length === 2) {
-      expect(ids).toEqual([11, 10]);
-    }
+  it('buckets events into multiple months, newest month first', () => {
+    const augEvent = event({ id: 10, statusUpdatedAt: '2026-08-15T12:00:00Z', amount: 100 });
+    const sepEvent = event({ id: 11, statusUpdatedAt: '2026-09-05T12:00:00Z', amount: 200 });
+    const groups = derivePushedByMonth([augEvent, sepEvent], invById, venById);
+    expect(groups.map(g => g.monthKey)).toEqual(['2026-09', '2026-08']);
+    expect(groups[0].total).toBe(200);
+    expect(groups[1].total).toBe(100);
+  });
+
+  it('sorts rows within a month newest first', () => {
+    const early = event({ id: 10, statusUpdatedAt: '2026-09-24T08:00:00Z' });
+    const late = event({ id: 11, statusUpdatedAt: '2026-09-24T14:00:00Z' });
+    const groups = derivePushedByMonth([early, late], invById, venById);
+    expect(groups[0].rows.map(r => r.eventId)).toEqual([11, 10]);
   });
 
   it('handles unmapped vendor gracefully', () => {
-    const rows = derivePushedTodayRows(
+    const groups = derivePushedByMonth(
       [event({ counterpartyQbVendorListId: null })],
       invById,
       venById,
     );
-    expect(rows[0]?.qbVendorName).toBe('(unmapped)');
+    expect(groups[0]?.rows[0]?.qbVendorName).toBe('(unmapped)');
   });
 });
 
