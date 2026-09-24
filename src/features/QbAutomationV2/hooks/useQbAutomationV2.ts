@@ -8,13 +8,13 @@ import { getEffectiveMatchedInvoiceIds, isUmbrellaEvent } from '../../../lib/qbA
 import { derivePushedRowDisplay, deriveSyntheticPushedRowDisplay } from '../../../lib/qbAutomation/pushedRowDerivation';
 import { isTestAccount } from '../../../lib/isTestAccount';
 
-// Lifted from TS.tsx:7246 — chip label per event source.
+// Lifted from TS.tsx:7246, tightened for v2 Pushed card (Inv → Bill vs V1's Invoice → Bill).
 const SOURCE_LABEL_MAP: Record<string, string> = {
   intuit_xlsx: 'Intuit',
   convera: 'Convera',
   manual: 'Manual',
-  invoice_g75: 'Invoice → Bill (Intuit)',
-  invoice_g76: 'Invoice → Bill (Convera)',
+  invoice_g75: 'Inv → Bill (Intuit)',
+  invoice_g76: 'Inv → Bill (Convera)',
 };
 export function sourceLabel(s: string): string {
   return SOURCE_LABEL_MAP[s] || s;

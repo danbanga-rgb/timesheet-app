@@ -16,10 +16,18 @@ function fmtMoney(n: number): string {
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+// Compact timestamp: "9/17 10:09a". Year is implicit from the month section
+// header ("Sep 2026"); 12h w/ lowercase am/pm shaves the widest column ~30%.
 function fmtWhen(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  const hr24 = d.getHours();
+  const min = String(d.getMinutes()).padStart(2, '0');
+  const ampm = hr24 >= 12 ? 'p' : 'a';
+  const hr = hr24 % 12 || 12;
+  return `${m}/${day} ${hr}:${min}${ampm}`;
 }
 
 // Normalize for the Counterparty vs QB Vendor equivalence check. Strips
@@ -133,8 +141,8 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                       <span className="inline-block px-1 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{r.src}</span>
                     </td>
                     <td className="px-1.5 py-1 whitespace-nowrap font-mono text-gray-600">{r.date || '—'}</td>
-                    <td className="px-1.5 py-1 truncate max-w-[180px]" title={r.counterpartyRaw}>{r.counterpartyRaw}</td>
-                    <td className="px-1.5 py-1 truncate max-w-[220px]" title={same ? undefined : r.qbVendorName}>
+                    <td className="px-1.5 py-1 truncate max-w-[195px]" title={r.counterpartyRaw}>{r.counterpartyRaw}</td>
+                    <td className="px-1.5 py-1 truncate max-w-[235px]" title={same ? undefined : r.qbVendorName}>
                       {same
                         ? <span className="text-[10px] italic text-emerald-600/80">same QB vendor</span>
                         : r.qbVendorName}

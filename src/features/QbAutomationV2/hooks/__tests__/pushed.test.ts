@@ -142,7 +142,7 @@ describe('derivePushedByMonth', () => {
     expect(row.counterpartyRaw).toBe('Rumiya Hasnutdinova');
     expect(row.qbVendorName).toBe('FLAWLESS APPS LLC');
     expect(row.memo).toBe('INV INV 500');
-    expect(row.src).toBe('Invoice → Bill (Intuit)');
+    expect(row.src).toBe('Inv → Bill (Intuit)');
     expect(row.resolvedAction).toBe('create_bill_then_pay');
     expect(row.isG75Source).toBe(true);
     expect(row.billTxnId).toBe('TXN-BILL-500');
@@ -157,7 +157,7 @@ describe('derivePushedByMonth', () => {
     } as Partial<Invoice>);
     const groups = derivePushedByMonth([], [inv], venById, billById, new Set(), new Set([inv.id]));
     const row = groups[0].rows[0];
-    expect(row.src).toBe('Invoice → Bill (Convera)');
+    expect(row.src).toBe('Inv → Bill (Convera)');
     expect(row.isG75Source).toBe(false);
   });
 
