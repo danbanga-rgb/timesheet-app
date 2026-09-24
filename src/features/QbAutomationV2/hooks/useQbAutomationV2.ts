@@ -22,7 +22,10 @@ export interface UmbrellaChildRow {
   rate: number | null;
   currency: string;
   share: number;                    // amount_share from convera_transaction_invoices, or invoice total as fallback
-  shareSource: 'convera_link' | 'invoice_total';
+  // 'convera_link' = post-wire slice pulled from convera_transaction_invoices.
+  // 'invoice_total' = post-wire slice where the link is missing → invoice total as fallback (renders * marker).
+  // 'pre_wire'      = no wire yet; invoice total is the authoritative amount (no marker).
+  shareSource: 'convera_link' | 'invoice_total' | 'pre_wire';
   qbVendorName: string;              // per-child (multi-vendor umbrellas like Bimosoft)
   qbVendorListId: string | null;
 }
@@ -507,7 +510,7 @@ export function useQbAutomationV2({
           rate: c.inv.rate ?? null,
           currency: c.inv.currency || 'USD',
           share: c.inv.totalAmount,
-          shareSource: 'invoice_total',
+          shareSource: 'pre_wire',
           qbVendorName: c.qbVendorName,
           qbVendorListId: c.qbVendorListId,
         }));
