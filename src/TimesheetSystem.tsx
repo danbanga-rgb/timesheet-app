@@ -1944,8 +1944,8 @@ const TimesheetSystem = () => {
     // final. Ignored/failed also stay out.
     const { data: rows } = await supabase
       .from('qb_ingest_events')
-      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs, match_provenance, qb_sync_job_ids')
-      .or('status.in.(pending,ready),and(status.eq.posted,posted_qb_refs->>posted_source.eq.qb_probe)')
+      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs, match_provenance, qb_sync_job_ids, raw_data')
+      .or('status.in.(pending,ready),and(status.eq.posted,posted_qb_refs->>posted_source.eq.qb_probe),and(status.eq.posted,posted_qb_refs->>posted_source.eq.push_paid_outside)')
       .not('target_qb_txn_kind', 'is', null);
 
     // Backfill invoicesById with any matched invoices we don't already have
@@ -2076,23 +2076,22 @@ const TimesheetSystem = () => {
     //     shows the bill settled (someone paid it outside our push)
     //   - 'qb_probe' — no push jobs at all; mirror discovered a pre-existing bill
     //
-    // Two link paths to check per event, because bill_add's write side
-    // differs by push origin:
+    // Three link paths to check per event, because writer-side conventions
+    // differ by push origin:
     //   1. event-driven: payload.sourceIngestEventId = event.id
-    //      (orphan bill_add; bill_pmt_add; check_add — appends to
-    //      event.qb_sync_job_ids at drain time)
+    //      (orphan bill_add; Intuit bill_pmt_add; check_add — also appends
+    //      to event.qb_sync_job_ids at drain time)
     //   2. invoice-driven: payload.sourceInvoiceIds overlaps
     //      event.matched_invoice_ids (G7.5 Intuit / G7.6 Convera create-bill;
     //      writes to invoices at drain, NOT to event.qb_sync_job_ids)
-    // Missing path #2 = missing the entire G7.5/G7.6 push fleet.
-    const allInvoiceIds = new Set<number>();
-    for (const r of (rows ?? []) as Array<{ matched_invoice_ids: number[] | null }>) {
-      for (const id of r.matched_invoice_ids ?? []) allInvoiceIds.add(id);
-    }
-    const eventIdsInBatch = (rows ?? []).map(r => (r as { id: number }).id);
-    interface PushJobHit { kind: 'bill_add' | 'bill_pmt_add' | 'check_add'; sourceIngestEventId: number | null; sourceInvoiceIds: number[] }
+    //   3. Convera wire-driven: payload.sourceConveraTxnId matches
+    //      event.raw_data.convera_transaction_id (Convera bill_pmt_add —
+    //      writes to convera_transaction_billpmts link table, never touches
+    //      the event; sourceIngestEventId is not set on Convera pay jobs)
+    // Missing any path silently drops that push fleet from the classifier.
+    interface PushJobHit { kind: 'bill_add' | 'bill_pmt_add' | 'check_add'; sourceIngestEventId: number | null; sourceInvoiceIds: number[]; sourceConveraTxnId: number | null }
     const pushJobHits: PushJobHit[] = [];
-    if (eventIdsInBatch.length > 0 || allInvoiceIds.size > 0) {
+    if ((rows?.length ?? 0) > 0) {
       const { data: jobRows } = await supabase
         .from('qb_sync_jobs')
         .select('id, kind, payload')
@@ -2102,7 +2101,8 @@ const TimesheetSystem = () => {
         const p = jr.payload ?? {};
         const evId = typeof p.sourceIngestEventId === 'number' ? p.sourceIngestEventId : null;
         const invIds = Array.isArray(p.sourceInvoiceIds) ? (p.sourceInvoiceIds as number[]).filter(n => typeof n === 'number') : [];
-        pushJobHits.push({ kind: jr.kind, sourceIngestEventId: evId, sourceInvoiceIds: invIds });
+        const ctxn = typeof p.sourceConveraTxnId === 'number' ? p.sourceConveraTxnId : (typeof p.sourceConveraTxnId === 'string' ? Number(p.sourceConveraTxnId) : null);
+        pushJobHits.push({ kind: jr.kind, sourceIngestEventId: evId, sourceInvoiceIds: invIds, sourceConveraTxnId: (ctxn != null && !Number.isNaN(ctxn)) ? ctxn : null });
       }
     }
     // Per-event: what push job kinds hit this event?
@@ -2112,11 +2112,14 @@ const TimesheetSystem = () => {
       bucket.add(kind);
       jobKindsByEventId.set(evId, bucket);
     };
-    for (const r of (rows ?? []) as Array<{ id: number; matched_invoice_ids: number[] | null }>) {
+    for (const r of (rows ?? []) as Array<{ id: number; matched_invoice_ids: number[] | null; raw_data: Record<string, unknown> | null }>) {
       const invSet = new Set<number>(r.matched_invoice_ids ?? []);
+      const rd = r.raw_data ?? {};
+      const evConveraTxn = typeof rd.convera_transaction_id === 'number' ? rd.convera_transaction_id : (typeof rd.convera_transaction_id === 'string' ? Number(rd.convera_transaction_id) : null);
       for (const hit of pushJobHits) {
-        if (hit.sourceIngestEventId === r.id) record(r.id, hit.kind);
-        else if (hit.kind === 'bill_add' && hit.sourceInvoiceIds.some(i => invSet.has(i))) record(r.id, hit.kind);
+        if (hit.sourceIngestEventId === r.id) { record(r.id, hit.kind); continue; }
+        if (hit.kind === 'bill_add' && hit.sourceInvoiceIds.some(i => invSet.has(i))) { record(r.id, hit.kind); continue; }
+        if (hit.kind === 'bill_pmt_add' && evConveraTxn != null && !Number.isNaN(evConveraTxn) && hit.sourceConveraTxnId === evConveraTxn) { record(r.id, hit.kind); continue; }
       }
     }
 
