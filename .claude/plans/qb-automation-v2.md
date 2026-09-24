@@ -17,8 +17,10 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry (as of 2026-09-24 S18 — V9.9 SHIPPED):**
-- Branch `feature/qb-automation-v2` tip `ad79da2`. Not merged to main.
+**State on entry (as of 2026-09-24 S18 EOD — Pushed classifier partially fixed, break called):**
+- Branch `feature/qb-automation-v2` tip `a44cde5`. Not merged to main.
+- **UNRESOLVED:** synthetic G7.5/G7.6 rows in Pushed card show amber "Pushed + paid outside" incorrectly. See §8 S18 EOD entry for one-line fix + resume prompt.
+- Reconciler classifier + 2 prod backfill migrations shipped. Real event labels correct (39 push / 4 manual / 1 qb_probe). Only synthetic row labelling is wrong.
 - V1–V9.9 SHIPPED (V7 SCRAPPED; V9.7 shipped-then-killed by V9.8). V8-B CLOSED.
 - **Three-bucket model locked** per [[three-bucket-lifecycle]]: Needs Mapping → Ready → Pushed. Anything else is scope creep.
 - Reconciler self-heals pp→vendor mappings on data load.
@@ -400,6 +402,50 @@ Concrete gates to flip the admin gate and delete v1:
 - `.claude/plans/accountant-modularization.md` — parent arc; Chunk 8 SUPERSEDED by this doc.
 
 ## §8. Session log
+
+**S18 EOD (2026-09-24) — BREAK CALLED (Dan frustrated). V9.9 items shipped + Pushed classifier followups partially shipped. Unresolved: synthetic row labelling still wrong.**
+
+**Remaining bug at break — Pushed card synthetic rows show "Pushed + paid outside" incorrectly.**
+
+Screenshot Dan sent at break: dozens of Convera Sep 3 rows labeled amber "Pushed + paid outside." These are the SYNTHETIC G7.5/G7.6 invoice-driven rows added by commit `4566e28`. Their label is computed at render time in `derivePushedByMonth` as:
+```
+postedSource = inv.status === 'paid' ? 'push_paid_outside' : 'push'
+```
+This is wrong per Dan's rule ([[intuit-double-booking-finding]] + earlier session dialog): "Even if we sent old payments to WU Holding and accountant corrected them to 8220, the fact is, we pushed it." We pushed the CREATE for these invoices. Accountant paying them (via Pay Bill from 8220) doesn't demote the label — WE still pushed.
+
+Two possible fixes for next session (pick one, don't do both):
+1. **Always label synthetic G7.5/G7.6 rows as `push`.** Simplest — drop the `inv.status === 'paid'` check. Rationale: synthetic rows ARE our create-bill push per definition (they only exist because we drained bill_add). Payment status is orthogonal and already captured by the real event row if present.
+2. **Dedupe synthetic rows against real posted events.** V1 concats without dedup, but V1 has no chip labels so the duplication is invisible. V2 with chips makes the duplication visible + confusing. Adding dedup means V2 count would drop below V1 (violating [[match-v1-during-coexistence]]) — probably NOT the right call.
+
+Recommend fix #1. Ship as one small commit, then re-verify against V1 screenshot.
+
+**Also open (lower priority):** the 4 Intuit `manual_accept_fuzzy` rows show as "Manual." Those are duplicates in the ingest stream where accountant fuzzy-matched an existing QB bill. Labeling is technically correct but Dan initially expected them to say "Pushed" — worth confirming his acceptance in a follow-up sentence, not a code change. Same for the 1 remaining `qb_probe` (Fix-It Sep 15 wire not yet pushed).
+
+**Prod state at break (safe):**
+- Reconciler classifier + 2 backfill migrations shipped. posted_source distribution now: 39 push / 4 manual_accept_fuzzy / 1 qb_probe / 0 push_paid_outside. Correct.
+- Branch tip `a44cde5`. Backfills 20260924000000 + 20260924000001 applied to prod via Supabase Management API.
+- V2 Pushed card shows 103 rows matching V1's 103. Numbers match. Only chip labeling on synthetic rows is wrong.
+- Push queue still HELD through V12. None of the S18 EOD work fires new pushes.
+
+**Cold-start resume prompt for next session** (paste as first message):
+```
+Resume QB Automation v2 arc — fix synthetic-row chip labelling.
+
+Read .claude/plans/qb-automation-v2.md §8 latest entry (S18 EOD). Confirm
+branch `feature/qb-automation-v2`, tip `a44cde5`. Push queue still HELD
+through V12; do NOT push anything live.
+
+One-line fix: in src/features/QbAutomationV2/hooks/useQbAutomationV2.ts
+derivePushedByMonth, synthetic G7.5/G7.6 rows unconditionally set
+postedSource = 'push'. Drop the inv.status === 'paid' check — WE pushed
+the create; payment status is orthogonal (Dan's [[intuit-double-booking-
+finding]] rule).
+
+Update the "marks G7.5/G7.6 rows as push_paid_outside when invoice is paid"
+test to assert 'push' instead. Small commit. Push preview. Verify against
+V1 screenshot: all 103 rows should show either "Pushed" (green) or "Manual"
+(slate). ZERO amber "Pushed + paid outside" for the current data.
+```
 
 **S18 (2026-09-24, morning) — V9.9 SHIPPED (5 items, 5 commits `c840f73` → `ad79da2`).**
 - Item 1 (`c840f73`) — drop `*` marker on pre-wire umbrella children. Widened `UmbrellaChildRow.shareSource` union with `'pre_wire'`; loose-invoice group branch uses it. Render sites already gate on `=== 'invoice_total'`, so no card changes needed.
