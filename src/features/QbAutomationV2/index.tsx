@@ -7,6 +7,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import QbPushStatusPane from '../../components/QbPushStatusPane';
 import { cancelPushJobs } from '../../lib/qbAutomation/cancelPushJobs';
 import { useQbAutomationV2, type FailedPushJob, type ReadyRow } from './hooks/useQbAutomationV2';
+import { useQbSyncState, useQbAutoRefresh } from './hooks/useQbSyncState';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
 import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingCard';
@@ -14,6 +15,8 @@ import PushBar from './sections/PushBar';
 import VendorMappingSubTab from './sections/VendorMappingSubTab';
 import PushPreviewModal from './sections/PushPreviewModal';
 import PushedCard from './sections/PushedCard';
+import HeaderPills from './sections/HeaderPills';
+import PendingJobsInspector, { type PendingJobRow } from './sections/PendingJobsInspector';
 
 export interface PushRowsArgs {
   eventIds: number[];
@@ -76,6 +79,13 @@ export interface QbAutomationV2Props {
    *  Pushed card needs them as synthetic rows to match V1's count. */
   g75PostedInvoiceIds?: Set<number>;
   g76PostedInvoiceIds?: Set<number>;
+  /** V10: sync surface + freshness pills. */
+  qbWcLastSeen: string | null;                    // MAX(qb_wc_sessions.last_seen_at)
+  vendorsLastQueriedAt: string | null;            // MAX(queried_at) on qb_mirror vendors
+  qbBillQueryPending: number;                     // count of pending/in_flight bill_query jobs
+  qbVendorQueryPending: number;                   // count of pending/in_flight vendor_query jobs
+  pendingJobs: PendingJobRow[];                   // all pending/in_flight qb_sync_jobs — feeds inspector
+  onSyncMirror: () => Promise<void>;              // enqueue bill_query for mapped vendors
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -112,11 +122,38 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   const [pushing, setPushing] = useState(false);
   const [showPostPushHint, setShowPostPushHint] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [pendingInspectorOpen, setPendingInspectorOpen] = useState(false);
 
   useEffect(() => {
     const unsubscribe = props.onMappingChangeSubscribe(() => {});
     return unsubscribe;
   }, [props.onMappingChangeSubscribe]);
+
+  const { mirror, vendors, qbwc } = useQbSyncState({
+    openBills: props.openBills,
+    vendorsLastQueriedAt: props.vendorsLastQueriedAt,
+    qbWcLastSeen: props.qbWcLastSeen,
+    qbBillQueryPending: props.qbBillQueryPending,
+    qbVendorQueryPending: props.qbVendorQueryPending,
+  });
+
+  useQbAutoRefresh({
+    onSyncMirror: props.onSyncMirror,
+    onSyncVendors: props.onSyncVendors,
+    mirrorPendingCount: mirror.pendingCount,
+    vendorsPendingCount: vendors.pendingCount,
+    mirrorStatus: mirror.status,
+    vendorsStatus: vendors.status,
+  });
+
+  const handleMirrorPillClick = () => {
+    if (mirror.pendingCount > 0) setPendingInspectorOpen(true);
+    else void props.onSyncMirror().catch(e => alert('Sync mirror failed: ' + (e instanceof Error ? e.message : String(e))));
+  };
+  const handleVendorsPillClick = () => {
+    if (vendors.pendingCount > 0) setPendingInspectorOpen(true);
+    else void props.onSyncVendors().catch(e => alert('Sync vendors failed: ' + (e instanceof Error ? e.message : String(e))));
+  };
 
   const selectedRows = useMemo(
     () => readyRows.filter(r => selectedKeys.has(r.rowKey)),
@@ -185,7 +222,15 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-800">QB Automation v2</h2>
-            <p className="text-xs text-gray-500">Admin preview · Slice V8 (push flow + preview)</p>
+            <div className="mt-0.5">
+              <HeaderPills
+                mirror={mirror}
+                vendors={vendors}
+                qbwc={qbwc}
+                onMirrorClick={handleMirrorPillClick}
+                onVendorsClick={handleVendorsPillClick}
+              />
+            </div>
           </div>
         </div>
         {subTab === 'inbox' && <PushBar count={selectionCount} total={selectionTotal} onPush={handlePushSelected} />}
@@ -331,6 +376,10 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           onCancel={() => setPreviewOpen(false)}
           onConfirm={handleConfirmPush}
         />
+      )}
+
+      {pendingInspectorOpen && (
+        <PendingJobsInspector jobs={props.pendingJobs} onClose={() => setPendingInspectorOpen(false)} />
       )}
     </div>
   );
