@@ -403,6 +403,39 @@ Concrete gates to flip the admin gate and delete v1:
 
 ## §8. Session log
 
+**S19 (2026-09-24, afternoon) — Pushed card rebuilt on V1's columns. SHIPPED `27702f4`.**
+
+Two commits earlier in session (`dcf0da4` synthetic-row label fix, `856b3ca` shared derivation lib for Action + Match chips) were incremental wins on the wrong path. Dan pushed back midway: the Pushed card was showing invoice-derived fields (Contractor, Period, Inv # from `matched_invoice_ids[0]`) as if authoritative — misleading on fuzzy matches. Rumiya's row read "INV 11 | paid: Inv# 09" because the reconciler had fuzzy-matched event 88 (memo "Inv# 09") to invoice 181 (INV 11) via amount+vendor+date.
+
+Investigation via probe (`/tmp/probe-rumiya*.mjs`) confirmed:
+- `posted_source='manual_accept_fuzzy'` — accountant paid Inv# 09 in QB pre-cutover; we didn't push anything
+- Our INV 09 (invoice id 25) is `matcher_ignore=true`, so fuzzy matcher fell through to INV 11 (next-closest $9,625 approved invoice)
+- We did NOTHING WRONG. The DB is correct; the UI was rendering fuzzily-matched invoice fields as if they were source-of-truth.
+
+Rebuild scope (`e8fce68`):
+- `PushedRow` reshape — dropped `contractorName`, `invoiceNumber`, `monthKey`, `monthLabel`, `matchProvenance`. Added `src`, `date` (event txnDate), `counterpartyRaw`, `memo`. Row reads event fields directly, never substitutes invoice fields.
+- 8 columns matching V1's Already Posted (TS.tsx:8599-8611) minus Provenance: **Src | Date | Counterparty | QB Vendor | Amount | Memo | Action | Posted at**
+- `text-[11px]` + `px-1.5` + zebra rows + subtle column dividers for single-tight-row scan density
+- QB Vendor cell renders `same QB vendor` italic muted-green when Counterparty ≈ QB Vendor (Intuit passthrough case, ~18% of rows)
+- Synthetic G7.5/G7.6 follow V1's synth pattern (TS.tsx:7461-7488): construct event-shaped fields so real + synthetic pushes share one render path
+- Ellipsis truncation on Counterparty (195px) / QB Vendor (235px) / Memo (150px) with hover tooltip for full text
+
+Follow-up nits (`27702f4`):
+- Posted at "Sep 17 at 10:09 AM" → "9/17 10:09a" (year implicit in month header)
+- Src labels "Invoice → Bill (X)" → "Inv → Bill (X)"
+- Freed width redistributed to Counterparty/QB Vendor
+
+**Meta lesson (session): V1's Already Posted column choices were correct all along. Two prior commits (`dcf0da4`, `856b3ca`) tried to preserve the wrong shape (invoice-derived fields + Provenance column). Dan called it out three times before I stopped reinventing. New guardrail memory: [[pushed-row-event-not-invoice]].**
+
+**Prod state at S19 close (safe):**
+- Branch tip `27702f4`. Not merged to main. Push queue still HELD through V12.
+- V2 Pushed count: 103 rows / $655,863 — matches V1 exactly.
+- No new migrations. No pushes fired.
+
+**Also open (deferred, low priority):** Rumiya fuzzy row 88 exposed a real reconciler quirk — when a memo names an invoice that's `matcher_ignore=true`, fuzzy falls through to the next amount-match. Not a data integrity bug (posted_source='manual_accept_fuzzy' correctly flags accountant-side), but a matcher improvement candidate. Not scoped here.
+
+---
+
 **S18 EOD (2026-09-24) — BREAK CALLED (Dan frustrated). V9.9 items shipped + Pushed classifier followups partially shipped. Unresolved: synthetic row labelling still wrong.**
 
 **Remaining bug at break — Pushed card synthetic rows show "Pushed + paid outside" incorrectly.**
