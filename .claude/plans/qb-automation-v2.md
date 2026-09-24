@@ -17,19 +17,18 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry (as of 2026-09-23 S17 EOD break):**
-- Branch `feature/qb-automation-v2` tip `8746b2d`. Not merged to main.
-- V1–V9.8 SHIPPED (V7 SCRAPPED; V9.7 shipped-then-killed by V9.8). V8-B CLOSED.
+**State on entry (as of 2026-09-24 S18 — V9.9 SHIPPED):**
+- Branch `feature/qb-automation-v2` tip `ad79da2`. Not merged to main.
+- V1–V9.9 SHIPPED (V7 SCRAPPED; V9.7 shipped-then-killed by V9.8). V8-B CLOSED.
 - **Three-bucket model locked** per [[three-bucket-lifecycle]]: Needs Mapping → Ready → Pushed. Anything else is scope creep.
 - Reconciler self-heals pp→vendor mappings on data load.
-- Two S17-morning hotfixes (#13, #14) merged to main and back-merged into v2.
-- Next up: **V9.9** (5 items — see V9.9 scope in §8 log). Then **V9.10** (Add Columns). Then **V10** (Sync surface + freshness pills).
+- V9.9 adds: pre-wire `*`-marker suppressed; Inv # column in Ready; persistent Skip via `invoices.qb_export_status`; Pushed history month-grouping; failed-push red pill on Ready with popover + Retry.
+- Next up: **V9.10** (Add Columns dropdown). Then **V10** (Sync surface + freshness pills).
 - v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
-- **⚠ V8 fires REAL QB pushes on Confirm.** The Preview modal is safe (no writes) but Confirm is not. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
+- **⚠ V8 fires REAL QB pushes on Confirm.** V9.9 Retry button also routes through `onPushRows`. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
 - v1 QB Automation tab is FROZEN — do not touch its render surface.
 - Chunk 8 in `.claude/plans/accountant-modularization.md` is SUPERSEDED.
 - Modularization arc is PAUSED. Do not resume Chunk 9/10/Phase 6 slices unless Dan asks.
-- Next planned slice: **V8-B item 4 (cancellation on QbPushStatusPane).** See §9 V8-B entry for scope + design questions to resolve before coding.
 
 **Do NOT:**
 - Ask Dan clarifying questions until he signals "ready" or dumps directionality. He said "let me think and give you some directionality and then you start asking questions" (2026-09-18).
@@ -401,6 +400,16 @@ Concrete gates to flip the admin gate and delete v1:
 - `.claude/plans/accountant-modularization.md` — parent arc; Chunk 8 SUPERSEDED by this doc.
 
 ## §8. Session log
+
+**S18 (2026-09-24, morning) — V9.9 SHIPPED (5 items, 5 commits `c840f73` → `ad79da2`).**
+- Item 1 (`c840f73`) — drop `*` marker on pre-wire umbrella children. Widened `UmbrellaChildRow.shareSource` union with `'pre_wire'`; loose-invoice group branch uses it. Render sites already gate on `=== 'invoice_total'`, so no card changes needed.
+- Item 2 (`833b469`) — dedicated **Inv #** column in Ready between Period and QB Vendor. Solo rows show `inv.invoiceNumber`; group parents show em-dash; child rows keep the number in the new column instead of borrowing the Period slot. New `'inv'` SortKey with numeric-aware string sort. Header + parent + child cells preserved at 10 columns.
+- Item 3 (`b5d20f3`) — persistent Skip via `invoices.qb_export_status='skipped'`. Session-local `skippedKeys` was a regression from v1 (forgotten on reload). Hook derives `skippedInvoiceIds` from `invoices`; a row is skipped iff every underlying invoice is skipped. `skip/unskip` become async and call new `onSaveInvoiceExportStatus` prop wired to v1's `saveInvoiceExportStatus` wrapper.
+- Item 4 (`91d0bbd`) — Pushed history month-grouping. New `derivePushedOlderByMonth` pure fn + `buildPushedRow` helper (DRYs today/older paths). `PushedTodayCard` gains an "Older" section under the today table, one collapsible row per local push-month, sorted newest-first.
+- Item 5 (`ad79da2`) — failed-push badge on Ready. New `FailedPushJob` type; `ReadyRow.lastFailedPush`. Hook indexes by source event/invoice, taking the most recent per source. Red pill next to verdict opens a popover with job id, kind, timestamp, error message, and a Retry button. Retry re-enqueues via `onPushRows` for just this row's IDs (bypasses preview modal) then reloads the inbox. TS.tsx loads recent failed jobs (last 30d, capped 200) alongside events.
+- **Push queue still HELD through V12.** Retry re-enqueues through the same `onPushRows` contract; nothing new is live-pushed by V9.9.
+- Tests: 69/69 pass. `npm run build` clean. Preview: [preview URL from S17].
+- Next: V9.10 (Add Columns dropdown) — deferred per S17 log. Then V10 (Sync surface + freshness pills).
 
 **S17 EOD (2026-09-23) — V9.5c/d, V9.6/b, V9.7 (killed by V9.8), V9.8 shipped. Break called.**
 
