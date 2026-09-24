@@ -22,14 +22,20 @@ function fmtWhen(iso: string): string {
 }
 
 // posted_source taxonomy → user-facing chip. Pushed by definition only
-// contains status='posted' rows, so the split is binary: our push vs a
-// human update in QB (mirror sync discovered it, or accountant matched
-// an existing bill via reconcile UI).
-function inQbChip(postedSource: string | null) {
-  const isPushed = postedSource === 'push';
-  return isPushed
-    ? <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">In QB (pushed)</span>
-    : <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 border border-slate-200">In QB (manual)</span>;
+// contains status='posted' rows. Three variants:
+//  - 'push'                → Pushed (we did everything)
+//  - 'push_paid_outside'   → Pushed + paid outside (we created the bill,
+//                            payment came from a source we didn't push)
+//  - anything else         → Manual (accountant did it in QB;
+//                            includes 'qb_probe', 'manual_accept_fuzzy', null)
+function sourceChip(postedSource: string | null) {
+  if (postedSource === 'push') {
+    return <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">Pushed</span>;
+  }
+  if (postedSource === 'push_paid_outside') {
+    return <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-200" title="We created the bill; payment came from outside our push queue">Pushed + paid outside</span>;
+  }
+  return <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 border border-slate-200">Manual</span>;
 }
 
 function useSortedRows(rows: PushedRow[], sortKey: SortKey, sortDir: SortDir): PushedRow[] {
@@ -105,7 +111,7 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('total')}>
                   Total{sortArrow('total')}
                 </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600">In QB</th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600">Source</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -119,7 +125,7 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                   <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
                     {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
                   </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">{inQbChip(r.postedSource)}</td>
+                  <td className="px-2 py-1.5 whitespace-nowrap">{sourceChip(r.postedSource)}</td>
                 </tr>
               ))}
             </tbody>

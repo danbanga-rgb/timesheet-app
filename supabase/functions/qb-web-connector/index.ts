@@ -695,7 +695,7 @@ async function persistJobResponse(
     }
     const existingRefs = (existing as { posted_qb_refs?: Record<string, unknown> } | null)?.posted_qb_refs ?? {};
     const existingJobIds = (existing as { qb_sync_job_ids?: number[] } | null)?.qb_sync_job_ids ?? [];
-    const nextRefs = { ...existingRefs, check: parsed.result.txnId };
+    const nextRefs = { ...existingRefs, check: parsed.result.txnId, posted_source: 'push' };
     const nextJobIds = existingJobIds.includes(job.id) ? existingJobIds : [...existingJobIds, job.id];
     const { error: updErr } = await supabase
       .from('qb_ingest_events')

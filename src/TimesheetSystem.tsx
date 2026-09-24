@@ -1944,7 +1944,7 @@ const TimesheetSystem = () => {
     // final. Ignored/failed also stay out.
     const { data: rows } = await supabase
       .from('qb_ingest_events')
-      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs, match_provenance')
+      .select('id, counterparty_raw, memo, amount, txn_date, counterparty_qb_vendor_list_id, target_qb_txn_kind, matched_invoice_ids, status, resolved_action, resolved_bill_txn_id, resolved_payment_txn_id, resolved_reason, posted_qb_refs, match_provenance, qb_sync_job_ids')
       .or('status.in.(pending,ready),and(status.eq.posted,posted_qb_refs->>posted_source.eq.qb_probe)')
       .not('target_qb_txn_kind', 'is', null);
 
@@ -2068,6 +2068,31 @@ const TimesheetSystem = () => {
         reason: `Convera umbrella: all ${total} sub-vendor bills exist in QB, none settled — ready for BillPmt push`,
       }};
     });
+    // ─── Push-history lookup for posted_source classification ────────────────
+    // A row that gets auto-closed to posted is either:
+    //   - 'push' — we drained a bill_pmt_add / check_add, or drained a bill_add
+    //     and mirror shows the bill still unpaid (create-only intent matched)
+    //   - 'push_paid_outside' — we drained a bill_add (create-only), mirror
+    //     shows the bill settled (someone paid it outside our push)
+    //   - 'qb_probe' — no push jobs at all; mirror discovered a pre-existing bill
+    // See the reconciler decision block below for the mapping.
+    const allEventJobIds = new Set<number>();
+    for (const r of (rows ?? []) as Array<{ qb_sync_job_ids: number[] | null }>) {
+      for (const id of r.qb_sync_job_ids ?? []) allEventJobIds.add(id);
+    }
+    const jobKindsById = new Map<number, string>();
+    if (allEventJobIds.size > 0) {
+      const { data: jobRows } = await supabase
+        .from('qb_sync_jobs')
+        .select('id, kind')
+        .in('id', Array.from(allEventJobIds))
+        .eq('status', 'done')
+        .in('kind', ['bill_add', 'bill_pmt_add', 'check_add']);
+      for (const jr of (jobRows ?? []) as Array<{ id: number; kind: string }>) {
+        jobKindsById.set(jr.id, jr.kind);
+      }
+    }
+
     const nowIso = new Date().toISOString();
     let reconciled = 0;
     // We track events whose action becomes 'already_done' so we can also flip
@@ -2148,12 +2173,27 @@ const TimesheetSystem = () => {
         && ((currentRow?.posted_qb_refs as Record<string, unknown> | null)?.posted_source === 'qb_probe');
       const autoCloseEligible = result.action === 'already_done' && nextProvenance === 'exact-txn';
       if (autoCloseEligible && event.status !== 'posted') {
+        // Decide posted_source from push job history + mirror settlement.
+        // Signal is authoritative (job existence) rather than trusting the
+        // edge fn to have written posted_source consistently across all
+        // push paths (Convera bill_pmt_add writes to link table, not events).
+        const evJobIds = (currentRow?.qb_sync_job_ids as number[] | null) ?? [];
+        const evJobKinds = evJobIds.map(id => jobKindsById.get(id)).filter((k): k is string => !!k);
+        const hasPayJob = evJobKinds.some(k => k === 'bill_pmt_add' || k === 'check_add');
+        const hasCreateJob = evJobKinds.some(k => k === 'bill_add');
+        let postedSource: 'push' | 'push_paid_outside' | 'qb_probe' = 'qb_probe';
+        if (hasPayJob) {
+          postedSource = 'push';
+        } else if (hasCreateJob) {
+          const mirrorBill = nextBillTxnId ? billsByTxnId.get(nextBillTxnId) : null;
+          postedSource = mirrorBill?.isPaid ? 'push_paid_outside' : 'push';
+        }
         patch.status = 'posted';
         patch.status_updated_at = nowIso;
         patch.posted_qb_refs = {
           bill_txn_id: nextBillTxnId,
           payment_txn_id: nextPaymentTxnId,
-          posted_source: 'qb_probe',
+          posted_source: postedSource,
         };
       } else if (!autoCloseEligible && wasQbProbePosted) {
         // Auto-close was wrong (action changed OR provenance no longer
