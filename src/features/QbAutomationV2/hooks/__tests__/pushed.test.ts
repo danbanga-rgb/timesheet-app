@@ -167,7 +167,10 @@ describe('derivePushedByMonth', () => {
     expect(groups[0].rows[0].postedSource).toBe('push_paid_outside');
   });
 
-  it('does not double-count synthetic G7.5 rows when a posted event covers them', () => {
+  it('does NOT dedupe synthetic G7.5 rows against covering events (matches V1 count)', () => {
+    // V1's Already-posted bucket concatenates without dedup — we mirror
+    // that here so V2's Pushed count equals V1's exactly. Fix at V12
+    // cutover, not per surface.
     const inv: Invoice = invoice({ id: 502, qbBillTxnId: 'TXN-BILL-502', qbExportStatusAt: '2026-09-20T10:00:00Z' } as Partial<Invoice>);
     const coveringEvent = event({ id: 42, matchedInvoiceIds: [inv.id], statusUpdatedAt: '2026-09-20T10:00:00Z' });
     const groups = derivePushedByMonth(
@@ -178,8 +181,7 @@ describe('derivePushedByMonth', () => {
       new Set([inv.id]),
       new Set(),
     );
-    // Only the real event's row (id 42), not a synthetic negative-id row.
-    expect(groups[0].rows.map(r => r.eventId)).toEqual([42]);
+    expect(groups[0].rows.map(r => r.eventId).sort()).toEqual([-502, 42]);
   });
 });
 

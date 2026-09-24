@@ -275,14 +275,17 @@ export function derivePushedByMonth(
     else byMonth.set(mk, [row]);
   }
   // Synthetic G7.5/G7.6 rows (invoice-driven create-bill pushes).
+  // Deliberate: does NOT dedupe against events with matched_invoice_ids
+  // overlap. V1's "Already posted" bucket also concatenates without
+  // dedup (TS.tsx:7449+), so matching V1's count 1:1 requires the
+  // same behavior. Small number of rows may appear twice — once as
+  // the real posted event, once as the synthetic invoice-driven push.
+  // Will fix in V1+V2 simultaneously at V12 cutover.
   for (const inv of invoices) {
     const isG75 = g75PostedInvoiceIds.has(inv.id);
     const isG76 = g76PostedInvoiceIds.has(inv.id);
     if (!isG75 && !isG76) continue;
     if (!inv.qbBillTxnId) continue;
-    // Skip if a real event already covers this invoice (avoid double-count).
-    const alreadyCovered = events.some(e => e.status === 'posted' && (e.matchedInvoiceIds ?? []).includes(inv.id));
-    if (alreadyCovered) continue;
     const when = inv.qbExportStatusAt ?? inv.periodEnd ?? '';
     if (!when) continue;
     const mk = localMonthKeyOfIso(when) || (inv.periodEnd?.slice(0, 7) ?? '');
