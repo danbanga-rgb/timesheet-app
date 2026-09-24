@@ -290,11 +290,12 @@ export function derivePushedByMonth(
     if (!when) continue;
     const mk = localMonthKeyOfIso(when) || (inv.periodEnd?.slice(0, 7) ?? '');
     if (!mk) continue;
-    // Posted source: we pushed the create. If the invoice is paid in our
-    // system OR (proxied) the bill is settled → push_paid_outside.
-    // Otherwise → push. (No mirror map here; invoice.status='paid' is a
-    // strong proxy since QB payment flows back through import.)
-    const postedSource = inv.status === 'paid' ? 'push_paid_outside' : 'push';
+    // Synthetic rows are, by definition, our create pushes — WE pushed the
+    // bill, so label is always 'push' regardless of what the accountant did
+    // on the payment side. push_paid_outside is only meaningful for real
+    // events where the reconciler proves we created but did NOT push a
+    // payment that mirror shows exists. See [[intuit-double-booking-finding]].
+    const postedSource = 'push';
     const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
     const monthLabel = monthLabelFromKey(monthKey);
     const row: PushedRow = {

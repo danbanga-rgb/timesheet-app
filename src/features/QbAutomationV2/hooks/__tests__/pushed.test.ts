@@ -154,7 +154,7 @@ describe('derivePushedByMonth', () => {
     expect(groups[0].rows[0].postedSource).toBe('push');
   });
 
-  it('marks G7.5/G7.6 rows as push_paid_outside when invoice is paid', () => {
+  it('always marks synthetic G7.5/G7.6 rows as push', () => {
     const inv: Invoice = invoice({ id: 501, invoiceNumber: 'INV 501', qbBillTxnId: 'TXN-BILL-501', qbExportStatusAt: '2026-09-20T10:00:00Z', status: 'paid' } as Partial<Invoice>);
     const groups = derivePushedByMonth(
       [],
@@ -164,7 +164,7 @@ describe('derivePushedByMonth', () => {
       new Set(),
       new Set([inv.id]),
     );
-    expect(groups[0].rows[0].postedSource).toBe('push_paid_outside');
+    expect(groups[0].rows[0].postedSource).toBe('push');
   });
 
   it('does NOT dedupe synthetic G7.5 rows against covering events (matches V1 count)', () => {
