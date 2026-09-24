@@ -29,7 +29,7 @@ interface Props {
   createTotal: number;
 }
 
-type SortKey = 'contractor' | 'period' | 'vendor' | 'hrs' | 'rate' | 'total' | 'status';
+type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'hrs' | 'rate' | 'total' | 'status';
 type SortDir = 'asc' | 'desc';
 
 const verdictOrder: Record<Verdict, number> = {
@@ -130,6 +130,7 @@ export default function ReadyCard(props: Props) {
       switch (sortKey) {
         case 'contractor': return a.contractorName.localeCompare(b.contractorName) * dir;
         case 'period':     return (a.monthKey || '').localeCompare(b.monthKey || '') * dir;
+        case 'inv':        return (a.invoiceNumber || '').localeCompare(b.invoiceNumber || '', undefined, { numeric: true }) * dir;
         case 'vendor':     return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
         case 'hrs':        return ((a.hours ?? -1) - (b.hours ?? -1)) * dir;
         case 'rate':       return ((a.rate ?? -1) - (b.rate ?? -1)) * dir;
@@ -198,6 +199,9 @@ export default function ReadyCard(props: Props) {
                 </th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('period')}>
                   Period{sortArrow('period')}
+                </th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('inv')}>
+                  Inv #{sortArrow('inv')}
                 </th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('vendor')}>
                   QB Vendor{sortArrow('vendor')}
@@ -268,6 +272,9 @@ export default function ReadyCard(props: Props) {
                         )}
                       </td>
                       <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
+                      <td className="px-2 py-1.5 whitespace-nowrap font-mono text-gray-600">
+                        {isGroup ? '—' : (r.invoiceNumber || '—')}
+                      </td>
                       <td className="px-2 py-1.5" style={{ minWidth: 260 }}>
                         {isGroup ? (
                           <span className="text-gray-700">
@@ -323,7 +330,8 @@ export default function ReadyCard(props: Props) {
                       <tr key={`${r.rowKey}-child-${c.invoiceId}`} className="bg-teal-50/20 text-xs text-gray-700">
                         <td className="px-2 py-1"></td>
                         <td className="px-2 py-1 pl-8 whitespace-nowrap italic">{c.contractorName}</td>
-                        <td className="px-2 py-1 text-gray-500 font-mono">{c.invoiceNumber}</td>
+                        <td className="px-2 py-1"></td>
+                        <td className="px-2 py-1 text-gray-500 font-mono whitespace-nowrap">{c.invoiceNumber}</td>
                         <td className="px-2 py-1">{c.qbVendorName}</td>
                         <td className="px-2 py-1 text-right font-mono">{c.hours ?? '—'}</td>
                         <td className="px-2 py-1 text-right font-mono">{c.rate != null ? `$${c.rate}` : '—'}</td>
