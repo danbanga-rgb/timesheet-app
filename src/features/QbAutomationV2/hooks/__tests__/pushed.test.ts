@@ -68,12 +68,12 @@ describe('derivePushedByMonth', () => {
   const venById = new Map<string, QbVendorRow>([['80000001-1', vendor()]]);
 
   it('returns empty when no events are posted', () => {
-    const groups = derivePushedByMonth([event({ status: 'ready' })], invById, venById);
+    const groups = derivePushedByMonth([event({ status: 'ready' })], [], invById, venById, new Set(), new Set());
     expect(groups).toEqual([]);
   });
 
   it('groups a single posted event by push-month', () => {
-    const groups = derivePushedByMonth([event()], invById, venById);
+    const groups = derivePushedByMonth([event()], [], invById, venById, new Set(), new Set());
     expect(groups).toHaveLength(1);
     expect(groups[0].rows).toHaveLength(1);
     expect(groups[0].rows[0]).toMatchObject({
@@ -90,8 +90,11 @@ describe('derivePushedByMonth', () => {
   it('excludes events with null statusUpdatedAt', () => {
     const groups = derivePushedByMonth(
       [event({ statusUpdatedAt: null })],
+      [],
       invById,
       venById,
+      new Set(),
+      new Set(),
     );
     expect(groups).toEqual([]);
   });
@@ -99,8 +102,11 @@ describe('derivePushedByMonth', () => {
   it('falls back to resolvedBillTxnId when postedQbRefs.bill is missing', () => {
     const groups = derivePushedByMonth(
       [event({ postedQbRefs: { bill_pmt: 'TXN-PMT-2' }, resolvedBillTxnId: 'TXN-BILL-RESOLVED' })],
+      [],
       invById,
       venById,
+      new Set(),
+      new Set(),
     );
     expect(groups[0]?.rows[0]?.billTxnId).toBe('TXN-BILL-RESOLVED');
   });
@@ -108,7 +114,7 @@ describe('derivePushedByMonth', () => {
   it('buckets events into multiple months, newest month first', () => {
     const augEvent = event({ id: 10, statusUpdatedAt: '2026-08-15T12:00:00Z', amount: 100 });
     const sepEvent = event({ id: 11, statusUpdatedAt: '2026-09-05T12:00:00Z', amount: 200 });
-    const groups = derivePushedByMonth([augEvent, sepEvent], invById, venById);
+    const groups = derivePushedByMonth([augEvent, sepEvent], [], invById, venById, new Set(), new Set());
     expect(groups.map(g => g.monthKey)).toEqual(['2026-09', '2026-08']);
     expect(groups[0].total).toBe(200);
     expect(groups[1].total).toBe(100);
@@ -117,17 +123,63 @@ describe('derivePushedByMonth', () => {
   it('sorts rows within a month newest first', () => {
     const early = event({ id: 10, statusUpdatedAt: '2026-09-24T08:00:00Z' });
     const late = event({ id: 11, statusUpdatedAt: '2026-09-24T14:00:00Z' });
-    const groups = derivePushedByMonth([early, late], invById, venById);
+    const groups = derivePushedByMonth([early, late], [], invById, venById, new Set(), new Set());
     expect(groups[0].rows.map(r => r.eventId)).toEqual([11, 10]);
   });
 
   it('handles unmapped vendor gracefully', () => {
     const groups = derivePushedByMonth(
       [event({ counterpartyQbVendorListId: null })],
+      [],
       invById,
       venById,
+      new Set(),
+      new Set(),
     );
     expect(groups[0]?.rows[0]?.qbVendorName).toBe('(unmapped)');
+  });
+
+  it('includes synthetic G7.5/G7.6 rows from invoice sets', () => {
+    const inv: Invoice = invoice({ id: 500, invoiceNumber: 'INV 500', qbBillTxnId: 'TXN-BILL-500', qbExportStatusAt: '2026-09-20T10:00:00Z' } as Partial<Invoice>);
+    const groups = derivePushedByMonth(
+      [],
+      [inv],
+      new Map([[inv.id, inv]]),
+      venById,
+      new Set([inv.id]),
+      new Set(),
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0].rows[0].billTxnId).toBe('TXN-BILL-500');
+    expect(groups[0].rows[0].postedSource).toBe('push');
+  });
+
+  it('marks G7.5/G7.6 rows as push_paid_outside when invoice is paid', () => {
+    const inv: Invoice = invoice({ id: 501, invoiceNumber: 'INV 501', qbBillTxnId: 'TXN-BILL-501', qbExportStatusAt: '2026-09-20T10:00:00Z', status: 'paid' } as Partial<Invoice>);
+    const groups = derivePushedByMonth(
+      [],
+      [inv],
+      new Map([[inv.id, inv]]),
+      venById,
+      new Set(),
+      new Set([inv.id]),
+    );
+    expect(groups[0].rows[0].postedSource).toBe('push_paid_outside');
+  });
+
+  it('does not double-count synthetic G7.5 rows when a posted event covers them', () => {
+    const inv: Invoice = invoice({ id: 502, qbBillTxnId: 'TXN-BILL-502', qbExportStatusAt: '2026-09-20T10:00:00Z' } as Partial<Invoice>);
+    const coveringEvent = event({ id: 42, matchedInvoiceIds: [inv.id], statusUpdatedAt: '2026-09-20T10:00:00Z' });
+    const groups = derivePushedByMonth(
+      [coveringEvent],
+      [inv],
+      new Map([[inv.id, inv]]),
+      venById,
+      new Set([inv.id]),
+      new Set(),
+    );
+    // Only the real event's row (id 42), not a synthetic negative-id row.
+    expect(groups[0].rows.map(r => r.eventId)).toEqual([42]);
   });
 });
 

@@ -71,6 +71,11 @@ export interface QbAutomationV2Props {
    *  back to Ready rows via payload.sourceIngestEventId /
    *  payload.sourceInvoiceId. Loaded once by the parent. */
   failedPushJobs?: FailedPushJob[];
+  /** V9.9 followup 2026-09-24: invoice IDs of G7.5/G7.6 create-bill
+   *  pushes that drained. These don't flip event.status='posted' — the
+   *  Pushed card needs them as synthetic rows to match V1's count. */
+  g75PostedInvoiceIds?: Set<number>;
+  g76PostedInvoiceIds?: Set<number>;
 }
 
 type SubTab = 'inbox' | 'mapping';

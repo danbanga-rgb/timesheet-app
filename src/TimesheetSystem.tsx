@@ -5374,6 +5374,8 @@ const TimesheetSystem = () => {
               mappings={qbVendorMappings}
               umbrellaShares={qbUmbrellaShares}
               failedPushJobs={qbFailedPushJobs}
+              g75PostedInvoiceIds={qbG75PostedInvoiceIds}
+              g76PostedInvoiceIds={qbG76PostedInvoiceIds}
               pushRecords={qbPushRecords}
               supabase={supabase}
               onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}

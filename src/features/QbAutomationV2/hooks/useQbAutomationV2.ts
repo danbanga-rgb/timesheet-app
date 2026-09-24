@@ -153,6 +153,13 @@ export interface UseQbAutomationV2Args {
   /** V9.9 item 5: recent failed qb_sync_jobs (status='failed'), scoped
    *  by the parent to the last ~30 days. Loaded once alongside events. */
   failedPushJobs?: FailedPushJob[];
+  /** V9.9 followup 2026-09-24: invoice IDs whose G7.5 (Intuit) or G7.6
+   *  (Convera) bill_add job drained successfully. These pushes write
+   *  qb_bill_txn_id to invoices, not events — the event stays 'ready'
+   *  forever. Included as synthetic Pushed rows to match V1's
+   *  "Already posted" bucket. */
+  g75PostedInvoiceIds?: Set<number>;
+  g76PostedInvoiceIds?: Set<number>;
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -241,10 +248,19 @@ export interface PushedMonthGroup {
 // events grouped by push-month (statusUpdatedAt), newest month first.
 // Today's rows naturally fall into the current-month bucket; no
 // separate "today" concept.
+//
+// 2026-09-24 correction: V1's "Already posted" bucket also includes
+// synthetic rows for G7.5/G7.6 invoice-driven pushes — bill_add on
+// those flows writes qb_bill_txn_id to invoices, not events, so the
+// event stays 'ready' forever. Mirror V1's approach here (see
+// TS.tsx:7449+) so v2's count matches V1's exactly.
 export function derivePushedByMonth(
   events: QbIngestEvent[],
+  invoices: Invoice[],
   invoicesById: Map<number, Invoice>,
   vendorsById: Map<string, QbVendorRow>,
+  g75PostedInvoiceIds: Set<number>,
+  g76PostedInvoiceIds: Set<number>,
 ): PushedMonthGroup[] {
   const byMonth = new Map<string, PushedRow[]>();
   for (const e of events) {
@@ -254,6 +270,45 @@ export function derivePushedByMonth(
     if (!row) continue;
     const mk = localMonthKeyOfIso(e.statusUpdatedAt);
     if (!mk) continue;
+    const bucket = byMonth.get(mk);
+    if (bucket) bucket.push(row);
+    else byMonth.set(mk, [row]);
+  }
+  // Synthetic G7.5/G7.6 rows (invoice-driven create-bill pushes).
+  for (const inv of invoices) {
+    const isG75 = g75PostedInvoiceIds.has(inv.id);
+    const isG76 = g76PostedInvoiceIds.has(inv.id);
+    if (!isG75 && !isG76) continue;
+    if (!inv.qbBillTxnId) continue;
+    // Skip if a real event already covers this invoice (avoid double-count).
+    const alreadyCovered = events.some(e => e.status === 'posted' && (e.matchedInvoiceIds ?? []).includes(inv.id));
+    if (alreadyCovered) continue;
+    const when = inv.qbExportStatusAt ?? inv.periodEnd ?? '';
+    if (!when) continue;
+    const mk = localMonthKeyOfIso(when) || (inv.periodEnd?.slice(0, 7) ?? '');
+    if (!mk) continue;
+    // Posted source: we pushed the create. If the invoice is paid in our
+    // system OR (proxied) the bill is settled → push_paid_outside.
+    // Otherwise → push. (No mirror map here; invoice.status='paid' is a
+    // strong proxy since QB payment flows back through import.)
+    const postedSource = inv.status === 'paid' ? 'push_paid_outside' : 'push';
+    const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
+    const monthLabel = monthLabelFromKey(monthKey);
+    const row: PushedRow = {
+      eventId: -inv.id,                              // negative avoids collision with real events
+      contractorName: inv.userName || '(unknown)',
+      invoiceNumber: inv.invoiceNumber || '',
+      amount: inv.totalAmount,
+      currency: inv.currency || 'USD',
+      monthKey,
+      monthLabel,
+      qbVendorName: inv.paymentProfile?.companyName || inv.userName || '(unmapped)',
+      billTxnId: inv.qbBillTxnId,
+      billPmtTxnId: null,
+      checkTxnId: null,
+      postedSource,
+      statusUpdatedAt: when,
+    };
     const bucket = byMonth.get(mk);
     if (bucket) bucket.push(row);
     else byMonth.set(mk, [row]);
@@ -279,6 +334,8 @@ export function useQbAutomationV2({
   umbrellaShares,
   onSaveInvoiceExportStatus,
   failedPushJobs,
+  g75PostedInvoiceIds,
+  g76PostedInvoiceIds,
 }: UseQbAutomationV2Args) {
   const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
   const vendorsById = useMemo(() => new Map(vendors.map(v => [v.listId, v])), [vendors]);
@@ -934,8 +991,15 @@ export function useQbAutomationV2({
   const readyTotal = useMemo(() => readyRows.reduce((s, r) => s + r.amount, 0), [readyRows]);
 
   const pushedByMonth = useMemo(
-    () => derivePushedByMonth(events, invoicesById, vendorsById),
-    [events, invoicesById, vendorsById],
+    () => derivePushedByMonth(
+      events,
+      invoices,
+      invoicesById,
+      vendorsById,
+      g75PostedInvoiceIds ?? new Set(),
+      g76PostedInvoiceIds ?? new Set(),
+    ),
+    [events, invoices, invoicesById, vendorsById, g75PostedInvoiceIds, g76PostedInvoiceIds],
   );
   const pushedCount = useMemo(
     () => pushedByMonth.reduce((s, g) => s + g.rows.length, 0),
