@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
 import type { PushedMonthGroup, PushedRow } from '../hooks/useQbAutomationV2';
-import { formatActionLabel, formatProvenanceBadge } from '../../../lib/qbAutomation/pushedRowDerivation';
+import { formatActionLabel } from '../../../lib/qbAutomation/pushedRowDerivation';
 
 interface Props {
   byMonth: PushedMonthGroup[];
@@ -9,7 +9,7 @@ interface Props {
   count: number;
 }
 
-type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'total' | 'when' | 'action' | 'match';
+type SortKey = 'src' | 'date' | 'counterparty' | 'vendor' | 'amount' | 'memo' | 'action' | 'when';
 type SortDir = 'asc' | 'desc';
 
 function fmtMoney(n: number): string {
@@ -22,18 +22,21 @@ function fmtWhen(iso: string): string {
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
-// Action chip: what actually happened in QB (created bill, paid, wrote
-// check). Green when populated; V1 uses green-100 for all posted actions.
+// Normalize for the Counterparty vs QB Vendor equivalence check. Strips
+// non-alphanumeric so "FLAWLESS APPS LLC" ≡ "Flawless APPS LLC" ≡ "flawless-apps-llc".
+function sameEntity(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return norm(a) === norm(b) && a.length > 0;
+}
+
 function actionChip(row: PushedRow) {
   const label = formatActionLabel({
     resolvedAction: row.resolvedAction,
     resolvedRefLabel: row.resolvedRefLabel,
     isG75Source: row.isG75Source,
-    matchProvenance: row.matchProvenance,
+    matchProvenance: null,   // no marker; kept for the derivation input shape
   });
-  if (!label) {
-    return <span className="text-gray-300">—</span>;
-  }
+  if (!label) return <span className="text-gray-300">—</span>;
   return (
     <span
       className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700 border border-green-200"
@@ -44,34 +47,20 @@ function actionChip(row: PushedRow) {
   );
 }
 
-// Match chip: how we linked our event to the QB record. Palette + copy
-// lifted from V1 via pushedRowDerivation.formatProvenanceBadge.
-function matchChip(row: PushedRow) {
-  const b = formatProvenanceBadge(row.matchProvenance);
-  return (
-    <span
-      className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${b.bg} ${b.fg} border border-gray-200`}
-      title={b.tooltip}
-    >
-      {b.text}
-    </span>
-  );
-}
-
 function useSortedRows(rows: PushedRow[], sortKey: SortKey, sortDir: SortDir): PushedRow[] {
   return useMemo(() => {
     const dir = sortDir === 'asc' ? 1 : -1;
     const copy = [...rows];
     copy.sort((a, b) => {
       switch (sortKey) {
-        case 'contractor': return a.contractorName.localeCompare(b.contractorName) * dir;
-        case 'period':     return (a.monthKey || '').localeCompare(b.monthKey || '') * dir;
-        case 'inv':        return (a.invoiceNumber || '').localeCompare(b.invoiceNumber || '', undefined, { numeric: true }) * dir;
-        case 'vendor':     return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
-        case 'total':      return (a.amount - b.amount) * dir;
-        case 'when':       return (a.statusUpdatedAt || '').localeCompare(b.statusUpdatedAt || '') * dir;
-        case 'action':     return (a.resolvedAction || '').localeCompare(b.resolvedAction || '') * dir;
-        case 'match':      return (a.matchProvenance || '').localeCompare(b.matchProvenance || '') * dir;
+        case 'src':          return a.src.localeCompare(b.src) * dir;
+        case 'date':         return (a.date || '').localeCompare(b.date || '') * dir;
+        case 'counterparty': return a.counterpartyRaw.localeCompare(b.counterpartyRaw) * dir;
+        case 'vendor':       return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
+        case 'amount':       return (a.amount - b.amount) * dir;
+        case 'memo':         return (a.memo || '').localeCompare(b.memo || '', undefined, { numeric: true }) * dir;
+        case 'action':       return (a.resolvedAction || '').localeCompare(b.resolvedAction || '') * dir;
+        case 'when':         return (a.statusUpdatedAt || '').localeCompare(b.statusUpdatedAt || '') * dir;
       }
     });
     return copy;
@@ -93,6 +82,14 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
     else { setSortKey(key); setSortDir(key === 'when' ? 'desc' : 'asc'); }
   };
   const sortArrow = (key: SortKey) => sortKey !== key ? '' : sortDir === 'asc' ? ' ▲' : ' ▼';
+  const th = (key: SortKey, label: string, extra = '') => (
+    <th
+      className={`px-1.5 py-1.5 text-left font-semibold text-gray-600 cursor-pointer select-none whitespace-nowrap ${extra}`}
+      onClick={() => clickSort(key)}
+    >
+      {label}{sortArrow(key)}
+    </th>
+  );
 
   return (
     <div className="border-t border-gray-100">
@@ -112,50 +109,45 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
       </button>
       {isOpen && (
         <div className="overflow-auto border-t border-gray-100">
-          <table className="w-full text-xs">
+          <table className="w-full text-[11px]">
             <thead className="bg-gray-50/60">
-              <tr>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('when')}>
-                  When{sortArrow('when')}
+              <tr className="divide-x divide-gray-100">
+                {th('src', 'Src')}
+                {th('date', 'Date')}
+                {th('counterparty', 'Counterparty')}
+                {th('vendor', 'QB Vendor')}
+                <th className="px-1.5 py-1.5 text-right font-semibold text-gray-600 cursor-pointer select-none whitespace-nowrap" onClick={() => clickSort('amount')}>
+                  Amount{sortArrow('amount')}
                 </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('contractor')}>
-                  Contractor{sortArrow('contractor')}
-                </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('period')}>
-                  Period{sortArrow('period')}
-                </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('inv')}>
-                  Inv #{sortArrow('inv')}
-                </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('vendor')}>
-                  QB Vendor{sortArrow('vendor')}
-                </th>
-                <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('total')}>
-                  Total{sortArrow('total')}
-                </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('action')}>
-                  Action{sortArrow('action')}
-                </th>
-                <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('match')}>
-                  Match{sortArrow('match')}
-                </th>
+                {th('memo', 'Memo')}
+                {th('action', 'Action')}
+                {th('when', 'Posted at')}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
-              {sortedRows.map(r => (
-                <tr key={r.eventId} className="hover:bg-emerald-50/40">
-                  <td className="px-2 py-1.5 whitespace-nowrap text-gray-600">{fmtWhen(r.statusUpdatedAt)}</td>
-                  <td className="px-2 py-1.5 whitespace-nowrap font-medium text-gray-800">{r.contractorName}</td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">{r.monthLabel || '(no period)'}</td>
-                  <td className="px-2 py-1.5 whitespace-nowrap font-mono text-gray-600">{r.invoiceNumber || '—'}</td>
-                  <td className="px-2 py-1.5">{r.qbVendorName}</td>
-                  <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
-                    {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
-                  </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">{actionChip(r)}</td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">{matchChip(r)}</td>
-                </tr>
-              ))}
+            <tbody>
+              {sortedRows.map((r, idx) => {
+                const same = sameEntity(r.counterpartyRaw, r.qbVendorName);
+                return (
+                  <tr key={r.eventId} className={`divide-x divide-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-emerald-50/40`}>
+                    <td className="px-1.5 py-1 whitespace-nowrap">
+                      <span className="inline-block px-1 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{r.src}</span>
+                    </td>
+                    <td className="px-1.5 py-1 whitespace-nowrap font-mono text-gray-600">{r.date || '—'}</td>
+                    <td className="px-1.5 py-1 truncate max-w-[180px]" title={r.counterpartyRaw}>{r.counterpartyRaw}</td>
+                    <td className="px-1.5 py-1 truncate max-w-[220px]" title={same ? undefined : r.qbVendorName}>
+                      {same
+                        ? <span className="text-[10px] italic text-emerald-600/80">same QB vendor</span>
+                        : r.qbVendorName}
+                    </td>
+                    <td className="px-1.5 py-1 text-right font-mono whitespace-nowrap font-semibold">
+                      {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
+                    </td>
+                    <td className="px-1.5 py-1 truncate max-w-[150px] font-mono text-gray-700" title={r.memo}>{r.memo || '—'}</td>
+                    <td className="px-1.5 py-1 whitespace-nowrap">{actionChip(r)}</td>
+                    <td className="px-1.5 py-1 whitespace-nowrap font-mono text-gray-500">{fmtWhen(r.statusUpdatedAt)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

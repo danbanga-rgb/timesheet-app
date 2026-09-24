@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Invoice, PaymentProfile, QbIngestEvent, QbResolvedAction, QbVendorMapping, UserProfile } from '../../../types';
 import type { QbOpenBillRow, QbVendorRow } from '../../../lib/qbStateSync/types';
-import type { MatchProvenance } from '../../../lib/matchProvenance';
 import { computeVerdict, type Verdict } from '../../../lib/qbAutomation/verdict';
 import { normalizeRef } from '../../../lib/intuit/reconcile';
 import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../../../lib/qbAutomation/vendorMappingResolver';
 import { getEffectiveMatchedInvoiceIds, isUmbrellaEvent } from '../../../lib/qbAutomation/umbrella';
 import { derivePushedRowDisplay, deriveSyntheticPushedRowDisplay } from '../../../lib/qbAutomation/pushedRowDerivation';
 import { isTestAccount } from '../../../lib/isTestAccount';
+
+// Lifted from TS.tsx:7246 — chip label per event source.
+const SOURCE_LABEL_MAP: Record<string, string> = {
+  intuit_xlsx: 'Intuit',
+  convera: 'Convera',
+  manual: 'Manual',
+  invoice_g75: 'Invoice → Bill (Intuit)',
+  invoice_g76: 'Invoice → Bill (Convera)',
+};
+export function sourceLabel(s: string): string {
+  return SOURCE_LABEL_MAP[s] || s;
+}
 
 export type ReadyGroup = 'pay' | 'create';
 
@@ -108,23 +119,23 @@ export interface FailedPushJob {
   sourceInvoiceId: number | null;
 }
 
+// V1-aligned shape (TS.tsx:8599-8611 Already Posted columns, minus Provenance).
+// Row is centered on the qb_ingest_event, not on a fuzzily-matched invoice —
+// counterparty_raw + memo are the source of truth. When the reconciler picked
+// the wrong invoice via fuzzy match, the raw event fields still read correctly.
 export interface PushedRow {
-  eventId: number;
-  contractorName: string;
-  invoiceNumber: string;
+  eventId: number;                    // React key
+  src: string;                        // sourceLabel(e.source) chip
+  date: string;                       // e.txnDate — QB transaction date
+  counterpartyRaw: string;            // e.counterparty_raw — always raw, never invoice-derived
+  qbVendorName: string;               // vendor mapped via counterparty_qb_vendor_list_id
   amount: number;
   currency: string;
-  monthKey: string;
-  monthLabel: string;
-  qbVendorName: string;
-  billTxnId: string | null;
-  billPmtTxnId: string | null;
-  checkTxnId: string | null;
-  // Two-axis display fields lifted from V1 via pushedRowDerivation.
+  memo: string;                       // e.memo — source of truth (e.g. "Inv# 09")
   resolvedAction: QbResolvedAction | null;
-  resolvedRefLabel: string | null;   // "INV 51" when known — feeds action label
-  isG75Source: boolean;              // affects create_bill_then_pay wording
-  matchProvenance: MatchProvenance | null;
+  resolvedRefLabel: string | null;    // feeds formatActionLabel — "INV 51" when known
+  isG75Source: boolean;
+  billTxnId: string | null;           // QB TxnID for optional Action badge tooltip
   statusUpdatedAt: string;
 }
 
@@ -208,15 +219,10 @@ export function localMonthKeyOfIso(iso: string): string {
 
 function buildPushedRow(
   e: QbIngestEvent,
-  invoicesById: Map<number, Invoice>,
   vendorsById: Map<string, QbVendorRow>,
   billByTxnId: Map<string, QbOpenBillRow>,
 ): PushedRow | null {
   if (!e.statusUpdatedAt) return null;
-  const invoice = e.matchedInvoiceIds.length > 0
-    ? (invoicesById.get(e.matchedInvoiceIds[0]) ?? null)
-    : null;
-  const monthKey = invoice?.periodEnd?.slice(0, 7) ?? '';
   const qbVendorName = e.counterpartyQbVendorListId
     ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(unmapped)')
     : '(unmapped)';
@@ -224,28 +230,23 @@ function buildPushedRow(
   const billTxnId = (typeof refs.bill === 'string' ? refs.bill : null)
     ?? e.resolvedBillTxnId
     ?? null;
-  const billPmtTxnId = typeof refs.bill_pmt === 'string' ? refs.bill_pmt : null;
-  const checkTxnId = typeof refs.check === 'string' ? refs.check : null;
   const display = derivePushedRowDisplay(
     { resolvedAction: e.resolvedAction, resolvedBillTxnId: e.resolvedBillTxnId, matchProvenance: e.matchProvenance, source: e.source },
     billByTxnId,
   );
   return {
     eventId: e.id,
-    contractorName: invoice?.userName || e.counterpartyRaw || '(unknown)',
-    invoiceNumber: invoice?.invoiceNumber ?? '',
-    amount: e.amount,
-    currency: invoice?.currency || 'USD',
-    monthKey,
-    monthLabel: monthLabelFromKey(monthKey),
+    src: sourceLabel(e.source),
+    date: e.txnDate ?? '',
+    counterpartyRaw: e.counterpartyRaw || '(unknown)',
     qbVendorName,
-    billTxnId,
-    billPmtTxnId,
-    checkTxnId,
+    amount: e.amount,
+    currency: 'USD',                    // event has no currency field; USD hardcoded matches V1
+    memo: e.memo ?? '',
     resolvedAction: display.resolvedAction,
     resolvedRefLabel: display.resolvedRefLabel,
     isG75Source: display.isG75Source,
-    matchProvenance: display.matchProvenance,
+    billTxnId,
     statusUpdatedAt: e.statusUpdatedAt,
   };
 }
@@ -270,7 +271,6 @@ export interface PushedMonthGroup {
 export function derivePushedByMonth(
   events: QbIngestEvent[],
   invoices: Invoice[],
-  invoicesById: Map<number, Invoice>,
   vendorsById: Map<string, QbVendorRow>,
   billByTxnId: Map<string, QbOpenBillRow>,
   g75PostedInvoiceIds: Set<number>,
@@ -280,7 +280,7 @@ export function derivePushedByMonth(
   for (const e of events) {
     if (e.status !== 'posted') continue;
     if (!e.statusUpdatedAt) continue;
-    const row = buildPushedRow(e, invoicesById, vendorsById, billByTxnId);
+    const row = buildPushedRow(e, vendorsById, billByTxnId);
     if (!row) continue;
     const mk = localMonthKeyOfIso(e.statusUpdatedAt);
     if (!mk) continue;
@@ -289,12 +289,10 @@ export function derivePushedByMonth(
     else byMonth.set(mk, [row]);
   }
   // Synthetic G7.5/G7.6 rows (invoice-driven create-bill pushes).
-  // Deliberate: does NOT dedupe against events with matched_invoice_ids
-  // overlap. V1's "Already posted" bucket also concatenates without
-  // dedup (TS.tsx:7449+), so matching V1's count 1:1 requires the
-  // same behavior. Small number of rows may appear twice — once as
-  // the real posted event, once as the synthetic invoice-driven push.
-  // Will fix in V1+V2 simultaneously at V12 cutover.
+  // V1 pattern (TS.tsx:7461-7488): synthesize a QbIngestEvent-shaped row so
+  // the same rendering path handles both real and invoice-driven pushes.
+  // No dedup vs covering events — mirrors V1's Already Posted count exactly
+  // per [[match-v1-during-coexistence]]. Fix at V12 cutover.
   for (const inv of invoices) {
     const isG75 = g75PostedInvoiceIds.has(inv.id);
     const isG76 = g76PostedInvoiceIds.has(inv.id);
@@ -305,24 +303,19 @@ export function derivePushedByMonth(
     const mk = localMonthKeyOfIso(when) || (inv.periodEnd?.slice(0, 7) ?? '');
     if (!mk) continue;
     const display = deriveSyntheticPushedRowDisplay(isG75 ? 'g75' : 'g76', inv.invoiceNumber || null);
-    const monthKey = inv.periodEnd?.slice(0, 7) ?? '';
-    const monthLabel = monthLabelFromKey(monthKey);
     const row: PushedRow = {
       eventId: -inv.id,                              // negative avoids collision with real events
-      contractorName: inv.userName || '(unknown)',
-      invoiceNumber: inv.invoiceNumber || '',
+      src: sourceLabel(isG75 ? 'invoice_g75' : 'invoice_g76'),
+      date: inv.periodEnd ?? '',
+      counterpartyRaw: inv.userName || '(unknown)',
+      qbVendorName: inv.paymentProfile?.companyName || inv.userName || '(unmapped)',
       amount: inv.totalAmount,
       currency: inv.currency || 'USD',
-      monthKey,
-      monthLabel,
-      qbVendorName: inv.paymentProfile?.companyName || inv.userName || '(unmapped)',
-      billTxnId: inv.qbBillTxnId,
-      billPmtTxnId: null,
-      checkTxnId: null,
+      memo: inv.invoiceNumber ? `INV ${inv.invoiceNumber}` : '',
       resolvedAction: display.resolvedAction,
       resolvedRefLabel: display.resolvedRefLabel,
       isG75Source: display.isG75Source,
-      matchProvenance: display.matchProvenance,
+      billTxnId: inv.qbBillTxnId,
       statusUpdatedAt: when,
     };
     const bucket = byMonth.get(mk);
@@ -1011,13 +1004,12 @@ export function useQbAutomationV2({
     () => derivePushedByMonth(
       events,
       invoices,
-      invoicesById,
       vendorsById,
       billByTxnId,
       g75PostedInvoiceIds ?? new Set(),
       g76PostedInvoiceIds ?? new Set(),
     ),
-    [events, invoices, invoicesById, vendorsById, billByTxnId, g75PostedInvoiceIds, g76PostedInvoiceIds],
+    [events, invoices, vendorsById, billByTxnId, g75PostedInvoiceIds, g76PostedInvoiceIds],
   );
   const pushedCount = useMemo(
     () => pushedByMonth.reduce((s, g) => s + g.rows.length, 0),

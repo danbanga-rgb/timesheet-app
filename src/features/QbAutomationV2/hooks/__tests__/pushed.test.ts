@@ -10,7 +10,8 @@ function event(overrides: Partial<QbIngestEvent> = {}): QbIngestEvent {
     sourceIngestKey: 'src-1',
     ingestedAt: '2026-09-23T09:00:00Z',
     amount: 2400,
-    currency: 'USD',
+    txnDate: '2026-09-15',
+    memo: 'INV-1042',
     counterpartyRaw: 'Anela Kaltak',
     counterpartyQbVendorListId: '80000001-1',
     targetQbTxnKind: 'bill_pmt',
@@ -23,12 +24,12 @@ function event(overrides: Partial<QbIngestEvent> = {}): QbIngestEvent {
     lastError: null,
     rawData: null,
     notes: null,
-    resolvedAction: null,
-    resolvedBillTxnId: null,
+    resolvedAction: 'pay_existing_bill',
+    resolvedBillTxnId: 'TXN-BILL-1',
     resolvedPaymentTxnId: null,
     resolvedReason: null,
     reconciledAt: null,
-    matchProvenance: null,
+    matchProvenance: 'exact-txn',
     statusUpdatedAt: '2026-09-24T09:00:00Z',
     ...overrides,
   } as QbIngestEvent;
@@ -58,171 +59,124 @@ function invoice(overrides: Partial<Invoice> = {}): Invoice {
 function vendor(overrides: Partial<QbVendorRow> = {}): QbVendorRow {
   return {
     listId: '80000001-1',
-    name: 'Anela Kaltak',
+    name: 'Flawless APPS LLC',
     ...overrides,
   } as QbVendorRow;
 }
 
 describe('derivePushedByMonth', () => {
-  const invById = new Map<number, Invoice>([[42, invoice()]]);
   const venById = new Map<string, QbVendorRow>([['80000001-1', vendor()]]);
   const billById = new Map<string, QbOpenBillRow>();
 
   it('returns empty when no events are posted', () => {
-    const groups = derivePushedByMonth([event({ status: 'ready' })], [], invById, venById, billById, new Set(), new Set());
+    const groups = derivePushedByMonth([event({ status: 'ready' })], [], venById, billById, new Set(), new Set());
     expect(groups).toEqual([]);
   });
 
-  it('groups a single posted event by push-month', () => {
-    const groups = derivePushedByMonth([event()], [], invById, venById, billById, new Set(), new Set());
-    expect(groups).toHaveLength(1);
-    expect(groups[0].rows).toHaveLength(1);
+  it('carries counterpartyRaw and memo straight from the event (no invoice lookup)', () => {
+    const groups = derivePushedByMonth([event()], [], venById, billById, new Set(), new Set());
     expect(groups[0].rows[0]).toMatchObject({
-      eventId: 1,
-      contractorName: 'Anela Kaltak',
-      qbVendorName: 'Anela Kaltak',
-      billTxnId: 'TXN-BILL-1',
-      billPmtTxnId: 'TXN-PMT-1',
+      counterpartyRaw: 'Anela Kaltak',
+      qbVendorName: 'Flawless APPS LLC',
+      memo: 'INV-1042',
+      src: 'Convera',
+      date: '2026-09-15',
     });
-    expect(groups[0].total).toBe(2400);
   });
 
   it('excludes events with null statusUpdatedAt', () => {
-    const groups = derivePushedByMonth(
-      [event({ statusUpdatedAt: null })],
-      [],
-      invById,
-      venById,
-      billById,
-      new Set(),
-      new Set(),
-    );
+    const groups = derivePushedByMonth([event({ statusUpdatedAt: null })], [], venById, billById, new Set(), new Set());
     expect(groups).toEqual([]);
   });
 
-  it('falls back to resolvedBillTxnId when postedQbRefs.bill is missing', () => {
+  it('resolvedRefLabel comes from the resolved bill in mirror', () => {
     const groups = derivePushedByMonth(
-      [event({ postedQbRefs: { bill_pmt: 'TXN-PMT-2' }, resolvedBillTxnId: 'TXN-BILL-RESOLVED' })],
+      [event({ resolvedBillTxnId: 'TXN-BILL-9' })],
       [],
-      invById,
       venById,
-      billById,
+      new Map([['TXN-BILL-9', { txnId: 'TXN-BILL-9', refNumber: 'INV 58', vendorListId: '80000001-1', vendorName: 'Flawless', txnDate: '2026-09-01', dueDate: null, amount: 2400, openAmount: 0, isPaid: true, queriedAt: '2026-09-24T10:00:00Z' }]]),
       new Set(),
       new Set(),
     );
-    expect(groups[0]?.rows[0]?.billTxnId).toBe('TXN-BILL-RESOLVED');
-  });
-
-  it('buckets events into multiple months, newest month first', () => {
-    const augEvent = event({ id: 10, statusUpdatedAt: '2026-08-15T12:00:00Z', amount: 100 });
-    const sepEvent = event({ id: 11, statusUpdatedAt: '2026-09-05T12:00:00Z', amount: 200 });
-    const groups = derivePushedByMonth([augEvent, sepEvent], [], invById, venById, billById, new Set(), new Set());
-    expect(groups.map(g => g.monthKey)).toEqual(['2026-09', '2026-08']);
-    expect(groups[0].total).toBe(200);
-    expect(groups[1].total).toBe(100);
-  });
-
-  it('sorts rows within a month newest first', () => {
-    const early = event({ id: 10, statusUpdatedAt: '2026-09-24T08:00:00Z' });
-    const late = event({ id: 11, statusUpdatedAt: '2026-09-24T14:00:00Z' });
-    const groups = derivePushedByMonth([early, late], [], invById, venById, billById, new Set(), new Set());
-    expect(groups[0].rows.map(r => r.eventId)).toEqual([11, 10]);
+    expect(groups[0].rows[0].resolvedRefLabel).toBe('INV 58');
+    expect(groups[0].rows[0].resolvedAction).toBe('pay_existing_bill');
   });
 
   it('handles unmapped vendor gracefully', () => {
     const groups = derivePushedByMonth(
       [event({ counterpartyQbVendorListId: null })],
       [],
-      invById,
       venById,
       billById,
       new Set(),
       new Set(),
     );
-    expect(groups[0]?.rows[0]?.qbVendorName).toBe('(unmapped)');
+    expect(groups[0].rows[0].qbVendorName).toBe('(unmapped)');
   });
 
-  it('carries resolvedAction and matchProvenance from real events', () => {
-    const groups = derivePushedByMonth(
-      [event({ resolvedAction: 'pay_existing_bill', resolvedBillTxnId: 'TXN-BILL-9', matchProvenance: 'exact-txn' })],
-      [],
-      invById,
-      venById,
-      new Map([['TXN-BILL-9', { txnId: 'TXN-BILL-9', refNumber: 'INV 58', vendorListId: '80000001-1', vendorName: 'Anela', txnDate: '2026-09-01', dueDate: null, amount: 2400, openAmount: 0, isPaid: true, queriedAt: '2026-09-24T10:00:00Z' }]]),
-      new Set(),
-      new Set(),
-    );
-    const row = groups[0]?.rows[0];
-    expect(row?.resolvedAction).toBe('pay_existing_bill');
-    expect(row?.resolvedRefLabel).toBe('INV 58');
-    expect(row?.matchProvenance).toBe('exact-txn');
-    expect(row?.isG75Source).toBe(false);
+  it('buckets events into multiple months, newest month first', () => {
+    const augEvent = event({ id: 10, statusUpdatedAt: '2026-08-15T12:00:00Z', amount: 100 });
+    const sepEvent = event({ id: 11, statusUpdatedAt: '2026-09-05T12:00:00Z', amount: 200 });
+    const groups = derivePushedByMonth([augEvent, sepEvent], [], venById, billById, new Set(), new Set());
+    expect(groups.map(g => g.monthKey)).toEqual(['2026-09', '2026-08']);
   });
 
-  it('includes synthetic G7.5/G7.6 rows from invoice sets with exact-ref provenance', () => {
-    const inv: Invoice = invoice({ id: 500, invoiceNumber: 'INV 500', qbBillTxnId: 'TXN-BILL-500', qbExportStatusAt: '2026-09-20T10:00:00Z' } as Partial<Invoice>);
-    const groups = derivePushedByMonth(
-      [],
-      [inv],
-      new Map([[inv.id, inv]]),
-      venById,
-      billById,
-      new Set([inv.id]),
-      new Set(),
-    );
-    expect(groups).toHaveLength(1);
+  it('sorts rows within a month newest first', () => {
+    const early = event({ id: 10, statusUpdatedAt: '2026-09-24T08:00:00Z' });
+    const late = event({ id: 11, statusUpdatedAt: '2026-09-24T14:00:00Z' });
+    const groups = derivePushedByMonth([early, late], [], venById, billById, new Set(), new Set());
+    expect(groups[0].rows.map(r => r.eventId)).toEqual([11, 10]);
+  });
+
+  it('includes synthetic G7.5 rows with counterpartyRaw = user, qbVendorName = pp company', () => {
+    const inv = invoice({
+      id: 500,
+      invoiceNumber: 'INV 500',
+      qbBillTxnId: 'TXN-BILL-500',
+      qbExportStatusAt: '2026-09-20T10:00:00Z',
+      userName: 'Rumiya Hasnutdinova',
+      paymentProfile: { id: 1, companyName: 'FLAWLESS APPS LLC' },
+    } as Partial<Invoice>);
+    const groups = derivePushedByMonth([], [inv], venById, billById, new Set([inv.id]), new Set());
     const row = groups[0].rows[0];
-    expect(row.billTxnId).toBe('TXN-BILL-500');
+    expect(row.counterpartyRaw).toBe('Rumiya Hasnutdinova');
+    expect(row.qbVendorName).toBe('FLAWLESS APPS LLC');
+    expect(row.memo).toBe('INV INV 500');
+    expect(row.src).toBe('Invoice → Bill (Intuit)');
     expect(row.resolvedAction).toBe('create_bill_then_pay');
-    expect(row.resolvedRefLabel).toBe('INV 500');
-    expect(row.matchProvenance).toBe('exact-ref');
     expect(row.isG75Source).toBe(true);
+    expect(row.billTxnId).toBe('TXN-BILL-500');
   });
 
-  it('synthetic G7.6 (Convera) rows carry isG75Source=false', () => {
-    const inv: Invoice = invoice({ id: 501, invoiceNumber: 'INV 501', qbBillTxnId: 'TXN-BILL-501', qbExportStatusAt: '2026-09-20T10:00:00Z', status: 'paid' } as Partial<Invoice>);
-    const groups = derivePushedByMonth(
-      [],
-      [inv],
-      new Map([[inv.id, inv]]),
-      venById,
-      billById,
-      new Set(),
-      new Set([inv.id]),
-    );
+  it('synthetic G7.6 rows carry Convera source label + isG75Source=false', () => {
+    const inv = invoice({
+      id: 501,
+      invoiceNumber: 'INV 501',
+      qbBillTxnId: 'TXN-BILL-501',
+      qbExportStatusAt: '2026-09-20T10:00:00Z',
+    } as Partial<Invoice>);
+    const groups = derivePushedByMonth([], [inv], venById, billById, new Set(), new Set([inv.id]));
     const row = groups[0].rows[0];
-    expect(row.resolvedAction).toBe('create_bill_then_pay');
+    expect(row.src).toBe('Invoice → Bill (Convera)');
     expect(row.isG75Source).toBe(false);
-    expect(row.matchProvenance).toBe('exact-ref');
   });
 
   it('does NOT dedupe synthetic G7.5 rows against covering events (matches V1 count)', () => {
-    // V1's Already-posted bucket concatenates without dedup — we mirror
-    // that here so V2's Pushed count equals V1's exactly. Fix at V12
-    // cutover, not per surface.
-    const inv: Invoice = invoice({ id: 502, qbBillTxnId: 'TXN-BILL-502', qbExportStatusAt: '2026-09-20T10:00:00Z' } as Partial<Invoice>);
+    const inv = invoice({ id: 502, qbBillTxnId: 'TXN-BILL-502', qbExportStatusAt: '2026-09-20T10:00:00Z' } as Partial<Invoice>);
     const coveringEvent = event({ id: 42, matchedInvoiceIds: [inv.id], statusUpdatedAt: '2026-09-20T10:00:00Z' });
-    const groups = derivePushedByMonth(
-      [coveringEvent],
-      [inv],
-      new Map([[inv.id, inv]]),
-      venById,
-      billById,
-      new Set([inv.id]),
-      new Set(),
-    );
+    const groups = derivePushedByMonth([coveringEvent], [inv], venById, billById, new Set([inv.id]), new Set());
     expect(groups[0].rows.map(r => r.eventId).sort()).toEqual([-502, 42]);
   });
 });
 
 describe('todayLocalDateKey', () => {
   it('returns YYYY-MM-DD in local time for a specific date', () => {
-    const noon = new Date(2026, 8, 23, 12, 0, 0);  // Sep 23 2026 noon local
+    const noon = new Date(2026, 8, 23, 12, 0, 0);
     expect(todayLocalDateKey(noon)).toBe('2026-09-23');
   });
 
   it('zero-pads month and day', () => {
-    const early = new Date(2026, 0, 5, 12, 0, 0);  // Jan 5 2026
+    const early = new Date(2026, 0, 5, 12, 0, 0);
     expect(todayLocalDateKey(early)).toBe('2026-01-05');
   });
 });
