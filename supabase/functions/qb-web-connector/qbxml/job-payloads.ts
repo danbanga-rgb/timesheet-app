@@ -41,8 +41,8 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, PayloadRequirement> = {
   // bill_pmt_add persist uses a source-ref back to the row that spawned the payment.
   // Convera path: sourceConveraTxnId + refNumber (OTR wire code). 2026-08-14 incident:
   // enqueue omitted the source ref, persist silently no-op'd.
-  // Intuit path (Slice G7+): sourceIngestEventId, blank RefNumber per accountant's
-  // historic convention (verified 2026-08-17 against QB — see [[intuit-push-context]]).
+  // Intuit path (Slice G7+): sourceIngestEventId, RefNumber 'EFT' (a blank one
+  // consumes the 8220 check sequence; changed 2026-08-25 — see [[intuit-push-context]]).
   bill_pmt_add: {
     required: ['payeeVendorName', 'applications'],
     oneOf: [['refNumber', 'sourceConveraTxnId'], ['sourceIngestEventId']],

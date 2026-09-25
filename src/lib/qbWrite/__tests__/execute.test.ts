@@ -208,10 +208,24 @@ describe('INVARIANTS #1–10 (qbXML builder-layer)', () => {
       delete noRef.refNumber;
       expect(validateIntent(noRef)).toBeNull();
     });
-    it('does NOT apply the 11-char cap to create_bill (Bill refNumber has higher limit)', () => {
-      const longBillRef = { ...baseCreateBill, refNumber: 'INVOICE Synergie 05/01-31/2026' };  // 30 chars
-      // ASCII check passes (all ASCII); refNumber-length rule is pay_bill-only
-      expect(validateIntent(longBillRef)).toBeNull();
+    it('does NOT apply the 11-char pay_bill cap to create_bill', () => {
+      const midBillRef = { ...baseCreateBill, refNumber: 'INV SYN 05/01-31' };  // 16 chars
+      expect(validateIntent(midBillRef)).toBeNull();
+    });
+  });
+
+  describe('#5b create_bill RefNumber max 20 chars (QB status=3070 above that)', () => {
+    it('accepts exactly 20 chars (boundary)', () => {
+      const boundary = { ...baseCreateBill, refNumber: 'INV SYNERGIE 07/2026' };  // 20 chars
+      expect(boundary.refNumber).toHaveLength(20);
+      expect(validateIntent(boundary)).toBeNull();
+    });
+    it('rejects 30 chars and points at the source invoice number', () => {
+      const tooLong = { ...baseCreateBill, refNumber: 'INVOICE Synergie 05/01-31/2026' };  // 30 chars
+      const r = validateIntent(tooLong);
+      expect(r).not.toBeNull();
+      expect(r!.invariant).toMatch(/#5b/);
+      expect(r!.reason).toMatch(/30 chars/);
     });
   });
   it('#6 DiscountAmount requires DiscountAccountRef — builder throws; executor types omit discount for MVP', () => {
