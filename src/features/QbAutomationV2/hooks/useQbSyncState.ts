@@ -87,65 +87,7 @@ export function useQbSyncState(args: UseQbSyncStateArgs): {
   };
 }
 
-// Auto-refresh coordinator: enqueues mirror + vendor syncs on a cadence that
-// matches QBWC's ~15-min drain. Guardrails against stacking: skips if a job
-// of that kind is already pending. Also fires on visibility-change so a tab
-// that's been backgrounded picks up fresh data on refocus.
-//
-// Callers pass the sync functions; hook owns timing + gating.
-export interface UseQbAutoRefreshArgs {
-  onSyncMirror: () => Promise<void>;
-  onSyncVendors: () => Promise<void>;
-  mirrorPendingCount: number;
-  vendorsPendingCount: number;
-  mirrorStatus: PillStatus;
-  vendorsStatus: PillStatus;
-  /** Test hook — inject a shorter interval when testing. Default 15min. */
-  intervalMs?: number;
-}
-
-export function useQbAutoRefresh({
-  onSyncMirror,
-  onSyncVendors,
-  mirrorPendingCount,
-  vendorsPendingCount,
-  mirrorStatus,
-  vendorsStatus,
-  intervalMs = 15 * 60 * 1000,
-}: UseQbAutoRefreshArgs): void {
-  // Mount: auto-sync anything amber/red or never-synced. Fire-and-forget.
-  useEffect(() => {
-    if (mirrorPendingCount === 0 && (mirrorStatus === 'amber' || mirrorStatus === 'red' || mirrorStatus === 'unknown')) {
-      void onSyncMirror().catch(() => {});
-    }
-    if (vendorsPendingCount === 0 && (vendorsStatus === 'amber' || vendorsStatus === 'red' || vendorsStatus === 'unknown')) {
-      void onSyncVendors().catch(() => {});
-    }
-    // Intentionally mount-only; periodic + visibility timers handle drift after.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Periodic: every intervalMs, enqueue a routine sync. Guard against stacking.
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (mirrorPendingCount === 0) void onSyncMirror().catch(() => {});
-      if (vendorsPendingCount === 0) void onSyncVendors().catch(() => {});
-    }, intervalMs);
-    return () => clearInterval(id);
-  }, [intervalMs, mirrorPendingCount, vendorsPendingCount, onSyncMirror, onSyncVendors]);
-
-  // Visibility: when tab regains focus, top up if stale (amber/red) and nothing pending.
-  useEffect(() => {
-    const onVisibility = () => {
-      if (document.visibilityState !== 'visible') return;
-      if (mirrorPendingCount === 0 && (mirrorStatus === 'amber' || mirrorStatus === 'red')) {
-        void onSyncMirror().catch(() => {});
-      }
-      if (vendorsPendingCount === 0 && (vendorsStatus === 'amber' || vendorsStatus === 'red')) {
-        void onSyncVendors().catch(() => {});
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [mirrorPendingCount, vendorsPendingCount, mirrorStatus, vendorsStatus, onSyncMirror, onSyncVendors]);
-}
+// V10 auto-refresh (mount + periodic + visibility) REMOVED — pg_cron handles
+// the baseline (bill_query hourly, vendor_query every 6h) and the push flow
+// silently refreshes on completion. Pills are pure status indicators; only
+// explicit user action (Sync Now link) enqueues syncs from the UI.

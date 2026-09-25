@@ -7,7 +7,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import QbPushStatusPane from '../../components/QbPushStatusPane';
 import { cancelPushJobs } from '../../lib/qbAutomation/cancelPushJobs';
 import { useQbAutomationV2, type FailedPushJob, type ReadyRow } from './hooks/useQbAutomationV2';
-import { useQbSyncState, useQbAutoRefresh } from './hooks/useQbSyncState';
+import { useQbSyncState } from './hooks/useQbSyncState';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
 import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingCard';
@@ -136,23 +136,15 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     qbBillQueryPending: props.qbBillQueryPending,
     qbVendorQueryPending: props.qbVendorQueryPending,
   });
+  const totalPending = props.qbBillQueryPending + props.qbVendorQueryPending;
 
-  useQbAutoRefresh({
-    onSyncMirror: props.onSyncMirror,
-    onSyncVendors: props.onSyncVendors,
-    mirrorPendingCount: mirror.pendingCount,
-    vendorsPendingCount: vendors.pendingCount,
-    mirrorStatus: mirror.status,
-    vendorsStatus: vendors.status,
-  });
-
-  const handleMirrorPillClick = () => {
-    if (mirror.pendingCount > 0) setPendingInspectorOpen(true);
-    else void props.onSyncMirror().catch(e => alert('Sync mirror failed: ' + (e instanceof Error ? e.message : String(e))));
-  };
-  const handleVendorsPillClick = () => {
-    if (vendors.pendingCount > 0) setPendingInspectorOpen(true);
-    else void props.onSyncVendors().catch(e => alert('Sync vendors failed: ' + (e instanceof Error ? e.message : String(e))));
+  // Sync Now: fires both bill + vendor query in parallel, silently. Errors
+  // surface to console (fire-and-forget); pill state updates reflect result.
+  const handleSyncNow = () => {
+    void Promise.allSettled([
+      props.onSyncMirror(),
+      props.onSyncVendors(),
+    ]).catch(() => {});
   };
 
   const selectedRows = useMemo(
@@ -185,10 +177,13 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
       clearSelection();
       setPreviewOpen(false);
       setCategory('ready');
-      // Item 5: fire silent Sync Vendors so QBWC picks up any missing vendors
-      // during its next drain (~15 min); when the user returns, the hint bar
-      // Refresh button pulls the freshly-classified rows into Ready.
-      void props.onPostPushSync();
+      // V10: post-push refresh — enqueue BOTH bill + vendor query silently
+      // so the next tab visit sees fresh mirror. Fire-and-forget; QBWC drains
+      // in ~15 min. Post-push hint below tells the user to Refresh once ready.
+      void Promise.allSettled([
+        props.onSyncMirror(),
+        props.onPostPushSync(),
+      ]).catch(() => {});
       setShowPostPushHint(true);
     } catch (e) {
       alert('Push failed: ' + (e instanceof Error ? e.message : String(e)));
@@ -227,8 +222,9 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
                 mirror={mirror}
                 vendors={vendors}
                 qbwc={qbwc}
-                onMirrorClick={handleMirrorPillClick}
-                onVendorsClick={handleVendorsPillClick}
+                totalPending={totalPending}
+                onSyncNow={handleSyncNow}
+                onOpenPendingInspector={() => setPendingInspectorOpen(true)}
               />
             </div>
           </div>
