@@ -403,6 +403,51 @@ Concrete gates to flip the admin gate and delete v1:
 
 ## §8. Session log
 
+**S20 (2026-09-24, evening) — V10 sync surface SHIPPED, then re-shipped after Dan feedback. BREAK CALLED.**
+
+V10 pass 1 (`03e6e0d`): Mirror/Vendors/QBWC pills + `useQbAutoRefresh` (mount + 15-min interval + visibility) + V2-owned PendingJobsInspector modal + `useQbSyncState` hook. Fired auto-refresh on every mount if data was amber/red.
+
+Fixes shipped mid-session:
+- `3a8c5fe` — silent mode for `runSyncQbBills`/`runSyncQbVendors` after V1's alerting handlers popped two blocking dialogs on tab open (module-self-sufficient rule extension: even DB-plumbing handlers embed `alert()` for the manual-click case).
+- `efc330f` — V10 rethink: pills are indicators, NOT triggers. Killed mount + periodic + visibility auto-refresh entirely. Added single `Sync Now` text link that fires bill + vendor query in parallel. Post-push flow silently refreshes both. `N pending` chip separate from pills → opens inspector.
+
+pg_cron changes applied to prod via Management API:
+- `qb-delta-vendors` schedule `37 */2 * * *` → `37 */6 * * *` (jobid 18). Vendor list changes ~1-2/wk; every 2h was 12×/day for near-static data. Bills unchanged at hourly.
+
+Design decisions locked in this session:
+1. **Pills are pure status indicators**, not action affordances. No auto-firing from UI.
+2. **pg_cron owns cadence**: bills hourly, vendors 6-hourly. UI never duplicates.
+3. **Manual override = single `Sync Now` link** that fires both queries. Not two separate buttons per pill.
+4. **Post-push refresh** covers the "unless done as part of push" case Dan specified.
+5. **V2 self-sufficiency rule** ([[module-self-sufficient]]) extended: even sync handlers get a `silent?` opt because their alert side-effects break silent auto-invocation.
+
+Push queue still HELD through V12. All new writes are query jobs (bill_query/vendor_query), not bill_add/pmt_add.
+
+Branch tip `efc330f`. Not merged to main.
+
+**Next up (§9 roadmap):** V11 (plain-English copy sweep) is next per plan. But might be worth revisiting V9.10 (Add Columns dropdown, deferred) or a different priority Dan surfaces.
+
+**Cold-start resume prompt:**
+```
+Resume QB Automation v2 arc. Read .claude/plans/qb-automation-v2.md §8
+latest entry (S20). Confirm branch `feature/qb-automation-v2`, tip `efc330f`.
+Push queue still HELD through V12; do NOT push anything live.
+
+V10 SHIPPED and reworked. Pills are pure status indicators; single 'Sync
+Now' text link fires bill + vendor query together (silent); post-push flow
+silently refreshes both; pg_cron owns cadence (bills hourly, vendors 6h).
+
+Next candidates:
+- V11: plain-English copy sweep (§5.10) — red-line every user-facing string
+  with Dan
+- V9.10: Add Columns dropdown for Ready row set — deferred earlier
+- Something else Dan surfaces
+
+Ask Dan which. Don't start coding until he picks.
+```
+
+---
+
 **S19 (2026-09-24, afternoon) — Pushed card rebuilt on V1's columns. SHIPPED `27702f4`.**
 
 Two commits earlier in session (`dcf0da4` synthetic-row label fix, `856b3ca` shared derivation lib for Action + Match chips) were incremental wins on the wrong path. Dan pushed back midway: the Pushed card was showing invoice-derived fields (Contractor, Period, Inv # from `matched_invoice_ids[0]`) as if authoritative — misleading on fuzzy matches. Rumiya's row read "INV 11 | paid: Inv# 09" because the reconciler had fuzzy-matched event 88 (memo "Inv# 09") to invoice 181 (INV 11) via amount+vendor+date.
