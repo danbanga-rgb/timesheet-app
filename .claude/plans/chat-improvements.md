@@ -42,27 +42,228 @@ User → Our edge fn (context assembler + guardrails) → LLM → Our edge fn (v
 - Item 2 (bulk extract) → free because LLM sees whole message + captured state
 - Country prompt tuning → moot, LLM phrases naturally
 
-## Priority 0b — give the model tools + context (2026-09-25 CA review)
+## Priority 0b — Chat as the CA's primary interface (design locked 2026-09-25)
 
-**Why:** 2026-09-23 the Contracts Admin asked "Mirza Hukic is finishing at the end of this week". The profile is "Mirza Hukić". The bot said "No user found" twice, then, stuck in the end-date form, told the CA it had "no access to a project roster" (it can list by project; the collecting prompt just doesn't know that). The session expired after 24h. Nothing was done and nobody was told. A person with the same context would have solved it in one step. The gap is wiring, not the model: the LLM only fills forms; code does lookups with canned replies; the LLM never sees data, can't search, can't retry.
+> **Cold start: read this section top to bottom, then do "Start here" (bottom of the section).** It is self-contained: no separate resume prompt is needed.
 
-**Step 1: SHIPPED 2026-09-25** (`fix/chat-accent-insensitive-search`, chat-parse v34 deployed):
-`search_profiles` RPC (unaccent + pg_trgm tiers: exact / contains / tokens / similar), resolveUser uses it, "Did you mean" instead of a dead end, candidate lists show the project. user.get uses the same resolver.
+### 0. Why
 
-**Step 2: tool-use loop for reads + resolution** (model: `claude-haiku-4-5`, the cheapest; Dan 2026-09-25: "this has been solved millions of times"):
-- Replace "classify → fixed pipeline" for READS and target resolution with a Claude tool-use loop (Messages API `tools`, loop until `end_turn`, cap ~6 tool calls/turn).
-- Read tools (server-implemented, role-scoped): `search_people(query, role?)` → search_profiles; `list_people(filters)` / `count_people(filters)` → existing execUserList/Count filters; `get_person(id|email)` → execUserGet card; `list_projects()`.
-- Writes stay deterministic: the model calls `propose_action(intent, fields)` → the existing intents.ts schema validation → existing confirmation step (formatConfirmationSummary) → existing executors + chat_actions audit. The model never executes; the code decides what's allowed (RBAC via has_permission).
-- Any phase: a side question mid-form ("is there a mirza hukic on any project?") goes through the same loop with the form state as context, so no more "I don't have access".
-- Fallbacks: tool error or unparseable output → deterministic reply that names what failed; never a fabricated capability limit.
+The Contracts Admin (contracts@synergietechsolutions.com, role `contract_admin`, he/him) uses chat as **their main way into the system**:
+- **onboarding:** pastes the client's onboarding email → create the user with project, dates, rates, role, payment terms
+- **lifecycle changes:** start/end dates, project moves, country/region, pay and bill rates
+- **open-ended questions** about people, projects, roles, rates and counts
 
-**Step 3: standing context, no silent failures, observability, evals:**
-- System prompt carries standing context (like CLAUDE.md/memory for Claude Code): who the CA is and their usual tasks; project list (injected); conventions (names often carry diacritics; "end of this week" = that Friday as the last working day unless told otherwise; TODAY IS …); capability list generated from intents.ts so it can't drift.
-- Unfinished writes: when a conversation with a write intent expires or is cancelled after a failure, notify admin (Brevo email, same pipe as reminders) and show it in Chat Activity.
-- Persist every model output + tool call per message (chat_messages.parsed_intent / action_taken are NULL today for all CA messages). Chat Activity gets a "failed / abandoned" filter, not only successful writes.
-- Replay evals: real CA transcripts become fixtures (input → expected tool calls / proposed action). Case #1: "Mirza Hukic is finishing at the end of this week" → search_people("Mirza Hukic") → propose user.set_end_date {target: mirza.hukic@pm.me, end_date: 2026-09-25}. Run on every prompt/tool change.
+Trigger (2026-09-23): "Mirza Hukic is finishing at the end of this week". The profile is "Mirza Hukić".
+- The accent-sensitive lookup said "No user found" twice.
+- While stuck in the end-date form, the bot claimed it had "no access to a project roster".
+- The session expired after 24h. Nothing was done, nobody was told, and every CA message had NULL `parsed_intent`/`action_taken`.
 
-**Order:** Step 2 reads + resolution first (fixes the Mirza class end to end), then writes via propose_action, then Step 3. Discuss the step 2 design with Dan before building.
+Dan's framing: *"I've given you enough context that you'd know what to do. Why can't the LLM we pay for?"* The answer is **wiring, not the model**:
+- the LLM only fills forms
+- code does lookups and sends canned replies
+- the LLM never sees data and can't clarify
+- every new question type needs a new intent with bolted-on filters (`user.list` already has ~12)
+
+**Don't design from the latest incident** (Dan pushed back on a Mirza-only framing). Design from the whole transcript history. Also note: many early messages come from while the bot was being built and patched, so they test the *types* of request, not the bot's past quality.
+
+### 1. Hard constraints (Dan)
+
+- **Running cost ≈ zero.** Dan: "even ~$1/week is too much."
+  - Anthropic spend caps: **notify at $2/month, stop at $4/month.** Dan believes these already exist; **verify in the Anthropic Console** before shipping.
+  - Real volume: 88 inbound messages in launch week (2026-08-31), then 20, 12, 6 per week.
+- **Cheapest model: `claude-haiku-4-5`** ($1/$5 per MTok; cached input ~$0.10/MTok). It's already the model in `supabase/functions/_shared/llm.ts` (`CLAUDE_MODEL`).
+- **The chatbot is the way the CA changes data.** Don't make CA-requested data fixes by hand or by SQL (Dan, 2026-09-25: "No, you will not make that change. That's what the chatbot is for.").
+- **Writes always need an explicit confirmation**, checked by our code (RBAC via `has_permission`, schema validation, `chat_actions` audit). The model proposes; code decides.
+
+### 2. Current system (as of 2026-09-25)
+
+- **Edge fn `supabase/functions/chat-parse/index.ts`** (~2,030 lines, deployed `--no-verify-jwt`; it checks the JWT and `chat_enabled` itself). Live version **v34**, deployed from branch `fix/chat-accent-insensitive-search` (PR #16 → main, open).
+- **Phases:** `idle` → `collecting` → `confirming` → execute → back to `idle`. `cancelled`/`error` are terminal. A 24h timeout sweep runs (`20260901020000_chat_timeout_sweep.sql`).
+  - `handleIdle` classifies the intent (last 6 messages as context).
+  - `driveCollecting` is an LLM form-filler (last 8 messages, field schema).
+  - `handleConfirmation` → `executeIntent`.
+- **Intents** (`chat-parse/intents.ts`):
+  - reads: `user.get`, `user.list`, `user.count`
+  - writes: `user.create`, `user.set_start_date`, `user.set_end_date`, `user.update_project`, `user.update_country_region`, `user.update_pay_rate`, `user.update_bill_rate`
+- **Name resolution:** `resolveUser()` → RPC **`search_profiles(q, role_filter, max_results)`** (migration `20260925010000`: `unaccent` + `pg_trgm`; tiers exact / contains / tokens / similar; returns `project_name`; `service_role` only). "Did you mean" for similar-only matches. **Shipped 2026-09-25 (step 1).**
+- **Tables:**
+  - `chat_conversations` (intent, captured, phase, expires_at)
+  - `chat_messages` (content, `parsed_intent` + `action_taken`: currently NOT populated)
+  - `chat_actions` (writes only, audit)
+  - `chat_allowlist_audit`
+- **Frontend:** `src/roles/Chat/` (ChatShell, api.ts), CA landing `src/roles/ContractAdmin/`, admin audit `src/roles/AdminChat/AdminChatActivity.tsx` (lists `chat_actions` = successful/failed writes only; reads and abandoned conversations are invisible).
+- **Data the CA asks about:**
+  - `profiles`: name, email, role, country, region, location_type, project_id, start_date, end_date, manager_id, vendor_manager_id, payment_terms, invoice_enabled, reminders_enabled
+  - `projects`: id, name, **code** e.g. `APFM-061`, `APFM-116`, `GNW-104`, `AnE-087`; status
+  - `clients` (name, …)
+  - `client_engagements`: user_id, client_id, role_title, bill_rate, sow_reference, effective_from/to
+  - `rate_history`: user_id, rate_kind (pay/bill), rate, effective_from/to, client_engagement_id
+- **Related memories:** `project_chat_bot.md` (history + this decision), `project_contract_admin_identity.md`, `project_bill_vs_pay_rate.md`, `project_country_location_type_derivation.md` (country always derives location_type, never the reverse), `project_projects_no_client_id.md`, `feedback_llm_needs_today_date.md`, `feedback_ca_pronouns.md`.
+
+### 3. Target design (chosen by Dan 2026-09-25, stress-tested below)
+
+```
+CA message
+  │
+  ├─ A. Code-only handler ($0) ── YES/NO/cancel/skip, "1"/"2" picks, exact email,
+  │                                explicit dates, simple field answers ("croatia", "onshore")
+  │
+  ├─ B. Write request ── code pre-fetches context (name matches via search_profiles,
+  │      projects+codes, clients, this week's calendar) → ONE Haiku call fills the
+  │      intent schema → code validates → confirmation → existing executor → chat_actions
+  │
+  ├─ C. Question ── ONE Haiku call emits a STRUCTURED QUERY (JSON, never SQL)
+  │      → code resolves names/projects inside it → validates against allowlisted
+  │      read-only views → runs with row limit → CODE renders the table/answer
+  │      (the model only writes a one-line lead-in, or nothing)
+  │
+  └─ D. Doesn't fit / ambiguous ── bounded loop (≤ 3 model calls) using the same
+         read tools, or a clarifying question. Never a made-up capability limit.
+```
+
+**Router:** A is pure code, tried first. Otherwise one Haiku call returns `{kind: write|question|chat, intent?, fields?, query?, reply?}`. B and C are then the *same single call*, so most messages cost **exactly one model call**.
+
+**Escalation:** if Haiku's output fails validation twice, retry once on a stronger model (Sonnet). This should be rare, and it's logged.
+
+#### 3.1 Structured query (C)
+
+The shape the model emits (validated by code; unknown fields/ops are rejected with a clarifying reply):
+```json
+{
+  "entity": "people",
+  "filters": [
+    {"field": "project", "op": "eq", "value": "APFM"},
+    {"field": "role_title", "op": "ilike", "value": "data engineer"},
+    {"field": "bill_rate", "op": "gt", "value": 60},
+    {"field": "status", "op": "eq", "value": "active"}
+  ],
+  "fields": ["name", "email", "project", "role_title", "bill_rate"],
+  "group_by": "vendor_manager",
+  "aggregate": "list | count",
+  "sort": {"field": "end_date", "dir": "desc"},
+  "limit": 25,
+  "refines_previous": false
+}
+```
+- **Views (read-only, allowlisted), built as SQL views with `security_invoker = true`** (see memory `project_supabase_view_security_invoker`):
+  - `chat_v_people`: profile + project name/code + current role_title/bill_rate (current `client_engagements` row) + current pay rate (`rate_history`) + manager/vendor-manager names + derived status (active / ended / not started)
+  - `chat_v_projects`: project + head counts
+  - later, if asked: `chat_v_invoices_summary`
+- **Name/project resolution inside filters:** person values go through `search_profiles`; project values match name, code (`APFM-061`) or id (`2`). Several matches → "Which Aleksandar? 1. … 2. …" (and code handles the reply "1").
+- **Data dictionary** (part of the cached system prompt, **generated from the view definitions and intents.ts** so it can't drift): every field, meaning, allowed ops, synonyms ("contractors" = timesheetuser, "VMs" = vendormanager), and date rules.
+
+#### 3.2 Standing context (cached system prompt)
+
+- **Who the CA is** and what they usually do. Tone: short, plain.
+- **Conventions:**
+  - names often carry Balkan diacritics (ć č š ž đ)
+  - onshore/offshore derives from country, never the reverse
+  - "contractor" = timesheetuser
+  - project codes look like `APFM-061`
+- **Data dictionary** (3.1) + a **capability list generated from intents.ts + views**. "Can you change a pay rate?" is answered from it, never guessed.
+- **"Not tracked" rule:** if a question needs data that isn't in the dictionary (e.g. discounts), say so plainly.
+- **Contradiction rule:** if the fields disagree (e.g. country=IN with location_type=onshore), show both, flag it, and offer the fix (a write proposal).
+- **Volatile part, after the cache breakpoint:** `TODAY IS 2026-…` plus **this week's calendar**, Mon–Sun with dates. "End of this week" = **Friday**, as the last working day, unless the CA says otherwise. Timesheet weeks end on Sunday; don't confuse the two. The deterministic date parser (§3.3) handles the common phrases before the model sees them.
+
+#### 3.3 Code-only handler (A)
+
+- confirmations: yes/y/ok/confirm, no/n/cancel, skip
+- numbered picks ("1", "the second one")
+- exact email → resolve directly
+- field answers while collecting: country names/ISO (existing `normalizeCountry`), onshore/offshore, role synonyms, send-invite yes/no
+- **date parser:** today, tomorrow, yesterday, (next|this) <weekday>, end of (this|next) week/month, `M/D`, `M/D/YYYY`, ISO. If it's ambiguous, fall through to the model.
+
+### 4. Stress test (all 103 CA inbound messages, 2026-09-02 → 09-25)
+
+| Share | Kind | Real examples | Path |
+|---|---|---|---|
+| ~35% | Short replies | YES/NO/skip, "croatia", "onshore", an email, "next monday", "HR" | A ($0) |
+| ~30% | Writes | "add Sarah Chen sarah@example.com onshore APFM starting monday", Tharun's pasted block (Name/Position/Client/SOW/Start/Location/Pay/Payment terms/Bill), "harun ends today", "he should be assigned to client APFM", "sivakumar is onshore not in india", "Change send invite to No", "I have contractor whose pay rate is increasing" | B |
+| ~35% | Questions | see below | C (D rarely) |
+
+Questions, and what each one requires:
+
+| Real question | Req |
+|---|---|
+| "who all are on APFM?", "give me all offshore people", "who all do we have as data engineers", "do we have any contractors in india? who are they?" | filters (base) |
+| "when did harun start?", "is harun hasic still working", "what is liya's bill rate?", "what is senad role/title?", "is Tharunkumar offshore or onshore" | one person + fields (base) |
+| "how many total onshore + offshore", "just give me the counts not the names", "total number of active contractors across all projects" | **R1 counts grouped by a field** |
+| "who are vendor managers and who are their contractors?" | **R2 grouping** |
+| "who reports to Aleksandar?" (failed **6×** on 2026-09-04; the worst experience in the log) | **R3 names inside filters resolved, with "which X?"** |
+| "which ones of these are onshore" | **R4 refine the previous result** (store last query in `chat_conversations`; model emits a patch) |
+| "who all are on 2?", "can you show me all people on APFM-061 / APFM-116" | **R5 project by code / name / number** |
+| "who was the last person that finished and on what date", "recent offboardings" | **R6 date + recency semantics** |
+| "do you have bill rates of contractors", "can you query people's role/title?", "if i want to increase someone's payrate, are you able…" | **R7 capability answers from the generated list** |
+| "do we offer any discounts on the bill rate?" | **R8 honest "not tracked in the system"** |
+| "how can sivakumar be onshore and also IN?" | **R9 contradictions shown + flagged + fix offered** |
+
+**Verdict:** all 103 fit the design once R1–R9 are in. No question needed free-form SQL.
+
+Real data issue found by the CA: **Sivakumar Gnanathilagam has country=IN but location_type=onshore.** He should fix it through chat once R9 lands (or via the admin UI; Dan's call).
+
+### 5. Cost model
+
+| Path | Model calls | Tokens (in / out) | $ per message |
+|---|---|---|---|
+| A code-only | 0 | – | $0 |
+| B write | 1 | ~6–10K (mostly cached) / ~200–400 | ~$0.004–0.008 (pasted onboarding email ≈ $0.01) |
+| C question | 1 | ~6–10K (mostly cached) / ~100–200 (code renders the table) | ~$0.004–0.006 |
+| D loop | ≤3 | – | ≤ ~$0.02, rare |
+
+- **Now (6–20 msgs/week):** ~$0.03–0.10/week.
+- **If chat truly becomes the main interface (100+/week):** ~$0.50–0.80/week, still under the $2 alert.
+- **Rules:**
+  - Keep the fixed block (instructions + dictionary + capability list) byte-stable and first, with the cache breakpoint after it. Verify `usage.cache_read_input_tokens > 0`.
+  - **Check that Haiku's minimum cacheable prefix is met.** If the block is below it, caching silently does nothing; either grow it with useful dictionary detail or accept uncached.
+  - History: last 4 turns plus the stored last query (R4), not more.
+  - Output: JSON only, `max_tokens` ~400. Tables are rendered by code.
+
+### 6. Observability + safety nets
+
+- **Persist per inbound message:** the model's raw JSON (`chat_messages.parsed_intent`), what code did (`action_taken`: path A/B/C/D, validation errors, rows returned) and `response.usage` (tokens → cost).
+- **Chat Activity (admin):**
+  - add a conversations view with filters: failed / abandoned / clarification loops
+  - show reads, not just writes
+  - weekly token + $ total vs the $2/$4 caps
+- **Unfinished writes:** when a conversation with a write intent expires or is cancelled after a failure, email Dan via Brevo (same pipe as reminders): "CA's request 'Mirza Hukic is finishing…' ended without completing."
+
+### 7. Evals (replay tests)
+
+- Fixtures file `supabase/functions/chat-parse/evals/cases.json`, built from the 103 real messages (grouped into conversations where follow-ups matter).
+- Each case: input (+ prior turns) → **expected path + intent/query** (e.g. case 1: "Mirza Hukic is finishing at the end of this week" on 2026-09-23 → path B, `user.set_end_date {target: mirza.hukic@pm.me, end_date: 2026-09-25}`).
+- **Runner script** (Node, calls the chat pipeline's pure core with a fake DB and fixed "today"). Grading is deterministic: path, intent and normalized fields/query compared.
+- A full run is ~60 LLM calls ≈ **$0.30–0.50**. Run it before every deploy of prompt/tool/view changes. Record pass rate in this plan.
+
+### 8. Build slices (each in a FRESH Claude Code session: this plan is the brief)
+
+| Slice | Scope | Effort | Claude Code usage (rough) |
+|---|---|---|---|
+| **S1 — Foundations** | Code-only handler + date parser (A); persist parsed/action/usage (§6 first half); calendar in prompt; capture the 103-message eval fixtures | ~2h | ~40–60 tool calls |
+| **S2 — Questions** | `chat_v_people` / `chat_v_projects` views; structured query schema + validator + executor + table renderer; R1–R9 resolution; generated data dictionary + capability list; route questions through C (replaces user.list/count/get internals) | ~3–4h | ~70–100 tool calls |
+| **S3 — Writes** | Single-call write extraction with pre-fetched context (B); keep the confirm/executor path; pasted onboarding email end to end; Sivakumar-style correction writes | ~2–3h | ~50–70 tool calls |
+| **S4 — Safety nets** | Bounded loop (D) + clarifying questions; stronger-model escalation; unfinished-write email; Chat Activity conversations view + cost panel; eval runner wired in | ~2–3h | ~50–70 tool calls |
+
+Order: **S1 → S2 → S3 → S4.** S2 fixes the worst real pain ("who reports to Aleksandar?"). Each slice: branch off `main`; deploy `chat-parse` with `--no-verify-jwt`; typecheck with `npx -y deno@2 check index.ts` (**9 pre-existing errors = baseline**); run evals; PR to main; ask the CA to try the real phrasing.
+
+### 9. Decisions log
+
+- 2026-09-25: step 1 (accent-insensitive search + did-you-mean) shipped. Mirza's end date was then set **through chat by the CA**; the model first proposed 9/28 for "end of this week", and the CA corrected it to 9/25. That's why the calendar and date parser are in S1.
+- 2026-09-25: **structured query over curated views, not model-written SQL** (Dan: my recommendation; stress-tested → holds).
+- 2026-09-25: **near-zero running cost** is a hard constraint; one Haiku call per non-trivial message; caps notify $2 / stop $4 per month.
+- 2026-09-25: rejected **free tiers (Gemini/Groq)**: contractor PII, may train on data, rate limits; we already moved off Groq. Rejected **self-hosting** (no cheap place to run it).
+
+### 10. Open questions (ask Dan when relevant; don't block on them)
+
+- Unfinished-write alerts: email Dan only, or also the CA?
+- Should the CA see rates (bill/pay) for everyone, or only for people they manage? Today they see all. Confirm before building `chat_v_people`.
+- Proactive digests (e.g. "3 contractors end this week", "2 starters without a project"): code-only, no model cost. Wanted? (Not in S1–S4.)
+
+### Start here (cold start)
+
+1. `git fetch && git log origin/main --oneline -5`. Check whether PR #16 (`fix/chat-accent-insensitive-search`) is merged. If not, ask Dan to merge it first (chat-parse v34 already runs from it).
+2. Read memory `project_chat_bot.md` (2026-09-25 sections) and this section.
+3. Read-only sanity check: chat-parse is deployed and `search_profiles('Mirza Hukic')` returns an exact match.
+4. Tell Dan in two lines where things stand, then start **S1** on a new branch off `main` (the plan is approved; no need to re-ask about the design). Discuss only the §10 open questions if a slice touches them.
 
 ## Priority 1 — ship next (fundamental UX quality)
 
