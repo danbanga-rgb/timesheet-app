@@ -23,6 +23,26 @@ export function sourceLabel(s: string): string {
 
 export type ReadyGroup = 'pay' | 'create';
 
+// Umbrella wire group rows (V9.5). The status follows the reconciler's
+// umbrella-aware decision, which is what the push routes on, rather than
+// a single-vendor mirror lookup. Bimosoft 2026-09-25: the wire is mapped to
+// ONE sub-vendor (Edin) but pays two (Bojan + Edin); looking up Bojan's ref
+// under Edin's vendor never found the bill, so it showed "Will Create + Pay"
+// while both bills sat in QB unpaid and the push would pay them.
+export function umbrellaGroupVerdict(resolvedAction: QbResolvedAction | null, fallback: Verdict | null): Verdict {
+  if (resolvedAction === 'pay_existing_bill') return 'will_pay';
+  if (resolvedAction === 'create_bill_then_pay') return 'will_create_and_pay';
+  return fallback ?? 'will_create_and_pay';
+}
+
+// Group title: a multi-vendor wire is named after its payee as it appears on
+// the wire (event fact, e.g. "BIMOSOFT E OU"), not after whichever sub-vendor
+// the wire happens to be mapped to. Single-vendor groups keep the QB vendor.
+export function umbrellaGroupTitle(distinctVendorCount: number, counterpartyRaw: string, vendorName: string): string {
+  if (distinctVendorCount > 1 && counterpartyRaw.trim()) return counterpartyRaw.trim();
+  return vendorName;
+}
+
 function groupForVerdict(v: Verdict): ReadyGroup {
   return v === 'will_create_bill' ? 'create' : 'pay';
 }
@@ -494,17 +514,19 @@ export function useQbAutomationV2({
         }
         childRows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
 
-        // Verdict for a group row: use the first child's invoice number as
-        // the mirror lookup key; if that yields null (e.g. empty refNumber
-        // path), fall back to 'will_create_and_pay' — the default for any
-        // umbrella event we haven't already booked. Never skip a group row
-        // just because the verdict input is thin, or the whole umbrella
-        // event disappears from Ready.
+        // Verdict for a group row: the reconciler's resolvedAction first (see
+        // umbrellaGroupVerdict). Only when it hasn't decided, fall back to a
+        // mirror lookup on the first child's ref, then 'will_create_and_pay'.
+        // Never skip a group row just because the verdict input is thin, or
+        // the whole umbrella event disappears from Ready.
         const firstChildRef = childRows[0]?.invoiceNumber ?? '';
-        const verdict = computeVerdict(
-          { kind: e.targetQbTxnKind, vendorListId: e.counterpartyQbVendorListId, refNumber: firstChildRef, month: monthKey },
-          openBills,
-        ) ?? 'will_create_and_pay';
+        const verdict = umbrellaGroupVerdict(
+          e.resolvedAction,
+          computeVerdict(
+            { kind: e.targetQbTxnKind, vendorListId: e.counterpartyQbVendorListId, refNumber: firstChildRef, month: monthKey },
+            openBills,
+          ),
+        );
 
         const parentVendorName = distinctVendorListIds.size === 1
           ? (vendorsById.get([...distinctVendorListIds][0])?.name ?? 'Not mapped')
@@ -516,7 +538,7 @@ export function useQbAutomationV2({
           rowKey: `evt-${e.id}`,
           eventId: e.id,
           invoiceId: null,
-          contractorName: parentVendorName,
+          contractorName: umbrellaGroupTitle(distinctVendorListIds.size, e.counterpartyRaw, parentVendorName),
           contractorUserId: null,
           invoiceNumber: '',
           amount: e.amount,
