@@ -73,6 +73,13 @@ export interface ReconcileContext {
    *  Undefined = no cutoff applied. Per-source config lives outside this pure
    *  module (see src/lib/intuit/config.ts for the Intuit value). */
   preOurSystemCutoff?: string;
+  /** QB bill TxnID → the invoice it belongs to (invoices.qb_bill_txn_id).
+   *  A wire matched to invoice X must not settle against a bill owned by a
+   *  DIFFERENT invoice Y, even when the memo names Y's number. 2026-09-25:
+   *  Nikolina reused "INV 1-1-11" for June and July; her July wire's memo hit
+   *  June's already-paid bill and was closed as already_done, so July never
+   *  reached QB. */
+  billOwnerInvoiceId?: Map<string, number>;
 }
 
 // ─── Output ───────────────────────────────────────────────────────────────────
@@ -273,8 +280,14 @@ export function reconcileEvent(
   // matches are too weak and produced silently wrong assignments when mirror
   // was partially seeded (bug surfaced 2026-08-20). Amount-only matches fall
   // through to create_bill_then_pay, which is the safe fallback.
+  const ownedByOtherInvoice = (b: MirrorBill): boolean => {
+    if (!ctx.billOwnerInvoiceId || event.matchedInvoiceIds.length === 0) return false;
+    const owner = ctx.billOwnerInvoiceId.get(b.txnId);
+    return owner != null && !event.matchedInvoiceIds.includes(owner);
+  };
   const scored = bills
     .filter(b => !claimedBillTxnIds.has(b.txnId))
+    .filter(b => !ownedByOtherInvoice(b))
     .map(b => ({
       bill: b,
       score: scoreBillMatch(eventRefs, event.amount, event.txnDate, b),
