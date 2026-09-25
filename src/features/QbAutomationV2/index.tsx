@@ -8,6 +8,7 @@ import QbPushStatusPane from '../../components/QbPushStatusPane';
 import { cancelPushJobs } from '../../lib/qbAutomation/cancelPushJobs';
 import { useQbAutomationV2, type FailedPushJob, type ReadyRow } from './hooks/useQbAutomationV2';
 import { useQbSyncState } from './hooks/useQbSyncState';
+import { useLastSyncChecks } from './hooks/useLastSyncChecks';
 import KpiStrip, { type CategoryKey } from './sections/KpiStrip';
 import ReadyCard from './sections/ReadyCard';
 import NeedsMappingCard, { type SaveMappingArgs } from './sections/NeedsMappingCard';
@@ -81,7 +82,6 @@ export interface QbAutomationV2Props {
   g76PostedInvoiceIds?: Set<number>;
   /** V10: sync surface + freshness pills. */
   qbWcLastSeen: string | null;                    // MAX(qb_wc_sessions.last_seen_at)
-  vendorsLastQueriedAt: string | null;            // MAX(queried_at) on qb_mirror vendors
   qbBillQueryPending: number;                     // count of pending/in_flight bill_query jobs
   qbVendorQueryPending: number;                   // count of pending/in_flight vendor_query jobs
   pendingJobs: PendingJobRow[];                   // all pending/in_flight qb_sync_jobs — feeds inspector
@@ -129,14 +129,17 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     return unsubscribe;
   }, [props.onMappingChangeSubscribe]);
 
+  const totalPending = props.qbBillQueryPending + props.qbVendorQueryPending;
+  // Re-read last finished checks whenever the pending count moves (a job
+  // drained or was just enqueued). Read-only; no sync is triggered here.
+  const lastChecks = useLastSyncChecks(props.supabase, totalPending);
   const { mirror, vendors, qbwc } = useQbSyncState({
-    openBills: props.openBills,
-    vendorsLastQueriedAt: props.vendorsLastQueriedAt,
+    bills: lastChecks.bills,
+    vendors: lastChecks.vendors,
     qbWcLastSeen: props.qbWcLastSeen,
     qbBillQueryPending: props.qbBillQueryPending,
     qbVendorQueryPending: props.qbVendorQueryPending,
   });
-  const totalPending = props.qbBillQueryPending + props.qbVendorQueryPending;
 
   // Sync Now: fires both bill + vendor query in parallel, silently. Errors
   // surface to console (fire-and-forget); pill state updates reflect result.

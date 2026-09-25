@@ -20,11 +20,12 @@ const STATUS_CLASSES: Record<PillState['status'], string> = {
 
 function Pill({ pill }: { pill: PillState }) {
   const cls = STATUS_CLASSES[pill.status];
-  const title = pill.kind === 'qbwc'
+  const base = pill.kind === 'qbwc'
     ? 'The QuickBooks Web Connector on the accountant\'s laptop. If this is red, ask him to start it.'
     : pill.kind === 'vendors'
-      ? 'When the QB Mirror last pulled vendors. Updates every 6 hours.'
-      : 'When the QB Mirror last pulled bills. Updates hourly.';
+      ? 'When the QB Mirror last checked QuickBooks for vendor changes. Runs every 6 hours.'
+      : 'When the QB Mirror last checked QuickBooks for bill changes. Runs hourly.';
+  const title = pill.lastError ? `${base}\nLast check failed: ${pill.lastError}` : base;
   return (
     <span
       className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded-full border ${cls}`}

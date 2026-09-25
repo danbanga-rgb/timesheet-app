@@ -705,7 +705,6 @@ const TimesheetSystem = () => {
   }>>([]);
   // Slice G1 — QBWC heartbeat: most recent qb_wc_sessions.last_seen_at
   const [qbWcLastSeen, setQbWcLastSeen] = useState<string | null>(null);
-  const [qbVendorsLastQueriedAt, setQbVendorsLastQueriedAt] = useState<string | null>(null);   // V10 pill
   // Slice G1 — count of in-flight bill_query jobs (pending or in_flight status).
   // Polled every 30s while the QB Automation tab is open + > 0 pending. Falls
   // to 0 when QBWC finishes draining; UI auto-refreshes snapshot at that point.
@@ -2337,20 +2336,6 @@ const TimesheetSystem = () => {
       console.warn('loadQbOpenBills failed', e);
     }
   };
-  // V10 — MAX(queried_at) on qb_mirror vendor rows drives the Vendors pill.
-  const loadQbVendorsLastQueriedAt = async () => {
-    try {
-      const { data } = await supabase
-        .from('qb_mirror')
-        .select('queried_at')
-        .eq('entity_kind', 'vendor')
-        .order('queried_at', { ascending: false })
-        .limit(1);
-      setQbVendorsLastQueriedAt((data && data[0]?.queried_at) || null);
-    } catch (e) {
-      console.warn('loadQbVendorsLastQueriedAt failed', e);
-    }
-  };
   // Slice G1 — MAX(qb_wc_sessions.last_seen_at) as QBWC heartbeat.
   const loadQbWcLastSeen = async () => {
     try {
@@ -2421,7 +2406,6 @@ const TimesheetSystem = () => {
       setQbVendorQueryPending(next);
       if (prev > 0 && next === 0) {
         await refreshQbVendors();
-        await loadQbVendorsLastQueriedAt();               // V10 pill: vendors mirror just refreshed
       }
     } catch (e) {
       console.warn('loadQbVendorQueryPending failed', e);
@@ -2625,7 +2609,6 @@ const TimesheetSystem = () => {
       await loadQbVendorsAndAccounts();
       await loadQbOpenBills();
       await loadQbWcLastSeen();
-      await loadQbVendorsLastQueriedAt();
       await loadQbBillQueryPending();
       await loadQbVendorQueryPending();
       await loadInflightPushRecords();
@@ -5407,7 +5390,6 @@ const TimesheetSystem = () => {
               pushRecords={qbPushRecords}
               supabase={supabase}
               qbWcLastSeen={qbWcLastSeen}
-              vendorsLastQueriedAt={qbVendorsLastQueriedAt}
               qbBillQueryPending={qbBillQueryPending}
               qbVendorQueryPending={qbVendorQueryPending}
               pendingJobs={qbPendingJobDetails.map(j => ({ id: j.id, kind: j.kind, createdAt: j.created_at, payload: j.payload }))}

@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react';
-import type { QbOpenBillRow } from '../../../lib/qbStateSync/types';
-import { snapshotAge, humanizeAge } from '../../../lib/qbStateSync/freshness';
+import { humanizeAge } from '../../../lib/qbStateSync/freshness';
+import type { SyncCheck } from './useLastSyncChecks';
 
-// Freshness thresholds (V1-aligned, TS.tsx:7559-7561 for QBWC).
-const MIRROR_GREEN_SEC = 15 * 60;         // < 15min: green
-const MIRROR_AMBER_SEC = 60 * 60;         // 15-60min: amber; >60min: red
+// Freshness thresholds follow each pg_cron cadence plus ~20 min for the
+// connector to pick the job up. Green = on schedule; amber = one run
+// missed; red = more than one missed.
+const GRACE_SEC = 20 * 60;
+const BILLS_CADENCE_SEC = 60 * 60;          // qb-delta-bills: hourly at :17
+const VENDORS_CADENCE_SEC = 6 * 60 * 60;    // qb-delta-vendors: every 6h at :37
+export const BILLS_GREEN_SEC = BILLS_CADENCE_SEC + GRACE_SEC;
+export const BILLS_AMBER_SEC = 2 * BILLS_CADENCE_SEC + GRACE_SEC;
+export const VENDORS_GREEN_SEC = VENDORS_CADENCE_SEC + GRACE_SEC;
+export const VENDORS_AMBER_SEC = 2 * VENDORS_CADENCE_SEC + GRACE_SEC;
 const QBWC_ALIVE_SEC = 20 * 60;           // < 20min: alive
 const QBWC_DOWN_SEC = 30 * 60;            // > 30min: down; 20-30min: delayed
 
@@ -17,11 +24,12 @@ export interface PillState {
   label: string;                          // "Mirror · 3m ago"
   pendingCount: number;                   // shown as subtle spinner "⟳ 2 syncing"
   clickable: boolean;                     // false for QBWC (info-only)
+  lastError?: string | null;              // most recent check errored (pill forced to at least amber)
 }
 
 export interface UseQbSyncStateArgs {
-  openBills: QbOpenBillRow[];
-  vendorsLastQueriedAt: string | null;    // MAX(queried_at) from qb_mirror WHERE entity_kind='vendor'
+  bills: SyncCheck | null;               // last finished bill_query job (null = not loaded yet)
+  vendors: SyncCheck | null;             // last finished vendor_query job
   qbWcLastSeen: string | null;
   qbBillQueryPending: number;
   qbVendorQueryPending: number;
@@ -52,16 +60,16 @@ export function useQbSyncState(args: UseQbSyncStateArgs): {
     return () => clearInterval(id);
   }, []);
 
-  const mirrorFreshness = snapshotAge(args.openBills);
-  const mirrorStatus = ageStatus(mirrorFreshness.newestQueriedAt, MIRROR_GREEN_SEC, MIRROR_AMBER_SEC, now);
-  const mirrorLabel = mirrorFreshness.newestQueriedAt
-    ? `QB Mirror · ${humanizeAge(mirrorFreshness.newestQueriedAt, now)}`
-    : 'QB Mirror · never synced';
-
-  const vendorsStatus = ageStatus(args.vendorsLastQueriedAt, MIRROR_GREEN_SEC, MIRROR_AMBER_SEC, now);
-  const vendorsLabel = args.vendorsLastQueriedAt
-    ? `QB Vendors · ${humanizeAge(args.vendorsLastQueriedAt, now)}`
-    : 'QB Vendors · never synced';
+  const checkPill = (check: SyncCheck | null, name: string, greenCap: number, amberCap: number) => {
+    const doneAt = check?.lastDoneAt ?? null;
+    let status = ageStatus(doneAt, greenCap, amberCap, now);
+    // A failed latest check can't hide behind an older success.
+    if (check?.lastFailedAt && (status === 'green' || status === 'unknown')) status = 'amber';
+    const label = doneAt ? `${name} · ${humanizeAge(doneAt, now)}` : `${name} · never synced`;
+    return { status, label, lastError: check?.lastFailedAt ? (check.lastError || 'no reason given') : null };
+  };
+  const mirrorPill = checkPill(args.bills, 'QB Mirror', BILLS_GREEN_SEC, BILLS_AMBER_SEC);
+  const vendorsPill = checkPill(args.vendors, 'QB Vendors', VENDORS_GREEN_SEC, VENDORS_AMBER_SEC);
 
   const qbwcAgeSec = ageSeconds(args.qbWcLastSeen, now);
   let qbwcStatus: PillStatus;
@@ -81,8 +89,8 @@ export function useQbSyncState(args: UseQbSyncStateArgs): {
   }
 
   return {
-    mirror: { kind: 'mirror', status: mirrorStatus, label: mirrorLabel, pendingCount: args.qbBillQueryPending, clickable: true },
-    vendors: { kind: 'vendors', status: vendorsStatus, label: vendorsLabel, pendingCount: args.qbVendorQueryPending, clickable: true },
+    mirror: { kind: 'mirror', ...mirrorPill, pendingCount: args.qbBillQueryPending, clickable: true },
+    vendors: { kind: 'vendors', ...vendorsPill, pendingCount: args.qbVendorQueryPending, clickable: true },
     qbwc: { kind: 'qbwc', status: qbwcStatus, label: qbwcLabel, pendingCount: 0, clickable: false },
   };
 }

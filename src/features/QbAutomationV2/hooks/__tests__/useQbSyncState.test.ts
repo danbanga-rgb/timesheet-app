@@ -2,111 +2,69 @@
 
 import { describe, it, expect } from 'vitest';
 import { renderHook } from '@testing-library/react';
-import type { QbOpenBillRow } from '../../../../lib/qbStateSync/types';
 import { useQbSyncState } from '../useQbSyncState';
+import type { SyncCheck } from '../useLastSyncChecks';
 
-function bill(queriedAt: string): QbOpenBillRow {
-  return {
-    vendorListId: 'V1', vendorName: 'V', refNumber: 'R', txnId: 'T',
-    txnDate: null, dueDate: null, amount: 0, openAmount: 0, isPaid: false,
-    queriedAt,
-  };
+const MIN = 60_000;
+const HR = 60 * MIN;
+const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+const ok = (msAgo: number): SyncCheck => ({ lastDoneAt: iso(msAgo), lastFailedAt: null, lastError: null });
+
+function run(bills: SyncCheck | null, vendors: SyncCheck | null, qbwcAgoMs: number | null = 3 * MIN, pending = [0, 0]) {
+  return renderHook(() => useQbSyncState({
+    bills,
+    vendors,
+    qbWcLastSeen: qbwcAgoMs == null ? null : iso(qbwcAgoMs),
+    qbBillQueryPending: pending[0],
+    qbVendorQueryPending: pending[1],
+  })).result.current;
 }
 
-const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
-
 describe('useQbSyncState', () => {
-  it('mirror: green when < 15min old', () => {
-    const { result } = renderHook(() => useQbSyncState({
-      openBills: [bill(iso(5 * 60_000))],
-      vendorsLastQueriedAt: iso(2 * 60_000),
-      qbWcLastSeen: iso(3 * 60_000),
-      qbBillQueryPending: 0,
-      qbVendorQueryPending: 0,
-    }));
-    expect(result.current.mirror.status).toBe('green');
-    expect(result.current.vendors.status).toBe('green');
-    expect(result.current.qbwc.status).toBe('green');
+  it('bills pill follows the hourly cadence (+20 min grace)', () => {
+    expect(run(ok(55 * MIN), ok(MIN)).mirror.status).toBe('green');
+    expect(run(ok(75 * MIN), ok(MIN)).mirror.status).toBe('green');
+    expect(run(ok(90 * MIN), ok(MIN)).mirror.status).toBe('amber');
+    expect(run(ok(3 * HR), ok(MIN)).mirror.status).toBe('red');
   });
 
-  it('mirror: amber when 15-60min old', () => {
-    const { result } = renderHook(() => useQbSyncState({
-      openBills: [bill(iso(30 * 60_000))],
-      vendorsLastQueriedAt: iso(30 * 60_000),
-      qbWcLastSeen: iso(3 * 60_000),
-      qbBillQueryPending: 0,
-      qbVendorQueryPending: 0,
-    }));
-    expect(result.current.mirror.status).toBe('amber');
-    expect(result.current.vendors.status).toBe('amber');
+  it('vendors pill follows the 6-hour cadence (+20 min grace)', () => {
+    expect(run(ok(MIN), ok(5 * HR)).vendors.status).toBe('green');
+    expect(run(ok(MIN), ok(7 * HR)).vendors.status).toBe('amber');
+    expect(run(ok(MIN), ok(13 * HR)).vendors.status).toBe('red');
   });
 
-  it('mirror: red when > 60min old', () => {
-    const { result } = renderHook(() => useQbSyncState({
-      openBills: [bill(iso(2 * 60 * 60_000))],
-      vendorsLastQueriedAt: iso(2 * 60 * 60_000),
-      qbWcLastSeen: iso(3 * 60_000),
-      qbBillQueryPending: 0,
-      qbVendorQueryPending: 0,
-    }));
-    expect(result.current.mirror.status).toBe('red');
-    expect(result.current.vendors.status).toBe('red');
+  it('a failed latest check forces at least amber and carries the error', () => {
+    const failing: SyncCheck = { lastDoneAt: iso(10 * MIN), lastFailedAt: iso(2 * MIN), lastError: 'QBWC timeout' };
+    const s = run(failing, ok(MIN));
+    expect(s.mirror.status).toBe('amber');
+    expect(s.mirror.lastError).toBe('QBWC timeout');
+    const oldAndFailing: SyncCheck = { lastDoneAt: iso(5 * HR), lastFailedAt: iso(2 * MIN), lastError: null };
+    expect(run(oldAndFailing, ok(MIN)).mirror.status).toBe('red');
   });
 
-  it('status is based on freshness age, NOT pending count', () => {
-    // Fresh mirror + a routine sync in flight → still green.
-    const { result } = renderHook(() => useQbSyncState({
-      openBills: [bill(iso(2 * 60_000))],
-      vendorsLastQueriedAt: iso(2 * 60_000),
-      qbWcLastSeen: iso(3 * 60_000),
-      qbBillQueryPending: 3,
-      qbVendorQueryPending: 2,
-    }));
-    expect(result.current.mirror.status).toBe('green');
-    expect(result.current.mirror.pendingCount).toBe(3);
-    expect(result.current.vendors.status).toBe('green');
-    expect(result.current.vendors.pendingCount).toBe(2);
+  it('label shows age of the last successful check', () => {
+    expect(run(ok(5 * MIN), ok(MIN)).mirror.label).toMatch(/^QB Mirror · /);
+    expect(run(null, null).mirror.label).toBe('QB Mirror · never synced');
   });
 
-  it('unknown when never synced', () => {
-    const { result } = renderHook(() => useQbSyncState({
-      openBills: [],
-      vendorsLastQueriedAt: null,
-      qbWcLastSeen: null,
-      qbBillQueryPending: 0,
-      qbVendorQueryPending: 0,
-    }));
-    expect(result.current.mirror.status).toBe('unknown');
-    expect(result.current.vendors.status).toBe('unknown');
-    expect(result.current.qbwc.status).toBe('red');   // never-seen QBWC is a fault, not unknown
+  it('status is based on age, NOT pending count', () => {
+    const s = run(ok(2 * MIN), ok(2 * MIN), 3 * MIN, [3, 2]);
+    expect(s.mirror.status).toBe('green');
+    expect(s.mirror.pendingCount).toBe(3);
+    expect(s.vendors.pendingCount).toBe(2);
   });
 
-  it('qbwc: amber 20-30min, red > 30min', () => {
-    const amber = renderHook(() => useQbSyncState({
-      openBills: [bill(iso(1 * 60_000))],
-      vendorsLastQueriedAt: iso(1 * 60_000),
-      qbWcLastSeen: iso(25 * 60_000),
-      qbBillQueryPending: 0,
-      qbVendorQueryPending: 0,
-    }));
-    expect(amber.result.current.qbwc.status).toBe('amber');
-    const red = renderHook(() => useQbSyncState({
-      openBills: [bill(iso(1 * 60_000))],
-      vendorsLastQueriedAt: iso(1 * 60_000),
-      qbWcLastSeen: iso(45 * 60_000),
-      qbBillQueryPending: 0,
-      qbVendorQueryPending: 0,
-    }));
-    expect(red.result.current.qbwc.status).toBe('red');
+  it('unknown when never synced; never-seen connector is red', () => {
+    const s = run(null, null, null);
+    expect(s.mirror.status).toBe('unknown');
+    expect(s.vendors.status).toBe('unknown');
+    expect(s.qbwc.status).toBe('red');
   });
 
-  it('qbwc is not clickable (external process)', () => {
-    const { result } = renderHook(() => useQbSyncState({
-      openBills: [], vendorsLastQueriedAt: null, qbWcLastSeen: iso(5 * 60_000),
-      qbBillQueryPending: 0, qbVendorQueryPending: 0,
-    }));
-    expect(result.current.qbwc.clickable).toBe(false);
-    expect(result.current.mirror.clickable).toBe(true);
-    expect(result.current.vendors.clickable).toBe(true);
+  it('qbwc: amber 20-30min, red > 30min, not clickable', () => {
+    expect(run(ok(MIN), ok(MIN), 25 * MIN).qbwc.status).toBe('amber');
+    expect(run(ok(MIN), ok(MIN), 45 * MIN).qbwc.status).toBe('red');
+    expect(run(ok(MIN), ok(MIN)).qbwc.clickable).toBe(false);
   });
 });
