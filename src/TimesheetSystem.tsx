@@ -1990,6 +1990,7 @@ const TimesheetSystem = () => {
       billsByVendor,
       paymentsByVendor,
       preOurSystemCutoff: INTUIT_PRE_OUR_SYSTEM_CUTOFF,
+      billOwnerInvoiceId: invoiceIdByBillTxnId,
     });
 
     // Convera umbrella-aware post-pass. The core reconciler is single-vendor
