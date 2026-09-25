@@ -447,13 +447,12 @@ Return JSON:
       await admin.from('chat_conversations').update({
         captured: merged, last_activity_at: new Date().toISOString(),
       }).eq('id', conv.id);
-      await writeBot(admin, conv.id,
-        `No user found matching "${targetStr}". Try a different name, or use the email address.`);
+      await writeBot(admin, conv.id, noMatchReply(targetStr, resolved));
       return;
     }
     if (resolved.kind === 'multi') {
       delete merged.target;
-      const list = resolved.candidates.map((c, i) => `  ${i + 1}. ${c.name} (${c.email})`).join('\n');
+      const list = describeCandidates(resolved.candidates);
       await admin.from('chat_conversations').update({
         captured: merged, last_activity_at: new Date().toISOString(),
       }).eq('id', conv.id);
@@ -1193,29 +1192,20 @@ async function execUserGet(admin: SupabaseClient, conv: Conversation): Promise<v
     const { data } = await admin.from('profiles').select(cols).ilike('email', t).limit(1).maybeSingle();
     user = data as Record<string, unknown> | null;
   } else {
-    const { data: exact } = await admin.from('profiles').select(cols).ilike('name', target).limit(10);
-    if (exact && exact.length === 1) {
-      user = exact[0] as Record<string, unknown>;
-    } else if (exact && exact.length > 1) {
-      // Multiple exact-name matches: pick the first (alphabetical by fetch order),
-      // state the assumption, list the alternatives so user can correct.
-      user = exact[0] as Record<string, unknown>;
-      const others = (exact as Array<{ name: string; email: string; role: string }>).slice(1);
-      assumptionNote = formatAssumption((user as { name: string; email: string; role: string }), others);
-    } else {
-      const { data: fuzzy } = await admin.from('profiles').select(cols).ilike('name', `%${target}%`).limit(10);
-      if (!fuzzy || fuzzy.length === 0) {
-        await writeBot(admin, conv.id, `No user found matching "${target}".`);
-        return;
-      }
-      if (fuzzy.length === 1) {
-        user = fuzzy[0] as Record<string, unknown>;
-      } else {
-        // Multi fuzzy match: pick the first + state assumption.
-        user = fuzzy[0] as Record<string, unknown>;
-        const others = (fuzzy as Array<{ name: string; email: string; role: string }>).slice(1);
-        assumptionNote = formatAssumption((user as { name: string; email: string; role: string }), others);
-      }
+    const resolved = await resolveUser(admin, target);
+    if (resolved.kind === 'none') {
+      await writeBot(admin, conv.id, noMatchReply(target, resolved));
+      return;
+    }
+    const picked = resolved.kind === 'single' ? resolved.user : resolved.candidates[0];
+    const { data } = await admin.from('profiles').select(cols).eq('id', picked.id).maybeSingle();
+    user = data as Record<string, unknown> | null;
+    if (user && resolved.kind === 'multi') {
+      // Several matches: show the first, state the assumption, list the others.
+      assumptionNote = formatAssumption(
+        { name: picked.name, email: picked.email, role: String((user as { role?: string }).role ?? '') },
+        resolved.candidates.slice(1).map(c => ({ name: c.name, email: c.email, role: '' })),
+      );
     }
   }
   if (!user) {
@@ -1671,37 +1661,62 @@ async function resolveEngagementFilterUserIds(
 //   - substring match on name (unique or ambiguous)
 // Returns start_date/end_date so callers can show current values before
 // confirming a change.
-type ResolvedUser = { id: string; name: string; email: string; start_date: string | null; end_date: string | null };
+type ResolvedUser = { id: string; name: string; email: string; start_date: string | null; end_date: string | null; project_name?: string | null };
 type Resolved =
-  | { kind: 'none' }
+  | { kind: 'none'; suggestions?: ResolvedUser[] }
   | { kind: 'single'; user: ResolvedUser }
   | { kind: 'multi'; candidates: ResolvedUser[] };
 
 const RESOLVE_COLS = 'id, name, email, start_date, end_date';
 
+/** "  1. Mirza Hukić (mirza.hukic@pm.me, Genworth/CareScout)" */
+function describeCandidates(list: ResolvedUser[]): string {
+  return list.map((c, i) => `  ${i + 1}. ${c.name} (${c.email}${c.project_name ? `, ${c.project_name}` : ''})`).join('\n');
+}
+
+/** Bot reply when a name doesn't resolve: "did you mean" when close matches exist. */
+function noMatchReply(target: string, r: Resolved): string {
+  if (r.kind === 'none' && r.suggestions && r.suggestions.length > 0) {
+    return `I couldn't find "${target}" exactly. Did you mean:\n${describeCandidates(r.suggestions)}\n\nReply with the name or email.`;
+  }
+  return `No user found matching "${target}". Try a different spelling, the last name only, or the email address.`;
+}
+
 async function resolveUser(admin: SupabaseClient, target: string, roleFilter?: string): Promise<Resolved> {
   const t = target.trim().toLowerCase();
   if (!t) return { kind: 'none' };
 
-  const withRole = <T>(q: T): T => (roleFilter ? (q as unknown as { eq: (c: string, v: string) => T }).eq('role', roleFilter) : q);
-
   // Exact email match first (highest confidence)
   if (t.includes('@')) {
-    const { data } = await withRole(admin.from('profiles').select(RESOLVE_COLS).ilike('email', t)).limit(1).maybeSingle();
+    let q = admin.from('profiles').select(RESOLVE_COLS).ilike('email', t);
+    if (roleFilter) q = q.eq('role', roleFilter);
+    const { data } = await q.limit(1).maybeSingle();
     if (data) return { kind: 'single', user: data as ResolvedUser };
     return { kind: 'none' };
   }
 
-  // Name-based: exact case-insensitive first
-  const { data: exact } = await withRole(admin.from('profiles').select(RESOLVE_COLS).ilike('name', t));
-  if (exact && exact.length === 1) return { kind: 'single', user: exact[0] as ResolvedUser };
-  if (exact && exact.length > 1) return { kind: 'multi', candidates: exact as ResolvedUser[] };
+  // Names: accent-insensitive + typo-tolerant search (search_profiles RPC,
+  // migration 20260925010000). "Mirza Hukic" must find "Mirza Hukić".
+  const { data, error } = await admin.rpc('search_profiles', { q: target.trim(), role_filter: roleFilter ?? null, max_results: 10 });
+  if (error) throw new Error(`name search failed: ${error.message}`);
+  const rows = (data ?? []) as Array<ResolvedUser & { match_kind: string }>;
+  const strip = (r: ResolvedUser & { match_kind: string }): ResolvedUser => ({
+    id: r.id, name: r.name, email: r.email, start_date: r.start_date, end_date: r.end_date, project_name: r.project_name ?? null,
+  });
 
-  // Substring match
-  const { data: fuzzy } = await withRole(admin.from('profiles').select(RESOLVE_COLS).ilike('name', `%${t}%`)).limit(10);
-  if (!fuzzy || fuzzy.length === 0) return { kind: 'none' };
-  if (fuzzy.length === 1) return { kind: 'single', user: fuzzy[0] as ResolvedUser };
-  return { kind: 'multi', candidates: fuzzy as ResolvedUser[] };
+  const exact = rows.filter(r => r.match_kind === 'exact');
+  if (exact.length === 1) return { kind: 'single', user: strip(exact[0]) };
+  if (exact.length > 1) return { kind: 'multi', candidates: exact.map(strip) };
+
+  // Name contains the query, or all its words appear: same trust as the old
+  // substring match (one → that person; several → ask which).
+  const partial = rows.filter(r => r.match_kind === 'contains' || r.match_kind === 'tokens');
+  if (partial.length === 1) return { kind: 'single', user: strip(partial[0]) };
+  if (partial.length > 1) return { kind: 'multi', candidates: partial.map(strip) };
+
+  // Only spelling-similar names: never act on a guess. Offer them.
+  const similar = rows.filter(r => r.match_kind === 'similar').slice(0, 5);
+  return { kind: 'none', suggestions: similar.map(strip) };
 }
 
 // ─── Executor helpers ──────────────────────────────────────────────
