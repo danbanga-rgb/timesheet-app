@@ -1,12 +1,12 @@
 import { useMemo } from 'react';
 import { X } from 'lucide-react';
-import type { Invoice, QbIngestEvent } from '../../../types';
+import type { QbIngestEvent } from '../../../types';
+import { sourceLabel } from '../hooks/useQbAutomationV2';
 
 interface Props {
   qbVendorListId: string;
   qbVendorName: string;
   events: QbIngestEvent[];
-  invoices: Invoice[];
   onClose: () => void;
 }
 
@@ -27,26 +27,25 @@ function extractQbRefs(refs: Record<string, unknown> | null): { bill: string; pm
   return { bill, pmt, source };
 }
 
-export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events, invoices, onClose }: Props) {
-  const invoicesById = useMemo(() => new Map(invoices.map(i => [i.id, i])), [invoices]);
-
+export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events, onClose }: Props) {
   const rows = useMemo(() => {
     // Only posted events — matches the "Bills pushed" column semantic.
     // Ignored / pending events are visible in other views.
+    // Row fields come from the event itself, never from matched_invoice_ids[0]:
+    // a fuzzy match can attach the wrong invoice ([[pushed-row-event-not-invoice]]).
     const matches = events.filter(e => e.counterpartyQbVendorListId === qbVendorListId && e.status === 'posted');
     return matches
       .map(e => {
-        const inv = e.matchedInvoiceIds.length > 0 ? invoicesById.get(e.matchedInvoiceIds[0]) ?? null : null;
         const refs = extractQbRefs(e.postedQbRefs);
         return {
           eventId: e.id,
           date: e.statusUpdatedAt || e.txnDate,
           txnDate: e.txnDate,
-          contractor: inv?.userName || e.counterpartyRaw || '(unknown)',
-          invoiceNumber: inv?.invoiceNumber || '',
+          paidTo: e.counterpartyRaw || '(unknown)',
+          memo: e.memo ?? '',
           amount: e.amount,
-          currency: inv?.currency || 'USD',
-          source: e.source,
+          currency: 'USD',                  // event has no currency field; matches Pushed card
+          source: sourceLabel(e.source),
           status: e.status,
           billTxnId: refs.bill,
           qbRefsDisplay: [refs.bill && `Bill ${refs.bill}`, refs.pmt && `Pmt ${refs.pmt}`].filter(Boolean).join(' · '),
@@ -54,7 +53,7 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
         };
       })
       .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  }, [events, qbVendorListId, invoicesById]);
+  }, [events, qbVendorListId]);
 
   const totalAmount = rows.reduce((s, r) => s + r.amount, 0);
   // Real duplicate signal = two posted events landing on the SAME QB Bill
@@ -76,7 +75,7 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
       <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white z-10">
           <div>
-            <h2 className="text-base font-bold text-gray-800">Bills pushed to QB via this mapping</h2>
+            <h2 className="text-base font-bold text-gray-800">Bills pushed to this QB vendor</h2>
             <p className="text-xs text-gray-500 mt-0.5">
               QB Vendor: <span className="font-medium">{qbVendorName}</span>
               <span className="mx-2">·</span>
@@ -103,12 +102,12 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
                   <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Date</th>
-                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Contractor</th>
-                  <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Invoice #</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Paid to</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Memo</th>
                   <th className="px-3 py-2 text-right font-semibold text-gray-600">Amount</th>
                   <th className="px-3 py-2 text-left font-semibold text-gray-600">Source</th>
                   <th className="px-3 py-2 text-left font-semibold text-gray-600">Status</th>
-                  <th className="px-3 py-2 text-left font-semibold text-gray-600">QB Refs</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">QB IDs</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -124,10 +123,10 @@ export default function BillsRoutedModal({ qbVendorListId, qbVendorName, events,
                   return (
                     <tr key={r.eventId} className={isDupe ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'}>
                       <td className="px-3 py-1.5 text-gray-600 whitespace-nowrap">{fmtDate(r.date)}</td>
-                      <td className="px-3 py-1.5 font-medium text-gray-800 whitespace-nowrap">{r.contractor}</td>
-                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                        {r.invoiceNumber || '—'}
-                        {isFuzzy && <span className="ml-1 text-[10px] text-indigo-700" title="Marked posted by accountant fuzzy-accept; pre-existing QB Bill (not created by our push)">fuzzy</span>}
+                      <td className="px-3 py-1.5 font-medium text-gray-800 whitespace-nowrap">{r.paidTo}</td>
+                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap font-mono">
+                        {r.memo || '—'}
+                        {isFuzzy && <span className="ml-1 text-[10px] text-indigo-700" title="The accountant entered this bill in QuickBooks. We matched it to an invoice by vendor and amount.">fuzzy</span>}
                         {isDupe && <span className="ml-1 text-[10px] text-red-700 font-semibold">dupe</span>}
                       </td>
                       <td className="px-3 py-1.5 text-right font-mono font-semibold whitespace-nowrap">

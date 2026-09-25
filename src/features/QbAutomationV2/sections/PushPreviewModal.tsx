@@ -132,7 +132,7 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
                 {missingVendorRows.length > 5 && ` +${missingVendorRows.length - 5} more`}
               </div>
               <div className="text-amber-700 mb-2">
-                Push is blocked until the vendor list refreshes. Click Sync Vendors, then wait for QBWC to drain (~15 min). This banner disappears once the missing vendors appear in the mirror. Alternatively, re-map any affected row to a vendor already in your mirror.
+                Push is blocked until the vendor list refreshes. Click Sync Vendors and wait about 15 min, or change those rows to a vendor already in the mirror.
               </div>
               <button
                 onClick={handleSyncVendors}
@@ -140,7 +140,7 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
                 className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <RefreshCw className={'w-3.5 h-3.5 ' + (syncing ? 'animate-spin' : '')} />
-                {syncing ? 'Enqueueing…' : 'Sync Vendors'}
+                {syncing ? 'Requesting…' : 'Sync Vendors'}
               </button>
             </div>
           </div>
@@ -227,7 +227,7 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
                           type="button"
                           disabled={busy || r.ppId <= 0}
                           onClick={() => setEditingRowKey(r.rowKey)}
-                          title={r.ppId <= 0 ? 'No payment profile — cannot re-map' : 'Click to change QB vendor mapping'}
+                          title={r.ppId <= 0 ? 'No payment profile on this invoice, so there\'s no mapping to change.' : 'Change the QB vendor mapping for this payment profile. Applies to this and future invoices.'}
                           className={
                             'text-left w-full px-1 py-0.5 rounded ' +
                             (busy || r.ppId <= 0
@@ -249,7 +249,7 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
                         {verdictLabel(r.verdict)}
                       </span>
                       {missing && (
-                        <span className="ml-1 inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-200 text-amber-900" title="This vendor listId is not in the local qb_vendors mirror yet — Sync Vendors to refresh">
+                        <span className="ml-1 inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-200 text-amber-900" title="This vendor isn't in the QB Mirror yet. Click Sync Vendors.">
                           Not synced
                         </span>
                       )}
@@ -264,7 +264,7 @@ export default function PushPreviewModal({ rows, vendors, onSaveMapping, onSyncV
                       <td className="px-3 py-1 text-right font-mono">
                         {fmtMoney(c.share)}{' '}
                         {c.shareSource === 'invoice_total' && (
-                          <span title="Share from convera_transaction_invoices not available — using invoice total as fallback" className="text-amber-600">*</span>
+                          <span title="This wire's split isn't recorded, so the full invoice total is shown." className="text-amber-600">*</span>
                         )}
                       </td>
                       <td className="px-3 py-1 text-[10px] text-gray-500">

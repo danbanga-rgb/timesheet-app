@@ -236,8 +236,8 @@ function buildPushedRow(
 ): PushedRow | null {
   if (!e.statusUpdatedAt) return null;
   const qbVendorName = e.counterpartyQbVendorListId
-    ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(unmapped)')
-    : '(unmapped)';
+    ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? 'Not mapped')
+    : 'Not mapped';
   const refs = (e.postedQbRefs ?? {}) as Record<string, unknown>;
   const billTxnId = (typeof refs.bill === 'string' ? refs.bill : null)
     ?? e.resolvedBillTxnId
@@ -322,7 +322,7 @@ export function derivePushedByMonth(
       src: sourceLabel(isG75 ? 'invoice_g75' : 'invoice_g76'),
       date: inv.periodEnd ?? '',
       counterpartyRaw: inv.userName || '(unknown)',
-      qbVendorName: inv.paymentProfile?.companyName || inv.userName || '(unmapped)',
+      qbVendorName: inv.paymentProfile?.companyName || inv.userName || 'Not mapped',
       amount: inv.totalAmount,
       currency: inv.currency || 'USD',
       memo: inv.invoiceNumber ? `INV ${inv.invoiceNumber}` : '',
@@ -462,8 +462,8 @@ export function useQbAutomationV2({
           const childMapping = childPpId > 0 ? mappingByPpId.get(childPpId) : undefined;
           const childVendorListId = childMapping?.qbVendorListId ?? null;
           const childVendorName = childVendorListId
-            ? (vendorsById.get(childVendorListId)?.name ?? '(unmapped)')
-            : '(unmapped)';
+            ? (vendorsById.get(childVendorListId)?.name ?? 'Not mapped')
+            : 'Not mapped';
           if (childVendorListId) distinctVendorListIds.add(childVendorListId);
 
           const shareKey = `${e.id}::${inv.id}`;
@@ -507,7 +507,7 @@ export function useQbAutomationV2({
         ) ?? 'will_create_and_pay';
 
         const parentVendorName = distinctVendorListIds.size === 1
-          ? (vendorsById.get([...distinctVendorListIds][0])?.name ?? '(unmapped)')
+          ? (vendorsById.get([...distinctVendorListIds][0])?.name ?? 'Not mapped')
           : (e.counterpartyQbVendorListId
               ? (vendorsById.get(e.counterpartyQbVendorListId)?.name ?? '(multi-vendor)')
               : '(multi-vendor)');
@@ -563,8 +563,8 @@ export function useQbAutomationV2({
 
       const vendorMapped = !!e.counterpartyQbVendorListId;
       const qbVendorName = vendorMapped
-        ? (vendorsById.get(e.counterpartyQbVendorListId!)?.name ?? '(unmapped)')
-        : '(unmapped)';
+        ? (vendorsById.get(e.counterpartyQbVendorListId!)?.name ?? 'Not mapped')
+        : 'Not mapped';
 
       if (invoice) invoiceIdsCoveredByEvents.add(invoice.id);
 
@@ -643,7 +643,7 @@ export function useQbAutomationV2({
       );
       if (hasBill) continue;
 
-      const qbVendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? '(unmapped)';
+      const qbVendorName = vendorsById.get(mapping.qbVendorListId)?.name ?? 'Not mapped';
       const ppLabel = inv.paymentProfile?.companyName || inv.paymentProfile?.bankName || '';
       const contractorName = inv.userName || '(unknown)';
       const contractorUserId = inv.userId ?? null;

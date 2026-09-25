@@ -1,4 +1,5 @@
 import { X } from 'lucide-react';
+import { jobKindLabel } from './jobKindLabel';
 
 // V2-owned inspector for pending qb_sync_jobs. Opens from a HeaderPill click
 // when the mirror or vendors pill is in the "syncing… N pending" state.
@@ -15,18 +16,6 @@ export interface PendingJobRow {
 interface Props {
   jobs: PendingJobRow[];
   onClose: () => void;
-}
-
-function humanKind(k: string): string {
-  return ({
-    bill_query: 'Bill query',
-    vendor_query: 'Vendor query',
-    account_query: 'Account query',
-    bill_add: 'Create Bill',
-    bill_pmt_add: 'Pay Bill',
-    check_add: 'Write Check',
-    vendor_add: 'Add Vendor',
-  } as Record<string, string>)[k] || k;
 }
 
 function agoMinutes(iso: string): string {
@@ -48,9 +37,9 @@ export default function PendingJobsInspector({ jobs, onClose }: Props) {
       >
         <div className="px-4 py-3 bg-indigo-50 border-b border-indigo-200 flex items-center justify-between">
           <div>
-            <div className="font-semibold text-gray-800">Pending QB sync jobs</div>
+            <div className="font-semibold text-gray-800">Pending QB jobs</div>
             <div className="text-xs text-gray-600 mt-0.5">
-              {jobs.length} job{jobs.length === 1 ? '' : 's'} queued · QBWC drains on next poll (~15 min)
+              {jobs.length} job{jobs.length === 1 ? '' : 's'} · the connector picks them up within about 15 min
             </div>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600" aria-label="Close">
@@ -64,8 +53,8 @@ export default function PendingJobsInspector({ jobs, onClose }: Props) {
             <table className="w-full text-xs">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
-                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Kind</th>
-                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Job ID</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Job</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">#</th>
                   <th className="px-3 py-2 text-left font-semibold text-gray-600">Age</th>
                 </tr>
               </thead>
@@ -74,7 +63,7 @@ export default function PendingJobsInspector({ jobs, onClose }: Props) {
                   <tr key={j.id}>
                     <td className="px-3 py-1.5">
                       <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-700 border border-gray-200">
-                        {humanKind(j.kind)}
+                        {jobKindLabel(j.kind)}
                       </span>
                     </td>
                     <td className="px-3 py-1.5 font-mono text-gray-500">#{j.id}</td>

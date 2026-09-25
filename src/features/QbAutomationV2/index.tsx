@@ -169,10 +169,10 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
       }
       const result = await props.onPushRows({ eventIds, invoiceIds });
       const parts: string[] = [];
-      if (result.pushed > 0) parts.push(`${result.pushed} jobs enqueued`);
+      if (result.pushed > 0) parts.push(`${result.pushed} jobs sent to QuickBooks`);
       if (result.rejected > 0) parts.push(`${result.rejected} rejected`);
-      if (result.skippedDuplicate > 0) parts.push(`${result.skippedDuplicate} duplicate-skipped`);
-      if (result.skippedIneligible > 0) parts.push(`${result.skippedIneligible} ineligible`);
+      if (result.skippedDuplicate > 0) parts.push(`${result.skippedDuplicate} already sent (skipped)`);
+      if (result.skippedIneligible > 0) parts.push(`${result.skippedIneligible} not eligible`);
       alert(parts.length > 0 ? parts.join(' · ') : 'Push complete.');
       clearSelection();
       setPreviewOpen(false);
@@ -263,7 +263,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           {showPostPushHint && (
             <div className="border border-indigo-200 rounded-lg bg-indigo-50/40 px-4 py-2 flex items-center justify-between gap-3 text-sm">
               <span className="text-indigo-900">
-                Vendor sync is running in the background (~15 min). Refresh once QBWC drains to pick up any newly-resolved rows.
+                QB Mirror is refreshing in the background (~15 min). Click Refresh after that to see updated rows.
               </span>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <button
@@ -355,7 +355,6 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
           rows={mappingRows}
           vendors={props.vendors}
           events={props.events}
-          invoices={props.invoices}
           onUpdateVendor={props.onUpdateMappingVendor}
           onDelete={props.onDeleteMapping}
           onAddLikeNeeds={props.onSaveMapping}

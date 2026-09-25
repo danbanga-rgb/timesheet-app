@@ -111,7 +111,7 @@ describe('derivePushedByMonth', () => {
       new Set(),
       new Set(),
     );
-    expect(groups[0].rows[0].qbVendorName).toBe('(unmapped)');
+    expect(groups[0].rows[0].qbVendorName).toBe('Not mapped');
   });
 
   it('buckets events into multiple months, newest month first', () => {

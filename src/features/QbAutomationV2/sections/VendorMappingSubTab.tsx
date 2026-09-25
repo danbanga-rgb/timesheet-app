@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import type { Invoice, QbIngestEvent } from '../../../types';
+import type { QbIngestEvent } from '../../../types';
 import { sourceLabel, type MappingRow } from '../hooks/useQbAutomationV2';
 import { useColumnPrefs, type OptionalColumn } from '../hooks/useColumnPrefs';
 import ColumnPicker from './ColumnPicker';
@@ -21,13 +21,12 @@ interface Props {
   rows: MappingRow[];
   vendors: QbVendorRow[];
   events: QbIngestEvent[];
-  invoices: Invoice[];
   onUpdateVendor: (args: { mappingId: number; qbVendorListId: string; qbVendorName: string }) => Promise<void>;
   onDelete: (mappingId: number) => Promise<void>;
   onAddLikeNeeds: (args: SaveMappingArgs) => Promise<void>;   // future — currently unused; kept for API symmetry
 }
 
-export default function VendorMappingSubTab({ rows, vendors, events, invoices, onUpdateVendor, onDelete }: Props) {
+export default function VendorMappingSubTab({ rows, vendors, events, onUpdateVendor, onDelete }: Props) {
   const [inspecting, setInspecting] = useState<{ listId: string; name: string } | null>(null);
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('contractor');
@@ -124,7 +123,7 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
 
       {filteredSorted.length === 0 ? (
         <div className="px-4 py-10 text-center text-sm text-gray-500">
-          {rows.length === 0 ? 'No mappings yet. Map events in the Needs Mapping card to build the list.' : 'No mappings match your search.'}
+          {rows.length === 0 ? "No mappings yet. They're created when you fix rows in Needs Mapping." : 'No mappings match your search.'}
         </div>
       ) : (
         <div className="overflow-auto">
@@ -188,7 +187,7 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
                         <button
                           onClick={() => setInspecting({ listId: row.qbVendorListId, name: row.qbVendorName })}
                           className="font-mono text-blue-600 hover:underline"
-                          title="Click to inspect routed bills"
+                          title="See these bills"
                         >
                           {row.billsPushedCount}
                         </button>
@@ -249,7 +248,6 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
           qbVendorListId={inspecting.listId}
           qbVendorName={inspecting.name}
           events={events}
-          invoices={invoices}
           onClose={() => setInspecting(null)}
         />
       )}

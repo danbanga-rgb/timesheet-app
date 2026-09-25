@@ -42,17 +42,17 @@ function confidenceChipClass(c: Confidence): string {
 function reasonMeta(reason: NeedsMappingReason) {
   switch (reason) {
     case 'event_needs_vendor':
-      return { label: 'Event needs QB vendor', cls: 'bg-amber-100 text-amber-800',
-        detail: 'This wire event landed but no QB vendor was picked. Choose one and it moves to Ready.' };
+      return { label: 'Payment needs QB vendor', cls: 'bg-amber-100 text-amber-800',
+        detail: 'A payment came in without a QB vendor. Pick one and it moves to Ready.' };
     case 'invoice_pp_no_qb_vendor':
       return { label: 'Profile needs QB vendor', cls: 'bg-amber-100 text-amber-800',
-        detail: "The contractor's payment profile has no QB Vendor set. Pick one and the mapping is created automatically." };
+        detail: "The contractor's payment profile has no QB vendor. Pick one and it's used for their future invoices too." };
     case 'invoice_pp_vendor_not_synced':
-      return { label: 'QB vendor not synced', cls: 'bg-amber-100 text-amber-800',
-        detail: 'The profile lists a QB vendor that is not in the local mirror. Run Sync Vendors and this row heals automatically after QBWC drains.' };
+      return { label: 'Vendor not in mirror yet', cls: 'bg-amber-100 text-amber-800',
+        detail: "The profile names a QB vendor the mirror doesn't have yet. Click Sync Vendors; the row fixes itself in about 15 min." };
     case 'invoice_no_pp':
       return { label: 'No payment profile', cls: 'bg-red-100 text-red-800',
-        detail: 'This invoice has no payment profile snapshot. Open the invoice to link one (cross-contractor picker works too).' };
+        detail: "This invoice has no payment profile. Open it to attach one; you can also pick another contractor's profile." };
   }
 }
 
@@ -78,7 +78,7 @@ export default function NeedsMappingCard(props: Props) {
       });
       setEditingRowKey(null);
     } catch (e) {
-      alert('Save failed: ' + (e instanceof Error ? e.message : String(e)));
+      alert('Failed to save mapping: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setSavingRowKey(null);
     }
@@ -94,7 +94,7 @@ export default function NeedsMappingCard(props: Props) {
       await onSaveQbVendorName(row.ppId, vendor?.name ?? args.qbVendorName);
       setEditingRowKey(null);
     } catch (e) {
-      alert('Save failed: ' + (e instanceof Error ? e.message : String(e)));
+      alert('Failed to save mapping: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setSavingRowKey(null);
     }
@@ -118,12 +118,12 @@ export default function NeedsMappingCard(props: Props) {
             {total > 0 && <span className="ml-1">· {fmtMoney(total)}</span>}
           </span>
         </div>
-        <span className="text-xs text-gray-500">Fix inline — the row moves to Ready on save.</span>
+        <span className="text-xs text-gray-500">Fix each row here. It moves to Ready once saved.</span>
       </div>
 
       {rows.length === 0 ? (
         <div className="px-4 py-10 text-center text-sm text-gray-500">
-          Every approved invoice and every event has a QB vendor mapping. Nice.
+          Every approved invoice and payment has a QB vendor.
         </div>
       ) : (
         <ul className="divide-y divide-gray-100">
@@ -148,7 +148,7 @@ export default function NeedsMappingCard(props: Props) {
                       <div className="text-[10px] text-gray-400 mt-0.5">Profile: <span className="font-mono">{r.ppLabel}</span></div>
                     )}
                     {r.ppQbVendorName && (
-                      <div className="text-[10px] text-gray-400 mt-0.5">Listed QB vendor: <span className="font-mono">{r.ppQbVendorName}</span></div>
+                      <div className="text-[10px] text-gray-400 mt-0.5">Vendor on profile: <span className="font-mono">{r.ppQbVendorName}</span></div>
                     )}
                   </div>
                   <div className="font-mono font-semibold text-sm text-gray-800 whitespace-nowrap">
@@ -192,7 +192,7 @@ export default function NeedsMappingCard(props: Props) {
                                   }
                                 }}
                                 className={'px-2 py-0.5 text-[11px] rounded-full border cursor-pointer ' + confidenceChipClass(c.confidence)}
-                                title={`${c.reason} · ${c.confidence}`}
+                                title={`${c.reason} (${c.confidence} confidence)`}
                               >
                                 {c.qbVendorName}
                               </button>
@@ -209,7 +209,7 @@ export default function NeedsMappingCard(props: Props) {
                       className="text-xs px-2 py-1 border border-amber-300 text-amber-800 rounded hover:bg-amber-50 inline-flex items-center gap-1 disabled:opacity-50"
                     >
                       <RefreshCw className={'w-3 h-3 ' + (syncing ? 'animate-spin' : '')} />
-                      {syncing ? 'Enqueueing…' : 'Sync Vendors'}
+                      {syncing ? 'Requesting…' : 'Sync Vendors'}
                     </button>
                   )}
                   {r.reason === 'invoice_no_pp' && r.invoiceId != null && (

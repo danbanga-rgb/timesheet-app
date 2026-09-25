@@ -55,29 +55,29 @@ export function useQbSyncState(args: UseQbSyncStateArgs): {
   const mirrorFreshness = snapshotAge(args.openBills);
   const mirrorStatus = ageStatus(mirrorFreshness.newestQueriedAt, MIRROR_GREEN_SEC, MIRROR_AMBER_SEC, now);
   const mirrorLabel = mirrorFreshness.newestQueriedAt
-    ? `Mirror · ${humanizeAge(mirrorFreshness.newestQueriedAt, now)}`
-    : 'Mirror · never synced';
+    ? `QB Mirror · ${humanizeAge(mirrorFreshness.newestQueriedAt, now)}`
+    : 'QB Mirror · never synced';
 
   const vendorsStatus = ageStatus(args.vendorsLastQueriedAt, MIRROR_GREEN_SEC, MIRROR_AMBER_SEC, now);
   const vendorsLabel = args.vendorsLastQueriedAt
-    ? `Vendors · ${humanizeAge(args.vendorsLastQueriedAt, now)}`
-    : 'Vendors · never synced';
+    ? `QB Vendors · ${humanizeAge(args.vendorsLastQueriedAt, now)}`
+    : 'QB Vendors · never synced';
 
   const qbwcAgeSec = ageSeconds(args.qbWcLastSeen, now);
   let qbwcStatus: PillStatus;
   let qbwcLabel: string;
   if (!args.qbWcLastSeen) {
     qbwcStatus = 'red';
-    qbwcLabel = 'QBWC · never seen';
+    qbwcLabel = 'QB connector · never connected';
   } else if (qbwcAgeSec < QBWC_ALIVE_SEC) {
     qbwcStatus = 'green';
-    qbwcLabel = 'QBWC · active';
+    qbwcLabel = 'QB connector · running';
   } else if (qbwcAgeSec < QBWC_DOWN_SEC) {
     qbwcStatus = 'amber';
-    qbwcLabel = `QBWC · delayed (${humanizeAge(args.qbWcLastSeen, now)})`;
+    qbwcLabel = `QB connector · late (${humanizeAge(args.qbWcLastSeen, now).replace(/ ago$/, '')})`;
   } else {
     qbwcStatus = 'red';
-    qbwcLabel = `QBWC · down (${humanizeAge(args.qbWcLastSeen, now)})`;
+    qbwcLabel = `QB connector · stopped (${humanizeAge(args.qbWcLastSeen, now).replace(/ ago$/, '')})`;
   }
 
   return {

@@ -117,7 +117,7 @@ export function resolveVendorCandidates(
         qbVendorName: vendor.name,
         confidence,
         tier: 'token_overlap',
-        reason: `Matched: ${tokens.join(', ')}`,
+        reason: `Name match: ${tokens.join(', ')}`,
       });
       seenListIds.add(vendor.listId);
     }

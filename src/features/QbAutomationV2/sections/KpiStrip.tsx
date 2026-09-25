@@ -85,7 +85,7 @@ export default function KpiStrip({ active, onSelect, readyCount, readyTotal, nee
         activeRing="ring-gray-400"
         label="Skipped"
         value={skippedCount}
-        secondary={skippedCount === 0 ? 'session-scoped' : 'click to view'}
+        secondary={skippedCount === 0 ? 'none skipped' : 'click to view'}
       />
       <KpiCard
         active={active === 'pushed'}

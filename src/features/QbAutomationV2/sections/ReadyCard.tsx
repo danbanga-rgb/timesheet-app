@@ -4,6 +4,7 @@ import { sourceLabel, type ReadyRow, type ReadyGroup } from '../hooks/useQbAutom
 import { formatProvenanceBadge } from '../../../lib/qbAutomation/pushedRowDerivation';
 import { useColumnPrefs, type OptionalColumn } from '../hooks/useColumnPrefs';
 import ColumnPicker from './ColumnPicker';
+import { jobKindLabel } from './jobKindLabel';
 import type { Verdict } from '../../../lib/qbAutomation/verdict';
 import type { CategoryKey } from './KpiStrip';
 import type { QbVendorRow } from '../../../lib/qbStateSync/types';
@@ -212,7 +213,7 @@ export default function ReadyCard(props: Props) {
   }, [rows, sortKey, sortDir]);
 
   const emptyMsg = isSkippedView
-    ? 'No skipped rows in this session.'
+    ? 'Nothing skipped.'
     : 'Nothing to push right now. Approve invoices in the Invoices tab to see them here.';
 
   return (
@@ -220,16 +221,16 @@ export default function ReadyCard(props: Props) {
       <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3 flex-wrap">
           <h3 className="text-base font-semibold text-gray-800">
-            {isSkippedView ? 'Skipped this session' : 'Ready to Push'}
+            {isSkippedView ? 'Skipped' : 'Ready to Push'}
           </h3>
           {!isSkippedView && (
             <div className="flex items-center gap-2 text-xs">
               <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200 font-medium">
-                {payCount} {payCount === 1 ? 'Payment' : 'Payments'}
+                {payCount} to pay
                 {payTotal > 0 && <span className="ml-1 text-blue-600">· {fmtMoney(payTotal)}</span>}
               </span>
               <span className="px-2 py-0.5 rounded bg-purple-50 text-purple-800 border border-purple-200 font-medium">
-                {createCount} Bill {createCount === 1 ? 'Creation' : 'Creations'}
+                {createCount} new {createCount === 1 ? 'bill' : 'bills'}
                 {createTotal > 0 && <span className="ml-1 text-purple-600">· {fmtMoney(createTotal)}</span>}
               </span>
             </div>
@@ -245,10 +246,10 @@ export default function ReadyCard(props: Props) {
             {!isSkippedView && (<>
             <button onClick={onSelectAll} className="text-emerald-700 hover:text-emerald-900 font-medium">Select all</button>
             {payCount > 0 && (
-              <button onClick={() => onSelectGroup('pay')} className="text-blue-700 hover:text-blue-900 font-medium">Select Payments</button>
+              <button onClick={() => onSelectGroup('pay')} className="text-blue-700 hover:text-blue-900 font-medium">Select payments</button>
             )}
             {createCount > 0 && (
-              <button onClick={() => onSelectGroup('create')} className="text-purple-700 hover:text-purple-900 font-medium">Select Bill Creations</button>
+              <button onClick={() => onSelectGroup('create')} className="text-purple-700 hover:text-purple-900 font-medium">Select new bills</button>
             )}
             <button onClick={onClearSelection} disabled={selectionCount === 0} className={selectionCount === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-900 font-medium'}>
               Clear selection
@@ -266,7 +267,7 @@ export default function ReadyCard(props: Props) {
           <table className="w-full text-xs">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-2 py-2 text-center font-semibold text-gray-600 w-10">Inc</th>
+                <th className="px-2 py-2 text-center font-semibold text-gray-600 w-10"><span className="sr-only">Select</span></th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('contractor')}>
                   Contractor{sortArrow('contractor')}
                 </th>
@@ -374,7 +375,7 @@ export default function ReadyCard(props: Props) {
                             type="button"
                             disabled={isSkippedView || r.ppId <= 0}
                             onClick={() => setEditingRowKey(r.rowKey)}
-                            title={r.ppId <= 0 ? 'No payment profile — cannot re-map' : 'Click to change QB vendor mapping'}
+                            title={r.ppId <= 0 ? 'No payment profile on this invoice, so there\'s no mapping to change.' : 'Change the QB vendor mapping for this payment profile. Applies to this and future invoices.'}
                             className={
                               'text-left w-full px-1 py-0.5 rounded ' +
                               (r.ppId <= 0
@@ -419,13 +420,13 @@ export default function ReadyCard(props: Props) {
                                     </button>
                                   </div>
                                   <div className="text-gray-500 font-mono mb-1">
-                                    Job #{r.lastFailedPush.jobId} · {r.lastFailedPush.kind}
+                                    Job #{r.lastFailedPush.jobId} · {jobKindLabel(r.lastFailedPush.kind)}
                                     {r.lastFailedPush.completedAt && (
                                       <> · {new Date(r.lastFailedPush.completedAt).toLocaleString()}</>
                                     )}
                                   </div>
                                   <div className="text-red-800 font-mono text-[11px] bg-red-50 border border-red-100 rounded px-2 py-1 mb-2 break-words">
-                                    {r.lastFailedPush.errorMsg || '(no error message)'}
+                                    {r.lastFailedPush.errorMsg || 'QuickBooks gave no reason.'}
                                   </div>
                                   {onRetryRow && (
                                     <button
@@ -463,7 +464,7 @@ export default function ReadyCard(props: Props) {
                         <td className="px-2 py-1 text-right font-mono">
                           {fmtMoney(c.share)}{' '}
                           {c.shareSource === 'invoice_total' && (
-                            <span title="Share from convera_transaction_invoices not available — using invoice total as fallback" className="text-amber-600">*</span>
+                            <span title="This wire's split isn't recorded, so the full invoice total is shown." className="text-amber-600">*</span>
                           )}
                         </td>
                         {extras.map(col => <td key={col.key} className="px-2 py-1"></td>)}

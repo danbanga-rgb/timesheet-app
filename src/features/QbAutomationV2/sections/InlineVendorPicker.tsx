@@ -106,7 +106,7 @@ export default function InlineVendorPicker({
                 'px-2 py-0.5 text-[11px] rounded-full border cursor-pointer disabled:opacity-50 ' +
                 confidenceChipClass(c.confidence)
               }
-              title={`${c.reason} · ${c.confidence}`}
+              title={`${c.reason} (${c.confidence} confidence)`}
             >
               {c.qbVendorName}
               <span className="ml-1 opacity-70 text-[10px]">{c.confidence}</span>

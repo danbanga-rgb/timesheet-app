@@ -133,9 +133,9 @@ function MonthSection({ group, isOpen, onToggle, extras }: MonthSectionProps) {
           <table className="w-full text-[11px]">
             <thead className="bg-gray-50/60">
               <tr className="divide-x divide-gray-100">
-                {th('src', 'Src')}
+                {th('src', 'Source')}
                 {th('date', 'Date')}
-                {th('counterparty', 'Counterparty')}
+                {th('counterparty', 'Paid to')}
                 {th('vendor', 'QB Vendor')}
                 <th className="px-1.5 py-1.5 text-right font-semibold text-gray-600 cursor-pointer select-none whitespace-nowrap" onClick={() => clickSort('amount')}>
                   Amount{sortArrow('amount')}
@@ -217,7 +217,7 @@ export default function PushedCard({ byMonth, total, count }: Props) {
           </span>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-500">Session failures live in the status pane above.</span>
+          <span className="text-xs text-gray-500">Failed pushes show in the status panel below.</span>
           {byMonth.length > 0 && (
             <ColumnPicker columns={EXTRA_COLUMNS} isOn={columnPrefs.isOn} onToggle={columnPrefs.toggle} onReset={columnPrefs.reset} />
           )}
@@ -226,7 +226,7 @@ export default function PushedCard({ byMonth, total, count }: Props) {
 
       {byMonth.length === 0 ? (
         <div className="px-4 py-10 text-center text-sm text-gray-500">
-          Nothing has been pushed yet. Successful pushes appear here after QBWC drains.
+          Nothing pushed yet. Pushes show up here once QuickBooks confirms them.
         </div>
       ) : (
         byMonth.map(group => (
