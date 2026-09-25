@@ -1,0 +1,33 @@
+name: Tests
+
+# Runs the unit tests on every push and PR. Warn-only: a failure shows a red
+# check on the commit (and GitHub emails the pusher) but does NOT block the
+# Vercel deploy. Added 2026-09-25 after two stale qbWrite tests sat broken
+# for a month because nothing ran them.
+#
+# Scope is src/ (product code). scripts/one-off/ holds throwaway probes and
+# dry-runs pinned to old fixtures; they are not kept green.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests (src/)
+        run: npx vitest run src
