@@ -427,23 +427,100 @@ Branch tip `efc330f`. Not merged to main.
 
 **Next up (§9 roadmap):** V11 (plain-English copy sweep) is next per plan. But might be worth revisiting V9.10 (Add Columns dropdown, deferred) or a different priority Dan surfaces.
 
-**Cold-start resume prompt:**
+**Cold-start resume prompt (paste as first message):**
 ```
-Resume QB Automation v2 arc. Read .claude/plans/qb-automation-v2.md §8
-latest entry (S20). Confirm branch `feature/qb-automation-v2`, tip `efc330f`.
-Push queue still HELD through V12; do NOT push anything live.
+Resume QB Automation v2 arc — S20 closed on break; picking next slice.
 
-V10 SHIPPED and reworked. Pills are pure status indicators; single 'Sync
-Now' text link fires bill + vendor query together (silent); post-push flow
-silently refreshes both; pg_cron owns cadence (bills hourly, vendors 6h).
+═══ COLD-START ORIENTATION (do this first, in order) ═══
 
-Next candidates:
-- V11: plain-English copy sweep (§5.10) — red-line every user-facing string
-  with Dan
-- V9.10: Add Columns dropdown for Ready row set — deferred earlier
-- Something else Dan surfaces
+1. Read .claude/plans/qb-automation-v2.md §0 Fast Start, then §8 latest
+   two entries (S19 + S20). Both were substantive: S19 rebuilt the Pushed
+   card to mirror V1's Already Posted columns; S20 shipped V10 sync
+   surface then reworked it after Dan feedback.
 
-Ask Dan which. Don't start coding until he picks.
+2. Read MEMORY.md entries in order:
+   - [Match V1 during coexistence] — v2 counts + display must match V1
+     1:1 while both run.
+   - [Pushed row = event, not invoice] — Rule 2026-09-24. Posted-row UI
+     fields come from event.counterparty_raw / memo / txn_date, NEVER
+     from matched_invoice_ids[0]. Bit us 3× before I stopped reinventing.
+   - [Module self-sufficient UI] — Rule 2026-09-24 during V10. V2 owns
+     its UI dependencies; even sync handlers need `silent?` opt.
+   - [posted_source semantics] — 'push' vs 'manual_accept_fuzzy' vs
+     'qb_probe' distinguishes WHO closed a row. Load-bearing.
+   - [qb_mirror schema] — column is `entity_ref` (NOT txn_id); vendor
+     name/txn_date live inside `data` JSONB. Bit me once when probing.
+   - [Three-bucket lifecycle] — Needs Mapping → Ready → Pushed. No new
+     buckets.
+   - [Break time trigger] — cold-start now; don't wait to be asked to
+     re-orient.
+
+3. Confirm `git branch --show-current` returns feature/qb-automation-v2.
+   Confirm `git log --oneline -5` shows 5d74951 (S20 plan) at top, then
+   efc330f (V10 rework), efc-parent 3a8c5fe (silent mode), 03e6e0d
+   (V10 initial), 899d6a5 (S19 plan).
+
+═══ STATE ═══
+
+- Branch tip 5d74951. Not merged to main.
+- V1–V10 shipped. V10 pattern: pills are pure indicators, single 'Sync
+  Now' text link fires bill+vendor together silently, post-push refreshes
+  both, `N pending` chip opens inspector. Auto-refresh (mount/periodic/
+  visibility) intentionally REMOVED per Dan.
+- pg_cron in prod: qb-delta-bills hourly at :17, qb-delta-vendors every
+  6h at :37 (changed from 2h this session via migration 20260924000002,
+  applied via Management API — jobid 18 verified).
+- Pushed card columns: Src | Date | Counterparty | QB Vendor | Amount |
+  Memo | Action | Posted at. QB Vendor cell shows 'same QB vendor'
+  italic muted-green when it equals Counterparty (Intuit passthrough).
+  Synthetic G7.5/G7.6 rows synthesize event-shape fields.
+- Shared lib grew: src/lib/qbAutomation/pushedRowDerivation.ts (V1 also
+  consumes at V12 cutover).
+- V2 lives at src/features/QbAutomationV2/ — role-agnostic module,
+  mounted in admin dashboard as adminView === 'qbautov2'.
+- Reconciler self-heals pp→vendor mappings on data load.
+- Push queue is HELD through V12 per Dan's decision. V10's 'Sync Now'
+  only writes bill_query/vendor_query jobs (safe reads), never
+  bill_add/pmt_add.
+
+═══ 🛑 HARD RULES ═══
+
+- Do NOT push any bill_add / bill_pmt_add / check_add live. Query jobs
+  only. Push queue held through V12.
+- Do NOT touch v1's QB Automation tab render (frozen until V12 cutover).
+- Do NOT re-add mount-time or periodic auto-refresh. Killed intentionally.
+- Do NOT introduce invoice-derived fields on Pushed rows. Use event
+  fields (counterparty_raw, memo, txn_date, source).
+- Do NOT rewrite pushedRowDerivation lib without confirming Dan is OK
+  with the change ripples to V1 (which will consume at V12).
+- Do NOT introduce a new provenance/match chip on Pushed. Match column
+  was intentionally dropped per Dan.
+
+═══ NEXT UP (Dan picks) ═══
+
+Three candidates queued in §9 roadmap; ask Dan which:
+
+- V11: plain-English copy sweep (§5.10 in this doc). Red-line pass on
+  every user-facing string. Dan reviews each one. Est 1-2h.
+- V9.10: Add Columns dropdown for Ready row customization. Deferred
+  from S17. LocalStorage persistence. Est ~2h.
+- Something else Dan surfaces at session open (e.g. address one of the
+  open concerns: rebuilding the Reconciler improvements after Rumiya
+  fuzzy incident, or vendor 6h cadence review, or hint bar UX).
+
+═══ WORKFLOW ═══
+
+1. Do orientation reads (steps 1-3 above).
+2. Ask Dan one line: "V11 copy sweep, V9.10 Add Columns, or something
+   else?"
+3. Once he picks, plan the slice (present tradeoffs if any), get
+   approval, ship in a small commit, push to preview.
+4. Log the slice to plan doc §8 as S21.
+
+═══ FIRST ACTION ═══
+
+Do orientation reads. Then ask Dan the one-line pick question. Do NOT
+start coding anything until Dan chooses.
 ```
 
 ---
