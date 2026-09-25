@@ -33,6 +33,19 @@ describe('converaWirePreflight', () => {
     expect(r).toMatch(/also used on this contractor's invoice #192.*-1/);
   });
 
+  it('Teal: 6 contractors in one group share one combined bill → not flagged', () => {
+    const members = [1, 2, 3].map(n => inv({ id: 220 + n, userId: `teal-${n}`, invoiceNumber: 'INV 002/08/2026', qbBillTxnId: 'B-TEAL', groupKey: 'g-teal', totalAmount: 100 }));
+    const r = converaWirePreflight({ amount: 300, matchedInvoiceIds: [221, 222, 223] }, [], new Map(), ctxOf(members, [bill({ txnId: 'B-TEAL' })]));
+    expect(r).toBeNull();
+  });
+
+  it('same bill on two invoices of the SAME contractor → flagged even inside a group', () => {
+    const a = inv({ id: 1, userId: 'x', invoiceNumber: 'A', qbBillTxnId: 'B', groupKey: 'g' });
+    const b = inv({ id: 2, userId: 'x', invoiceNumber: 'B', qbBillTxnId: 'B', groupKey: 'g' });
+    expect(converaWirePreflight({ amount: 1000, matchedInvoiceIds: [1] }, [], new Map(), ctxOf([a, b], [bill({ txnId: 'B' })])))
+      .toMatch(/also linked to invoice #2/);
+  });
+
   it('bill already paid in QB → blocked', () => {
     const i = inv({ id: 1, qbBillTxnId: 'B1' });
     expect(converaWirePreflight({ amount: 1000, matchedInvoiceIds: [1] }, [], new Map(), ctxOf([i], [bill({ txnId: 'B1', isPaid: true })])))

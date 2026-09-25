@@ -19,6 +19,8 @@ export interface PreflightInvoice extends InvoiceNumberRow {
   qbBillTxnId: string | null;
   paymentMethodOverride: string | null;
   matcherIgnore?: boolean;
+  /** Multi-contractor invoice group (e.g. Teal): members intentionally share ONE QB bill. */
+  groupKey?: string | null;
 }
 
 export interface PreflightBill {
@@ -44,9 +46,16 @@ function reusedNumberReason(inv: PreflightInvoice, ctx: PreflightContext): strin
   return `Invoice number "${inv.invoiceNumber}" is also used on this contractor's invoice #${dupes[0].id}. Rename one (add "-1") so each has its own QB bill.`;
 }
 
+// One QB bill on several invoices is correct for a multi-contractor group
+// (Teal: 6 contractors, one group_key, one combined bill). It is wrong when the
+// same contractor holds it twice (reused invoice number) or when unrelated
+// invoices share it.
 function sharedBillReason(inv: PreflightInvoice, ctx: PreflightContext): string | null {
   if (!inv.qbBillTxnId) return null;
-  const other = ctx.allInvoices.find(o => o.id !== inv.id && o.qbBillTxnId === inv.qbBillTxnId);
+  const other = ctx.allInvoices.find(o =>
+    o.id !== inv.id
+    && o.qbBillTxnId === inv.qbBillTxnId
+    && (o.userId === inv.userId || !inv.groupKey || o.groupKey !== inv.groupKey));
   return other ? `QB bill ${inv.qbBillTxnId} is also linked to invoice #${other.id}.` : null;
 }
 

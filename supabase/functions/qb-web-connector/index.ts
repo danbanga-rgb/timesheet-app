@@ -306,27 +306,44 @@ async function persistJobResponse(
       } else {
         const { data: cands, error: candErr } = await supabase
           .from('invoices')
-          .select('id, qb_bill_txn_id, period_end')
+          .select('id, user_id, qb_bill_txn_id, period_end')
           .in('user_id', userIds)
           .eq('invoice_number', r.refNumber);
         if (candErr) {
           return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${candErr.message}` };
         }
-        const rows = (cands ?? []) as Array<{ id: number; qb_bill_txn_id: string | null; period_end: string | null }>;
-        const alreadyLinked = rows.filter(c => c.qb_bill_txn_id === r.txnId);
-        if (alreadyLinked.length > 0) {
-          targetIds = [alreadyLinked[0].id];   // idempotent re-read of a bill we already linked
-        } else {
-          const free = rows.filter(c => !c.qb_bill_txn_id);
-          // Same number on several free invoices → the bill's month decides.
-          const billMonth = (r.txnDate ?? '').slice(0, 7);
-          const sameMonth = free.filter(c => (c.period_end ?? '').slice(0, 7) === billMonth);
-          const pick = free.length === 1 ? free : sameMonth.length === 1 ? sameMonth : [];
-          if (pick.length === 0 && free.length > 1) {
-            if (tolerateInvoicePersistMiss) { skippedUnknownInvoice++; continue; }
-            return { ok: false, errorMsg: `BillQuery persist: ${free.length} invoices share refNumber="${r.refNumber}" for vendor="${r.vendorFullName}" and none matches the bill month ${billMonth}. Rename the reused invoice number (e.g. add "-1") and retry.` };
+        const rows = (cands ?? []) as Array<{ id: number; user_id: string; qb_bill_txn_id: string | null; period_end: string | null }>;
+        // Per contractor: several contractors sharing one number is a legit
+        // combined bill (Teal: one bill, one invoice per contractor) → link
+        // each. The SAME contractor holding the number twice is a reused
+        // invoice number → the bill's month picks one; ambiguous → none.
+        const billMonth = (r.txnDate ?? '').slice(0, 7);
+        const byUser = new Map<string, typeof rows>();
+        for (const c of rows) {
+          const list = byUser.get(c.user_id) ?? [];
+          list.push(c);
+          byUser.set(c.user_id, list);
+        }
+        targetIds = [];
+        let ambiguous = 0;
+        for (const list of byUser.values()) {
+          if (list.some(c => c.qb_bill_txn_id === r.txnId)) continue;   // already linked for this contractor
+          const free = list.filter(c => !c.qb_bill_txn_id);             // never overwrite a different bill
+          if (free.length === 1) { targetIds.push(free[0].id); continue; }
+          if (free.length > 1) {
+            const sameMonth = free.filter(c => (c.period_end ?? '').slice(0, 7) === billMonth);
+            if (sameMonth.length === 1) targetIds.push(sameMonth[0].id);
+            else ambiguous++;
           }
-          targetIds = pick.map(c => c.id);
+        }
+        const alreadyLinkedAny = rows.some(c => c.qb_bill_txn_id === r.txnId);
+        if (targetIds.length === 0 && ambiguous > 0) {
+          if (tolerateInvoicePersistMiss) { skippedUnknownInvoice++; continue; }
+          return { ok: false, errorMsg: `BillQuery persist: the same contractor has several invoices numbered "${r.refNumber}" (vendor "${r.vendorFullName}") and none matches the bill month ${billMonth}. Rename the reused invoice number (e.g. add "-1") and retry.` };
+        }
+        if (targetIds.length === 0 && alreadyLinkedAny) {
+          linked += 1;   // idempotent re-read of a bill we already linked
+          continue;
         }
       }
       const { data: updated, error: updErr } = targetIds.length === 0
