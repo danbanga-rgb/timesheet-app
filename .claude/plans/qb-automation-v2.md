@@ -403,6 +403,28 @@ Concrete gates to flip the admin gate and delete v1:
 
 ---
 
+**S21d (2026-09-25, evening) — FIRST LIVE PILOT ✅ + pre-pilot guardrails + hotfix to main. Break called (non-breaking; Dan moved to chat).**
+
+Pilot results (V2 preview → prod QB):
+- Batch 1: Convera C-1 wires 456 Deniz / 464 QAce / 478 Vladimir. Jobs 2077-2079 + verify 2080-2082 drained 20:24; all 3 bills settled; events posted with posted_source='push'.
+- Batch 2: Nikolina event 474 create+pay (2150 bill_add INV 1-1-11-1 → 2154 pay → 2155 verify): July bill 41C9D created + paid, so the missing $5,520 is now in QB. YARA #312 Intuit invoice→bill (2151 → 2153): bill 41CA0 created, unpaid by design.
+- Still to confirm next session: the FIX IT + batch-1 BillPmts landed in the mirror via the hourly payments delta (bank 8220); event 474 posted as 'push' after a page reload (needs `26459ce`).
+
+Shipped this stretch (feature branch unless noted):
+- Reused invoice numbers (4 contractors): approval block + "-1" (A), group-aware per-contractor bill linking in the edge fn (B, deployed), Ready "Won't push" preflight (C), Intuit create-bill mirror idempotency (D), Source column (E), reconciler bill-ownership guard + "matched invoice's own bill is authoritative". Data repair applied (Dan ran the script); **hotfix PR #15 merged to main (`ba1cae0`)** with A + D + ownership guard + stale-test fixes.
+- Mirror: bills without RefNumber kept (`93e9e1f`); 2026 catch-up complete (gate #10); payments delta cron (gate #9); honest sync pills (gate #8).
+- Pilot UX: pane under the tiles; one delta query for Sync Now / post-push (not 65); chip = items pushing + connector next-check ETA; pane rebuilt from DB per ITEM (create → pay → confirm, invoice→bill included) after push + reload; "verified" = bill paid in the mirror; popup counts items.
+- Umbrella rows: status follows the reconciler; multi-vendor title = wire payee. Teal group bills no longer flagged.
+- CI: warn-only Tests workflow on every push.
+
+**V12.1 candidates (Dan: discuss, don't build yet):**
+1. **Umbrella push slice** (blocks gate #1 umbrella path): Teal Jul wire 451 ($37,400, 6 linked invoices, only [224] matched) and Bimosoft wire 452 (2 vendors) are correctly "Won't push". Routing reads matched_invoice_ids only. Needs: route on convera_transaction_invoices links; Teal = one BillPmt on the one combined bill (dedupe applications by bill); Bimosoft = one BillPmt per vendor (C-2 fan-per-vendor pattern). Plan first.
+2. **Per-item move to Pushed:** today Ready→Pushed happens only when the WHOLE bill_query queue drains (30s poll) or on reload; invoice→bill items may need a reload to appear in Pushed. Fix: when a pane item's confirm job finishes → refresh + reconcile immediately; show "Moved to Pushed" on the pane row.
+3. **Source pill colours** (no amber/yellow): Convera solid purple, Intuit solid green (matches the payment-method chip), Inv→Bill (Convera) light purple outlined, Inv→Bill (Intuit) light green outlined, no-method grey.
+4. Hotfix to main: the "matched invoice's own bill" reconciler rule (`26459ce`) is preview-only; prod V1 keeps showing 474 as open (harmless).
+
+---
+
 **S21 (2026-09-25) — V9.10 + V11 SHIPPED together (Dan: "I don't like tech debt").**
 
 - **V9.10 `d2aa7bd`** — shared `ColumnPicker` + `useColumnPrefs` (per-view localStorage) on Ready/Skipped, Pushed, Vendor Mapping. Needs Mapping excluded on purpose (card layout with per-row fix controls). Ready extras: Source, Payment profile, Wire date, Bank memo, Match, QB bill #. Pushed extras (event-only): QB bill #, Bank ref. Mapping extras: Source, Last posted. Dropped "QB payment #" (no human number on our pushed payments) and "Mapping updated at" (not stored).
