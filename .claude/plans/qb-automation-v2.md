@@ -368,6 +368,8 @@ Concrete gates to flip the admin gate and delete v1:
 5. **All six v1 UX rules covered per §5.12** — carry rules preserved, amend rules landed cleanly.
 6. **Vendor Mapping sub-tab has zero orphan rows** (every mapping row has a pp_id resolved).
 7. **Dan runs 3 sanity queries** against `qb_ingest_events` post-push (all pushes trace to expected pp/vendor).
+8. **Sync pills tell the truth** (Dan, 2026-09-25): age = last finished check from `qb_sync_jobs`, colours follow each pg_cron cadence. ✅ `26633e7` — verify on preview across a full day (Mirror stays green/amber, never 17h).
+9. **Payments mirror current** (Dan, 2026-09-25): `qb-delta-bill-payments` (jobid 20, hourly :47) live + Aug 20 → now catch-up job #2045 drained. Verify `max(queried_at)` for `bill_payment` stays < 2h and the bank-drift guardrail (`mirrorDeviationCheck`) sees post-Aug-20 payments.
 
 ## §6. Non-goals (things v2 does NOT touch)
 
@@ -389,6 +391,16 @@ Concrete gates to flip the admin gate and delete v1:
 - `.claude/plans/accountant-modularization.md` — parent arc; Chunk 8 SUPERSEDED by this doc.
 
 ## §8. Session log
+
+**S21b (2026-09-25, afternoon) — Mirror freshness + payments delta (both now V12 gates, §5.13 #8–9).**
+
+- Dan saw "QB Mirror · 17h ago" in red. Hourly bill checks were all succeeding; the pill read `qb_mirror.queried_at`, which the delta only bumps for bills that changed. Vendors was red at 5h on a 6h schedule (15/60-min thresholds for both). Fix `26633e7`: V2-owned `useLastSyncChecks` reads the last finished `qb_sync_jobs` per kind; thresholds = cadence + 20 min grace; latest-check error forces amber.
+- Found while checking: `bill_payment` mirror rows frozen since the 2026-08-20 seed. The parked "pg_cron S2" item was never built. The reconciler's already-paid detection is safe (it falls back to the bill's IsPaid flag, which the hourly bill delta keeps current), but the Convera bank-drift guardrail samples payment rows, so it was silently degrading.
+- Fix: structured `buildBillPaymentCheckQueryRq` (`2200a18`, edge fn deployed), `qb-delta-bill-payments` cron (jobid 20, migration `20260925000000`, applied via Management API), catch-up job #2045 from 2026-08-19.
+- Also fixed: pre-existing comment-only drift between the two qbxml copies (drift test green again).
+- Still failing, pre-existing and unrelated: `execute.test.ts` (#5 create_bill 11-char cap) and `intuitPush.test.ts` (pay_bill + verify). Not touched.
+
+---
 
 **S21 (2026-09-25) — V9.10 + V11 SHIPPED together (Dan: "I don't like tech debt").**
 
