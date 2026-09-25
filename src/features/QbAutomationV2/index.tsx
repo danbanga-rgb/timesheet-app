@@ -131,6 +131,11 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   }, [props.onMappingChangeSubscribe]);
 
   const totalPending = props.qbBillQueryPending + props.qbVendorQueryPending;
+  // Items still moving through QuickBooks = panel rows with any step pending.
+  const pendingJobIds = new Set(props.pendingJobs.map(j => j.id));
+  const pushingItems = props.pushRecords.filter(r =>
+    [r.createJobId, r.payJobId, r.verifyJobId].some(id => id != null && pendingJobIds.has(id)),
+  ).length;
   // Re-read last finished checks whenever the pending count moves (a job
   // drained or was just enqueued). Read-only; no sync is triggered here.
   const lastChecks = useLastSyncChecks(props.supabase, totalPending);
@@ -172,11 +177,15 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
         else if (r.invoiceId != null) invoiceIds.push(r.invoiceId);
       }
       const result = await props.onPushRows({ eventIds, invoiceIds });
+      // Count ITEMS (rows you selected), not QB jobs: one item can be several
+      // steps (create bill → pay → confirm). Pilot 2026-09-25: "3 jobs sent"
+      // for 2 items read as out of sync with the panel.
+      const notSent = Math.min(selectedRows.length, result.rejected + result.skippedDuplicate + result.skippedIneligible);
+      const sent = selectedRows.length - notSent;
+      const itemWord = (n: number) => `${n} item${n === 1 ? '' : 's'}`;
       const parts: string[] = [];
-      if (result.pushed > 0) parts.push(`${result.pushed} jobs sent to QuickBooks`);
-      if (result.rejected > 0) parts.push(`${result.rejected} rejected`);
-      if (result.skippedDuplicate > 0) parts.push(`${result.skippedDuplicate} already sent (skipped)`);
-      if (result.skippedIneligible > 0) parts.push(`${result.skippedIneligible} not eligible`);
+      if (sent > 0) parts.push(`Sent ${itemWord(sent)} to QuickBooks`);
+      if (notSent > 0) parts.push(`${itemWord(notSent)} not sent (still in Ready)`);
       alert(parts.length > 0 ? parts.join(' · ') : 'Push complete.');
       clearSelection();
       setPreviewOpen(false);
@@ -227,6 +236,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
                 vendors={vendors}
                 qbwc={qbwc}
                 totalPending={props.pendingJobs.length}
+                pushingItems={pushingItems}
                 nextCheck={nextCheck}
                 onSyncNow={handleSyncNow}
                 onOpenPendingInspector={() => setPendingInspectorOpen(true)}

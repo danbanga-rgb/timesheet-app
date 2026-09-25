@@ -76,7 +76,7 @@ import { enqueueBillDeltaQuery, enqueueBillQueryForVendors, enqueueVendorQuery }
 import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
 import { findSameNumberInvoices, suggestUniqueInvoiceNumber } from './lib/invoices/invoiceNumber';
 import { resolvePaymentMethod } from './lib/invoices/paymentMethod';
-import { buildRestoredPushRecords, eventIdForJob, type RestoreJobRow } from './lib/qbAutomation/pushRecordRestore';
+import { buildRestoredPushRecords, eventIdForJob, mergePushRecords, type RestoreJobRow } from './lib/qbAutomation/pushRecordRestore';
 import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
 import type { QbOpenBillRow } from './lib/qbStateSync/types';
 import {
@@ -2523,14 +2523,12 @@ const TimesheetSystem = () => {
   const loadInflightPushRecords = async () => {
     const { data: jobs } = await supabase
       .from('qb_sync_jobs')
-      .select('id, kind, status, payload, created_at')
+      .select('id, kind, status, payload, created_at, depends_on')
       .in('status', ['pending', 'in_flight'])
-      .in('kind', ['bill_pmt_add', 'check_add']);
+      .in('kind', ['bill_pmt_add', 'check_add', 'bill_add']);
     const jobRows = (jobs ?? []) as RestoreJobRow[];
-    if (jobRows.length === 0) {
-      setQbPushRecords([]);
-      return;
-    }
+    // Nothing in flight: keep whatever this session already shows.
+    if (jobRows.length === 0) return;
     // Convera C-1 pay jobs carry sourceConveraTxnId, not sourceIngestEventId
     // (pilot 2026-09-25: those vanished from the pane on reload).
     const converaTxnIds = [...new Set(jobRows
@@ -2551,25 +2549,23 @@ const TimesheetSystem = () => {
     }
     const eventIds = new Set<number>();
     for (const j of jobRows) {
-      const eid = eventIdForJob(j, eventIdByConveraTxnId);
-      if (eid != null) eventIds.add(eid);
-    }
-    if (eventIds.size === 0) {
-      setQbPushRecords([]);
-      return;
+      const eid = j.kind === 'bill_add' ? Number(j.payload?.sourceIngestEventId) : eventIdForJob(j, eventIdByConveraTxnId);
+      if (eid != null && Number.isFinite(eid)) eventIds.add(eid);
     }
     // Fetch fresh — the tab-load useEffect fires loadInflightPushRecords in
     // the same tick as loadQbVendorMappings + loadQbVendorsAndAccounts, so
     // React state is stale in this closure. INVARIANTS #27 / [[state-vs-fresh-fetch]].
-    const payJobIds = jobRows.map(j => String(j.id));
+    const stepJobIds = jobRows.map(j => String(j.id));
     const [eventDataRes, freshMappings, freshVendors, verifyRes] = await Promise.all([
-      supabase
-        .from('qb_ingest_events')
-        .select('id, source, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
-        .in('id', Array.from(eventIds)),
+      eventIds.size > 0
+        ? supabase
+            .from('qb_ingest_events')
+            .select('id, source, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
+            .in('id', Array.from(eventIds))
+        : Promise.resolve({ data: [] }),
       supabase.from('qb_vendor_mappings').select('source, counterparty_pattern, payee_full_name'),
       supabase.from('qb_vendors').select('list_id, name'),
-      supabase.from('qb_sync_jobs').select('id, depends_on').eq('kind', 'bill_query').overlaps('depends_on', payJobIds),
+      supabase.from('qb_sync_jobs').select('id, depends_on').eq('kind', 'bill_query').overlaps('depends_on', stepJobIds),
     ]);
     const eventById = new Map(((eventDataRes.data ?? []) as Array<{ id: number; source: string; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
     const vendorNameById = new Map(((freshVendors.data ?? []) as Array<{ list_id: string; name: string }>).map(v => [v.list_id, v.name]));
@@ -2577,17 +2573,18 @@ const TimesheetSystem = () => {
     for (const m of ((freshMappings.data ?? []) as Array<{ source: string; counterparty_pattern: string; payee_full_name: string | null }>)) {
       if (m.payee_full_name) payeeByKey.set(`${m.source} ${m.counterparty_pattern}`, m.payee_full_name);
     }
-    const verifyJobIdByPayJobId = new Map<number, number>();
+    const verifyJobIdByJobId = new Map<number, number>();
     for (const v of (verifyRes.data ?? []) as Array<{ id: number; depends_on: Array<string | number> | null }>) {
-      for (const dep of v.depends_on ?? []) verifyJobIdByPayJobId.set(Number(dep), v.id);
+      for (const dep of v.depends_on ?? []) verifyJobIdByJobId.set(Number(dep), v.id);
     }
-    const records = buildRestoredPushRecords(jobRows, eventById, eventIdByConveraTxnId, verifyJobIdByPayJobId, (eid, j) => {
-      const event = eventById.get(eid)!;
+    const records = buildRestoredPushRecords(jobRows, eventById, eventIdByConveraTxnId, verifyJobIdByJobId, (eid, j) => {
+      const event = eventById.get(eid);
+      if (!event) return String(j.payload?.payeeVendorName ?? j.payload?.vendorName ?? '');
       return (event.counterparty_qb_vendor_list_id && vendorNameById.get(event.counterparty_qb_vendor_list_id))
         || payeeByKey.get(`${event.source} ${event.counterparty_raw}`)
         || String(j.payload?.payeeVendorName ?? event.counterparty_raw);
     });
-    setQbPushRecords(records);
+    setQbPushRecords(prev => mergePushRecords(prev, records));
   };
 
   useEffect(() => {
@@ -5525,49 +5522,11 @@ const TimesheetSystem = () => {
                     .flatMap(r => (r?.skippedIneligible ?? []) as unknown[]),
                 };
 
-                // Build status-pane records for the pay-bill jobs (Intuit + all 3
-                // Convera pay paths). bill_add-only pushes (Create-Bill verdict,
-                // g75/g76) don't get pane records — the pane's state machine
-                // models pay+verify only. Same policy as v1 (see TS.tsx:7735).
-                const vendorByListId = new Map(qbVendorsList.map(v => [v.listId, v]));
-                const newRecords: PushRecord[] = [];
-                const buildFor = (
-                  pushRes: { jobIds: (number | null)[]; rejected: Array<{ intent?: { kind?: string; sourceIngestEventId?: number } }>; skippedDuplicate: Array<{ intent?: { kind?: string; sourceIngestEventId?: number } }>; skippedIneligible: Array<{ eventId?: number }>; verifyJobIdByPayJobId?: Record<number, number> } | null,
-                  requestedIds: number[],
-                ) => {
-                  if (!pushRes) return;
-                  const inelig = new Set((pushRes.skippedIneligible ?? []).map(s => s.eventId));
-                  const rej = new Set((pushRes.rejected ?? [])
-                    .map(rj => rj.intent?.kind === 'pay_bill' ? rj.intent.sourceIngestEventId : undefined)
-                    .filter((x): x is number => x != null));
-                  const dup = new Set((pushRes.skippedDuplicate ?? [])
-                    .map(s => s.intent?.kind === 'pay_bill' ? s.intent.sourceIngestEventId : undefined)
-                    .filter((x): x is number => x != null));
-                  const eligibleInOrder = requestedIds.filter(id => !inelig.has(id) && !rej.has(id) && !dup.has(id));
-                  (pushRes.jobIds ?? []).forEach((jobId, i) => {
-                    if (jobId == null) return;
-                    const eventId = eligibleInOrder[i];
-                    if (eventId == null) return;
-                    const event = eventById.get(eventId);
-                    if (!event) return;
-                    const vendor = event.counterpartyQbVendorListId ? vendorByListId.get(event.counterpartyQbVendorListId) : null;
-                    newRecords.push({
-                      eventId,
-                      payJobId: jobId,
-                      verifyJobId: pushRes.verifyJobIdByPayJobId?.[jobId] ?? null,
-                      billTxnId: event.resolvedBillTxnId ?? '',
-                      expectedAmount: event.amount,
-                      expectedVendor: vendor?.name ?? event.counterpartyRaw,
-                      pushedAt: new Date().toISOString(),
-                      kind: 'pay_bill',
-                    });
-                  });
-                };
-                buildFor(payRes as never, intuitPay);
-                buildFor(converaPayRes as never, converaBillExists);
-                buildFor(converaCreatePayRes as never, converaMissingBills);
-                buildFor(converaOrphanRes as never, converaOrphan);
-                if (newRecords.length > 0) setQbPushRecords(prev => [...prev, ...newRecords]);
+                // Status pane: rebuild from the jobs just written, one record per
+                // pushed ITEM (pay, create→pay, invoice→bill), same code path as a
+                // page reload. The old index-based mapping labelled create+pay by its
+                // bill_add job and skipped invoice→bill items (pilot 2026-09-25).
+                await loadInflightPushRecords();
 
                 await loadQbIngestEvents();
                 await loadQbOpenBills();

@@ -249,6 +249,26 @@ export function reconcileEvent(
     };
   }
 
+  // The matched invoice's OWN bill is authoritative (invoices.qb_bill_txn_id),
+  // whatever the memo says. 2026-09-25: Nikolina's July wire memo still read
+  // "INV 1-1-11" after the invoice was renamed "INV 1-1-11-1"; we created and
+  // paid 41C9D for it, but ref matching never found it, so the wire stayed
+  // create_bill_then_pay forever.
+  if (ctx.billOwnerInvoiceId && event.matchedInvoiceIds.length === 1) {
+    const own = bills.find(b => ctx.billOwnerInvoiceId!.get(b.txnId) === event.matchedInvoiceIds[0]);
+    if (own && !claimedBillTxnIds.has(own.txnId)) {
+      const settlement = findSettlingPayment(own, payments);
+      if (settlement.alreadySettled) {
+        return {
+          action: 'already_done',
+          billTxnId: own.txnId,
+          ...(settlement.paymentTxnId ? { paymentTxnId: settlement.paymentTxnId } : {}),
+        };
+      }
+      return { action: 'pay_existing_bill', billTxnId: own.txnId };
+    }
+  }
+
   // If vendor is entirely missing from mirror, we don't yet know QB state → held.
   // (Reconciler assumes an empty bills[] means "confirmed vendor has no bills",
   // not "vendor not synced." Callers must ensure a sync has completed before

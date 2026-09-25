@@ -7,6 +7,7 @@ interface Props {
   qbwc: PillState;
   totalPending: number;                    // all pending/in-flight qb_sync_jobs (sync queries + pushes)
   nextCheck: NextCheck | null;             // connector's next pickup estimate
+  pushingItems: number;                    // pushed items with a step still pending (matches the status panel)
   onSyncNow: () => void;                   // fires both bill_query + vendor_query (silent)
   onOpenPendingInspector: () => void;      // only relevant when totalPending > 0
 }
@@ -37,7 +38,7 @@ function Pill({ pill }: { pill: PillState }) {
   );
 }
 
-export default function HeaderPills({ mirror, vendors, qbwc, totalPending, nextCheck, onSyncNow, onOpenPendingInspector }: Props) {
+export default function HeaderPills({ mirror, vendors, qbwc, totalPending, nextCheck, pushingItems, onSyncNow, onOpenPendingInspector }: Props) {
   return (
     <div className="inline-flex items-center gap-2 flex-wrap">
       <Pill pill={mirror} />
@@ -61,9 +62,11 @@ export default function HeaderPills({ mirror, vendors, qbwc, totalPending, nextC
               ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
               : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100')
           }
-          title={`${totalPending} job${totalPending === 1 ? '' : 's'} waiting for QuickBooks.${nextCheck ? ` Connector's next check: ${nextCheck.label}.` : ''} Click to see them.`}
+          title={`${pushingItems > 0 ? `${pushingItems} pushed item${pushingItems === 1 ? '' : 's'} in progress; ` : ''}${totalPending} job${totalPending === 1 ? '' : 's'} waiting for QuickBooks in total.${nextCheck ? ` Connector's next check: ${nextCheck.label}.` : ''} Click to see them.`}
         >
-          <Loader2 className="w-3 h-3 animate-spin" /> {totalPending} pending{nextCheck && <span> · {nextCheck.label}</span>}
+          <Loader2 className="w-3 h-3 animate-spin" />
+          {pushingItems > 0 ? `${pushingItems} pushing` : `${totalPending} syncing`}
+          {nextCheck && <span> · {nextCheck.label}</span>}
         </button>
       )}
     </div>

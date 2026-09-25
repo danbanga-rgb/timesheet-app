@@ -461,3 +461,21 @@ describe('bill ownership guard (reused invoice numbers, 2026-09-25)', () => {
     expect(r.action).toBe('already_done');
   });
 });
+
+describe('matched invoice owns its bill (renamed invoice, 2026-09-25)', () => {
+  const julyBill = bill({ txnId: 'JULY', refNumber: 'INV 1-1-11-1', amount: 5520, isPaid: true, txnDate: '2026-07-31' });
+  const juneBill = bill({ txnId: 'JUNE', refNumber: 'INV 1-1-11', amount: 5280, isPaid: true, txnDate: '2026-06-30' });
+  const wire = event({ memo: 'INV 1-1-11', amount: 5520, txnDate: '2026-09-15', matchedInvoiceIds: [205], targetQbTxnKind: 'bill_pmt' });
+  const owners = new Map([['JULY', 205], ['JUNE', 187]]);
+
+  it('closes against the invoice\'s own paid bill even though the memo names the old number', () => {
+    const r = reconcileEvent(wire, { ...ctxWith([juneBill, julyBill]), billOwnerInvoiceId: owners }, new Set());
+    expect(r).toMatchObject({ action: 'already_done', billTxnId: 'JULY' });
+  });
+
+  it('own bill unpaid → pay_existing_bill', () => {
+    const unpaid = { ...julyBill, isPaid: false };
+    const r = reconcileEvent(wire, { ...ctxWith([juneBill, unpaid]), billOwnerInvoiceId: owners }, new Set());
+    expect(r).toMatchObject({ action: 'pay_existing_bill', billTxnId: 'JULY' });
+  });
+});

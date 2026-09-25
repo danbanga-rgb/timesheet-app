@@ -28,6 +28,8 @@ export interface PushRecord {
   invoiceId?: number;
   payJobId: number;
   verifyJobId: number | null;
+  /** Create-then-pay items: the bill_add the pay job waits on. */
+  createJobId?: number | null;
   billTxnId: string;
   expectedAmount: number;
   expectedVendor: string;
@@ -47,6 +49,7 @@ interface MirrorRow { entity_ref: string; is_settled: boolean | null; data: { op
 interface EventRow { id: number; status: string; posted_qb_refs: Record<string, unknown> | null; resolved_bill_txn_id: string | null }
 
 interface LiveState {
+  createStatus?: JobStatus | 'unknown' | null;
   payStatus: JobStatus | 'unknown';
   payError: string | null;
   verifyStatus: JobStatus | 'unknown' | 'not-enqueued';
@@ -149,7 +152,11 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, onCance
 
   const poll = useCallback(async () => {
     if (records.length === 0) return;
-    const jobIds = records.flatMap(r => [r.payJobId, ...(r.verifyJobId != null ? [r.verifyJobId] : [])]);
+    const jobIds = records.flatMap(r => [
+      r.payJobId,
+      ...(r.verifyJobId != null ? [r.verifyJobId] : []),
+      ...(r.createJobId != null ? [r.createJobId] : []),
+    ]);
     // Split by source domain (Slice A: PushRecord now supports 'invoice' for G7.5).
     const eventRecs = records.filter(r => (r.sourceKind ?? 'event') === 'event');
     const invoiceRecs = records.filter(r => r.sourceKind === 'invoice');
@@ -199,7 +206,17 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, onCance
       const invoiceBillTxn = rec.sourceKind === 'invoice' && rec.invoiceId != null ? invoiceBillTxnById.get(rec.invoiceId) : null;
       const lookupKey = rec.billTxnId || event?.resolved_bill_txn_id || invoiceBillTxn || '';
       const mirror = lookupKey ? (mirrorByTxn.get(lookupKey) ?? null) : null;
-      next.set(rec.eventId, classify(pay, verify, event, mirror, rec.kind));
+      const create = rec.createJobId != null ? (jobById.get(rec.createJobId) ?? null) : null;
+      const state = classify(pay, verify, event, mirror, rec.kind);
+      if (create) {
+        state.createStatus = create.status;
+        // A failed create step means the pay never runs: surface it on the item.
+        if (create.status === 'failed') {
+          state.overall = 'pay-failed';
+          state.payError = `create step failed: ${create.error_msg ?? 'no reason given'}`;
+        }
+      }
+      next.set(rec.eventId, state);
     }
     setLiveByEventId(next);
   }, [records, supabase]);
@@ -263,7 +280,10 @@ export default function QbPushStatusPane({ supabase, records, onDismiss, onCance
                   <span className="font-mono text-gray-600">${rec.expectedAmount.toFixed(2)}</span>
                 </div>
                 <div className="text-xs text-gray-500 mt-0.5 flex items-center gap-3">
-                  <span>pay job <span className="font-mono">{rec.payJobId}</span>: {live?.payStatus ?? '…'}</span>
+                  {rec.createJobId != null && (
+                    <span>create job <span className="font-mono">{rec.createJobId}</span>: {live?.createStatus ?? '…'}</span>
+                  )}
+                  <span>{rec.kind === 'invoice_create_bill' || rec.kind === 'create' ? 'create job' : 'pay job'} <span className="font-mono">{rec.payJobId}</span>: {live?.payStatus ?? '…'}</span>
                   {rec.verifyJobId != null && (
                     <span>verify <span className="font-mono">{rec.verifyJobId}</span>: {live?.verifyStatus ?? '…'}</span>
                   )}
