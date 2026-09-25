@@ -1,6 +1,9 @@
 import { useMemo, useState, Fragment } from 'react';
 import { AlertTriangle, ChevronRight, ChevronDown, Users, X } from 'lucide-react';
-import type { ReadyRow, ReadyGroup } from '../hooks/useQbAutomationV2';
+import { sourceLabel, type ReadyRow, type ReadyGroup } from '../hooks/useQbAutomationV2';
+import { formatProvenanceBadge } from '../../../lib/qbAutomation/pushedRowDerivation';
+import { useColumnPrefs, type OptionalColumn } from '../hooks/useColumnPrefs';
+import ColumnPicker from './ColumnPicker';
 import type { Verdict } from '../../../lib/qbAutomation/verdict';
 import type { CategoryKey } from './KpiStrip';
 import type { QbVendorRow } from '../../../lib/qbStateSync/types';
@@ -32,7 +35,54 @@ interface Props {
   createTotal: number;
 }
 
-type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'hrs' | 'rate' | 'total' | 'status';
+type ExtraKey = 'source' | 'pp' | 'wireDate' | 'memo' | 'match' | 'billRef';
+type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'hrs' | 'rate' | 'total' | 'status' | ExtraKey;
+
+// V9.10: optional columns, off by default. Order here = render order.
+const EXTRA_COLUMNS: readonly OptionalColumn<ExtraKey>[] = [
+  { key: 'source',   label: 'Source' },
+  { key: 'pp',       label: 'Payment profile' },
+  { key: 'wireDate', label: 'Wire date' },
+  { key: 'memo',     label: 'Bank memo' },
+  { key: 'match',    label: 'Match' },
+  { key: 'billRef',  label: 'QB bill #' },
+];
+
+function rowSourceLabel(s: string): string {
+  return s === 'invoice' ? 'Invoice' : sourceLabel(s);
+}
+
+function extraSortValue(r: ReadyRow, key: ExtraKey): string {
+  switch (key) {
+    case 'source':   return rowSourceLabel(r.rowSource);
+    case 'pp':       return r.ppLabel;
+    case 'wireDate': return r.wireDate ?? '';
+    case 'memo':     return r.bankMemo ?? '';
+    case 'match':    return r.matchProvenance ?? '';
+    case 'billRef':  return r.qbBillRef ?? '';
+  }
+}
+
+function extraCell(r: ReadyRow, key: ExtraKey) {
+  const dash = <span className="text-gray-300">—</span>;
+  switch (key) {
+    case 'source':
+      return <span className="inline-block px-1 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{rowSourceLabel(r.rowSource)}</span>;
+    case 'pp':
+      return r.ppLabel ? <span className="truncate inline-block max-w-[180px] align-bottom" title={r.ppLabel}>{r.ppLabel}</span> : dash;
+    case 'wireDate':
+      return r.wireDate ? <span className="font-mono text-gray-600">{r.wireDate}</span> : dash;
+    case 'memo':
+      return r.bankMemo ? <span className="truncate inline-block max-w-[160px] align-bottom font-mono text-gray-700" title={r.bankMemo}>{r.bankMemo}</span> : dash;
+    case 'match': {
+      if (r.rowSource === 'invoice') return dash;
+      const b = formatProvenanceBadge(r.matchProvenance);
+      return <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${b.bg} ${b.fg}`} title={b.tooltip}>{b.text}</span>;
+    }
+    case 'billRef':
+      return r.qbBillRef ? <span className="font-mono text-gray-700">{r.qbBillRef}</span> : dash;
+  }
+}
 type SortDir = 'asc' | 'desc';
 
 const verdictOrder: Record<Verdict, number> = {
@@ -87,6 +137,8 @@ export default function ReadyCard(props: Props) {
   const [expandedRowKeys, setExpandedRowKeys] = useState<Set<string>>(new Set());
   const [openFailureKey, setOpenFailureKey] = useState<string | null>(null);
   const [retryingKey, setRetryingKey] = useState<string | null>(null);
+  const columnPrefs = useColumnPrefs<ExtraKey>('ready', EXTRA_COLUMNS);
+  const extras = EXTRA_COLUMNS.filter(c => columnPrefs.isOn(c.key));
 
   const toggleExpanded = (rowKey: string) => {
     setExpandedRowKeys(prev => {
@@ -153,6 +205,7 @@ export default function ReadyCard(props: Props) {
         case 'rate':       return ((a.rate ?? -1) - (b.rate ?? -1)) * dir;
         case 'total':      return (a.amount - b.amount) * dir;
         case 'status':     return (verdictOrder[a.verdict] - verdictOrder[b.verdict]) * dir;
+        default:           return extraSortValue(a, sortKey).localeCompare(extraSortValue(b, sortKey), undefined, { numeric: true }) * dir;
       }
     });
     return rowsCopy;
@@ -187,8 +240,9 @@ export default function ReadyCard(props: Props) {
             </span>
           )}
         </div>
-        {!isSkippedView && rows.length > 0 && (
+        {rows.length > 0 && (
           <div className="flex items-center gap-3 text-xs">
+            {!isSkippedView && (<>
             <button onClick={onSelectAll} className="text-emerald-700 hover:text-emerald-900 font-medium">Select all</button>
             {payCount > 0 && (
               <button onClick={() => onSelectGroup('pay')} className="text-blue-700 hover:text-blue-900 font-medium">Select Payments</button>
@@ -199,6 +253,8 @@ export default function ReadyCard(props: Props) {
             <button onClick={onClearSelection} disabled={selectionCount === 0} className={selectionCount === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-900 font-medium'}>
               Clear selection
             </button>
+            </>)}
+            <ColumnPicker columns={EXTRA_COLUMNS} isOn={columnPrefs.isOn} onToggle={columnPrefs.toggle} onReset={columnPrefs.reset} />
           </div>
         )}
       </div>
@@ -232,6 +288,11 @@ export default function ReadyCard(props: Props) {
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('total')}>
                   Total{sortArrow('total')}
                 </th>
+                {extras.map(c => (
+                  <th key={c.key} className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort(c.key)}>
+                    {c.label}{sortArrow(c.key)}
+                  </th>
+                ))}
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('status')}>
                   Status{sortArrow('status')}
                 </th>
@@ -332,6 +393,9 @@ export default function ReadyCard(props: Props) {
                       <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap font-semibold">
                         {fmtMoney(r.amount)} <span className="text-gray-500 font-normal">{r.currency}</span>
                       </td>
+                      {extras.map(c => (
+                        <td key={c.key} className="px-2 py-1.5 whitespace-nowrap">{extraCell(r, c.key)}</td>
+                      ))}
                       <td className="px-2 py-1.5 whitespace-nowrap">
                         <div className="flex items-center gap-1 relative">
                           {isSkippedView ? skippedBadge() : verdictBadge(r.verdict)}
@@ -402,6 +466,7 @@ export default function ReadyCard(props: Props) {
                             <span title="Share from convera_transaction_invoices not available — using invoice total as fallback" className="text-amber-600">*</span>
                           )}
                         </td>
+                        {extras.map(col => <td key={col.key} className="px-2 py-1"></td>)}
                         <td className="px-2 py-1"></td>
                         <td className="px-2 py-1"></td>
                       </tr>

@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
 import type { PushedMonthGroup, PushedRow } from '../hooks/useQbAutomationV2';
 import { formatActionLabel } from '../../../lib/qbAutomation/pushedRowDerivation';
+import { useColumnPrefs, type OptionalColumn } from '../hooks/useColumnPrefs';
+import ColumnPicker from './ColumnPicker';
 
 interface Props {
   byMonth: PushedMonthGroup[];
@@ -9,7 +11,15 @@ interface Props {
   count: number;
 }
 
-type SortKey = 'src' | 'date' | 'counterparty' | 'vendor' | 'amount' | 'memo' | 'action' | 'when';
+type ExtraKey = 'billRef' | 'sourceRef';
+type SortKey = 'src' | 'date' | 'counterparty' | 'vendor' | 'amount' | 'memo' | 'action' | 'when' | ExtraKey;
+
+// V9.10: optional columns — event-side fields only (never invoice-derived,
+// per the Pushed-row rule).
+const EXTRA_COLUMNS: readonly OptionalColumn<ExtraKey>[] = [
+  { key: 'billRef',   label: 'QB bill #' },
+  { key: 'sourceRef', label: 'Bank ref' },
+];
 type SortDir = 'asc' | 'desc';
 
 function fmtMoney(n: number): string {
@@ -69,6 +79,8 @@ function useSortedRows(rows: PushedRow[], sortKey: SortKey, sortDir: SortDir): P
         case 'memo':         return (a.memo || '').localeCompare(b.memo || '', undefined, { numeric: true }) * dir;
         case 'action':       return (a.resolvedAction || '').localeCompare(b.resolvedAction || '') * dir;
         case 'when':         return (a.statusUpdatedAt || '').localeCompare(b.statusUpdatedAt || '') * dir;
+        case 'billRef':      return (a.qbBillRef || '').localeCompare(b.qbBillRef || '', undefined, { numeric: true }) * dir;
+        case 'sourceRef':    return (a.sourceRef || '').localeCompare(b.sourceRef || '') * dir;
       }
     });
     return copy;
@@ -79,9 +91,10 @@ interface MonthSectionProps {
   group: PushedMonthGroup;
   isOpen: boolean;
   onToggle: () => void;
+  extras: readonly OptionalColumn<ExtraKey>[];
 }
 
-function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
+function MonthSection({ group, isOpen, onToggle, extras }: MonthSectionProps) {
   const [sortKey, setSortKey] = useState<SortKey>('when');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const sortedRows = useSortedRows(group.rows, sortKey, sortDir);
@@ -130,6 +143,7 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                 {th('memo', 'Memo')}
                 {th('action', 'Action')}
                 {th('when', 'Posted at')}
+                {extras.map(c => <Fragment key={c.key}>{th(c.key, c.label)}</Fragment>)}
               </tr>
             </thead>
             <tbody>
@@ -153,6 +167,14 @@ function MonthSection({ group, isOpen, onToggle }: MonthSectionProps) {
                     <td className="px-1.5 py-1 truncate max-w-[150px] font-mono text-gray-700" title={r.memo}>{r.memo || '—'}</td>
                     <td className="px-1.5 py-1 whitespace-nowrap">{actionChip(r)}</td>
                     <td className="px-1.5 py-1 whitespace-nowrap font-mono text-gray-500">{fmtWhen(r.statusUpdatedAt)}</td>
+                    {extras.map(c => {
+                      const v = c.key === 'billRef' ? r.qbBillRef : r.sourceRef;
+                      return (
+                        <td key={c.key} className="px-1.5 py-1 truncate max-w-[160px] font-mono text-gray-600" title={v ?? undefined}>
+                          {v || <span className="text-gray-300">—</span>}
+                        </td>
+                      );
+                    })}
                   </tr>
                 );
               })}
@@ -172,6 +194,8 @@ export default function PushedCard({ byMonth, total, count }: Props) {
     return s;
   }, [byMonth]);
   const [expandedMonths, setExpandedMonths] = useState<Set<string>>(defaultOpen);
+  const columnPrefs = useColumnPrefs<ExtraKey>('pushed', EXTRA_COLUMNS);
+  const extras = EXTRA_COLUMNS.filter(c => columnPrefs.isOn(c.key));
   const toggleMonth = (monthKey: string) => {
     setExpandedMonths(prev => {
       const next = new Set(prev);
@@ -192,7 +216,12 @@ export default function PushedCard({ byMonth, total, count }: Props) {
             {total > 0 && <span className="ml-1">· {fmtMoney(total)}</span>}
           </span>
         </div>
-        <span className="text-xs text-gray-500">Session failures live in the status pane above.</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-500">Session failures live in the status pane above.</span>
+          {byMonth.length > 0 && (
+            <ColumnPicker columns={EXTRA_COLUMNS} isOn={columnPrefs.isOn} onToggle={columnPrefs.toggle} onReset={columnPrefs.reset} />
+          )}
+        </div>
       </div>
 
       {byMonth.length === 0 ? (
@@ -206,6 +235,7 @@ export default function PushedCard({ byMonth, total, count }: Props) {
             group={group}
             isOpen={expandedMonths.has(group.monthKey)}
             onToggle={() => toggleMonth(group.monthKey)}
+            extras={extras}
           />
         ))
       )}

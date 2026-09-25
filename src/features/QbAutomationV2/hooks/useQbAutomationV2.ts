@@ -7,6 +7,7 @@ import { buildHistoryByUser, resolveVendorCandidates, type Candidate } from '../
 import { getEffectiveMatchedInvoiceIds, isUmbrellaEvent } from '../../../lib/qbAutomation/umbrella';
 import { derivePushedRowDisplay, deriveSyntheticPushedRowDisplay } from '../../../lib/qbAutomation/pushedRowDerivation';
 import { isTestAccount } from '../../../lib/isTestAccount';
+import type { MatchProvenance } from '../../../lib/matchProvenance';
 
 // Lifted from TS.tsx:7246, tightened for v2 Pushed card (Inv → Bill vs V1's Invoice → Bill).
 const SOURCE_LABEL_MAP: Record<string, string> = {
@@ -79,6 +80,13 @@ export interface ReadyRow {
   // finished with status='failed'. Card renders a red pill; the row is
   // still selectable + pushable (retry = re-select and push).
   lastFailedPush?: FailedPushJob;
+  // V9.10 optional columns (Columns ▾). Event rows carry the bank-side
+  // fields; invoice-only rows (no wire yet) leave them null.
+  rowSource: string;                     // event.source, or 'invoice' for loose-invoice rows
+  wireDate: string | null;               // event.txnDate
+  bankMemo: string | null;               // event.memo
+  matchProvenance: MatchProvenance | null;
+  qbBillRef: string | null;              // Will Pay rows: RefNumber of the existing QB bill
 }
 
 export type NeedsMappingReason =
@@ -137,6 +145,9 @@ export interface PushedRow {
   isG75Source: boolean;
   billTxnId: string | null;           // QB TxnID for optional Action badge tooltip
   statusUpdatedAt: string;
+  // V9.10 optional columns. Event-side only — no invoice-derived fields.
+  qbBillRef: string | null;           // mirror RefNumber of billTxnId
+  sourceRef: string | null;           // e.sourceRef (bank / Convera reference)
 }
 
 export interface MappingRow {
@@ -150,6 +161,7 @@ export interface MappingRow {
   qbVendorName: string;
   billsPushedCount: number;
   isLegacy: boolean;
+  lastPostedDate: string | null;      // V9.10: latest posted event txnDate for this vendor
 }
 
 export interface UseQbAutomationV2Args {
@@ -248,6 +260,8 @@ function buildPushedRow(
     isG75Source: display.isG75Source,
     billTxnId,
     statusUpdatedAt: e.statusUpdatedAt,
+    qbBillRef: billTxnId ? (billByTxnId.get(billTxnId)?.refNumber || null) : null,
+    sourceRef: e.sourceRef || null,
   };
 }
 
@@ -317,6 +331,8 @@ export function derivePushedByMonth(
       isG75Source: display.isG75Source,
       billTxnId: inv.qbBillTxnId,
       statusUpdatedAt: when,
+      qbBillRef: billByTxnId.get(inv.qbBillTxnId)?.refNumber || null,
+      sourceRef: null,
     };
     const bucket = byMonth.get(mk);
     if (bucket) bucket.push(row);
@@ -406,6 +422,19 @@ export function useQbAutomationV2({
       }
       if (hit) row.lastFailedPush = hit;
       return row;
+    };
+
+    // Same lookup computeVerdict uses to decide Will Pay — returns the bill's
+    // RefNumber so the QB bill # column names exactly the bill being paid.
+    const findOpenBillRef = (vendorListId: string | null, ref: string, month: string): string | null => {
+      const wantRef = normalizeRef(ref);
+      if (!vendorListId || !wantRef || !month) return null;
+      const bill = openBills.find(b =>
+        b.vendorListId === vendorListId
+        && normalizeRef(b.refNumber) === wantRef
+        && (b.txnDate ?? '').slice(0, 7) === month,
+      );
+      return bill?.refNumber || null;
     };
 
     for (const e of events) {
@@ -510,6 +539,11 @@ export function useQbAutomationV2({
           candidates: [],
           children: childRows,
           distinctVendorCount: distinctVendorListIds.size,
+          rowSource: e.source,
+          wireDate: e.txnDate || null,
+          bankMemo: e.memo,
+          matchProvenance: e.matchProvenance,
+          qbBillRef: verdict === 'will_pay' ? findOpenBillRef(e.counterpartyQbVendorListId, firstChildRef, monthKey) : null,
         });
         continue;
       }
@@ -573,6 +607,11 @@ export function useQbAutomationV2({
         ppSource: e.source,
         ppCounterpartyPattern: e.counterpartyRaw,
         candidates,
+        rowSource: e.source,
+        wireDate: e.txnDate || null,
+        bankMemo: e.memo,
+        matchProvenance: e.matchProvenance,
+        qbBillRef: verdict === 'will_pay' ? findOpenBillRef(e.counterpartyQbVendorListId, refNumber, monthKey) : null,
       });
     }
 
@@ -652,6 +691,11 @@ export function useQbAutomationV2({
           ppSource: mapping.source || 'invoice',
           ppCounterpartyPattern: mapping.counterpartyPattern || ppLabel,
           candidates,
+          rowSource: 'invoice',
+          wireDate: null,
+          bankMemo: null,
+          matchProvenance: null,
+          qbBillRef: null,
         });
       } else {
         // Pre-wire umbrella group row.
@@ -698,6 +742,11 @@ export function useQbAutomationV2({
           candidates: [],
           children: childRows,
           distinctVendorCount: 1,
+          rowSource: 'invoice',
+          wireDate: null,
+          bankMemo: null,
+          matchProvenance: null,
+          qbBillRef: null,
         });
       }
     }
@@ -833,6 +882,7 @@ export function useQbAutomationV2({
 
   const mappingRows: MappingRow[] = useMemo(() => {
     const postedCountByVendor = new Map<string, number>();
+    const lastPostedByVendor = new Map<string, string>();
     for (const e of events) {
       if (e.status !== 'posted') continue;
       if (!e.counterpartyQbVendorListId) continue;
@@ -840,6 +890,8 @@ export function useQbAutomationV2({
         e.counterpartyQbVendorListId,
         (postedCountByVendor.get(e.counterpartyQbVendorListId) ?? 0) + 1,
       );
+      const prev = lastPostedByVendor.get(e.counterpartyQbVendorListId);
+      if (e.txnDate && (!prev || e.txnDate > prev)) lastPostedByVendor.set(e.counterpartyQbVendorListId, e.txnDate);
     }
 
     return mappings.map(m => {
@@ -859,6 +911,7 @@ export function useQbAutomationV2({
         qbVendorName,
         billsPushedCount: postedCountByVendor.get(m.qbVendorListId) ?? 0,
         isLegacy: m.ppId == null,
+        lastPostedDate: lastPostedByVendor.get(m.qbVendorListId) ?? null,
       };
     });
   }, [mappings, ppById, userById, vendorsById, events]);

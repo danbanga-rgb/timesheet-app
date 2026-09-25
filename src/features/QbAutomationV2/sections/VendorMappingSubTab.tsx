@@ -1,11 +1,20 @@
 import { useMemo, useState } from 'react';
 import type { Invoice, QbIngestEvent } from '../../../types';
-import type { MappingRow } from '../hooks/useQbAutomationV2';
+import { sourceLabel, type MappingRow } from '../hooks/useQbAutomationV2';
+import { useColumnPrefs, type OptionalColumn } from '../hooks/useColumnPrefs';
+import ColumnPicker from './ColumnPicker';
 import type { QbVendorRow } from '../../../lib/qbStateSync/types';
 import type { SaveMappingArgs } from './NeedsMappingCard';
 import BillsRoutedModal from './BillsRoutedModal';
 
-type SortKey = 'contractor' | 'pp' | 'vendor' | 'bills';
+type ExtraKey = 'source' | 'lastPosted';
+type SortKey = 'contractor' | 'pp' | 'vendor' | 'bills' | ExtraKey;
+
+// V9.10: optional columns, off by default.
+const EXTRA_COLUMNS: readonly OptionalColumn<ExtraKey>[] = [
+  { key: 'source',     label: 'Source' },
+  { key: 'lastPosted', label: 'Last posted' },
+];
 type SortDir = 'asc' | 'desc';
 
 interface Props {
@@ -26,6 +35,8 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
   const [busyId, setBusyId] = useState<number | null>(null);
+  const columnPrefs = useColumnPrefs<ExtraKey>('mappings', EXTRA_COLUMNS);
+  const extras = EXTRA_COLUMNS.filter(c => columnPrefs.isOn(c.key));
 
   const vendorByLowerName = useMemo(() => new Map(vendors.map(v => [v.name.toLowerCase().trim(), v])), [vendors]);
 
@@ -44,6 +55,8 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
         case 'pp':         return a.ppLabel.localeCompare(b.ppLabel) * dir;
         case 'vendor':     return a.qbVendorName.localeCompare(b.qbVendorName) * dir;
         case 'bills':      return (a.billsPushedCount - b.billsPushedCount) * dir;
+        case 'source':     return sourceLabel(a.source).localeCompare(sourceLabel(b.source)) * dir;
+        case 'lastPosted': return (a.lastPostedDate || '').localeCompare(b.lastPostedDate || '') * dir;
       }
     });
     return sorted;
@@ -97,6 +110,8 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
             {filteredSorted.length} {search ? `of ${rows.length}` : ''}
           </span>
         </div>
+        <div className="flex items-center gap-3">
+        <ColumnPicker columns={EXTRA_COLUMNS} isOn={columnPrefs.isOn} onToggle={columnPrefs.toggle} onReset={columnPrefs.reset} />
         <input
           type="text"
           value={search}
@@ -104,6 +119,7 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
           placeholder="Search contractor, profile, vendor…"
           className="px-3 py-1.5 text-xs border border-gray-300 rounded w-64 focus:outline-none focus:ring-1 focus:ring-emerald-400"
         />
+        </div>
       </div>
 
       {filteredSorted.length === 0 ? (
@@ -130,6 +146,11 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 cursor-pointer whitespace-nowrap" onClick={() => clickSort('bills')}>
                   Bills pushed{sortArrow('bills')}
                 </th>
+                {extras.map(c => (
+                  <th key={c.key} className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer whitespace-nowrap" onClick={() => clickSort(c.key)}>
+                    {c.label}{sortArrow(c.key)}
+                  </th>
+                ))}
                 <th className="px-2 py-2 text-right font-semibold text-gray-600 w-40">Actions</th>
               </tr>
             </thead>
@@ -175,6 +196,15 @@ export default function VendorMappingSubTab({ rows, vendors, events, invoices, o
                         <span className="font-mono text-gray-400">{row.billsPushedCount}</span>
                       )}
                     </td>
+                    {extras.map(c => (
+                      <td key={c.key} className="px-2 py-1.5 whitespace-nowrap">
+                        {c.key === 'source'
+                          ? <span className="inline-block px-1 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{sourceLabel(row.source)}</span>
+                          : row.lastPostedDate
+                            ? <span className="font-mono text-gray-600">{row.lastPostedDate}</span>
+                            : <span className="text-gray-300">—</span>}
+                      </td>
+                    ))}
                     <td className="px-2 py-1.5 text-right whitespace-nowrap">
                       {isEditing ? (
                         <>
