@@ -85,7 +85,7 @@ export interface QbAutomationV2Props {
   qbBillQueryPending: number;                     // count of pending/in_flight bill_query jobs
   qbVendorQueryPending: number;                   // count of pending/in_flight vendor_query jobs
   pendingJobs: PendingJobRow[];                   // all pending/in_flight qb_sync_jobs — feeds inspector
-  onSyncMirror: () => Promise<void>;              // enqueue bill_query for mapped vendors
+  onSyncMirror: () => Promise<void>;              // enqueue ONE delta bill_query (bills modified recently)
 }
 
 type SubTab = 'inbox' | 'mapping';
@@ -300,6 +300,15 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             pushedTotal={pushedTotal}
           />
 
+          {/* Live push status sits right under the tiles so it's visible
+              without scrolling past a long Ready list (pilot 2026-09-25). */}
+          <QbPushStatusPane
+            supabase={props.supabase}
+            records={props.pushRecords}
+            onDismiss={props.onDismissPushRecord}
+            onCancel={targets => cancelPushJobs({ supabase: props.supabase, records: targets })}
+          />
+
           {showNeedsMapping && (
             <NeedsMappingCard
               rows={needsMappingRows}
@@ -346,12 +355,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
             />
           )}
 
-          <QbPushStatusPane
-            supabase={props.supabase}
-            records={props.pushRecords}
-            onDismiss={props.onDismissPushRecord}
-            onCancel={targets => cancelPushJobs({ supabase: props.supabase, records: targets })}
-          />
+
         </>
       )}
 

@@ -88,6 +88,58 @@ export async function enqueueVendorQuery(supabase: SB, auditTag?: string): Promi
   return { jobIds: [data.id as number], skippedInFlight: [] };
 }
 
+/** "YYYY-MM-DDTHH:MM:SS" in America/Los_Angeles, no zone suffix. QB reads
+ *  FromModifiedDate in the QB machine's local time (qb-delta-reads-facts). */
+export function qbLocalTimestamp(d: Date): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles', hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(d).map(p => [p.type, p.value]),
+  );
+  const hour = parts.hour === '24' ? '00' : parts.hour;
+  return `${parts.year}-${parts.month}-${parts.day}T${hour}:${parts.minute}:${parts.second}`;
+}
+
+/**
+ * Enqueue ONE delta bill_query ("bills modified in the last N minutes"),
+ * same shape as pg_cron qb-delta-bills. Replaces the per-vendor fan-out for
+ * Sync Now / post-push refresh: 2026-09-25 pilot push queued 65 bill_query
+ * jobs, one per vendor. Dedup: skipped while another delta is pending or
+ * in flight.
+ */
+export async function enqueueBillDeltaQuery(
+  supabase: SB,
+  opts: { lookbackMinutes?: number; auditTag?: string; now?: Date } = {},
+): Promise<EnqueueResult> {
+  const { data: inflight } = await supabase
+    .from('qb_sync_jobs')
+    .select('id, payload')
+    .eq('kind', 'bill_query')
+    .in('status', INFLIGHT_STATUSES);
+  const deltaInFlight = (inflight ?? []).some(
+    (j: { payload: Record<string, unknown> | null }) => !!j.payload?.fromModifiedDate && !j.payload?.entityVendorName,
+  );
+  if (deltaInFlight) return { jobIds: [], skippedInFlight: ['bill_query delta'] };
+
+  const lookback = opts.lookbackMinutes ?? 180;
+  const from = new Date((opts.now ?? new Date()).getTime() - lookback * 60_000);
+  const payload: Record<string, unknown> = {
+    fromModifiedDate: qbLocalTimestamp(from),
+    maxReturned: 200,
+    includeLineItems: true,
+    __source: 'v2_sync_delta',
+  };
+  if (opts.auditTag) payload.__audit_tag = opts.auditTag;
+  const { data, error } = await supabase
+    .from('qb_sync_jobs')
+    .insert({ kind: 'bill_query', payload, status: 'pending' })
+    .select('id')
+    .single();
+  if (error) throw error;
+  return { jobIds: [data.id as number], skippedInFlight: [] };
+}
+
 /**
  * Enqueue an account_query job. Dedup: at most one pending/in-flight at a time.
  */

@@ -72,7 +72,7 @@ import {
   type ClassifiableInvoice,
   type ClassifiableMapping,
 } from './lib/classifyQbIngestEvent';
-import { enqueueBillQueryForVendors, enqueueVendorQuery } from './lib/qbStateSync/enqueue';
+import { enqueueBillDeltaQuery, enqueueBillQueryForVendors, enqueueVendorQuery } from './lib/qbStateSync/enqueue';
 import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
 import { findSameNumberInvoices, suggestUniqueInvoiceNumber } from './lib/invoices/invoiceNumber';
 import { resolvePaymentMethod } from './lib/invoices/paymentMethod';
@@ -5413,7 +5413,15 @@ const TimesheetSystem = () => {
               qbBillQueryPending={qbBillQueryPending}
               qbVendorQueryPending={qbVendorQueryPending}
               pendingJobs={qbPendingJobDetails.map(j => ({ id: j.id, kind: j.kind, createdAt: j.created_at, payload: j.payload }))}
-              onSyncMirror={() => runSyncQbBills({ silent: true })}
+              onSyncMirror={async () => {
+                // One delta query (bills modified in the last 3h), not one per vendor.
+                try {
+                  await enqueueBillDeltaQuery(supabase, { auditTag: 'v2-sync' });
+                  await loadQbBillQueryPending();
+                } catch (e) {
+                  console.warn('v2 bill delta sync enqueue failed', e);
+                }
+              }}
               onDismissPushRecord={(eventId) => setQbPushRecords(prev => prev.filter(r => r.eventId !== eventId))}
               onSyncVendors={() => runSyncQbVendors({ silent: true })}
               onPostPushSync={async () => {

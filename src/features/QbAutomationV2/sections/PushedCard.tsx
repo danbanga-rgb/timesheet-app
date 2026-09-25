@@ -217,7 +217,7 @@ export default function PushedCard({ byMonth, total, count }: Props) {
           </span>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-500">Failed pushes show in the status panel below.</span>
+          <span className="text-xs text-gray-500">Failed pushes show in the status panel above.</span>
           {byMonth.length > 0 && (
             <ColumnPicker columns={EXTRA_COLUMNS} isOn={columnPrefs.isOn} onToggle={columnPrefs.toggle} onReset={columnPrefs.reset} />
           )}
