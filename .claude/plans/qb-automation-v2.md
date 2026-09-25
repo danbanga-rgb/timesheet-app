@@ -370,6 +370,7 @@ Concrete gates to flip the admin gate and delete v1:
 7. **Dan runs 3 sanity queries** against `qb_ingest_events` post-push (all pushes trace to expected pp/vendor).
 8. **Sync pills tell the truth** (Dan, 2026-09-25): age = last finished check from `qb_sync_jobs`, colours follow each pg_cron cadence. ✅ `26633e7` — verify on preview across a full day (Mirror stays green/amber, never 17h).
 9. **Payments mirror current** (Dan, 2026-09-25): `qb-delta-bill-payments` (jobid 20, hourly :47) live + Aug 20 → now catch-up job #2045 drained. Verify `max(queried_at)` for `bill_payment` stays < 2h and the bank-drift guardrail (`mirrorDeviationCheck`) sees post-Aug-20 payments.
+10. **Mirror complete for 2026+** (Dan, 2026-09-25): every QB bill + bill payment dated 2026-01-01 onwards is in `qb_mirror`, all vendors (accountant-only rows kept as FYI/backup). No pre-2026 backfill. One-time monthly catch-up jobs 2048–2065 (2026-09-25). Verify: zero vendors with 2026 payments but no bills.
 
 ## §6. Non-goals (things v2 does NOT touch)
 
