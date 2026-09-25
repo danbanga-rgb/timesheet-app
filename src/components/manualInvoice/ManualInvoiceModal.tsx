@@ -12,6 +12,7 @@ import PayeePicker from './PayeePicker';
 import type { PayeeCandidate } from './types';
 import { supabase } from '../../supabaseClient';
 import { buildInvoiceLines, type InvoiceLine } from '../../lib/invoiceLines';
+import { findSameNumberInvoices, suggestUniqueInvoiceNumber } from '../../lib/invoices/invoiceNumber';
 
 // Types imported/duplicated from TimesheetSystem — kept minimal so the module
 // is standalone. Full Invoice/PaymentProfile shapes live in the monolith.
@@ -276,8 +277,19 @@ export default function ManualInvoiceModal({
       && inv.periodStart <= periodEnd);
   }, [invoices, selectedUser, periodStart, periodEnd]);
 
+  // Same contractor + same invoice number is never allowed (QB keys bills on
+  // vendor + RefNumber). Hard block with a one-click "-1" suggestion.
+  const sameNumberInvoices = useMemo(() => {
+    if (!selectedUser) return [];
+    return findSameNumberInvoices({ id: -1, userId: selectedUser.id, invoiceNumber }, invoices);
+  }, [invoices, selectedUser, invoiceNumber]);
+  const uniqueNumberSuggestion = sameNumberInvoices.length > 0
+    ? suggestUniqueInvoiceNumber(invoiceNumber, invoices.filter(i => i.userId === selectedUser?.id && i.status !== 'rejected').map(i => i.invoiceNumber))
+    : '';
+
   const canSave =
     !!selectedUser
+    && sameNumberInvoices.length === 0
     && !!selectedProfile
     && (paymentMethodOverride === 'Intuit' || paymentMethodOverride === 'Convera')
     && invoiceNumber.trim().length > 0
@@ -665,6 +677,19 @@ export default function ManualInvoiceModal({
               </div>
 
               {/* Warnings */}
+              {sameNumberInvoices.length > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-900">
+                  <div className="font-semibold">Invoice number "{invoiceNumber}" is already used by {selectedUser?.name} (#{sameNumberInvoices[0].id}).</div>
+                  <div className="text-xs mt-0.5">QuickBooks needs a unique number per vendor.</div>
+                  <button
+                    type="button"
+                    onClick={() => { setInvoiceNumber(uniqueNumberSuggestion); setInvoiceNumberEdited(true); }}
+                    className="mt-1.5 text-xs font-medium px-2 py-1 border border-red-300 rounded hover:bg-red-100"
+                  >
+                    Use "{uniqueNumberSuggestion}"
+                  </button>
+                </div>
+              )}
               {dupInvoices.length > 0 && (
                 <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm">
                   <div className="font-semibold text-amber-900 mb-1">⚠ {selectedUser.name} already has {dupInvoices.length} invoice{dupInvoices.length === 1 ? '' : 's'} in this period:</div>

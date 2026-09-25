@@ -108,7 +108,7 @@ describe('pushIntuitPayBill', () => {
     expect(payload.payeeVendorName).toBe('Hovercloud Technologies');
     expect(payload.bankAccountName).toBe('BANK/CASH:8220 - Key Point Checking');
     expect(payload.sourceIngestEventId).toBe(42);
-    expect(payload.refNumber).toBeUndefined();               // Intuit historic convention — blank RefNumber
+    expect(payload.refNumber).toBe('EFT');                   // not blank: blank consumes the 8220 check sequence (67256ff)
     expect(payload.memo).toBe('ingest:42');                  // traceability into QB
     expect(payload.__audit_tag).toBe('test-tag');
     expect(payload.applications).toEqual([{ billTxnId: 'HOVER-BILL-TXN', paymentAmount: 5000 }]);

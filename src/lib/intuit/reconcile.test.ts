@@ -437,3 +437,27 @@ describe('vendor scoping', () => {
     expect(r.action).toBe('held');
   });
 });
+
+describe('bill ownership guard (reused invoice numbers, 2026-09-25)', () => {
+  // Nikolina: June invoice 187 owns bill JUNE (INV 1-1-11, paid). Her July
+  // wire (matched to invoice 205) has memo "INV 1-1-11" too.
+  const juneBill = bill({ txnId: 'JUNE', refNumber: 'INV 1-1-11', amount: 5280, isPaid: true, txnDate: '2026-06-30' });
+  const julyWire = event({ memo: 'INV 1-1-11', amount: 5520, txnDate: '2026-09-15', matchedInvoiceIds: [205], targetQbTxnKind: 'bill_pmt' });
+
+  it('does not settle a wire against a bill owned by a different invoice', () => {
+    const ctx = { ...ctxWith([juneBill]), billOwnerInvoiceId: new Map([['JUNE', 187]]) };
+    const r = reconcileEvent(julyWire, ctx, new Set());
+    expect(r.action).toBe('create_bill_then_pay');
+  });
+
+  it('still matches when the bill belongs to the wire\'s own invoice', () => {
+    const ctx = { ...ctxWith([juneBill]), billOwnerInvoiceId: new Map([['JUNE', 205]]) };
+    const r = reconcileEvent(julyWire, ctx, new Set());
+    expect(r.action).toBe('already_done');
+  });
+
+  it('without the ownership map, behaviour is unchanged', () => {
+    const r = reconcileEvent(julyWire, ctxWith([juneBill]), new Set());
+    expect(r.action).toBe('already_done');
+  });
+});
