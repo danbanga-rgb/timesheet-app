@@ -8,6 +8,8 @@ import { getEffectiveMatchedInvoiceIds, isUmbrellaEvent } from '../../../lib/qbA
 import { derivePushedRowDisplay, deriveSyntheticPushedRowDisplay } from '../../../lib/qbAutomation/pushedRowDerivation';
 import { isTestAccount } from '../../../lib/isTestAccount';
 import type { MatchProvenance } from '../../../lib/matchProvenance';
+import { converaWirePreflight, invoiceCreateBillPreflight, type PreflightContext } from '../../../lib/qbAutomation/pushPreflight';
+import { resolvePaymentMethod } from '../../../lib/invoices/paymentMethod';
 
 // Lifted from TS.tsx:7246, tightened for v2 Pushed card (Inv → Bill vs V1's Invoice → Bill).
 const SOURCE_LABEL_MAP: Record<string, string> = {
@@ -16,6 +18,7 @@ const SOURCE_LABEL_MAP: Record<string, string> = {
   manual: 'Manual',
   invoice_g75: 'Inv → Bill (Intuit)',
   invoice_g76: 'Inv → Bill (Convera)',
+  invoice: 'Inv → Bill (no method)',
 };
 export function sourceLabel(s: string): string {
   return SOURCE_LABEL_MAP[s] || s;
@@ -107,6 +110,10 @@ export interface ReadyRow {
   bankMemo: string | null;               // event.memo
   matchProvenance: MatchProvenance | null;
   qbBillRef: string | null;              // Will Pay rows: RefNumber of the existing QB bill
+  // Push preflight (src/lib/qbAutomation/pushPreflight.ts): set when the push
+  // consumers would refuse this row. Row stays in Ready (counts match V1) but
+  // shows "Won't push" and can't be selected.
+  wontPush: string | null;
 }
 
 export type NeedsMappingReason =
@@ -387,6 +394,36 @@ export function useQbAutomationV2({
   const billByTxnId = useMemo(() => new Map(openBills.map(b => [b.txnId, b])), [openBills]);
   const ppById = useMemo(() => new Map(paymentProfiles.map(p => [p.id, p])), [paymentProfiles]);
   const userById = useMemo(() => new Map(users.map(u => [u.id, u])), [users]);
+  const preflightCtx = useMemo<PreflightContext>(
+    () => ({ allInvoices: invoices, billsByTxnId: billByTxnId, bills: openBills }),
+    [invoices, billByTxnId, openBills],
+  );
+  // convera_transaction_invoices links per event (umbrella wires), keyed
+  // `${eventId}::${invoiceId}` in umbrellaShares.
+  const linkedInvoicesByEvent = useMemo(() => {
+    const m = new Map<number, { ids: number[]; shares: Map<number, number> }>();
+    for (const [key, share] of umbrellaShares ?? []) {
+      const [eventId, invoiceId] = key.split('::').map(Number);
+      if (!Number.isFinite(eventId) || !Number.isFinite(invoiceId)) continue;
+      const entry = m.get(eventId) ?? { ids: [], shares: new Map<number, number>() };
+      entry.ids.push(invoiceId);
+      entry.shares.set(invoiceId, share);
+      m.set(eventId, entry);
+    }
+    return m;
+  }, [umbrellaShares]);
+  const wirePreflight = (e: QbIngestEvent): string | null => {
+    if (e.source !== 'convera' || e.targetQbTxnKind !== 'bill_pmt' || e.matchedInvoiceIds.length === 0) return null;
+    const linked = linkedInvoicesByEvent.get(e.id);
+    return converaWirePreflight(
+      { amount: e.amount, matchedInvoiceIds: e.matchedInvoiceIds },
+      linked?.ids ?? [], linked?.shares ?? new Map(), preflightCtx,
+    );
+  };
+  const invoiceSourceKey = (inv: Invoice): { method: string; rowSource: string } => {
+    const method = resolvePaymentMethod(inv, invoices, users);
+    return { method, rowSource: method === 'Intuit' ? 'invoice_g75' : method === 'Convera' ? 'invoice_g76' : 'invoice' };
+  };
   const mappingByPpId = useMemo(() => {
     const m = new Map<number, QbVendorMapping>();
     for (const row of mappings) if (row.ppId != null) m.set(row.ppId, row);
@@ -566,6 +603,7 @@ export function useQbAutomationV2({
           bankMemo: e.memo,
           matchProvenance: e.matchProvenance,
           qbBillRef: verdict === 'will_pay' ? findOpenBillRef(e.counterpartyQbVendorListId, firstChildRef, monthKey) : null,
+          wontPush: wirePreflight(e),
         });
         continue;
       }
@@ -634,6 +672,7 @@ export function useQbAutomationV2({
         bankMemo: e.memo,
         matchProvenance: e.matchProvenance,
         qbBillRef: verdict === 'will_pay' ? findOpenBillRef(e.counterpartyQbVendorListId, refNumber, monthKey) : null,
+        wontPush: wirePreflight(e),
       });
     }
 
@@ -713,11 +752,12 @@ export function useQbAutomationV2({
           ppSource: mapping.source || 'invoice',
           ppCounterpartyPattern: mapping.counterpartyPattern || ppLabel,
           candidates,
-          rowSource: 'invoice',
+          rowSource: invoiceSourceKey(inv).rowSource,
           wireDate: null,
           bankMemo: null,
           matchProvenance: null,
           qbBillRef: null,
+          wontPush: invoiceCreateBillPreflight([inv], invoiceSourceKey(inv).method, qbVendorListId, preflightCtx),
         });
       } else {
         // Pre-wire umbrella group row.
@@ -764,11 +804,12 @@ export function useQbAutomationV2({
           candidates: [],
           children: childRows,
           distinctVendorCount: 1,
-          rowSource: 'invoice',
+          rowSource: invoiceSourceKey(first.inv).rowSource,
           wireDate: null,
           bankMemo: null,
           matchProvenance: null,
           qbBillRef: null,
+          wontPush: invoiceCreateBillPreflight(bucket.map(c => c.inv), invoiceSourceKey(first.inv).method, first.qbVendorListId, preflightCtx),
         });
       }
     }
@@ -776,7 +817,8 @@ export function useQbAutomationV2({
     rows.sort((a, b) => a.contractorName.localeCompare(b.contractorName));
     for (const r of rows) attachFailure(r);
     return rows;
-  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares, failedByEventId, failedByInvoiceId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- wirePreflight/invoiceSourceKey close over preflightCtx, linkedInvoicesByEvent, users (listed)
+  }, [events, invoices, invoicesById, vendorsById, openBills, mappingByPpId, resolverVendors, historyByUser, umbrellaShares, failedByEventId, failedByInvoiceId, preflightCtx, linkedInvoicesByEvent, users]);
 
   // Vendor lookup by lowercase name — used by needsMappingRows to detect
   // "pp has qb_vendor_name but doesn't resolve to a qb_vendors row" (needs
@@ -966,10 +1008,14 @@ export function useQbAutomationV2({
   const readyRows = useMemo(() => allReadyRows.filter(r => !isRowSkipped(r)), [allReadyRows, isRowSkipped]);
   const skippedRows = useMemo(() => allReadyRows.filter(r => isRowSkipped(r)), [allReadyRows, isRowSkipped]);
 
-  const payCount = useMemo(() => readyRows.filter(r => r.group === 'pay').length, [readyRows]);
-  const createCount = useMemo(() => readyRows.filter(r => r.group === 'create').length, [readyRows]);
-  const payTotal = useMemo(() => readyRows.filter(r => r.group === 'pay').reduce((s, r) => s + r.amount, 0), [readyRows]);
-  const createTotal = useMemo(() => readyRows.filter(r => r.group === 'create').reduce((s, r) => s + r.amount, 0), [readyRows]);
+  // Pushable = not blocked by preflight. Ready KPI total still counts every
+  // row (V1 parity); the to-pay / new-bills chips count only pushable rows.
+  const pushableRows = useMemo(() => readyRows.filter(r => !r.wontPush), [readyRows]);
+  const wontPushCount = readyRows.length - pushableRows.length;
+  const payCount = useMemo(() => pushableRows.filter(r => r.group === 'pay').length, [pushableRows]);
+  const createCount = useMemo(() => pushableRows.filter(r => r.group === 'create').length, [pushableRows]);
+  const payTotal = useMemo(() => pushableRows.filter(r => r.group === 'pay').reduce((s, r) => s + r.amount, 0), [pushableRows]);
+  const createTotal = useMemo(() => pushableRows.filter(r => r.group === 'create').reduce((s, r) => s + r.amount, 0), [pushableRows]);
 
   // Auto-select all Pay rows on first Ready population. Once initialized,
   // stay out of the user's way — new Pay rows arriving are auto-added; new
@@ -977,7 +1023,7 @@ export function useQbAutomationV2({
   const initializedRef = useRef(false);
   const prevPayKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const currentPayKeys = new Set(readyRows.filter(r => r.group === 'pay').map(r => r.rowKey));
+    const currentPayKeys = new Set(pushableRows.filter(r => r.group === 'pay').map(r => r.rowKey));
     if (!initializedRef.current && currentPayKeys.size > 0) {
       setSelectedKeys(new Set(currentPayKeys));
       initializedRef.current = true;
@@ -996,25 +1042,26 @@ export function useQbAutomationV2({
       }
       prevPayKeysRef.current = currentPayKeys;
     }
-  }, [readyRows]);
+  }, [pushableRows]);
 
   const visibleSelectedKeys = useMemo(() => {
-    const visible = new Set(readyRows.map(r => r.rowKey));
+    const visible = new Set(pushableRows.map(r => r.rowKey));
     return new Set(Array.from(selectedKeys).filter(k => visible.has(k)));
-  }, [readyRows, selectedKeys]);
+  }, [pushableRows, selectedKeys]);
 
   const toggle = useCallback((rowKey: string) => {
+    if (readyRows.find(r => r.rowKey === rowKey)?.wontPush) return;
     setSelectedKeys(prev => {
       const next = new Set(prev);
       if (next.has(rowKey)) next.delete(rowKey);
       else next.add(rowKey);
       return next;
     });
-  }, []);
+  }, [readyRows]);
 
   const selectAll = useCallback(() => {
-    setSelectedKeys(new Set(readyRows.map(r => r.rowKey)));
-  }, [readyRows]);
+    setSelectedKeys(new Set(pushableRows.map(r => r.rowKey)));
+  }, [pushableRows]);
 
   const clearSelection = useCallback(() => {
     setSelectedKeys(new Set());
@@ -1023,8 +1070,8 @@ export function useQbAutomationV2({
   const selectGroup = useCallback((group: ReadyGroup) => {
     // Replace-semantics: selecting a group discards other selections.
     // Matches Dan's mental model — "Select Payments" = "show me only Payments in selection".
-    setSelectedKeys(new Set(readyRows.filter(r => r.group === group).map(r => r.rowKey)));
-  }, [readyRows]);
+    setSelectedKeys(new Set(pushableRows.filter(r => r.group === group).map(r => r.rowKey)));
+  }, [pushableRows]);
 
   const skip = useCallback(async (rowKey: string) => {
     const row = allReadyRows.find(r => r.rowKey === rowKey);
@@ -1097,6 +1144,7 @@ export function useQbAutomationV2({
 
   return {
     readyRows,
+    wontPushCount,
     skippedRows,
     needsMappingRows,
     needsMappingTotal,

@@ -226,6 +226,30 @@ export async function pushIntuitInvoiceCreateBill(
 
   if (perIntentVendor.length === 0) return emptyReturn();
 
+  // ─── Idempotency: qb_mirror bill lookup by (vendor, refNumber) ─────────
+  // Parity with converaInvoiceCreateBill Layer 3. qb_bill_txn_id only proves
+  // WE booked the bill; the accountant may have created it by hand in QB.
+  {
+    const refByInvoice = new Map(eligible.map(i => [i.id, i.invoice_number!.trim()]));
+    const { data: mirrorRows } = await supabase
+      .from('qb_mirror')
+      .select('vendor_list_id, ref_number')
+      .eq('entity_kind', 'bill')
+      .in('vendor_list_id', [...new Set(perIntentVendor.map(p => p.vendorListId))])
+      .in('ref_number', [...new Set(perIntentVendor.map(p => refByInvoice.get(p.invoiceId)!))]);
+    const existing = new Set(((mirrorRows ?? []) as Array<{ vendor_list_id: string; ref_number: string }>)
+      .map(r => `${r.vendor_list_id}::${r.ref_number}`));
+    for (let i = perIntentVendor.length - 1; i >= 0; i--) {
+      const p = perIntentVendor[i];
+      const ref = refByInvoice.get(p.invoiceId)!;
+      if (existing.has(`${p.vendorListId}::${ref}`)) {
+        skippedIneligible.push({ invoiceId: p.invoiceId, reason: `qb_mirror already has a bill for this vendor with RefNumber "${ref}" — not pushing a duplicate. If this is a new month with a reused invoice number, rename the invoice (e.g. "${ref}-1").` });
+        perIntentVendor.splice(i, 1);
+      }
+    }
+  }
+  if (perIntentVendor.length === 0) return emptyReturn();
+
   // Resolve expense account list_id → full_name (executor sends by FullName)
   const { data: expenseData } = await supabase
     .from('qb_accounts')

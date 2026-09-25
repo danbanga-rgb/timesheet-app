@@ -74,6 +74,8 @@ import {
 } from './lib/classifyQbIngestEvent';
 import { enqueueBillQueryForVendors, enqueueVendorQuery } from './lib/qbStateSync/enqueue';
 import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
+import { findSameNumberInvoices, suggestUniqueInvoiceNumber } from './lib/invoices/invoiceNumber';
+import { resolvePaymentMethod } from './lib/invoices/paymentMethod';
 import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
 import type { QbOpenBillRow } from './lib/qbStateSync/types';
 import {
@@ -468,35 +470,9 @@ const TimesheetSystem = () => {
     }
   };
 
-  const paymentMethod = (inv: Invoice) => {
-    // Older data has lowercase 'intuit'/'convera'; canonicalise so downstream === matches.
-    const canonicalise = (raw: string | null | undefined): string => {
-      if (!raw) return '';
-      const lc = raw.toLowerCase();
-      if (lc === 'intuit') return 'Intuit';
-      if (lc === 'convera') return 'Convera';
-      return raw;
-    };
-    const own = canonicalise(inv.paymentMethodOverride);
-    if (own) return own;
-    // Fall back to the accountant's most recent explicit choice for this contractor.
-    // Country/location_type can't capture anomalies (offshore contractor billed at onshore
-    // rate, umbrella switches, etc.); prior accountant choices can.
-    const prior = invoices
-      .filter(i => i.userId === inv.userId && i.id !== inv.id && i.paymentMethodOverride)
-      .sort((a, b) => b.id - a.id)[0];
-    if (prior) return canonicalise(prior.paymentMethodOverride);
-    // Location-type invariant (last resort): offshore → Convera, onshore → Intuit.
-    // MUST key on location_type, not country: profiles.country is auto-prefilled
-    // from the admin's browser timezone at user-create time, so US-based admins
-    // create every profile with country='US' regardless of the contractor's real
-    // location. location_type is admin-curated and correct. See [[offshore-100-convera]]
-    // — 18 profiles today have country='US' but location_type='offshore'.
-    const contractor = users.find(u => u.id === inv.userId);
-    if (contractor?.locationType === 'offshore') return 'Convera';
-    if (contractor?.locationType === 'onshore')  return 'Intuit';
-    return '';
-  };
+  // One rule for the whole app (push router + V2 Source column):
+  // see src/lib/invoices/paymentMethod.ts.
+  const paymentMethod = (inv: Invoice) => resolvePaymentMethod(inv, invoices, users);
   // Colour classes for the payment-method chip. '' → gray (Unassigned).
   const paymentMethodChipClass = (inv: Invoice) => {
     const pm = paymentMethod(inv);
@@ -3242,6 +3218,33 @@ const TimesheetSystem = () => {
     setShowInvoiceModal(true);
   };
 
+  // Same contractor, same invoice number → must be renamed before approval
+  // (QB keys bills on vendor + RefNumber). Offers "<number>-1" (or next free
+  // suffix) and applies it on OK. Returns the number to approve with, or null
+  // when the accountant cancels. See src/lib/invoices/invoiceNumber.ts.
+  const resolveDuplicateInvoiceNumber = async (invoice: Invoice, candidate: string): Promise<string | null> => {
+    const dupes = findSameNumberInvoices({ id: invoice.id, userId: invoice.userId, invoiceNumber: candidate }, invoices);
+    if (dupes.length === 0) return candidate;
+    const taken = invoices
+      .filter(i => i.userId === invoice.userId && i.id !== invoice.id && i.status !== 'rejected')
+      .map(i => i.invoiceNumber);
+    const suggestion = suggestUniqueInvoiceNumber(candidate, taken);
+    const other = dupes[0];
+    const [oy, om] = (other.periodEnd ?? '').split('-');
+    const otherMonth = oy && om ? `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(om) - 1]} ${oy}` : 'another';
+    const ok = confirm(
+      `Duplicate invoice number.\n\n"${candidate}" is already used on this contractor's ${otherMonth} invoice (#${other.id}). ` +
+      `QuickBooks needs a unique number per vendor, so this invoice has to be renamed before approval.\n\n` +
+      `Rename it to "${suggestion}" and continue?`,
+    );
+    if (!ok) return null;
+    const { error } = await supabase.from('invoices').update({ invoice_number: suggestion }).eq('id', invoice.id);
+    if (error) { alert('Failed to rename invoice: ' + error.message); return null; }
+    setInvoices(prev => prev.map(i => i.id === invoice.id ? { ...i, invoiceNumber: suggestion } : i));
+    setSelectedInvoice(prev => prev && prev.id === invoice.id ? { ...prev, invoiceNumber: suggestion } : prev);
+    return suggestion;
+  };
+
   const handleInvoiceAction = async (invoiceId: number, status: 'approved' | 'rejected' | 'paid', payOnDate?: string, paidDate?: string, pmOverride?: string, paymentTerms?: string) => {
     const invoice = invoices.find(i => i.id === invoiceId);
     // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b). Refuse approval when
@@ -3250,7 +3253,12 @@ const TimesheetSystem = () => {
     // reject/paid still work regardless.
     if (status === 'approved') {
       const nextPM = pmOverride !== undefined ? pmOverride : (invoice?.paymentMethodOverride ?? '');
-      const num = invoice?.invoiceNumber ?? '';
+      let num = invoice?.invoiceNumber ?? '';
+      if (invoice && num) {
+        const unique = await resolveDuplicateInvoiceNumber(invoice, num);
+        if (unique === null) return;
+        num = unique;
+      }
       if (nextPM && ['Intuit', 'Convera'].includes(nextPM) && num.length > 20) {
         alert(`Cannot approve: invoice number "${num}" is ${num.length} chars. QuickBooks caps Bill.RefNumber at 20. Edit the invoice number on the Invoices tab first, then approve.`);
         return;
@@ -3334,8 +3342,19 @@ const TimesheetSystem = () => {
   };
 
   // Save approval status and/or pay on date without closing modal
-  const saveInvoiceEdits = async (invoiceId: number, fields: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string; invoiceNumber?: string }) => {
+  const saveInvoiceEdits = async (invoiceId: number, fieldsIn: { status?: 'approved' | 'rejected'; payOnDate?: string; paymentMethod?: string; paymentTerms?: string; invoiceNumber?: string }) => {
     const invoice = invoices.find(i => i.id === invoiceId);
+    let fields = fieldsIn;
+    // Duplicate invoice number for this contractor → rename before an approval
+    // (or before saving a new number on an already-approved invoice).
+    if (invoice && (fields.status === 'approved' || (fields.status === undefined && invoice.status === 'approved' && fields.invoiceNumber !== undefined))) {
+      const candidate = fields.invoiceNumber !== undefined ? fields.invoiceNumber : (invoice.invoiceNumber ?? '');
+      if (candidate) {
+        const unique = await resolveDuplicateInvoiceNumber(invoice, candidate);
+        if (unique === null) return;
+        if (unique !== candidate) fields = { ...fields, invoiceNumber: unique };
+      }
+    }
     // QB Bill.RefNumber cap 20 chars (INVARIANTS #5b, 2026-08-27 Vladimir
     // "INV SYNERGIE 07/01-31/2026" rejection). Refuse approval when the
     // effective invoice_number would exceed QB's limit and the invoice

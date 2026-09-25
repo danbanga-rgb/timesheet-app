@@ -101,6 +101,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
     pushedCount,
     pushedTotal,
     payCount,
+    wontPushCount,
     createCount,
     payTotal,
     createTotal,
@@ -339,6 +340,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
               }}
               payCount={payCount}
               createCount={createCount}
+              wontPushCount={wontPushCount}
               payTotal={payTotal}
               createTotal={createTotal}
             />

@@ -32,16 +32,16 @@ interface Props {
 
   payCount: number;
   createCount: number;
+  wontPushCount: number;
   payTotal: number;
   createTotal: number;
 }
 
-type ExtraKey = 'source' | 'pp' | 'wireDate' | 'memo' | 'match' | 'billRef';
-type SortKey = 'contractor' | 'period' | 'inv' | 'vendor' | 'hrs' | 'rate' | 'total' | 'status' | ExtraKey;
+type ExtraKey = 'pp' | 'wireDate' | 'memo' | 'match' | 'billRef';
+type SortKey = 'source' | 'contractor' | 'period' | 'inv' | 'vendor' | 'hrs' | 'rate' | 'total' | 'status' | ExtraKey;
 
 // V9.10: optional columns, off by default. Order here = render order.
 const EXTRA_COLUMNS: readonly OptionalColumn<ExtraKey>[] = [
-  { key: 'source',   label: 'Source' },
   { key: 'pp',       label: 'Payment profile' },
   { key: 'wireDate', label: 'Wire date' },
   { key: 'memo',     label: 'Bank memo' },
@@ -50,12 +50,11 @@ const EXTRA_COLUMNS: readonly OptionalColumn<ExtraKey>[] = [
 ];
 
 function rowSourceLabel(s: string): string {
-  return s === 'invoice' ? 'Invoice' : sourceLabel(s);
+  return sourceLabel(s);
 }
 
 function extraSortValue(r: ReadyRow, key: ExtraKey): string {
   switch (key) {
-    case 'source':   return rowSourceLabel(r.rowSource);
     case 'pp':       return r.ppLabel;
     case 'wireDate': return r.wireDate ?? '';
     case 'memo':     return r.bankMemo ?? '';
@@ -67,8 +66,6 @@ function extraSortValue(r: ReadyRow, key: ExtraKey): string {
 function extraCell(r: ReadyRow, key: ExtraKey) {
   const dash = <span className="text-gray-300">—</span>;
   switch (key) {
-    case 'source':
-      return <span className="inline-block px-1 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{rowSourceLabel(r.rowSource)}</span>;
     case 'pp':
       return r.ppLabel ? <span className="truncate inline-block max-w-[180px] align-bottom" title={r.ppLabel}>{r.ppLabel}</span> : dash;
     case 'wireDate':
@@ -127,6 +124,7 @@ export default function ReadyCard(props: Props) {
     onRetryRow,
     payCount,
     createCount,
+    wontPushCount,
     payTotal,
     createTotal,
   } = props;
@@ -137,6 +135,7 @@ export default function ReadyCard(props: Props) {
   const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
   const [expandedRowKeys, setExpandedRowKeys] = useState<Set<string>>(new Set());
   const [openFailureKey, setOpenFailureKey] = useState<string | null>(null);
+  const [openBlockKey, setOpenBlockKey] = useState<string | null>(null);
   const [retryingKey, setRetryingKey] = useState<string | null>(null);
   const columnPrefs = useColumnPrefs<ExtraKey>('ready', EXTRA_COLUMNS);
   const extras = EXTRA_COLUMNS.filter(c => columnPrefs.isOn(c.key));
@@ -198,6 +197,7 @@ export default function ReadyCard(props: Props) {
     const rowsCopy = [...rows];
     rowsCopy.sort((a, b) => {
       switch (sortKey) {
+        case 'source':     return rowSourceLabel(a.rowSource).localeCompare(rowSourceLabel(b.rowSource)) * dir;
         case 'contractor': return a.contractorName.localeCompare(b.contractorName) * dir;
         case 'period':     return (a.monthKey || '').localeCompare(b.monthKey || '') * dir;
         case 'inv':        return (a.invoiceNumber || '').localeCompare(b.invoiceNumber || '', undefined, { numeric: true }) * dir;
@@ -205,7 +205,7 @@ export default function ReadyCard(props: Props) {
         case 'hrs':        return ((a.hours ?? -1) - (b.hours ?? -1)) * dir;
         case 'rate':       return ((a.rate ?? -1) - (b.rate ?? -1)) * dir;
         case 'total':      return (a.amount - b.amount) * dir;
-        case 'status':     return (verdictOrder[a.verdict] - verdictOrder[b.verdict]) * dir;
+        case 'status':     return ((a.wontPush ? 9 : verdictOrder[a.verdict]) - (b.wontPush ? 9 : verdictOrder[b.verdict])) * dir;
         default:           return extraSortValue(a, sortKey).localeCompare(extraSortValue(b, sortKey), undefined, { numeric: true }) * dir;
       }
     });
@@ -233,6 +233,11 @@ export default function ReadyCard(props: Props) {
                 {createCount} new {createCount === 1 ? 'bill' : 'bills'}
                 {createTotal > 0 && <span className="ml-1 text-purple-600">· {fmtMoney(createTotal)}</span>}
               </span>
+              {wontPushCount > 0 && (
+                <span className="px-2 py-0.5 rounded bg-red-50 text-red-800 border border-red-200 font-medium">
+                  {wontPushCount} won't push
+                </span>
+              )}
             </div>
           )}
           {isSkippedView && (
@@ -268,6 +273,9 @@ export default function ReadyCard(props: Props) {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-2 py-2 text-center font-semibold text-gray-600 w-10"><span className="sr-only">Select</span></th>
+                <th className="px-2 py-2 text-left font-semibold text-gray-600 whitespace-nowrap cursor-pointer select-none" onClick={() => clickSort('source')}>
+                  Source{sortArrow('source')}
+                </th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-600 cursor-pointer select-none" onClick={() => clickSort('contractor')}>
                   Contractor{sortArrow('contractor')}
                 </th>
@@ -323,12 +331,17 @@ export default function ReadyCard(props: Props) {
                         ) : (
                           <input
                             type="checkbox"
-                            checked={isChecked}
+                            checked={isChecked && !r.wontPush}
+                            disabled={!!r.wontPush}
                             onChange={() => onToggle(r.rowKey)}
-                            className="rounded"
+                            className="rounded disabled:opacity-30"
                             aria-label={`Select ${r.contractorName}`}
+                            title={r.wontPush ? "Won't push — see Status" : undefined}
                           />
                         )}
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap">
+                        <span className="inline-block px-1 py-0.5 rounded text-[10px] bg-gray-100 text-gray-600 font-medium">{rowSourceLabel(r.rowSource)}</span>
                       </td>
                       <td className={'px-2 py-1.5 font-medium whitespace-nowrap ' + (isSkippedView ? '' : 'text-gray-800')}>
                         {isGroup ? (
@@ -399,7 +412,28 @@ export default function ReadyCard(props: Props) {
                       ))}
                       <td className="px-2 py-1.5 whitespace-nowrap">
                         <div className="flex items-center gap-1 relative">
-                          {isSkippedView ? skippedBadge() : verdictBadge(r.verdict)}
+                          {isSkippedView ? skippedBadge() : r.wontPush ? (
+                            <button
+                              type="button"
+                              onClick={() => setOpenBlockKey(prev => prev === r.rowKey ? null : r.rowKey)}
+                              title={r.wontPush}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-800 border border-red-200 hover:bg-red-200"
+                            >
+                              <AlertTriangle className="w-3 h-3" />
+                              Won't push
+                            </button>
+                          ) : verdictBadge(r.verdict)}
+                          {!isSkippedView && r.wontPush && openBlockKey === r.rowKey && (
+                            <div className="absolute z-20 top-full mt-1 left-0 w-80 bg-white border border-red-200 rounded-lg shadow-lg p-3 text-xs text-left whitespace-normal">
+                              <div className="flex items-start justify-between gap-2 mb-1">
+                                <span className="font-semibold text-red-900">Why this won't push</span>
+                                <button onClick={() => setOpenBlockKey(null)} className="text-gray-400 hover:text-gray-700" aria-label="Close">
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </div>
+                              <div className="text-gray-800">{r.wontPush}</div>
+                            </div>
+                          )}
                           {!isSkippedView && r.lastFailedPush && (
                             <>
                               <button
@@ -454,6 +488,7 @@ export default function ReadyCard(props: Props) {
                     </tr>
                     {isGroup && isExpanded && r.children!.map(c => (
                       <tr key={`${r.rowKey}-child-${c.invoiceId}`} className="bg-teal-50/20 text-xs text-gray-700">
+                        <td className="px-2 py-1"></td>
                         <td className="px-2 py-1"></td>
                         <td className="px-2 py-1 pl-8 whitespace-nowrap italic">{c.contractorName}</td>
                         <td className="px-2 py-1"></td>

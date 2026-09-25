@@ -281,19 +281,61 @@ async function persistJobResponse(
         return { ok: false, errorMsg: `BillQuery persist: no payment_profile.qb_vendor_name matches "${r.vendorFullName}" (refNumber=${r.refNumber})` };
       }
       const multi = /^MULTI-(\d{4})-(\d{2})$/.exec(r.refNumber);
-      let update = supabase
-        .from('invoices')
-        .update({ qb_bill_txn_id: r.txnId })
-        .in('user_id', userIds);
+      // Never overwrite an invoice that already points at a DIFFERENT bill,
+      // and never write one TxnID onto two single-invoice rows. 2026-09-25:
+      // contractors who reused an invoice number (Izet INV 20260801 Jul+Aug,
+      // Nikolina INV 1-1-11 Jun+Jul, Mensur, Stefan) got last month's TxnID
+      // copied onto the new month's invoice, so the new month's bill was never
+      // created and one wire was closed against an already-paid bill.
+      let targetIds: number[];
       if (multi) {
         const [, y, m] = multi;
         const first = `${y}-${m}-01`;
         const last  = new Date(Number(y), Number(m), 0).toISOString().slice(0, 10);
-        update = update.gte('period_end', first).lte('period_end', last);
+        const { data: cands, error: candErr } = await supabase
+          .from('invoices')
+          .select('id, qb_bill_txn_id')
+          .in('user_id', userIds)
+          .gte('period_end', first).lte('period_end', last);
+        if (candErr) {
+          return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${candErr.message}` };
+        }
+        targetIds = ((cands ?? []) as Array<{ id: number; qb_bill_txn_id: string | null }>)
+          .filter(c => !c.qb_bill_txn_id || c.qb_bill_txn_id === r.txnId)
+          .map(c => c.id);
       } else {
-        update = update.eq('invoice_number', r.refNumber);
+        const { data: cands, error: candErr } = await supabase
+          .from('invoices')
+          .select('id, qb_bill_txn_id, period_end')
+          .in('user_id', userIds)
+          .eq('invoice_number', r.refNumber);
+        if (candErr) {
+          return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${candErr.message}` };
+        }
+        const rows = (cands ?? []) as Array<{ id: number; qb_bill_txn_id: string | null; period_end: string | null }>;
+        const alreadyLinked = rows.filter(c => c.qb_bill_txn_id === r.txnId);
+        if (alreadyLinked.length > 0) {
+          targetIds = [alreadyLinked[0].id];   // idempotent re-read of a bill we already linked
+        } else {
+          const free = rows.filter(c => !c.qb_bill_txn_id);
+          // Same number on several free invoices → the bill's month decides.
+          const billMonth = (r.txnDate ?? '').slice(0, 7);
+          const sameMonth = free.filter(c => (c.period_end ?? '').slice(0, 7) === billMonth);
+          const pick = free.length === 1 ? free : sameMonth.length === 1 ? sameMonth : [];
+          if (pick.length === 0 && free.length > 1) {
+            if (tolerateInvoicePersistMiss) { skippedUnknownInvoice++; continue; }
+            return { ok: false, errorMsg: `BillQuery persist: ${free.length} invoices share refNumber="${r.refNumber}" for vendor="${r.vendorFullName}" and none matches the bill month ${billMonth}. Rename the reused invoice number (e.g. add "-1") and retry.` };
+          }
+          targetIds = pick.map(c => c.id);
+        }
       }
-      const { data: updated, error: updErr } = await update.select('id');
+      const { data: updated, error: updErr } = targetIds.length === 0
+        ? { data: [] as Array<{ id: number }>, error: null }
+        : await supabase
+            .from('invoices')
+            .update({ qb_bill_txn_id: r.txnId })
+            .in('id', targetIds)
+            .select('id');
       if (updErr) {
         return { ok: false, errorMsg: `BillQuery persist DB error for vendor="${r.vendorFullName}" refNumber="${r.refNumber}": ${updErr.message}` };
       }
