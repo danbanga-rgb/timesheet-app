@@ -423,6 +423,143 @@ Shipped this stretch (feature branch unless noted):
 3. **Source pill colours** (no amber/yellow): Convera solid purple, Intuit solid green (matches the payment-method chip), Inv→Bill (Convera) light purple outlined, Inv→Bill (Intuit) light green outlined, no-method grey.
 4. Hotfix to main: the "matched invoice's own bill" reconciler rule (`26459ce`) is preview-only; prod V1 keeps showing 474 as open (harmless).
 
+**Cold-start resume prompt (paste as first message):**
+```
+Resume QB Automation v2 arc — S21d closed on a non-breaking break (Dan moved to chat). First live V2 pilot succeeded; next is picking V12.1 work.
+
+═══ COLD-START ORIENTATION (do this first, in order) ═══
+
+1. Read .claude/plans/qb-automation-v2.md:
+   - §8 latest entries: S21d (pilot + V12.1 candidates), S21b (mirror
+     freshness + payments delta), S21 (V9.10 + V11). S21d is the source of
+     truth for what's next.
+   - §5.13 V12 cutover checklist (gates 1-10). Status: 5, 6 (reworded:
+     map on need), 8, 9, 10 ✅. 1, 2, 3, 4, 7 need real pushes. Gate 1's
+     umbrella path is BLOCKED by V12.1 item 1.
+   - §9 V12 "Deferred copy" = 14 strings shared with V1 (status pane, Match
+     badges, tab title) that are applied at cutover, not before.
+
+2. Read MEMORY.md entries in order:
+   - [QB Automation v2 pivot] — arc state; S21c/S21d sections and pilot notes.
+   - [Reused invoice numbers] — 4 contractors reused last month's Inv #.
+     Rule: block at approval, rename the later one "-1". Repair applied.
+     Nikolina's July $5,520 was missing from QB and is now fixed by the pilot.
+   - [QB Mirror scope: 2026+, map on need] — the mirror is a passive copy
+     of QB (all bills + payments from 2026-01-01). Map/resolve only when a
+     push needs it. No bulk cleanup, no pre-2026 backfill.
+   - [Match V1 during coexistence] — Ready/Pushed COUNTS must match V1 1:1.
+   - [Pushed row = event, not invoice] — Pushed fields come from the event.
+   - [posted_source semantics] — 'push' vs 'manual_accept_fuzzy' vs 'qb_probe'.
+   - [Three-bucket lifecycle] — Needs Mapping → Ready → Pushed. No new buckets.
+   - [UI copy voice] — keep team terms (Mirror, jobs, mapping); chips short;
+     errors "Failed to …"; hovers say the real effect.
+   - [Bulk review as XLSX] — many-row decisions go to ~/Downloads XLSX.
+   - [CI tests workflow] — check `gh run list --workflow tests.yml` after
+     every push and at session start (you are not notified).
+   - [Announce background shells] — say what/read-only/when it stops.
+   - [Break time trigger] — the cold-start prompt must be FULL, like this one.
+
+3. Confirm `git branch --show-current` = feature/qb-automation-v2 and
+   `git log --oneline -3` shows d9c6b1e (plan S21d) at top, then 26459ce
+   (items + own-bill reconciler), aa97804 (pane verified = bill paid).
+
+═══ STATE ═══
+
+- Branch feature/qb-automation-v2, tip d9c6b1e, on Vercel preview. Not
+  merged. main = ba1cae0 (hotfix PR #15: duplicate invoice-number block at
+  approval + Manual Invoice, reconciler bill-ownership guard, Intuit
+  create-bill mirror idempotency, stale-test fixes). Live on
+  time.mysynergie.net.
+- qb-web-connector edge function is deployed FROM THE FEATURE BRANCH
+  (global). Includes: structured bill_pmt_query builder; bills without
+  RefNumber kept; per-contractor, month-aware, non-overwriting bill-ID
+  linking (Teal group bills link all members).
+- pg_cron: qb-delta-bills hourly :17, qb-delta-vendors every 6h :37,
+  qb-delta-bill-payments hourly :47 (jobid 20, new this session).
+- Mirror complete for 2026: ~600 bills (173 without RefNumber) + 657
+  payments. The unresolved payment→bill links are payments of pre-2026 bills.
+  Expected; don't chase.
+- LIVE PILOT (V2 → prod QB) 2026-09-25:
+  · Batch 1 ✅ Convera C-1 wires 456 Deniz $2,880 / 464 QAce $3,680 / 478
+    Vladimir $3,520. Jobs 2077-2079 (+verify 2080-2082) drained 20:24. All 3
+    bills settled; events posted, posted_source='push'.
+  · Batch 2 ✅ Nikolina event 474 create+pay (2150 bill_add INV 1-1-11-1 →
+    2154 pay → 2155 verify): July bill 41C9D created + paid. YARA #312 Intuit
+    invoice→bill (2151 → 2153): bill 41CA0 created, unpaid by design.
+- V2 features added this session: Columns picker (all table views except
+  Needs Mapping); V11 copy (from Dan's XLSX); Source column; Ready "Won't
+  push" preflight (src/lib/qbAutomation/pushPreflight.ts, which must mirror
+  consumer refusals); honest sync pills (last finished job, cadence colours);
+  chip "N pushing · ~Xm" (connector next check = last seen + 15m); pane
+  under the tiles, rebuilt from DB per ITEM (create → pay → confirm,
+  invoice→bill) after push + reload; pane "verified" = bill paid in mirror;
+  popup counts items; Sync Now / post-push = ONE delta bill_query.
+- Shared helpers: src/lib/invoices/{invoiceNumber,paymentMethod}.ts,
+  src/lib/qbAutomation/{pushPreflight,pushRecordRestore}.ts,
+  enqueueBillDeltaQuery + qbLocalTimestamp in src/lib/qbStateSync/enqueue.ts.
+- Tests: 709 passing in src/. CI green on d9c6b1e's parent.
+
+═══ 🛑 HARD RULES ═══
+
+- Push ONLY what Dan picks. Never push on your own.
+- No prod DATA writes (invoice/event/row edits) yourself. The auto-mode
+  classifier blocks them. Write a script with a rollback snapshot and
+  have Dan run it (`! bash <path>`), unless he explicitly authorizes that
+  one script.
+- The invoices table has trigger trg_invoices_invalidate_approval_on_edit:
+  it blocks identity/amount edits while qb_bill_txn_id is set (clear it
+  first) and flips a renamed approved invoice back to 'submitted' (re-approve
+  in the same transaction).
+- Don't touch V1's QB Automation tab render (frozen until V12). Shared
+  plumbing fixes are OK if you say they also affect V1's data.
+- Deploy qb-web-connector with `--no-verify-jwt` (QBWC has no JWT). Check
+  with `npx -y deno@2 check index.ts`: 11 pre-existing errors = baseline.
+- Announce every background shell. Count in ITEMS, not jobs.
+
+═══ NEXT UP (Dan picks — discuss before building) ═══
+
+V12.1 candidates (plan §8 S21d):
+1. Umbrella push slice (blocks gate #1 umbrella path). Teal Jul wire 451
+   ($37,400, 6 linked invoices, only [224] matched) and Bimosoft wire 452
+   ($9,280, 2 vendors, only Edin matched) correctly show "Won't push".
+   Routing (TS.tsx onPushRows) + converaBillPmt read matched_invoice_ids
+   only. Needs: route on convera_transaction_invoices links; Teal = one
+   BillPmt on the one combined bill (dedupe applications by bill);
+   Bimosoft = one BillPmt per vendor (see the C-2 fan-per-vendor in
+   converaCreateBillAndPay). Bring a plan first.
+2. Per-item move to Pushed: today Ready→Pushed only fires when the WHOLE
+   bill_query queue drains (30s poll in loadQbBillQueryPending) or on
+   reload. Fix: when a pane item's confirm job finishes → reload bills +
+   reconcile + reload events; show "Moved to Pushed" on the pane row.
+3. Source pill colours (no amber/yellow): Convera solid purple, Intuit
+   solid green (matches the payment-method chip), Inv→Bill (Convera) light
+   purple outlined, Inv→Bill (Intuit) light green outlined, no-method grey.
+4. Hotfix to main: the "matched invoice's own bill is authoritative"
+   reconciler rule (26459ce) is preview-only. Prod V1 still shows event 474
+   as open (harmless).
+Also pending: accountant note for Nikolina (July bill 41C9D + payment
+created by us; the June bill is unchanged) once 474 shows posted/'push'.
+
+═══ WORKFLOW ═══
+
+Orientation reads → FIRST ACTION checks → ask Dan the one-line pick →
+plan (recommend, tradeoffs) → his OK → build on the feature branch →
+`npm run build` + `npx vitest run src` → commit + push → check CI → give
+"what to check on preview" (≤6 bullets) → log S22 in plan §8 + refresh
+the pivot memory.
+
+═══ FIRST ACTION ═══
+
+1. `gh run list --workflow tests.yml --limit 1` (expect success).
+2. Read-only: confirm event 474 is status='posted' with posted_source='push'
+   (needs a V2 page load after 26459ce). Confirm the pilot BillPmts (Deniz
+   2880, QAce 3680, Vladimir 3520, FIX IT 5520) are in qb_mirror
+   bill_payment on 8220 via the :47 delta.
+3. Report both in two lines, then ask Dan: "Umbrella push slice, per-item
+   move to Pushed, pill colours, the reconciler hotfix, or something else?"
+   Do NOT code until he picks.
+```
+
 ---
 
 **S21 (2026-09-25) — V9.10 + V11 SHIPPED together (Dan: "I don't like tech debt").**
