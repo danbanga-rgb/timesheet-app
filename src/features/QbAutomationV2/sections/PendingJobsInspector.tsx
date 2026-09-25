@@ -16,6 +16,7 @@ export interface PendingJobRow {
 interface Props {
   jobs: PendingJobRow[];
   onClose: () => void;
+  nextCheckLabel?: string | null;   // "~5m" | "due now" | "overdue 12m"
 }
 
 function agoMinutes(iso: string): string {
@@ -25,7 +26,7 @@ function agoMinutes(iso: string): string {
   return `${Math.floor(secs / 3600)}h ago`;
 }
 
-export default function PendingJobsInspector({ jobs, onClose }: Props) {
+export default function PendingJobsInspector({ jobs, onClose, nextCheckLabel }: Props) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -39,7 +40,7 @@ export default function PendingJobsInspector({ jobs, onClose }: Props) {
           <div>
             <div className="font-semibold text-gray-800">Pending QB jobs</div>
             <div className="text-xs text-gray-600 mt-0.5">
-              {jobs.length} job{jobs.length === 1 ? '' : 's'} · the connector picks them up within about 15 min
+              {jobs.length} job{jobs.length === 1 ? '' : 's'} · {nextCheckLabel ? `connector's next check ${nextCheckLabel}` : 'the connector picks them up within about 15 min'}
             </div>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600" aria-label="Close">

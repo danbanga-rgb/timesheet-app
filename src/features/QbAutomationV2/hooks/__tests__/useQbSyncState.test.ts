@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { renderHook } from '@testing-library/react';
-import { useQbSyncState } from '../useQbSyncState';
+import { qbwcNextCheck, useQbSyncState } from '../useQbSyncState';
 import type { SyncCheck } from '../useLastSyncChecks';
 
 const MIN = 60_000;
@@ -66,5 +66,21 @@ describe('useQbSyncState', () => {
     expect(run(ok(MIN), ok(MIN), 25 * MIN).qbwc.status).toBe('amber');
     expect(run(ok(MIN), ok(MIN), 45 * MIN).qbwc.status).toBe('red');
     expect(run(ok(MIN), ok(MIN)).qbwc.clickable).toBe(false);
+  });
+});
+
+describe('qbwcNextCheck (connector checks in every 15 min)', () => {
+  const now = new Date('2026-09-25T20:19:20Z');
+  it('pilot: last seen 20:09:35 → next check ~6m', () => {
+    expect(qbwcNextCheck('2026-09-25T20:09:35Z', now)).toEqual({ label: '~6m', overdue: false });
+  });
+  it('within a minute either side → due now', () => {
+    expect(qbwcNextCheck('2026-09-25T20:04:40Z', now)?.label).toBe('due now');
+  });
+  it('more than 5 min late → overdue', () => {
+    expect(qbwcNextCheck('2026-09-25T19:52:00Z', now)).toEqual({ label: 'overdue 12m', overdue: true });
+  });
+  it('never seen → null', () => {
+    expect(qbwcNextCheck(null, now)).toBeNull();
   });
 });

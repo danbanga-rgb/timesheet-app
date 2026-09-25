@@ -1,11 +1,12 @@
 import { Loader2, RefreshCw } from 'lucide-react';
-import type { PillState } from '../hooks/useQbSyncState';
+import type { NextCheck, PillState } from '../hooks/useQbSyncState';
 
 interface Props {
   mirror: PillState;
   vendors: PillState;
   qbwc: PillState;
-  totalPending: number;                    // sum across bill_query + vendor_query
+  totalPending: number;                    // all pending/in-flight qb_sync_jobs (sync queries + pushes)
+  nextCheck: NextCheck | null;             // connector's next pickup estimate
   onSyncNow: () => void;                   // fires both bill_query + vendor_query (silent)
   onOpenPendingInspector: () => void;      // only relevant when totalPending > 0
 }
@@ -36,7 +37,7 @@ function Pill({ pill }: { pill: PillState }) {
   );
 }
 
-export default function HeaderPills({ mirror, vendors, qbwc, totalPending, onSyncNow, onOpenPendingInspector }: Props) {
+export default function HeaderPills({ mirror, vendors, qbwc, totalPending, nextCheck, onSyncNow, onOpenPendingInspector }: Props) {
   return (
     <div className="inline-flex items-center gap-2 flex-wrap">
       <Pill pill={mirror} />
@@ -54,10 +55,15 @@ export default function HeaderPills({ mirror, vendors, qbwc, totalPending, onSyn
         <button
           type="button"
           onClick={onOpenPendingInspector}
-          className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full border bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100"
-          title={`${totalPending} job${totalPending === 1 ? '' : 's'} waiting for QuickBooks. Click to see them.`}
+          className={
+            'inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full border ' +
+            (nextCheck?.overdue
+              ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+              : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100')
+          }
+          title={`${totalPending} job${totalPending === 1 ? '' : 's'} waiting for QuickBooks.${nextCheck ? ` Connector's next check: ${nextCheck.label}.` : ''} Click to see them.`}
         >
-          <Loader2 className="w-3 h-3 animate-spin" /> {totalPending} pending
+          <Loader2 className="w-3 h-3 animate-spin" /> {totalPending} pending{nextCheck && <span> · {nextCheck.label}</span>}
         </button>
       )}
     </div>

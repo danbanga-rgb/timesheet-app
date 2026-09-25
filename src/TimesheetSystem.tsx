@@ -76,6 +76,7 @@ import { enqueueBillDeltaQuery, enqueueBillQueryForVendors, enqueueVendorQuery }
 import { getAllOpenBills, getAllPayments } from './lib/qbStateSync/read';
 import { findSameNumberInvoices, suggestUniqueInvoiceNumber } from './lib/invoices/invoiceNumber';
 import { resolvePaymentMethod } from './lib/invoices/paymentMethod';
+import { buildRestoredPushRecords, eventIdForJob, type RestoreJobRow } from './lib/qbAutomation/pushRecordRestore';
 import { snapshotAge, humanizeAge, vendorsNeedingSync } from './lib/qbStateSync/freshness';
 import type { QbOpenBillRow } from './lib/qbStateSync/types';
 import {
@@ -2518,18 +2519,39 @@ const TimesheetSystem = () => {
   // Rehydrate the status pane from in-flight qb_sync_jobs. Called on tab
   // load so a page refresh mid-drain doesn't lose the pane (and doesn't
   // let the preview modal re-offer events with pending pushes). Only
-  // rebuilds bill_pmt_add + check_add rows (verify chain not reconstructed —
-  // acceptable degradation for a refresh; correctness data stays in DB).
+  // rebuilds bill_pmt_add + check_add rows, with their verify bill_query.
   const loadInflightPushRecords = async () => {
     const { data: jobs } = await supabase
       .from('qb_sync_jobs')
       .select('id, kind, status, payload, created_at')
       .in('status', ['pending', 'in_flight'])
       .in('kind', ['bill_pmt_add', 'check_add']);
-    const jobRows = (jobs ?? []) as Array<{ id: number; kind: string; status: string; payload: Record<string, unknown> | null; created_at: string }>;
+    const jobRows = (jobs ?? []) as RestoreJobRow[];
+    if (jobRows.length === 0) {
+      setQbPushRecords([]);
+      return;
+    }
+    // Convera C-1 pay jobs carry sourceConveraTxnId, not sourceIngestEventId
+    // (pilot 2026-09-25: those vanished from the pane on reload).
+    const converaTxnIds = [...new Set(jobRows
+      .map(j => j.payload?.sourceConveraTxnId)
+      .filter(v => v != null)
+      .map(v => String(v)))];
+    const { data: converaEvents } = converaTxnIds.length > 0
+      ? await supabase
+          .from('qb_ingest_events')
+          .select('id, raw_data')
+          .eq('source', 'convera')
+          .in('raw_data->>convera_transaction_id', converaTxnIds)
+      : { data: [] as Array<{ id: number; raw_data: Record<string, unknown> | null }> };
+    const eventIdByConveraTxnId = new Map<number, number>();
+    for (const e of (converaEvents ?? []) as Array<{ id: number; raw_data: Record<string, unknown> | null }>) {
+      const ctx = Number(e.raw_data?.convera_transaction_id);
+      if (Number.isFinite(ctx)) eventIdByConveraTxnId.set(ctx, e.id);
+    }
     const eventIds = new Set<number>();
     for (const j of jobRows) {
-      const eid = (j.payload as { sourceIngestEventId?: number } | null)?.sourceIngestEventId;
+      const eid = eventIdForJob(j, eventIdByConveraTxnId);
       if (eid != null) eventIds.add(eid);
     }
     if (eventIds.size === 0) {
@@ -2539,13 +2561,15 @@ const TimesheetSystem = () => {
     // Fetch fresh — the tab-load useEffect fires loadInflightPushRecords in
     // the same tick as loadQbVendorMappings + loadQbVendorsAndAccounts, so
     // React state is stale in this closure. INVARIANTS #27 / [[state-vs-fresh-fetch]].
-    const [eventDataRes, freshMappings, freshVendors] = await Promise.all([
+    const payJobIds = jobRows.map(j => String(j.id));
+    const [eventDataRes, freshMappings, freshVendors, verifyRes] = await Promise.all([
       supabase
         .from('qb_ingest_events')
         .select('id, source, amount, counterparty_raw, counterparty_qb_vendor_list_id, resolved_bill_txn_id')
         .in('id', Array.from(eventIds)),
       supabase.from('qb_vendor_mappings').select('source, counterparty_pattern, payee_full_name'),
       supabase.from('qb_vendors').select('list_id, name'),
+      supabase.from('qb_sync_jobs').select('id, depends_on').eq('kind', 'bill_query').overlaps('depends_on', payJobIds),
     ]);
     const eventById = new Map(((eventDataRes.data ?? []) as Array<{ id: number; source: string; amount: number|string; counterparty_raw: string; counterparty_qb_vendor_list_id: string | null; resolved_bill_txn_id: string | null }>).map(r => [r.id, r]));
     const vendorNameById = new Map(((freshVendors.data ?? []) as Array<{ list_id: string; name: string }>).map(v => [v.list_id, v.name]));
@@ -2553,26 +2577,16 @@ const TimesheetSystem = () => {
     for (const m of ((freshMappings.data ?? []) as Array<{ source: string; counterparty_pattern: string; payee_full_name: string | null }>)) {
       if (m.payee_full_name) payeeByKey.set(`${m.source} ${m.counterparty_pattern}`, m.payee_full_name);
     }
-    const records: PushRecord[] = [];
-    for (const j of jobRows) {
-      const eid = (j.payload as { sourceIngestEventId?: number } | null)?.sourceIngestEventId;
-      if (eid == null) continue;
-      const event = eventById.get(eid);
-      if (!event) continue;
-      const displayName = (event.counterparty_qb_vendor_list_id && vendorNameById.get(event.counterparty_qb_vendor_list_id))
-        ?? payeeByKey.get(`${event.source} ${event.counterparty_raw}`)
-        ?? event.counterparty_raw;
-      records.push({
-        eventId: eid,
-        payJobId: j.id,
-        verifyJobId: null,
-        billTxnId: event.resolved_bill_txn_id ?? '',
-        expectedAmount: Number(event.amount),
-        expectedVendor: displayName,
-        pushedAt: j.created_at,
-        kind: j.kind === 'check_add' ? 'check' : 'pay_bill',
-      });
+    const verifyJobIdByPayJobId = new Map<number, number>();
+    for (const v of (verifyRes.data ?? []) as Array<{ id: number; depends_on: Array<string | number> | null }>) {
+      for (const dep of v.depends_on ?? []) verifyJobIdByPayJobId.set(Number(dep), v.id);
     }
+    const records = buildRestoredPushRecords(jobRows, eventById, eventIdByConveraTxnId, verifyJobIdByPayJobId, (eid, j) => {
+      const event = eventById.get(eid)!;
+      return (event.counterparty_qb_vendor_list_id && vendorNameById.get(event.counterparty_qb_vendor_list_id))
+        || payeeByKey.get(`${event.source} ${event.counterparty_raw}`)
+        || String(j.payload?.payeeVendorName ?? event.counterparty_raw);
+    });
     setQbPushRecords(records);
   };
 

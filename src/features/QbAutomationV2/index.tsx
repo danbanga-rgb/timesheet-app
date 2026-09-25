@@ -134,7 +134,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
   // Re-read last finished checks whenever the pending count moves (a job
   // drained or was just enqueued). Read-only; no sync is triggered here.
   const lastChecks = useLastSyncChecks(props.supabase, totalPending);
-  const { mirror, vendors, qbwc } = useQbSyncState({
+  const { mirror, vendors, qbwc, nextCheck } = useQbSyncState({
     bills: lastChecks.bills,
     vendors: lastChecks.vendors,
     qbWcLastSeen: props.qbWcLastSeen,
@@ -226,7 +226,8 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
                 mirror={mirror}
                 vendors={vendors}
                 qbwc={qbwc}
-                totalPending={totalPending}
+                totalPending={props.pendingJobs.length}
+                nextCheck={nextCheck}
                 onSyncNow={handleSyncNow}
                 onOpenPendingInspector={() => setPendingInspectorOpen(true)}
               />
@@ -383,7 +384,7 @@ export default function QbAutomationV2(props: QbAutomationV2Props) {
       )}
 
       {pendingInspectorOpen && (
-        <PendingJobsInspector jobs={props.pendingJobs} onClose={() => setPendingInspectorOpen(false)} />
+        <PendingJobsInspector jobs={props.pendingJobs} onClose={() => setPendingInspectorOpen(false)} nextCheckLabel={nextCheck?.label ?? null} />
       )}
     </div>
   );

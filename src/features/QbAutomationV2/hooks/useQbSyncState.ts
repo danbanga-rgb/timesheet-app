@@ -12,6 +12,7 @@ export const BILLS_GREEN_SEC = BILLS_CADENCE_SEC + GRACE_SEC;
 export const BILLS_AMBER_SEC = 2 * BILLS_CADENCE_SEC + GRACE_SEC;
 export const VENDORS_GREEN_SEC = VENDORS_CADENCE_SEC + GRACE_SEC;
 export const VENDORS_AMBER_SEC = 2 * VENDORS_CADENCE_SEC + GRACE_SEC;
+const QBWC_POLL_SEC = 15 * 60;            // Web Connector checks in every 15 min
 const QBWC_ALIVE_SEC = 20 * 60;           // < 20min: alive
 const QBWC_DOWN_SEC = 30 * 60;            // > 30min: down; 20-30min: delayed
 
@@ -48,10 +49,27 @@ function ageStatus(iso: string | null, greenCap: number, amberCap: number, now: 
   return 'red';
 }
 
+export interface NextCheck {
+  label: string;        // "~5m" | "due now" | "overdue 12m"
+  overdue: boolean;
+}
+
+/** When the Web Connector should next pick up queued jobs: last check-in + 15 min. */
+export function qbwcNextCheck(lastSeen: string | null, now: Date): NextCheck | null {
+  if (!lastSeen) return null;
+  const last = Date.parse(lastSeen);
+  if (Number.isNaN(last)) return null;
+  const secsLeft = Math.round((last + QBWC_POLL_SEC * 1000 - now.getTime()) / 1000);
+  if (secsLeft > 60) return { label: `~${Math.ceil(secsLeft / 60)}m`, overdue: false };
+  if (secsLeft > -5 * 60) return { label: 'due now', overdue: false };
+  return { label: `overdue ${Math.round(-secsLeft / 60)}m`, overdue: true };
+}
+
 export function useQbSyncState(args: UseQbSyncStateArgs): {
   mirror: PillState;
   vendors: PillState;
   qbwc: PillState;
+  nextCheck: NextCheck | null;
 } {
   // Tick every 30s so "3m ago" ages update without a full parent re-render.
   const [now, setNow] = useState<Date>(() => new Date());
@@ -92,6 +110,7 @@ export function useQbSyncState(args: UseQbSyncStateArgs): {
     mirror: { kind: 'mirror', ...mirrorPill, pendingCount: args.qbBillQueryPending, clickable: true },
     vendors: { kind: 'vendors', ...vendorsPill, pendingCount: args.qbVendorQueryPending, clickable: true },
     qbwc: { kind: 'qbwc', status: qbwcStatus, label: qbwcLabel, pendingCount: 0, clickable: false },
+    nextCheck: qbwcNextCheck(args.qbWcLastSeen, now),
   };
 }
 
