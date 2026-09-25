@@ -366,7 +366,7 @@ Concrete gates to flip the admin gate and delete v1:
 3. **Accountant does a full session on v2** and reports no confusion (single question at end: "did anything confuse you?").
 4. **Push status pane fires** for every event in every batch (no silent partial failures).
 5. **All six v1 UX rules covered per §5.12** — carry rules preserved, amend rules landed cleanly.
-6. **Vendor Mapping sub-tab has zero orphan rows** (every mapping row has a pp_id resolved).
+6. ~~Vendor Mapping sub-tab has zero orphan rows~~ **Reworded 2026-09-25 (Dan: "resolve if we have a need to resolve"):** every row in a batch we push resolves to a QB vendor (Needs Mapping empty for that batch). Enforced by the Needs Mapping bucket. ✅ The 55 pp-less rows (51 Convera legacy duplicates of pp mappings + 4 Intuit non-contractor payees) stay as they are; CLOUDYGON / US Signature stay unmapped until a batch needs them.
 7. **Dan runs 3 sanity queries** against `qb_ingest_events` post-push (all pushes trace to expected pp/vendor).
 8. **Sync pills tell the truth** (Dan, 2026-09-25): age = last finished check from `qb_sync_jobs`, colours follow each pg_cron cadence. ✅ `26633e7` — verify on preview across a full day (Mirror stays green/amber, never 17h).
 9. **Payments mirror current** (Dan, 2026-09-25): `qb-delta-bill-payments` (jobid 20, hourly :47) live + Aug 20 → now catch-up job #2045 drained. Verify `max(queried_at)` for `bill_payment` stays < 2h and the bank-drift guardrail (`mirrorDeviationCheck`) sees post-Aug-20 payments.
