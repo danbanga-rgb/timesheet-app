@@ -56,7 +56,7 @@ interface LiveState {
   overall: 'awaiting-drain' | 'draining' | 'verifying' | 'verified-ok' | 'silent-drop' | 'pay-failed' | 'verify-failed';
 }
 
-function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | null, mirror: MirrorRow | null, kind: PushRecord['kind'] = 'pay_bill'): LiveState {
+export function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | null, mirror: MirrorRow | null, kind: PushRecord['kind'] = 'pay_bill'): LiveState {
   const payStatus = pay?.status ?? 'unknown';
   const verifyStatus = verify == null ? 'not-enqueued' : verify.status;
   const billPmtTxnId = (event?.posted_qb_refs as { bill_pmt?: string } | null)?.bill_pmt ?? null;
@@ -83,9 +83,12 @@ function classify(pay: JobRow | null, verify: JobRow | null, event: EventRow | n
     } else if (verifyStatus === 'failed') overall = 'verify-failed';
     else if (verifyStatus === 'pending' || verifyStatus === 'in_flight') overall = 'verifying';
     else if (verifyStatus === 'done') {
-      // Both jobs done. Mirror should show is_settled=true AND event should have bill_pmt TxnID.
-      if (billPmtTxnId != null && mirrorSettled === true) overall = 'verified-ok';
-      else overall = 'silent-drop';
+      // Both jobs done. The proof is QB itself: the verify re-read shows the
+      // bill paid. The BillPmt TxnID is display-only: Convera C-1 persists it
+      // to convera_transaction_billpmts, not to the event, so requiring it on
+      // the event flagged every successful Convera push as a silent drop
+      // (pilot 2026-09-25, jobs 2077-2079).
+      overall = mirrorSettled === true ? 'verified-ok' : 'silent-drop';
     } else overall = 'verifying';       // unknown → assume verifying
   } else overall = 'awaiting-drain';
 
