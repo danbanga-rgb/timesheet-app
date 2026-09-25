@@ -17,33 +17,20 @@
 5. Memory [[qb-automation-ux-contract]] — v1's 6 UX rules (some carry, some amend in v2).
 6. Memory [[umbrella-payment-patterns]] — Native Teams / TCode / Bimosoft / Teal semantics (wire-side aggregation, distinct from QB-side per-contractor naming — see [[qb-vendor-mapping-truths-2026-09]]).
 
-**State on entry (as of 2026-09-24 S18 EOD — Pushed classifier partially fixed, break called):**
-- Branch `feature/qb-automation-v2` tip `a44cde5`. Not merged to main.
-- **UNRESOLVED:** synthetic G7.5/G7.6 rows in Pushed card show amber "Pushed + paid outside" incorrectly. See §8 S18 EOD entry for one-line fix + resume prompt.
-- Reconciler classifier + 2 prod backfill migrations shipped. Real event labels correct (39 push / 4 manual / 1 qb_probe). Only synthetic row labelling is wrong.
-- V1–V9.9 SHIPPED (V7 SCRAPPED; V9.7 shipped-then-killed by V9.8). V8-B CLOSED.
-- **Three-bucket model locked** per [[three-bucket-lifecycle]]: Needs Mapping → Ready → Pushed. Anything else is scope creep.
-- Reconciler self-heals pp→vendor mappings on data load.
-- V9.9 adds: pre-wire `*`-marker suppressed; Inv # column in Ready; persistent Skip via `invoices.qb_export_status`; Pushed history month-grouping; failed-push red pill on Ready with popover + Retry.
-- Next up: **V9.10** (Add Columns dropdown). Then **V10** (Sync surface + freshness pills).
-- v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard tab nav as `adminView === 'qbautov2'`.
-- **⚠ V8 fires REAL QB pushes on Confirm.** V9.9 Retry button also routes through `onPushRows`. Push queue still held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
-- v1 QB Automation tab is FROZEN — do not touch its render surface.
-- Chunk 8 in `.claude/plans/accountant-modularization.md` is SUPERSEDED.
-- Modularization arc is PAUSED. Do not resume Chunk 9/10/Phase 6 slices unless Dan asks.
-
-**Do NOT:**
-- Ask Dan clarifying questions until he signals "ready" or dumps directionality. He said "let me think and give you some directionality and then you start asking questions" (2026-09-18).
-- Propose sections, flows, or wireframes before Dan gives directionality. That's the design conversation, not the prep.
-- Write ANY v2 code before §5 (Sections + flows) is populated and Dan signs off.
-- Touch v1 (any file that renders inside the current QB Automation tab in TS.tsx).
-- Resume the accountant modularization arc unless Dan explicitly asks.
+**State on entry (as of 2026-09-25 S21):**
+- Branch `feature/qb-automation-v2` tip `8ebca4c`. Not merged to main.
+- V1–V11 SHIPPED (V7 SCRAPPED; V9.7 shipped-then-killed by V9.8). Remaining: **V12 cutover** (see §9 V12 + §5.13 checklist).
+- **Three-bucket model locked** per [[three-bucket-lifecycle]]: Needs Mapping → Ready → Pushed.
+- v2 lives at `src/features/QbAutomationV2/` (role-agnostic). Mounted in admin dashboard as `adminView === 'qbautov2'`.
+- **⚠ V8 fires REAL QB pushes on Confirm.** Push queue held through V12; DO NOT confirm anything via v2 without Dan's go-ahead.
+- v1 QB Automation tab is FROZEN until V12 — do not touch its render surface. Copy shared with V1 is queued in §9 V12 "Deferred copy".
+- Pushed rows read event fields only ([[pushed-row-event-not-invoice]]); counts match V1 1:1 ([[match-v1-during-coexistence]]).
+- Latest session log entry in §8 is the source of truth for what's next.
 
 **Do FIRST on cold start:**
-1. Confirm `git log --oneline -3` shows tip `801b080` or later (main).
-2. Confirm `.claude/plans/qb-automation-v2.md` exists (this file) and §5 is still empty.
-3. Report state to Dan in one sentence: "v2 arc paused waiting on your directionality dump — ready when you are."
-4. Wait.
+1. `git log --oneline -3` — confirm tip matches the latest §8 entry.
+2. Read the latest §8 entry + its resume prompt.
+3. Ask Dan the one-line pick from that entry's "Next up". Do not code until he picks.
 
 ---
 
@@ -402,6 +389,19 @@ Concrete gates to flip the admin gate and delete v1:
 - `.claude/plans/accountant-modularization.md` — parent arc; Chunk 8 SUPERSEDED by this doc.
 
 ## §8. Session log
+
+**S21 (2026-09-25) — V9.10 + V11 SHIPPED together (Dan: "I don't like tech debt").**
+
+- **V9.10 `d2aa7bd`** — shared `ColumnPicker` + `useColumnPrefs` (per-view localStorage) on Ready/Skipped, Pushed, Vendor Mapping. Needs Mapping excluded on purpose (card layout with per-row fix controls). Ready extras: Source, Payment profile, Wire date, Bank memo, Match, QB bill #. Pushed extras (event-only): QB bill #, Bank ref. Mapping extras: Source, Last posted. Dropped "QB payment #" (no human number on our pushed payments) and "Mapping updated at" (not stored).
+- **V11 `8ebca4c`** — copy written for the V2-only end state. Reviewed by Dan in `~/Downloads/QB-Automation-V11-copy-review.xlsx` (104 strings). Dan's cross-cutting calls: keep "Mirror" (→ "QB Mirror"), keep "jobs", chips are width-limited (Will Pay / Will Create labels kept), errors stay "Failed to …", keep "Save mapping". Shared-with-V1 strings deferred to V12 (list in §9 V12).
+- **Bills popup fix (in `8ebca4c`)** — Vendor Mapping → Bills pushed popup now shows Paid to + Memo from the event, not the matched invoice's contractor/invoice # ([[pushed-row-event-not-invoice]]).
+- Process rule: bulk reviews go by XLSX ([[bulk-review-as-xlsx]]).
+
+Push queue still HELD. No migrations, no pushes fired.
+
+**Next up:** V12 cutover — needs §5.13 checklist (real batches through v2) before code. Dan picks timing.
+
+---
 
 **S20 (2026-09-24, evening) — V10 sync surface SHIPPED, then re-shipped after Dan feedback. BREAK CALLED.**
 
@@ -1171,7 +1171,7 @@ Original spec preserved below for archaeology.
 
 ---
 
-### Slice V11 — Plain-English copy sweep
+### Slice V11 — Plain-English copy sweep ✅ SHIPPED 2026-09-25 (`8ebca4c`)
 **Est:** 1–2h. **Depends on:** V3, V4, V5, V8.
 
 **Goal:** §5.10 red-line pass. Dan reviews every string.
@@ -1200,6 +1200,11 @@ Original spec preserved below for archaeology.
 - Accountant loads app → sees v2 as the QB Automation tab.
 - No dead imports (`npm run build` green).
 - Archive doc written.
+
+**Deferred copy (decided in V11, apply at cutover — these files also render in V1):**
+- Tab title: `QB Automation v2` → `QB Automation`.
+- Match badges (`formatProvenanceBadge`): `🔒 exact` · `✓ memo ref` · `🆕 new bill` · `~ fuzzy` · `— none`; hovers: Linked by QB bill ID / Memo names this invoice / We created the bill and paid it / Matched by vendor + amount only. Verify. / No invoice link.
+- `QbPushStatusPane`: title `Pushes this session (N)`; cancel-all hover `Cancel pushes that haven't started. Ones already sending will finish.`; notice `Cancelled N · M was already sending and will finish`; keep `Cancel failed:`; row id `Payment #812` / `Inv #305`; badges `Waiting / Sending / Checking / Done / Unconfirmed / Failed / Check failed`; detail `Push #1234: done · Check #1235: waiting · QB payment 8A1B…`; errors `Push error:` / `Check error:`; silent-drop `QuickBooks accepted the push, but the mirror still shows the bill unpaid. Check it in QuickBooks.`; row `Cancel` (hover `Cancel this push. Only works before it starts sending.`); `Undo…` (hover `Steps to undo this push`); modal title `Undo push · payment #812`. Void SQL body unchanged.
 
 **Rollback:** revert commit; v1 restored.
 
