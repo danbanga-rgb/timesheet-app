@@ -125,6 +125,18 @@ describe('parseBillQueryRs', () => {
     expect(parsed.status.requestId).toBe('q-1');
   });
 
+  it('keeps a BillRet with no RefNumber (accountant overhead bills) with refNumber=""', () => {
+    const noRef = buildBillRet({ txnId: '4035C-1771914227', editSeq: '1771914227', refNumber: 'X', withVendor: 'Mera Khana [Invoices]' })
+      .replace('    <RefNumber>X</RefNumber>\n', '');
+    expect(noRef).not.toContain('RefNumber');
+    const parsed = parseBillQueryRs(wrap(noRef + '\n' + buildBillRet({ txnId: 'T2', editSeq: 'E2', refNumber: 'INV 7' })));
+    expect(parsed.results).toHaveLength(2);
+    expect(parsed.results[0].txnId).toBe('4035C-1771914227');
+    expect(parsed.results[0].refNumber).toBe('');
+    expect(parsed.results[0].vendorFullName).toBe('Mera Khana [Invoices]');
+    expect(parsed.results[1].refNumber).toBe('INV 7');
+  });
+
   it('extracts a single BillRet correctly', () => {
     const env = wrap(buildBillRet({
       txnId: '12006-1196864828',

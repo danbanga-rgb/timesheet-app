@@ -360,11 +360,14 @@ export function parseBillQueryRs(xml: string): ParsedBillQueryRs {
     const amount = amountStr != null ? Number(amountStr) : undefined;
     const openAmount = openAmountStr != null ? Number(openAmountStr) : undefined;
     const isPaid = isPaidStr === 'true' ? true : (isPaidStr === 'false' ? false : undefined);
-    if (txnId != null && editSequence != null && refNumber != null) {
+    // RefNumber is optional in QB. The accountant leaves it blank on overhead
+    // bills (rent, cards, insurance, loans, taxes); those used to be dropped
+    // here, so they never reached qb_mirror. Keep them with refNumber=''.
+    if (txnId != null && editSequence != null) {
       results.push({
         txnId,
         editSequence,
-        refNumber,
+        refNumber: refNumber ?? '',
         ...(vendorFullName != null ? { vendorFullName } : {}),
         ...(vendorListId != null ? { vendorListId } : {}),
         ...(txnDate != null ? { txnDate } : {}),

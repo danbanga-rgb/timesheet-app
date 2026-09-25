@@ -80,6 +80,7 @@ export interface BillPaymentCheckQueryResult {
 
 /** Result of parseBillQueryRs — one entry per matched bill. */
 export interface BillQueryResult {
+  /** '' when the QB bill has no RefNumber (common on accountant-entered overhead bills). */
   refNumber: string;
   txnId: string;
   editSequence: string;

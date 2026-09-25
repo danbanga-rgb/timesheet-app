@@ -258,6 +258,7 @@ async function persistJobResponse(
     let linked = 0;
     let skippedUnmappedVendor = 0;
     let skippedUnknownInvoice = 0;
+    let skippedNoRef = 0;
     const errors: string[] = [];
     for (const r of parsed.results) {
       if (!r.vendorFullName) {
@@ -267,6 +268,9 @@ async function persistJobResponse(
         errors.push(`missing VendorRef.FullName for refNumber=${r.refNumber}`);
         continue;
       }
+      // No RefNumber → cannot be one of our invoice bills (we always push the
+      // invoice number). Mirror-only; skip invoice linkage.
+      if (!r.refNumber) { skippedNoRef++; continue; }
       const { data: pps } = await supabase
         .from('payment_profiles')
         .select('user_id')
@@ -304,7 +308,7 @@ async function persistJobResponse(
       return { ok: false, errorMsg: `BillQuery persist structural errors: ${errors.join('; ')}` };
     }
     if (isIteratorMode) {
-      console.log(`[bill_query iterator job=${job.id} vendor="${payload.entityVendorName}"] results=${parsed.results.length} linked=${linked} skipped_unmapped_vendor=${skippedUnmappedVendor} skipped_unknown_invoice=${skippedUnknownInvoice}`);
+      console.log(`[bill_query iterator job=${job.id} vendor="${payload.entityVendorName}"] results=${parsed.results.length} linked=${linked} skipped_unmapped_vendor=${skippedUnmappedVendor} skipped_unknown_invoice=${skippedUnknownInvoice} skipped_no_ref=${skippedNoRef}`);
     }
 
     // Slice G1.1: unified qb_mirror (entity_kind='bill'). Runs alongside the
@@ -317,7 +321,7 @@ async function persistJobResponse(
         entity_kind: 'bill' as const,
         entity_ref:  r.txnId,
         vendor_list_id: r.vendorListId!,
-        ref_number:  r.refNumber,
+        ref_number:  r.refNumber || null,
         amount:      r.amount!,
         is_settled:  r.isPaid!,
         data: {
