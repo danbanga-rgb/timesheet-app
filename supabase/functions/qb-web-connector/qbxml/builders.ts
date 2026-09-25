@@ -16,6 +16,7 @@ import type {
   BillQueryRqInput,
   CheckAddRqInput,
   VendorQueryRqInput,
+  BillPaymentCheckQueryRqInput,
 } from './types.ts';
 import { assertAscii, xmlEscape } from './envelope.ts';
 import { DEFAULT_AP_ACCOUNT, DEFAULT_EXPENSE_ACCOUNT } from './constants.ts';
@@ -591,5 +592,58 @@ export function buildBillPaymentCheckAddRq(
 
   parts.push('  </BillPaymentCheckAdd>');
   parts.push('</BillPaymentCheckAddRq>');
+  return parts.join('\n');
+}
+
+/**
+ * BillPaymentCheckQueryRq. Strict qbXML 13 element order:
+ *   MaxReturned? → (ModifiedDateRangeFilter | TxnDateRangeFilter)? →
+ *   EntityFilter? → IncludeLineItems?
+ * ModifiedDateRangeFilter is a WRAPPER element (same as BillQueryRq).
+ */
+export function buildBillPaymentCheckQueryRq(input: BillPaymentCheckQueryRqInput): string {
+  const hasModified = !!input.fromModifiedDate || !!input.toModifiedDate;
+  const hasTxnDate = !!input.fromTxnDate || !!input.toTxnDate;
+  if (hasModified && hasTxnDate) {
+    throw new Error('buildBillPaymentCheckQueryRq: modified-date and txn-date ranges are mutually exclusive per the qbXML XSD');
+  }
+  if (!hasModified && !hasTxnDate && !input.entityVendorName) {
+    throw new Error('buildBillPaymentCheckQueryRq: supply a vendor, a txn-date range, or a modified-date range');
+  }
+  if (input.requestId) assertAscii('requestId', input.requestId);
+  const attrs = input.requestId ? ` requestID="${xmlEscape(input.requestId)}"` : '';
+  const parts: string[] = [`<BillPaymentCheckQueryRq${attrs}>`];
+  if (input.maxReturned != null) parts.push(`  <MaxReturned>${input.maxReturned}</MaxReturned>`);
+  if (hasModified) {
+    parts.push('  <ModifiedDateRangeFilter>');
+    if (input.fromModifiedDate) {
+      assertAscii('fromModifiedDate', input.fromModifiedDate);
+      parts.push(`    <FromModifiedDate>${xmlEscape(input.fromModifiedDate)}</FromModifiedDate>`);
+    }
+    if (input.toModifiedDate) {
+      assertAscii('toModifiedDate', input.toModifiedDate);
+      parts.push(`    <ToModifiedDate>${xmlEscape(input.toModifiedDate)}</ToModifiedDate>`);
+    }
+    parts.push('  </ModifiedDateRangeFilter>');
+  } else if (hasTxnDate) {
+    parts.push('  <TxnDateRangeFilter>');
+    if (input.fromTxnDate) {
+      assertAscii('fromTxnDate', input.fromTxnDate);
+      parts.push(`    <FromTxnDate>${xmlEscape(input.fromTxnDate)}</FromTxnDate>`);
+    }
+    if (input.toTxnDate) {
+      assertAscii('toTxnDate', input.toTxnDate);
+      parts.push(`    <ToTxnDate>${xmlEscape(input.toTxnDate)}</ToTxnDate>`);
+    }
+    parts.push('  </TxnDateRangeFilter>');
+  }
+  if (input.entityVendorName) {
+    assertAscii('entityVendorName', input.entityVendorName);
+    parts.push('  <EntityFilter>');
+    parts.push(`    <FullName>${xmlEscape(input.entityVendorName)}</FullName>`);
+    parts.push('  </EntityFilter>');
+  }
+  if (input.includeLineItems !== false) parts.push('  <IncludeLineItems>true</IncludeLineItems>');
+  parts.push('</BillPaymentCheckQueryRq>');
   return parts.join('\n');
 }

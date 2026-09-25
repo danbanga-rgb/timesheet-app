@@ -112,8 +112,7 @@ export async function enqueueAccountQuery(supabase: SB, auditTag?: string): Prom
 
 /**
  * Enqueue one bill_pmt_query job (iterator-mode) for a vendor over a date range.
- * Builds the qbXML request inline (no shared builder yet — the qb_sync_jobs
- * job kind takes `rawQbxmlRequest` per its current contract).
+ * Structured payload → buildBillPaymentCheckQueryRq in the edge fn.
  *
  * IncludeLineItems=true gets AppliedToTxnRet[] blocks in the response —
  * essential for the reconciler to know which bills each payment settled.
@@ -135,35 +134,19 @@ export async function enqueueBillPmtQuery(
     .select('id, payload')
     .eq('kind', 'bill_pmt_query')
     .in('status', INFLIGHT_STATUSES);
-  const alreadyRunning = (inflight ?? []).some((j: { payload: Record<string, unknown> }) => {
-    const raw = String(j.payload?.rawQbxmlRequest ?? '');
-    return raw.includes(`<FullName>${opts.vendorName}</FullName>`);
-  });
+  const alreadyRunning = (inflight ?? []).some(
+    (j: { payload: Record<string, unknown> }) => j.payload?.entityVendorName === opts.vendorName,
+  );
   if (alreadyRunning) {
     return { jobIds: [], skippedInFlight: [opts.vendorName] };
   }
 
-  const includeLine = opts.includeLineItems !== false;
-  // qbXML BillPaymentCheckQueryRq XSD element order (SDK 13):
-  //   TxnID* | RefNumber* | (TxnDateRangeFilter | ModifiedDateRangeFilter)?
-  //   → EntityFilter → AccountFilter → RefNumberFilter → IncludeLineItems?
-  //   → IncludeRetElement*
-  // We emit iterator style: EntityFilter + optional TxnDateRangeFilter.
-  const parts: string[] = ['<BillPaymentCheckQueryRq>'];
-  if (opts.fromTxnDate || opts.toTxnDate) {
-    parts.push('<TxnDateRangeFilter>');
-    if (opts.fromTxnDate) parts.push(`<FromTxnDate>${opts.fromTxnDate}</FromTxnDate>`);
-    if (opts.toTxnDate)   parts.push(`<ToTxnDate>${opts.toTxnDate}</ToTxnDate>`);
-    parts.push('</TxnDateRangeFilter>');
-  }
-  parts.push('<EntityFilter>');
-  parts.push(`<FullName>${opts.vendorName}</FullName>`);
-  parts.push('</EntityFilter>');
-  if (includeLine) parts.push('<IncludeLineItems>true</IncludeLineItems>');
-  parts.push('</BillPaymentCheckQueryRq>');
-  const rawQbxmlRequest = parts.join('');
-
-  const payload: Record<string, unknown> = { rawQbxmlRequest };
+  const payload: Record<string, unknown> = {
+    entityVendorName: opts.vendorName,
+    includeLineItems: opts.includeLineItems !== false,
+  };
+  if (opts.fromTxnDate) payload.fromTxnDate = opts.fromTxnDate;
+  if (opts.toTxnDate) payload.toTxnDate = opts.toTxnDate;
   if (opts.auditTag) payload.__audit_tag = opts.auditTag;
 
   const { data, error } = await supabase

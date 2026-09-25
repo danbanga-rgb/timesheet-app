@@ -106,7 +106,10 @@ export interface BillQueryResult {
   /** QB's <TimeModified> — needed later for delta-read cursors. */
   timeModified?: string;
   /** ExpenseLineRet[] — populated only when the query requested
-   *  IncludeLineItems=true (Mirror completeness pass 2026-08-26). */
+   *  IncludeLineItems=true (Mirror completeness pass 2026-08-26). Each line
+   *  carries the expense account the bill was posted to plus the line amount
+   *  + memo. Consumers use this to answer "which account did the accountant
+   *  use for this vendor's bills?" without a fresh probe. */
   expenseLines?: Array<{
     accountListId?: string;
     accountFullName?: string;
@@ -460,4 +463,25 @@ export interface VendorResult {
 export interface ParsedVendorQueryRs {
   status: QbxmlResponseStatus;
   vendors: VendorResult[];
+}
+
+/** BillPaymentCheckQueryRq (qbXML 13). Iterator-style read of bill payments
+ *  made by check (Convera + Intuit payments both post as BillPaymentCheck).
+ *  Delta sync uses fromModifiedDate (QB-local time, no TZ suffix — see
+ *  qb-delta-reads-facts). Modified and Txn date ranges are mutually exclusive
+ *  per the XSD choice group. */
+export interface BillPaymentCheckQueryRqInput {
+  /** Filter to one payee vendor (exact QB FullName). */
+  entityVendorName?: string;
+  /** TxnDate range, YYYY-MM-DD. */
+  fromTxnDate?: string;
+  toTxnDate?: string;
+  /** ModifiedDate range, "YYYY-MM-DDTHH:MM:SS" in QB-machine local time. */
+  fromModifiedDate?: string;
+  toModifiedDate?: string;
+  /** Include AppliedToTxnRet blocks (which bills each payment settled).
+   *  Default true — the reconciler needs them. */
+  includeLineItems?: boolean;
+  maxReturned?: number;
+  requestId?: string;
 }

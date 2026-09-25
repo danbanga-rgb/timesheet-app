@@ -30,6 +30,7 @@ import {
   buildBillQueryRq,
   buildCheckAddRq,
   buildVendorQueryRq,
+  buildBillPaymentCheckQueryRq,
 } from './qbxml/builders.ts';
 import {
   parseAccountQueryRs,
@@ -48,6 +49,7 @@ import type {
   BillQueryRqInput,
   CheckAddRqInput,
   VendorQueryRqInput,
+  BillPaymentCheckQueryRqInput,
 } from './qbxml/types.ts';
 import { validatePayload } from './qbxml/job-payloads.ts';
 import {
@@ -145,14 +147,11 @@ function renderJobRequest(job: JobRow): string {
     case 'vendor_query':
       element = buildVendorQueryRq({ ...(job.payload as VendorQueryRqInput), requestId });
       break;
-    case 'bill_pmt_query': {
-      // Exploratory read-only query. Payload provides pre-built XML; we splice
-      // in the requestID and pass through. No structured builder yet — this
-      // kind exists for one-off discovery of historic payment patterns.
-      const raw = (job.payload as { rawQbxmlRequest: string }).rawQbxmlRequest;
-      element = raw.replace(/<BillPaymentCheckQueryRq(\s|>)/, `<BillPaymentCheckQueryRq requestID="${requestId}"$1`);
+    case 'bill_pmt_query':
+      // Read-only payment query: hourly delta (pg_cron qb-delta-bill-payments)
+      // or per-vendor iterator (enqueueBillPmtQuery). Results land in qb_mirror.
+      element = buildBillPaymentCheckQueryRq({ ...(job.payload as BillPaymentCheckQueryRqInput), requestId });
       break;
-    }
     default:
       throw new Error(`Unknown job kind: ${(job as JobRow).kind}`);
   }

@@ -55,10 +55,10 @@ export const PAYLOAD_REQUIRED_KEYS: Record<JobKind, PayloadRequirement> = {
   // Query-only jobs — the response IS the payload from our POV. Nothing required.
   account_query: [],
   vendor_query: [],
-  // Exploratory read-only query. Payload carries a raw qbxml_request string that
-  // the dispatcher sends through unmodified. Persist is a no-op — response is
-  // inspected manually via qb_sync_jobs.qbxml_response.
-  bill_pmt_query: ['rawQbxmlRequest'],
+  // Read-only payment query (structured input → buildBillPaymentCheckQueryRq).
+  // Persist upserts results into qb_mirror (entity_kind='bill_payment');
+  // nothing is read back from the payload.
+  bill_pmt_query: [],
 };
 
 export interface ValidatePayloadResult {

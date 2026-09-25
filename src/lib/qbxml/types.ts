@@ -464,3 +464,24 @@ export interface ParsedVendorQueryRs {
   status: QbxmlResponseStatus;
   vendors: VendorResult[];
 }
+
+/** BillPaymentCheckQueryRq (qbXML 13). Iterator-style read of bill payments
+ *  made by check (Convera + Intuit payments both post as BillPaymentCheck).
+ *  Delta sync uses fromModifiedDate (QB-local time, no TZ suffix — see
+ *  qb-delta-reads-facts). Modified and Txn date ranges are mutually exclusive
+ *  per the XSD choice group. */
+export interface BillPaymentCheckQueryRqInput {
+  /** Filter to one payee vendor (exact QB FullName). */
+  entityVendorName?: string;
+  /** TxnDate range, YYYY-MM-DD. */
+  fromTxnDate?: string;
+  toTxnDate?: string;
+  /** ModifiedDate range, "YYYY-MM-DDTHH:MM:SS" in QB-machine local time. */
+  fromModifiedDate?: string;
+  toModifiedDate?: string;
+  /** Include AppliedToTxnRet blocks (which bills each payment settled).
+   *  Default true — the reconciler needs them. */
+  includeLineItems?: boolean;
+  maxReturned?: number;
+  requestId?: string;
+}
